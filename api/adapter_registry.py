@@ -17,7 +17,7 @@ ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
         id="kalshi",
         name="Kalshi BTC",
-        description="Download settled BTC contracts (KXBTC/D/W/M) and trade history from Kalshi.",
+        description="Download settled BTC contracts (KXBTC/D/W/M/15M) and trade history from Kalshi.",
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-03-21",

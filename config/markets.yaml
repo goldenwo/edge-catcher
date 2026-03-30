@@ -10,6 +10,7 @@ adapters:
       - KXBTCD   # BTC daily
       - KXBTCW   # BTC weekly
       - KXBTCM   # BTC monthly
+      - KXBTC15M # BTC 15-minute
     # Market status filter — only fetch markets in these states
     # "settled" maps to the "finalized" status Kalshi returns for resolved markets
     statuses:

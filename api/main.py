@@ -142,7 +142,7 @@ def _run_download() -> None:
             markets_with_vol: list = []
             for series in adapter.get_configured_series():
                 for m in get_markets_by_series(conn, series):
-                    if (m.volume or 0) > 0 and m.ticker not in existing_tickers:
+                    if (m.volume is None or (m.volume or 0) > 0) and m.ticker not in existing_tickers:
                         markets_with_vol.append(m)
             markets_with_vol.sort(key=lambda m: m.volume or 0, reverse=True)
 
@@ -476,7 +476,7 @@ def _run_kalshi_adapter_download(state, start_date: str | None = None) -> None:
             markets_with_vol: list = []
             for series in adapter.get_configured_series():
                 for m in get_markets_by_series(conn, series):
-                    if (m.volume or 0) > 0 and m.ticker not in existing_tickers:
+                    if (m.volume is None or (m.volume or 0) > 0) and m.ticker not in existing_tickers:
                         markets_with_vol.append(m)
             markets_with_vol.sort(key=lambda m: m.volume or 0, reverse=True)
 

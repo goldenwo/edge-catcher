@@ -74,7 +74,7 @@ def _cmd_download(args) -> None:
         for series in adapter.get_configured_series():
             series_markets = get_markets_by_series(conn, series)
             for m in series_markets:
-                if (m.volume or 0) > 0:
+                if m.volume is None or (m.volume or 0) > 0:
                     if m.series_ticker in PRIORITY_SERIES:
                         priority_markets.append(m)
                     else:
@@ -204,7 +204,12 @@ def _cmd_paper_trade(args) -> None:
     load_dotenv()
     from edge_catcher.monitors.paper_trader import run_paper_trader
     import asyncio
-    asyncio.run(run_paper_trader(db_path=Path(args.db), min_price=args.min_price, max_price=args.max_price))
+    asyncio.run(run_paper_trader(
+        db_path=Path(args.db),
+        min_price=args.min_price,
+        max_price=args.max_price,
+        enable_strategy_b=args.enable_strategy_b,
+    ))
 
 
 def _cmd_archive(args) -> None:
@@ -267,8 +272,10 @@ def main() -> None:
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
-    pt.add_argument("--min-price", type=int, default=50, help="Min yes_ask to enter (cents)")
-    pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter (cents)")
+    pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
+    pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter for Strategy A (cents)")
+    pt.add_argument("--enable-strategy-b", action="store_true", default=True,
+                    help="Enable contrarian NO strategy (default: enabled)")
     pt.set_defaults(func=_cmd_paper_trade)
 
     fm = sub.add_parser(

@@ -1,0 +1,6 @@
+# Gitleaks config for edge-catcher
+# .env is gitignored — allowlist it for local scans to avoid false positives
+[allowlist]
+  paths = [
+    '''.env''',
+  ]
