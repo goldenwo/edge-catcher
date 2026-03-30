@@ -1,0 +1,30 @@
+[Unit]
+Description=Edge Catcher — Kalshi Data Downloader
+Documentation=https://github.com/goldenwo/edge-catcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=private-infra
+Group=private-infra
+WorkingDirectory=/home/private-infra/edge-catcher
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/private-infra/edge-catcher/.env
+ExecStart=/bin/bash /home/private-infra/edge-catcher/deploy/run-download.sh
+StandardOutput=append:/var/log/edge-catcher/download.log
+StandardError=append:/var/log/edge-catcher/download.log
+
+# Restart on failure (not on clean exit — download completes and exits 0)
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=80%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

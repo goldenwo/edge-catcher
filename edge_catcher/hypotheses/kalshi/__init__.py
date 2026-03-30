@@ -1,0 +1,1 @@
+"""Kalshi-specific hypothesis modules."""

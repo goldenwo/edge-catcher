@@ -1,0 +1,20 @@
+# Active market adapters
+adapters:
+  kalshi:
+    enabled: true
+    # NOTE: Verify this is correct for crypto series (KXBTC). Main API may be api.kalshi.com
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0.2  # minimum seconds between requests
+    series:
+      - KXBTC    # BTC hourly
+      - KXBTCD   # BTC daily
+      - KXBTCW   # BTC weekly
+      - KXBTCM   # BTC monthly
+    # Market status filter — only fetch markets in these states
+    # "settled" maps to the "finalized" status Kalshi returns for resolved markets
+    statuses:
+      - settled
+    min_available_ram_mb: 400  # pause download if available RAM drops below this
+    pagination:
+      default_limit: 200
+      max_limit: 1000

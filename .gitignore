@@ -1,0 +1,56 @@
+# Private research (never push)
+config.local/
+edge_catcher/hypotheses/local/
+docs/superpowers/
+
+# Data and databases
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+.eggs/
+
+# Reports output (entire directory is private)
+reports/
+TASK.md
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# Credentials (never commit API keys)
+*.pem
+*.key
+.secrets/
+credentials.json
+node_modules/

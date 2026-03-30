@@ -1,0 +1,59 @@
+# Hypothesis configurations and thresholds
+# Copy and adapt the example below for your own research hypotheses.
+# status: exploratory | confirmatory
+# Bonferroni correction is applied by the registry based on total tests run.
+
+hypotheses:
+  longshot_bias_tutorial:
+    name: "Longshot Bias Tutorial"
+    module: "edge_catcher.hypotheses.kalshi.price_efficiency"
+    market: kalshi
+    status: exploratory
+    rationale: >
+      Tutorial hypothesis: tests whether low-probability Kalshi contracts (1–30 cents)
+      are systematically overpriced — a pattern known as longshot bias. Serves as a
+      fully-documented reference implementation. Copy and adapt for your own research.
+    thresholds:
+      t_stat: 3.0
+      min_n_per_bucket: 30
+      min_independent_obs: 80
+      min_fee_adjusted_edge: 0.0
+    fee_model: kalshi
+    buckets:
+      - [0.01, 0.03]
+      - [0.03, 0.05]
+      - [0.05, 0.08]
+      - [0.08, 0.12]
+      - [0.12, 0.18]
+      - [0.18, 0.25]
+      - [0.25, 0.30]
+    pass_criteria:
+      clustered_z_stat: 3.0
+      clustered_n: 80
+      fee_adjusted_edge_positive: true
+
+  example_hypothesis:
+    name: "Example Hypothesis"
+    module: "edge_catcher.hypotheses.examples.example_hypothesis"
+    market: kalshi
+    status: exploratory
+    rationale: >
+      Describe the market inefficiency you are testing and why you expect it to exist.
+      Be specific: what price signal, what outcome variable, what theoretical mechanism?
+    thresholds:
+      t_stat: 3.0               # Harvey-Liu-Zhu threshold; use 3.0 for financial research
+      min_n_per_bucket: 30      # minimum contracts per price bucket
+      min_independent_obs: 80   # minimum independent observations (after clustering)
+      min_fee_adjusted_edge: 0.0
+    fee_model: kalshi           # references config/fees.yaml
+    buckets:
+      - [0.01, 0.10]
+      - [0.10, 0.25]
+      - [0.25, 0.50]
+      - [0.50, 0.75]
+      - [0.75, 0.90]
+      - [0.90, 0.99]
+    pass_criteria:
+      clustered_z_stat: 3.0
+      clustered_n: 80
+      fee_adjusted_edge_positive: true
