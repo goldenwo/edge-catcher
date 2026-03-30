@@ -112,6 +112,10 @@ class AIKeyRequest(BaseModel):
     api_key: str
 
 
+class AdapterKeyRequest(BaseModel):
+    api_key: str
+
+
 class AISettingsResponse(BaseModel):
     anthropic: bool
     openai: bool

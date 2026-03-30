@@ -33,6 +33,28 @@ async function fetchStatus(id: string): Promise<AdapterDownloadStatus> {
   return res.json()
 }
 
+async function saveKey(id: string, apiKey: string): Promise<void> {
+  const token = localStorage.getItem('ec_token') ?? ''
+  const res = await fetch(`${API}/adapters/${id}/key`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+async function clearKey(id: string): Promise<void> {
+  const token = localStorage.getItem('ec_token') ?? ''
+  const res = await fetch(`${API}/adapters/${id}/key`, {
+    method: 'DELETE',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
 async function startDownload(id: string, apiKey?: string, startDate?: string): Promise<void> {
   const token = localStorage.getItem('ec_token') ?? ''
   const res = await fetch(`${API}/adapters/${id}/download`, {
@@ -89,15 +111,25 @@ function AdapterCard({ adapter }: { adapter: AdapterInfo }) {
     }
   }, [status.running, adapter.id])
 
-  const canDownload = !status.running && !triggering && (!adapter.requires_api_key || apiKeySet || apiKey.trim().length > 0)
+  const canDownload = !status.running && !triggering && (!adapter.requires_api_key || apiKeySet)
+
+  async function handleSaveKey() {
+    setErr(null)
+    try {
+      await saveKey(adapter.id, apiKey.trim())
+      setApiKeySet(true)
+      setApiKey('')
+      setEditingKey(false)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   async function handleDownload() {
     setTriggering(true)
     setErr(null)
     try {
-      const keyToSend = apiKey.trim() || undefined
-      await startDownload(adapter.id, keyToSend, startDate.trim() || undefined)
-      if (keyToSend) { setApiKeySet(true); setEditingKey(false) }
+      await startDownload(adapter.id, undefined, startDate.trim() || undefined)
       setStatus(s => ({ ...s, running: true, progress: 'Starting...', error: null }))
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -138,12 +170,27 @@ function AdapterCard({ adapter }: { adapter: AdapterInfo }) {
       </div>
 
       {adapter.api_key_env_var && (apiKeySet && !editingKey ? (
-        <button
-          onClick={() => setEditingKey(true)}
-          className="text-xs text-gray-500 hover:text-gray-300 transition-colors self-start"
-        >
-          Change key
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={() => setEditingKey(true)}
+            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            Change key
+          </button>
+          <button
+            onClick={async () => {
+              try {
+                await clearKey(adapter.id)
+                setApiKeySet(false)
+              } catch (e) {
+                setErr(e instanceof Error ? e.message : String(e))
+              }
+            }}
+            className="text-xs text-red-500 hover:text-red-400 transition-colors"
+          >
+            Clear key
+          </button>
+        </div>
       ) : (
         <div className="flex gap-2">
           <input
@@ -162,11 +209,11 @@ function AdapterCard({ adapter }: { adapter: AdapterInfo }) {
             </button>
           )}
           <button
-            onClick={handleDownload}
-            disabled={!apiKey.trim() || status.running}
+            onClick={handleSaveKey}
+            disabled={!apiKey.trim()}
             className="px-3 py-1.5 rounded text-sm bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors"
           >
-            Save & Use
+            Save
           </button>
         </div>
       ))}

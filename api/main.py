@@ -9,8 +9,15 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import check_auth
@@ -19,6 +26,7 @@ from api.models import (
     AdapterDownloadRequest,
     AdapterDownloadStatus,
     AdapterInfo,
+    AdapterKeyRequest,
     AIKeyRequest,
     AISettingsResponse,
     AnalyzeRequest,
@@ -53,14 +61,16 @@ def _db_path() -> Path:
 
 
 def _config_path() -> Path:
-    """Return config path. Prefer config.local/ if it exists, otherwise config/."""
+    """Return config path for hypotheses. Always use config/ for shared config like markets.yaml."""
     explicit = os.getenv("CONFIG_PATH")
     if explicit:
         return Path(explicit)
-    local = Path("config.local")
-    if local.exists() and (local / "hypotheses.yaml").exists():
-        return local
     return Path("config")
+
+
+def _markets_yaml() -> Path:
+    """Always return config/markets.yaml — not overridable locally."""
+    return Path("config") / "markets.yaml"
 
 
 # ── status ────────────────────────────────────────────────────────────────────
@@ -112,7 +122,7 @@ def _run_download() -> None:
 
     try:
         init_db(db)
-        adapter = KalshiAdapter(config_path=cfg / "markets.yaml")
+        adapter = KalshiAdapter(config_path=_markets_yaml())
         conn = get_connection(db)
         try:
             # Phase 1: markets
@@ -380,6 +390,15 @@ def _save_api_key(env_var: str, value: str) -> None:
     os.environ[env_var] = value  # also update current process
 
 
+def _clear_api_key(env_var: str) -> None:
+    """Remove KEY=value from .env file and unset from current process."""
+    env_path = Path(".env")
+    if env_path.exists():
+        lines = [l for l in env_path.read_text().splitlines() if not l.startswith(f"{env_var}=")]
+        env_path.write_text("\n".join(lines) + "\n" if lines else "")
+    os.environ.pop(env_var, None)
+
+
 def _run_coinbase_download(state, start_date: str | None = None) -> None:
     from datetime import datetime, timezone
 
@@ -440,7 +459,7 @@ def _run_kalshi_adapter_download(state, start_date: str | None = None) -> None:
 
     try:
         init_db(db)
-        adapter = KalshiAdapter(config_path=cfg / "markets.yaml")
+        adapter = KalshiAdapter(config_path=_markets_yaml())
         conn = get_connection(db)
         try:
             markets_count = 0
@@ -527,6 +546,30 @@ async def adapter_status(adapter_id: str) -> AdapterDownloadStatus:
     )
 
 
+@app.put("/adapters/{adapter_id}/key", status_code=200)
+async def save_adapter_key(
+    adapter_id: str, req: AdapterKeyRequest, _=Depends(check_auth)
+) -> dict:
+    meta = get_adapter(adapter_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Adapter {adapter_id!r} not found")
+    if not meta.api_key_env_var:
+        raise HTTPException(status_code=400, detail="Adapter has no API key")
+    _save_api_key(meta.api_key_env_var, req.api_key)
+    return {"ok": True}
+
+
+@app.delete("/adapters/{adapter_id}/key", status_code=200)
+async def clear_adapter_key(adapter_id: str, _=Depends(check_auth)) -> dict:
+    meta = get_adapter(adapter_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Adapter {adapter_id!r} not found")
+    if not meta.api_key_env_var:
+        raise HTTPException(status_code=400, detail="Adapter has no API key")
+    _clear_api_key(meta.api_key_env_var)
+    return {"ok": True}
+
+
 @app.post("/adapters/{adapter_id}/download", status_code=202)
 async def start_adapter_download(
     adapter_id: str,
@@ -584,4 +627,12 @@ async def save_ai_key(body: AIKeyRequest) -> dict:
 
 _ui_dist = Path(__file__).parent.parent / "ui" / "dist"
 if _ui_dist.exists():
-    app.mount("/", StaticFiles(directory=str(_ui_dist), html=True), name="static")
+    # Serve static assets directly; fall back to index.html for SPA routes
+    app.mount("/assets", StaticFiles(directory=str(_ui_dist / "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str) -> FileResponse:
+        candidate = _ui_dist / full_path
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(_ui_dist / "index.html"))

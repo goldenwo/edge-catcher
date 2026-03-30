@@ -36,6 +36,6 @@ def get_adapter(adapter_id: str) -> Optional[AdapterMeta]:
     return next((a for a in ADAPTERS if a.id == adapter_id), None)
 
 def is_api_key_set(meta: AdapterMeta) -> bool:
-    if not meta.requires_api_key or not meta.api_key_env_var:
-        return True
+    if not meta.api_key_env_var:
+        return False
     return bool(os.getenv(meta.api_key_env_var))

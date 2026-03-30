@@ -1,5 +1,10 @@
-# Hypothesis configurations and thresholds
-# Copy and adapt the example below for your own research hypotheses.
+# ──────────────────────────────────────────────────────────────────────────────
+# PUBLIC EXAMPLES ONLY — do not add your own hypotheses here.
+#
+# This file is tracked in git and shared with all users.
+# Add your private research hypotheses to config.local/hypotheses.yaml instead.
+# That file is gitignored and merged automatically at runtime.
+# ──────────────────────────────────────────────────────────────────────────────
 # status: exploratory | confirmatory
 # Bonferroni correction is applied by the registry based on total tests run.
 
