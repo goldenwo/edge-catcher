@@ -1,6 +1,7 @@
 # Private research (never push)
 config.local/
 edge_catcher/hypotheses/local/
+edge_catcher/monitors/
 docs/superpowers/
 
 # Data and databases

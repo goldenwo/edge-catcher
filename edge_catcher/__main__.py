@@ -199,6 +199,14 @@ def _cmd_interpret(args) -> None:
     print(summary)
 
 
+def _cmd_paper_trade(args) -> None:
+    from dotenv import load_dotenv
+    load_dotenv()
+    from edge_catcher.monitors.paper_trader import run_paper_trader
+    import asyncio
+    asyncio.run(run_paper_trader(db_path=Path(args.db), min_price=args.min_price, max_price=args.max_price))
+
+
 def _cmd_archive(args) -> None:
     from edge_catcher.storage.db import get_connection
     from edge_catcher.storage.archiver import archive_old_trades
@@ -257,6 +265,12 @@ def main() -> None:
     ar.add_argument("--db-path", default="data/kalshi.db")
     ar.add_argument("--archive-dir", default="data/archive")
 
+    pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
+    pt.add_argument("--db", default="data/paper_trades.db")
+    pt.add_argument("--min-price", type=int, default=50, help="Min yes_ask to enter (cents)")
+    pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter (cents)")
+    pt.set_defaults(func=_cmd_paper_trade)
+
     fm = sub.add_parser(
         "formalize",
         help="Formalize a hypothesis from plain English (requires AI)",
@@ -301,6 +315,8 @@ def main() -> None:
         _cmd_formalize(args)
     elif args.command == "interpret":
         _cmd_interpret(args)
+    elif args.command == "paper-trade":
+        _cmd_paper_trade(args)
     else:
         parser.print_help()
         sys.exit(1)
