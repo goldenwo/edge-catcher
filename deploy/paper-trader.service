@@ -1,0 +1,34 @@
+[Unit]
+Description=Edge Catcher — Kalshi Paper Trader
+Documentation=https://github.com/goldenwo/edge-catcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=private-infra
+Group=private-infra
+WorkingDirectory=/home/private-infra/edge-catcher
+EnvironmentFile=-/home/private-infra/edge-catcher/.env
+
+ExecStart=/usr/bin/python3 -m edge_catcher paper-trade \
+    --db data/paper_trades.db \
+    --min-price 50 \
+    --max-price 99
+
+StandardOutput=append:/var/log/edge-catcher/paper-trader.log
+StandardError=append:/var/log/edge-catcher/paper-trader.log
+
+# Restart automatically on any failure (not on clean exit)
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=20%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
