@@ -192,4 +192,4 @@ def test_get_db_stats(tmp_db_conn):
 def test_cache_size_pragma_set(tmp_db_conn):
     """_configure_connection() sets cache_size to -32768 (32 MB cap)."""
     cache_size = tmp_db_conn.execute("PRAGMA cache_size").fetchone()[0]
-    assert cache_size == -32768
+    assert cache_size == -524288

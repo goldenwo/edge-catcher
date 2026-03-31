@@ -130,7 +130,7 @@ def _configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size = -32768")  # Cap page cache at 32 MB
+    conn.execute("PRAGMA cache_size = -524288")  # Page cache ~512 MB (Pi has 8 GB RAM)
     conn.row_factory = sqlite3.Row
 
 
