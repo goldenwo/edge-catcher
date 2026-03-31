@@ -230,11 +230,14 @@ def _cmd_backtest(args) -> None:
     from edge_catcher.runner.event_backtest import EventBacktester
     from edge_catcher.runner.strategies import (
         BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
-        FadeFirstTrade, ThresholdFade,
+        FadeFirstTrade, ThresholdFade, REDACTED,
+        REDACTED, REDACTED,
+        REDACTED,
     )
 
     strategy_map = {
         'REDACTED': BuyYesInRange,
+        'REDACTED': REDACTED,
         'REDACTED': BuyNoOnDrop,
         'REDACTED': BuyNoInRange,
         'REDACTED': FadeFirstTrade,
@@ -242,6 +245,13 @@ def _cmd_backtest(args) -> None:
         'REDACTED': ThresholdFade,
         # Backwards compat aliases
         'A': BuyYesInRange,
+        'Avol': REDACTED,
+        'Cvol': REDACTED,
+        'REDACTED': REDACTED,
+        'Amom': REDACTED,
+        'REDACTED': REDACTED,
+        'Cmom': REDACTED,
+        'REDACTED': REDACTED,
         'B': BuyNoOnDrop,
         'C': BuyNoInRange,
         'D': FadeFirstTrade,
@@ -262,7 +272,8 @@ def _cmd_backtest(args) -> None:
             kwargs['min_price'] = args.min_price
         if args.max_price is not None:
             kwargs['max_price'] = args.max_price
-        if name == 'TP':
+        if name in ('TP', 'A', 'Avol', 'REDACTED', 'REDACTED', 'C', 'Cvol', 'REDACTED', 'REDACTED',
+                    'Amom', 'REDACTED', 'Cmom', 'REDACTED'):
             if args.tp is not None:
                 kwargs['take_profit'] = args.tp
             if args.sl is not None:
@@ -281,6 +292,16 @@ def _cmd_backtest(args) -> None:
                 kwargs['fav_threshold'] = args.h5_fav_threshold
             if args.h5_long_threshold is not None:
                 kwargs['long_threshold'] = args.h5_long_threshold
+        # Load BTC OHLC data for momentum-filtered strategies
+        if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED'):
+            import sqlite3 as _sql
+            _conn = _sql.connect(str(args.db_path))
+            _conn.row_factory = _sql.Row
+            _rows = _conn.execute('SELECT timestamp, close FROM btc_ohlc ORDER BY timestamp').fetchall()
+            kwargs['btc_closes'] = {r['timestamp']: r['close'] for r in _rows}
+            _conn.close()
+            print(f'  Loaded {len(kwargs["btc_closes"])} BTC candles for momentum filter', file=sys.stderr)
+
         strategies.append(cls(**kwargs))
 
     start = date.fromisoformat(args.start) if args.start else None

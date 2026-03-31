@@ -130,7 +130,7 @@ def _configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size = -524288")  # Page cache ~512 MB (Pi has 8 GB RAM)
+    conn.execute("PRAGMA cache_size = -262144")  # Page cache ~256 MB (balance: fast reads without OOM)
     conn.execute("PRAGMA temp_store=2")  # Keep temp tables in RAM (avoids disk-full on large scans)
     conn.row_factory = sqlite3.Row
 

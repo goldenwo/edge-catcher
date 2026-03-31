@@ -203,7 +203,7 @@ class BacktestResult:
 			'win_rate': self.win_rate,
 			'avg_win_cents': self.avg_win_cents,
 			'avg_loss_cents': self.avg_loss_cents,
-			'equity_curve': [(t.isoformat(), e) for t, e in self.equity_curve],
+			'equity_curve': [(t.isoformat(), e) for t, e in self.equity_curve[-1000:]],  # keep last 1000 points
 			'per_strategy': self.per_strategy,
 			'trade_log': [
 				{
@@ -217,7 +217,7 @@ class BacktestResult:
 					'pnl_cents': ct.pnl_cents,
 					'exit_reason': ct.exit_reason,
 				}
-				for ct in self.trade_log
+				for ct in self.trade_log[:5000]  # cap at 5000 to prevent huge output files
 			],
 		}
 
@@ -456,7 +456,7 @@ class EventBacktester:
 					)
 
 			trade_count += 1
-			if trade_count % 1000 == 0:
+			if trade_count % 10000 == 0:  # was 1000 — reduce snapshot frequency to save RAM
 				portfolio.snapshot(trade.created_time)
 
 			# --- 4b. Skip strategy dispatch for trades from closed markets ---
