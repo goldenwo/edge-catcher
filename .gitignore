@@ -60,3 +60,9 @@ node_modules/
 run_sweep.py
 run_filter_tests.py
 TASK.md
+
+# Local strategies (edge-specific, never commit)
+edge_catcher/runner/strategies_local.py
+
+# Analysis scripts with specific hypotheses
+scripts/kxbtc15m_analysis.py

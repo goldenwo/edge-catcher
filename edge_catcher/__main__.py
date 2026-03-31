@@ -228,37 +228,38 @@ def _cmd_backtest(args) -> None:
     import json
     from datetime import date
     from edge_catcher.runner.event_backtest import EventBacktester
-    from edge_catcher.runner.strategies import (
-        BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
-        FadeFirstTrade, ThresholdFade, REDACTED,
-        REDACTED, REDACTED,
-        REDACTED,
-    )
+    from edge_catcher.runner.strategies import ExampleStrategy
+    try:
+        from edge_catcher.runner.strategies_local import (
+            BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
+            FadeFirstTrade, ThresholdFade, REDACTED,
+            REDACTED, REDACTED,
+            REDACTED,
+        )
+        _has_local = True
+    except ImportError:
+        _has_local = False
 
-    strategy_map = {
-        'REDACTED': BuyYesInRange,
-        'REDACTED': REDACTED,
-        'REDACTED': BuyNoOnDrop,
-        'REDACTED': BuyNoInRange,
-        'REDACTED': FadeFirstTrade,
-        'TP': ActiveExitStub,
-        'REDACTED': ThresholdFade,
-        # Backwards compat aliases
-        'A': BuyYesInRange,
-        'Avol': REDACTED,
-        'Cvol': REDACTED,
-        'REDACTED': REDACTED,
-        'Amom': REDACTED,
-        'REDACTED': REDACTED,
-        'Cmom': REDACTED,
-        'REDACTED': REDACTED,
-        'B': BuyNoOnDrop,
-        'C': BuyNoInRange,
-        'D': FadeFirstTrade,
-        'H1': FadeFirstTrade,
-        'H5_15m': ThresholdFade,
-        'H5_15M': ThresholdFade,
+    strategy_map: dict = {
+        'example': ExampleStrategy,
     }
+    if _has_local:
+        strategy_map.update({
+            'REDACTED': BuyYesInRange,
+            'REDACTED': REDACTED,
+            'REDACTED': BuyNoOnDrop,
+            'REDACTED': BuyNoInRange,
+            'REDACTED': REDACTED,
+            'REDACTED': FadeFirstTrade,
+            'TP': ActiveExitStub,
+            'REDACTED': ThresholdFade,
+            'A': BuyYesInRange, 'Avol': REDACTED,
+            'B': BuyNoOnDrop, 'C': BuyNoInRange, 'Cvol': REDACTED,
+            'D': FadeFirstTrade, 'H1': FadeFirstTrade,
+            'Amom': REDACTED, 'REDACTED': REDACTED,
+            'Cmom': REDACTED, 'REDACTED': REDACTED,
+            'H5_15m': ThresholdFade, 'H5_15M': ThresholdFade,
+        })
     strategy_names = [s.strip() for s in args.strategy.split(',')]
 
     strategies = []

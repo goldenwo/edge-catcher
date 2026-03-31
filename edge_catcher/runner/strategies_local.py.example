@@ -1,0 +1,52 @@
+"""Template for local strategies. Copy to strategies_local.py and customize.
+
+strategies_local.py is gitignored — your strategies stay private.
+Import base classes from strategies.py and build on top of them.
+"""
+
+from edge_catcher.runner.strategies import Strategy, Signal, VolumeMixin, MomentumMixin
+from edge_catcher.storage.models import Market, Trade
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+	from edge_catcher.runner.event_backtest import Portfolio
+
+
+class MyStrategy(Strategy):
+	"""Your custom strategy. Modify the parameters and logic below."""
+
+	name = 'my-strategy'
+
+	def __init__(self, min_price: int = 40, max_price: int = 60, size: int = 1) -> None:
+		self.min_price = min_price
+		self.max_price = max_price
+		self.size = size
+
+	def on_trade(self, trade: Trade, market: Market, portfolio: 'Portfolio') -> list[Signal]:
+		# Your entry logic here
+		if (
+			self.min_price <= trade.yes_price <= self.max_price
+			and not portfolio.has_position(trade.ticker, self.name)
+		):
+			return [Signal(
+				action='buy',
+				ticker=trade.ticker,
+				side='yes',  # or 'no'
+				price=trade.yes_price,
+				size=self.size,
+				reason=f'my signal: yes_price={trade.yes_price}',
+			)]
+		return []
+
+
+# To use volume filtering, inherit from VolumeMixin:
+# class MyFilteredStrategy(VolumeMixin, MyStrategy):
+#     name = 'my-filtered'
+#     def __init__(self, max_trades=20, **kwargs):
+#         MyStrategy.__init__(self, **kwargs)
+#         self._init_volume_filter(max_trades)
+#     def on_trade(self, trade, market, portfolio):
+#         self._increment_and_check(trade.ticker)
+#         if self._trade_counts[trade.ticker] > self.max_trades:
+#             return []
+#         return MyStrategy.on_trade(self, trade, market, portfolio)
