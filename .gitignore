@@ -55,3 +55,8 @@ logs/
 .secrets/
 credentials.json
 node_modules/
+
+# Temporary sweep/test scripts
+run_sweep.py
+run_filter_tests.py
+TASK.md
