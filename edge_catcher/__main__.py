@@ -212,6 +212,56 @@ def _cmd_paper_trade(args) -> None:
     ))
 
 
+def _cmd_backtest(args) -> None:
+    import json
+    from datetime import date
+    from edge_catcher.runner.event_backtest import EventBacktester
+    from edge_catcher.runner.strategies import BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub
+
+    strategy_map = {'A': BuyYesInRange, 'B': BuyNoOnDrop, 'C': BuyNoInRange, 'TP': ActiveExitStub}
+    strategy_names = [s.strip().upper() for s in args.strategy.split(',')]
+
+    strategies = []
+    for name in strategy_names:
+        cls = strategy_map.get(name)
+        if cls is None:
+            print(f"Unknown strategy: {name}. Available: A, B, C, TP", file=sys.stderr)
+            sys.exit(1)
+        kwargs: dict = {}
+        if args.min_price is not None:
+            kwargs['min_price'] = args.min_price
+        if args.max_price is not None:
+            kwargs['max_price'] = args.max_price
+        if name == 'TP':
+            if args.tp is not None:
+                kwargs['take_profit'] = args.tp
+            if args.sl is not None:
+                kwargs['stop_loss'] = args.sl
+        strategies.append(cls(**kwargs))
+
+    start = date.fromisoformat(args.start) if args.start else None
+    end = date.fromisoformat(args.end) if args.end else None
+
+    backtester = EventBacktester()
+    result = backtester.run(
+        series=args.series,
+        strategies=strategies,
+        start=start,
+        end=end,
+        initial_cash=args.cash,
+        slippage_cents=args.slippage,
+        db_path=Path(args.db_path),
+    )
+
+    print(result.summary())
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(result.to_dict(), f, indent=2)
+    print(f"\nJSON saved to {args.output}")
+
+
 def _cmd_archive(args) -> None:
     from edge_catcher.storage.db import get_connection
     from edge_catcher.storage.archiver import archive_old_trades
@@ -270,6 +320,20 @@ def main() -> None:
     ar.add_argument("--db-path", default="data/kalshi.db")
     ar.add_argument("--archive-dir", default="data/archive")
 
+    bt = sub.add_parser("backtest", help="Run event-driven backtest on historical trade data")
+    bt.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD, KXBTC15M)")
+    bt.add_argument("--strategy", default="A", help="Comma-separated strategy names: A,B,C,TP")
+    bt.add_argument("--start", default=None, help="Start date ISO format (e.g. 2025-06-01)")
+    bt.add_argument("--end", default=None, help="End date ISO format (e.g. 2026-03-30)")
+    bt.add_argument("--cash", type=float, default=10000.0, help="Initial capital (default: 10000)")
+    bt.add_argument("--slippage", type=int, default=1, help="Slippage in cents (default: 1)")
+    bt.add_argument("--tp", type=int, default=None, help="Take profit cents for ActiveExitStub (default: 8)")
+    bt.add_argument("--sl", type=int, default=None, help="Stop loss cents for ActiveExitStub (default: 5)")
+    bt.add_argument("--min-price", type=int, default=None, dest="min_price", help="Override strategy min price")
+    bt.add_argument("--max-price", type=int, default=None, dest="max_price", help="Override strategy max price")
+    bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
+    bt.add_argument("--output", default="reports/backtest_result.json")
+
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
     pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
@@ -310,7 +374,9 @@ def main() -> None:
     args = parser.parse_args()
     _setup_logging(getattr(args, "verbose", False))
 
-    if args.command == "download":
+    if args.command == "backtest":
+        _cmd_backtest(args)
+    elif args.command == "download":
         _cmd_download(args)
     elif args.command == "download-btc":
         _cmd_download_btc(args)
