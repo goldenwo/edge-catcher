@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import sqlite3
 import statistics
 from dataclasses import dataclass, field
@@ -357,6 +358,9 @@ class EventBacktester:
 		slippage_cents: int = 1,
 		db_path: Path = Path('data/kalshi.db'),
 	) -> BacktestResult:
+		# Ensure SQLite temp files go to the DB directory, not /tmp (which may be a small tmpfs)
+		db_dir = str(Path(db_path).parent.resolve())
+		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
 			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents)

@@ -212,13 +212,25 @@ def _cmd_paper_trade(args) -> None:
     ))
 
 
+def _cmd_paper_trade_15m(args) -> None:
+    from dotenv import load_dotenv
+    load_dotenv()
+    from edge_catcher.monitors.paper_trader_15m import run_paper_trader_15m
+    import asyncio
+    asyncio.run(run_paper_trader_15m(
+        db_path=Path(args.db),
+        threshold_high=args.threshold_high,
+        threshold_low=args.threshold_low,
+    ))
+
+
 def _cmd_backtest(args) -> None:
     import json
     from datetime import date
     from edge_catcher.runner.event_backtest import EventBacktester
     from edge_catcher.runner.strategies import (
         BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
-        REDACTED, ThresholdFade,
+        FadeFirstTrade, ThresholdFade,
     )
 
     strategy_map = {
@@ -226,7 +238,8 @@ def _cmd_backtest(args) -> None:
         'B': BuyNoOnDrop,
         'C': BuyNoInRange,
         'TP': ActiveExitStub,
-        'H1': REDACTED,
+        'D': FadeFirstTrade,
+        'H1': FadeFirstTrade,   # backwards-compat alias
         'H5_15M': ThresholdFade,
     }
     strategy_names = [s.strip().upper() for s in args.strategy.split(',')]
@@ -235,7 +248,7 @@ def _cmd_backtest(args) -> None:
     for name in strategy_names:
         cls = strategy_map.get(name)
         if cls is None:
-            print(f"Unknown strategy: {name}. Available: A, B, C, TP, H1, H5_15m", file=sys.stderr)
+            print(f"Unknown strategy: {name}. Available: A, B, C, TP, D, H5_15m", file=sys.stderr)
             sys.exit(1)
         kwargs: dict = {}
         if args.min_price is not None:
@@ -247,7 +260,7 @@ def _cmd_backtest(args) -> None:
                 kwargs['take_profit'] = args.tp
             if args.sl is not None:
                 kwargs['stop_loss'] = args.sl
-        if name == 'H1':
+        if name in ('D', 'H1'):
             if args.tp is not None:
                 kwargs['take_profit'] = args.tp
             if args.sl is not None:
@@ -374,6 +387,14 @@ def main() -> None:
                     help="Enable contrarian NO strategy (default: enabled)")
     pt.set_defaults(func=_cmd_paper_trade)
 
+    pt15 = sub.add_parser('paper-trade-15m', help='Run 15-min BTC paper trading (Strategy D)')
+    pt15.add_argument('--db', default='data/paper_trades_15m.db')
+    pt15.add_argument('--threshold-high', type=int, default=60,
+                      help='Buy NO when first yes_ask > this (cents)', dest='threshold_high')
+    pt15.add_argument('--threshold-low', type=int, default=40,
+                      help='Buy YES when first yes_ask < this (cents)', dest='threshold_low')
+    pt15.set_defaults(func=_cmd_paper_trade_15m)
+
     fm = sub.add_parser(
         "formalize",
         help="Formalize a hypothesis from plain English (requires AI)",
@@ -422,6 +443,8 @@ def main() -> None:
         _cmd_interpret(args)
     elif args.command == "paper-trade":
         _cmd_paper_trade(args)
+    elif args.command == "paper-trade-15m":
+        _cmd_paper_trade_15m(args)
     else:
         parser.print_help()
         sys.exit(1)
