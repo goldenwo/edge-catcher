@@ -12,6 +12,10 @@ ExecStart=/usr/bin/python3 -m edge_catcher paper-trade-15m --db data/paper_trade
 Restart=always
 RestartSec=30
 Nice=10
+StandardOutput=append:/var/log/edge-catcher/paper-trader-15m.log
+StandardError=append:/var/log/edge-catcher/paper-trader-15m.log
+MemoryMax=256M
+CPUQuota=20%
 
 [Install]
 WantedBy=multi-user.target
