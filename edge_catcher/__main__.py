@@ -216,16 +216,26 @@ def _cmd_backtest(args) -> None:
     import json
     from datetime import date
     from edge_catcher.runner.event_backtest import EventBacktester
-    from edge_catcher.runner.strategies import BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub
+    from edge_catcher.runner.strategies import (
+        BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
+        REDACTED, ThresholdFade,
+    )
 
-    strategy_map = {'A': BuyYesInRange, 'B': BuyNoOnDrop, 'C': BuyNoInRange, 'TP': ActiveExitStub}
+    strategy_map = {
+        'A': BuyYesInRange,
+        'B': BuyNoOnDrop,
+        'C': BuyNoInRange,
+        'TP': ActiveExitStub,
+        'H1': REDACTED,
+        'H5_15M': ThresholdFade,
+    }
     strategy_names = [s.strip().upper() for s in args.strategy.split(',')]
 
     strategies = []
     for name in strategy_names:
         cls = strategy_map.get(name)
         if cls is None:
-            print(f"Unknown strategy: {name}. Available: A, B, C, TP", file=sys.stderr)
+            print(f"Unknown strategy: {name}. Available: A, B, C, TP, H1, H5_15m", file=sys.stderr)
             sys.exit(1)
         kwargs: dict = {}
         if args.min_price is not None:
@@ -237,6 +247,20 @@ def _cmd_backtest(args) -> None:
                 kwargs['take_profit'] = args.tp
             if args.sl is not None:
                 kwargs['stop_loss'] = args.sl
+        if name == 'H1':
+            if args.tp is not None:
+                kwargs['take_profit'] = args.tp
+            if args.sl is not None:
+                kwargs['stop_loss'] = args.sl
+            if args.h1_threshold_high is not None:
+                kwargs['threshold_high'] = args.h1_threshold_high
+            if args.h1_threshold_low is not None:
+                kwargs['threshold_low'] = args.h1_threshold_low
+        if name == 'H5_15M':
+            if args.h5_fav_threshold is not None:
+                kwargs['fav_threshold'] = args.h5_fav_threshold
+            if args.h5_long_threshold is not None:
+                kwargs['long_threshold'] = args.h5_long_threshold
         strategies.append(cls(**kwargs))
 
     start = date.fromisoformat(args.start) if args.start else None
@@ -331,6 +355,14 @@ def main() -> None:
     bt.add_argument("--sl", type=int, default=None, help="Stop loss cents for ActiveExitStub (default: 5)")
     bt.add_argument("--min-price", type=int, default=None, dest="min_price", help="Override strategy min price")
     bt.add_argument("--max-price", type=int, default=None, dest="max_price", help="Override strategy max price")
+    bt.add_argument("--h1-threshold-high", type=int, default=None, dest="h1_threshold_high",
+                    help="H1 entry threshold for high (fade NO above this, default: 60)")
+    bt.add_argument("--h1-threshold-low", type=int, default=None, dest="h1_threshold_low",
+                    help="H1 entry threshold for low (fade YES below this, default: 40)")
+    bt.add_argument("--h5-fav-threshold", type=int, default=None, dest="h5_fav_threshold",
+                    help="H5_15m favorite threshold — buy NO at or above this (default: 85)")
+    bt.add_argument("--h5-long-threshold", type=int, default=None, dest="h5_long_threshold",
+                    help="H5_15m longshot threshold — buy YES at or below this (default: 15)")
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
     bt.add_argument("--output", default="reports/backtest_result.json")
 
