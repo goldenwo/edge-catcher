@@ -19,7 +19,7 @@ from edge_catcher.runner.strategies import (
 	BuyNoOnDrop,
 	BuyNoInRange,
 	ActiveExitStub,
-	REDACTED,
+	FadeFirstTrade,
 	ThresholdFade,
 )
 from edge_catcher.storage.models import Market, Trade
@@ -825,12 +825,12 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------------
-# REDACTED unit tests
+# FadeFirstTrade unit tests
 # ---------------------------------------------------------------------------
 
-class TestREDACTED:
+class TestFadeFirstTrade:
 	def test_fade_first_trade_above_threshold_buys_no(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=65)
@@ -841,7 +841,7 @@ class TestREDACTED:
 		assert signals[0].price == 35  # 100 - 65
 
 	def test_fade_first_trade_below_threshold_buys_yes(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=35)
@@ -852,7 +852,7 @@ class TestREDACTED:
 		assert signals[0].price == 35
 
 	def test_no_signal_when_first_trade_in_midrange(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=50)
@@ -860,13 +860,13 @@ class TestREDACTED:
 		assert signals == []
 
 	def test_ignores_subsequent_trades(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# First trade: triggers entry signal
 		signals1 = strategy.on_trade(_make_trade(yes_price=65), market, port)
 		assert len(signals1) == 1
-		port.open_position(signals1[0], 'H1', _dt(), slippage=0)
+		port.open_position(signals1[0], 'D', _dt(), slippage=0)
 		# Second trade: same ticker, position exists — check TP/SL only (not entry)
 		# yes_price=63 doesn't trigger TP (need no_price >= 35+8=43, i.e. yes<=57) or SL
 		signals2 = strategy.on_trade(_make_trade(yes_price=63), market, port)
@@ -874,7 +874,7 @@ class TestREDACTED:
 
 	def test_ignores_subsequent_trades_without_position(self):
 		"""When first trade is in midrange (no entry), subsequent trades are also ignored."""
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		strategy.on_trade(_make_trade(yes_price=50), market, port)  # no entry
@@ -882,7 +882,7 @@ class TestREDACTED:
 		assert signals == []
 
 	def test_one_position_per_ticker(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# Different ticker should get its own entry
@@ -893,12 +893,12 @@ class TestREDACTED:
 
 	def test_take_profit_exit_no_position(self):
 		"""NO position TP: fires when no_price (100-yes_price) rises enough."""
-		strategy = REDACTED(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# Enter: yes_price=65, no_price=35, entry_price stored = 35 + slippage=1 = 36
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'H1', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'D', _dt(), slippage=1)  # entry_price = 36
 		# TP fires when current no_price >= 36 + 8 = 44, i.e. yes_price <= 56
 		trade_tp = _make_trade(yes_price=56)  # no_price = 44
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -909,11 +909,11 @@ class TestREDACTED:
 
 	def test_stop_loss_exit_no_position(self):
 		"""NO position SL: fires when no_price falls enough (yes_price rises)."""
-		strategy = REDACTED(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'H1', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'D', _dt(), slippage=1)  # entry_price = 36
 		# SL fires when current no_price <= 36 - 5 = 31, i.e. yes_price >= 69
 		trade_sl = _make_trade(yes_price=69)  # no_price = 31
 		signals = strategy.on_trade(trade_sl, market, port)
@@ -924,11 +924,11 @@ class TestREDACTED:
 
 	def test_take_profit_exit_yes_position(self):
 		"""YES position TP: fires when yes_price rises enough."""
-		strategy = REDACTED(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'H1', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'D', _dt(), slippage=1)  # entry_price = 36
 		# TP: yes_price >= 36 + 8 = 44
 		trade_tp = _make_trade(yes_price=44)
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -938,11 +938,11 @@ class TestREDACTED:
 		assert 'take_profit' in signals[0].reason
 
 	def test_no_exit_between_tp_and_sl(self):
-		strategy = REDACTED(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'H1', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'D', _dt(), slippage=1)  # entry_price = 36
 		# Prices where no_price stays 32..43 should not trigger (TP needs >=44, SL needs <=31)
 		for yes_price in (57, 60, 65, 68):
 			# no_price = 43, 40, 35, 32 — all between SL(31) and TP(44)
