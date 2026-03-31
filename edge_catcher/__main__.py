@@ -390,8 +390,8 @@ def main() -> None:
     pt.add_argument("--db", default="data/paper_trades.db")
     pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
     pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter for Strategy A (cents)")
-    pt.add_argument("--enable-strategy-b", action="store_true", default=True,
-                    help="Enable contrarian NO strategy (default: enabled)")
+    pt.add_argument("--enable-strategy-b", action="store_true", default=False,
+                    help="Enable contrarian NO strategy (default: disabled — killed 2026-03-31 after historical backtest confirmed -$48.57 net, 32.4%% win rate)")
     pt.set_defaults(func=_cmd_paper_trade)
 
     pt15 = sub.add_parser('paper-trade-15m', help='Run 15-min BTC paper trading (Strategy D)')
