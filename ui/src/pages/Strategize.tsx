@@ -6,7 +6,7 @@ import { usePipeline } from '../components/PipelineStatus'
 const providers = ['anthropic', 'openai', 'openrouter'] as const
 
 export default function Strategize() {
-  const { status: pipeline, loading: pipelineLoading } = usePipeline()
+  const { status: pipeline, loading: pipelineLoading, refresh: refreshPipeline } = usePipeline()
   const [searchParams] = useSearchParams()
 
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([])
@@ -81,6 +81,7 @@ export default function Strategize() {
       const r = await api.saveStrategy(generatedCode, strategyName)
       if (r.ok) {
         setSaveResult({ ok: true, message: `Saved to ${r.path}` })
+        refreshPipeline()
       } else {
         setSaveResult({ ok: false, message: r.error ?? 'Unknown error' })
       }
