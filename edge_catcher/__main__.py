@@ -236,6 +236,7 @@ def _cmd_backtest(args) -> None:
             REDACTED, REDACTED,
             REDACTED, REDACTED,
             REDACTED,
+            REDACTED, REDACTED,
         )
         _has_local = True
     except ImportError:
@@ -262,6 +263,8 @@ def _cmd_backtest(args) -> None:
             'Cmom': REDACTED, 'REDACTED': REDACTED,
             'Cstack': REDACTED, 'REDACTED': REDACTED,
             'H5_15m': ThresholdFade, 'H5_15M': ThresholdFade,
+            'Fflow': REDACTED, 'REDACTED': REDACTED,
+            'Ffvol': REDACTED, 'REDACTED': REDACTED,
         })
     strategy_names = [s.strip() for s in args.strategy.split(',')]
 
