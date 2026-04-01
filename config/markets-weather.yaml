@@ -1,0 +1,21 @@
+# Weather series — temperature and rain predictions
+# These are likely thin markets with retail noise (good transfer candidates)
+adapters:
+  kalshi:
+    enabled: true
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    series:
+      # Temperature
+      - KXTEMPNYCH    # NYC high temperature (13 events — highest weather volume)
+      # Rain
+      - KXRAINSFOM    # SF rain
+      - KXRAINSEAM    # Seattle rain
+      - KXRAINMIAM    # Miami rain
+      - KXRAINLAXM    # LA rain
+    statuses:
+      - settled
+    min_available_ram_pct: 10
+    pagination:
+      default_limit: 200
+      max_limit: 1000

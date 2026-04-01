@@ -397,13 +397,14 @@ class EventBacktester:
 		db_path: Path = Path('data/kalshi.db'),
 		fee_pct: float = 1.0,
 		on_progress: Optional[Callable[[dict], None]] = None,
+		is_cancelled: Optional[Callable[[], bool]] = None,
 	) -> BacktestResult:
 		# Ensure SQLite temp files go to the DB directory, not /tmp (which may be a small tmpfs)
 		db_dir = str(Path(db_path).parent.resolve())
 		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
-			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct, on_progress)
+			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct, on_progress, is_cancelled)
 		finally:
 			conn.close()
 
@@ -418,6 +419,7 @@ class EventBacktester:
 		slippage_cents: int,
 		fee_pct: float = 1.0,
 		on_progress: Optional[Callable[[dict], None]] = None,
+		is_cancelled: Optional[Callable[[], bool]] = None,
 	) -> BacktestResult:
 		# --- 1. Load markets for series (with optional date bounds) ---
 		market_query = 'SELECT * FROM markets WHERE series_ticker = ?'
@@ -436,15 +438,17 @@ class EventBacktester:
 			m = _row_to_market(row)
 			market_map[m.ticker] = m
 
-		if not market_map:
-			# Return empty result if no matching markets
-			return BacktestResult(
-				total_trades=0, wins=0, losses=0, net_pnl_cents=0,
-				total_fees_paid=0,
-				sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
-				avg_win_cents=0.0, avg_loss_cents=0.0,
-				equity_curve=[], per_strategy={}, trade_sample=[],
-			)
+		_cancelled = is_cancelled or (lambda: False)
+		_empty = BacktestResult(
+			total_trades=0, wins=0, losses=0, net_pnl_cents=0,
+			total_fees_paid=0,
+			sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
+			avg_win_cents=0.0, avg_loss_cents=0.0,
+			equity_curve=[], per_strategy={}, trade_sample=[],
+		)
+
+		if not market_map or _cancelled():
+			return _empty
 
 		tickers = list(market_map.keys())
 		portfolio = Portfolio(initial_cash, fee_pct=fee_pct)
@@ -453,6 +457,10 @@ class EventBacktester:
 		conn.execute('CREATE TEMP TABLE IF NOT EXISTS _bt_tickers (ticker TEXT PRIMARY KEY)')
 		conn.execute('DELETE FROM _bt_tickers')
 		conn.executemany('INSERT INTO _bt_tickers VALUES (?)', [(t,) for t in tickers])
+
+		if _cancelled():
+			conn.execute('DROP TABLE IF EXISTS _bt_tickers')
+			return _empty
 
 		# --- 3. Build shared WHERE clause for trade queries ---
 		where_clauses = []
@@ -471,6 +479,10 @@ class EventBacktester:
 			f'SELECT COUNT(*) FROM trades t INNER JOIN _bt_tickers bt ON t.ticker = bt.ticker{where_sql}',
 			trade_params,
 		).fetchone()[0]
+
+		if _cancelled():
+			conn.execute('DROP TABLE IF EXISTS _bt_tickers')
+			return _empty
 
 		# Fire initial progress callback
 		if on_progress is not None:
@@ -519,8 +531,11 @@ class EventBacktester:
 					)
 
 			trade_count += 1
-			if trade_count % 10000 == 0:  # was 1000 — reduce snapshot frequency to save RAM
-				portfolio.snapshot(trade.created_time)
+			if trade_count % 1000 == 0:
+				if _cancelled():
+					break
+				if trade_count % 10000 == 0:
+					portfolio.snapshot(trade.created_time)
 				if on_progress is not None:
 					on_progress({
 						"trades_processed": trade_count,
@@ -552,6 +567,8 @@ class EventBacktester:
 						)
 
 	
+		cursor.close()
+
 		# --- 5. Final settlement sweep ---
 		for (t_ticker, t_strategy) in list(portfolio.positions.keys()):
 			pos_market = market_map.get(t_ticker)
