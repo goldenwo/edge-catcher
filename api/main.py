@@ -45,7 +45,7 @@ from api.models import (
     StrategySaveRequest, StrategySaveResponse,
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
 )
-from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
+from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,15 @@ async def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
             """
             SELECT run_id, hypothesis_id, verdict, run_timestamp
             FROM analysis_results
+            WHERE run_id IN (
+                SELECT run_id FROM (
+                    SELECT run_id, ROW_NUMBER() OVER (
+                        PARTITION BY hypothesis_id ORDER BY run_timestamp DESC
+                    ) AS rn
+                    FROM analysis_results
+                )
+                WHERE rn = 1
+            )
             ORDER BY run_timestamp DESC
             LIMIT 100
             """
@@ -404,7 +413,7 @@ def _clear_api_key(env_var: str) -> None:
     os.environ.pop(env_var, None)
 
 
-def _run_coinbase_download(state, start_date: str | None = None) -> None:
+def _run_coinbase_download(adapter_id: str, state, start_date: str | None = None) -> None:
     from datetime import datetime, timezone
 
     from edge_catcher.adapters.coinbase import CoinbaseAdapter
@@ -435,6 +444,7 @@ def _run_coinbase_download(state, start_date: str | None = None) -> None:
         state.rows_fetched = n
         state.progress = f"Complete — {n:,} new candles"
         state.last_run = datetime.now(timezone.utc).isoformat()
+        save_adapter_history(adapter_id, state.last_run)
     except Exception as e:
         state.error = str(e)
         state.progress = "Error"
@@ -443,7 +453,7 @@ def _run_coinbase_download(state, start_date: str | None = None) -> None:
 
 
 def _run_kalshi_adapter_download(
-    state, start_date: str | None = None, markets_yaml: str | None = None
+    adapter_id: str, state, start_date: str | None = None, markets_yaml: str | None = None
 ) -> None:
     """Run Kalshi download, updating the per-adapter state."""
     from datetime import datetime, timezone
@@ -503,6 +513,7 @@ def _run_kalshi_adapter_download(
 
         state.last_run = datetime.now(timezone.utc).isoformat()
         state.progress = "Complete"
+        save_adapter_history(adapter_id, state.last_run)
     except Exception as exc:
         logger.error("Kalshi adapter download failed: %s", exc)
         state.error = str(exc)
@@ -511,11 +522,45 @@ def _run_kalshi_adapter_download(
         state.running = False
 
 
+def _adapter_has_data(meta) -> bool:
+    """Check whether an adapter's DB actually contains data for it."""
+    import sqlite3, yaml
+    db_file = Path(meta.db_file)
+    if not db_file.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(db_file), timeout=5)
+        if meta.markets_yaml:
+            cfg = yaml.safe_load(Path(meta.markets_yaml).read_text())
+            series = cfg.get("adapters", {}).get("kalshi", {}).get("series", [])
+            if not series:
+                conn.close()
+                return False
+            placeholders = ",".join("?" for _ in series)
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM markets WHERE series_ticker IN ({placeholders})", series
+            ).fetchone()[0]
+            conn.close()
+            return count > 0
+        else:
+            # coinbase_btc — check btc_ohlc table
+            count = conn.execute("SELECT COUNT(*) FROM btc_ohlc").fetchone()[0]
+            conn.close()
+            return count > 0
+    except Exception:
+        return False
+
+
 @app.get("/adapters", response_model=list[AdapterInfo])
 async def list_adapters() -> list[AdapterInfo]:
     result = []
     for meta in ADAPTERS:
         state = get_adapter_state(meta.id)
+        # Seed history from existing DB data if no recorded download
+        if not state.last_run and not state.running and _adapter_has_data(meta):
+            state.last_run = "detected"
+            state.progress = "Previously downloaded"
+            save_adapter_history(meta.id, state.last_run)
         if state.running:
             dl_status = "running"
         elif state.error:
@@ -524,6 +569,8 @@ async def list_adapters() -> list[AdapterInfo]:
             dl_status = "complete"
         else:
             dl_status = "idle"
+        db_file = Path(meta.db_file)
+        db_size_mb = round(db_file.stat().st_size / (1024 * 1024), 1) if db_file.exists() else None
         result.append(
             AdapterInfo(
                 id=meta.id,
@@ -534,6 +581,7 @@ async def list_adapters() -> list[AdapterInfo]:
                 api_key_set=is_api_key_set(meta),
                 download_status=dl_status,
                 default_start_date=meta.default_start_date,
+                db_size_mb=db_size_mb,
             )
         )
     return result
@@ -596,9 +644,9 @@ async def start_adapter_download(
         _save_api_key(meta.api_key_env_var, req.api_key)
     if meta.markets_yaml:
         target = _run_kalshi_adapter_download
-        args = (state, req.start_date, meta.markets_yaml)
+        args = (adapter_id, state, req.start_date, meta.markets_yaml)
     elif adapter_id == "coinbase_btc":
-        target, args = _run_coinbase_download, (state, req.start_date)
+        target, args = _run_coinbase_download, (adapter_id, state, req.start_date)
     else:
         raise HTTPException(status_code=400, detail=f"No download handler for {adapter_id!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
