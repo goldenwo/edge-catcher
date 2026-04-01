@@ -182,7 +182,6 @@ def init_db(db_path: Path) -> None:
         conn.executescript(_SCHEMA_SQL)
         # executescript() issues an implicit COMMIT before running — only call on a fresh connection
         conn.executescript(_INDEXES_SQL)
-        init_btc_ohlc_table(conn)
         # Record migration version 1 if not already present
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)",
