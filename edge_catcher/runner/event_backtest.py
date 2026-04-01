@@ -8,7 +8,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from edge_catcher.storage.db import get_connection
 from edge_catcher.storage.models import Market, Trade
@@ -396,13 +396,14 @@ class EventBacktester:
 		slippage_cents: int = 1,
 		db_path: Path = Path('data/kalshi.db'),
 		fee_pct: float = 1.0,
+		on_progress: Optional[Callable[[dict], None]] = None,
 	) -> BacktestResult:
 		# Ensure SQLite temp files go to the DB directory, not /tmp (which may be a small tmpfs)
 		db_dir = str(Path(db_path).parent.resolve())
 		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
-			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct)
+			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct, on_progress)
 		finally:
 			conn.close()
 
@@ -416,6 +417,7 @@ class EventBacktester:
 		initial_cash: float,
 		slippage_cents: int,
 		fee_pct: float = 1.0,
+		on_progress: Optional[Callable[[dict], None]] = None,
 	) -> BacktestResult:
 		# --- 1. Load markets for series (with optional date bounds) ---
 		market_query = 'SELECT * FROM markets WHERE series_ticker = ?'
@@ -452,23 +454,43 @@ class EventBacktester:
 		conn.execute('DELETE FROM _bt_tickers')
 		conn.executemany('INSERT INTO _bt_tickers VALUES (?)', [(t,) for t in tickers])
 
-		# --- 3. Stream trades in time order ---
-		trade_query = '''
+		# --- 3. Build shared WHERE clause for trade queries ---
+		where_clauses = []
+		trade_params: list = []
+		if start:
+			where_clauses.append('t.created_time >= ?')
+			trade_params.append(start.isoformat())
+		if end:
+			end_dt = end + timedelta(days=1)
+			where_clauses.append('t.created_time < ?')
+			trade_params.append(end_dt.isoformat())
+		where_sql = (' WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
+
+		# Estimated total for progress reporting
+		estimated_total = conn.execute(
+			f'SELECT COUNT(*) FROM trades t INNER JOIN _bt_tickers bt ON t.ticker = bt.ticker{where_sql}',
+			trade_params,
+		).fetchone()[0]
+
+		# Fire initial progress callback
+		if on_progress is not None:
+			on_progress({
+				"trades_processed": 0,
+				"trades_estimated": estimated_total,
+				"total_trades": 0,
+				"wins": 0,
+				"losses": 0,
+				"net_pnl_cents": 0,
+			})
+
+		trade_query = f'''
 			SELECT t.trade_id, t.ticker, t.yes_price, t.no_price, t.count,
 			       t.taker_side, t.created_time, t.raw_data
 			FROM trades t
 			INNER JOIN _bt_tickers bt ON t.ticker = bt.ticker
+			{where_sql}
+			ORDER BY t.created_time ASC
 		'''
-		trade_params: list = []
-		if start:
-			trade_query += ' WHERE t.created_time >= ?'
-			trade_params.append(start.isoformat())
-		if end:
-			sep = ' AND ' if start else ' WHERE '
-			end_dt = end + timedelta(days=1)
-			trade_query += f'{sep}t.created_time < ?'
-			trade_params.append(end_dt.isoformat())
-		trade_query += ' ORDER BY t.created_time ASC'
 
 		cursor = conn.execute(trade_query, trade_params)
 		trade_count = 0
@@ -499,6 +521,15 @@ class EventBacktester:
 			trade_count += 1
 			if trade_count % 10000 == 0:  # was 1000 — reduce snapshot frequency to save RAM
 				portfolio.snapshot(trade.created_time)
+				if on_progress is not None:
+					on_progress({
+						"trades_processed": trade_count,
+						"trades_estimated": estimated_total,
+						"total_trades": portfolio.total_trades,
+						"wins": portfolio.wins,
+						"losses": portfolio.losses,
+						"net_pnl_cents": portfolio.net_pnl_cents,
+					})
 
 			# --- 4b. Skip strategy dispatch for trades from closed markets ---
 			if market.close_time is not None and trade.created_time > market.close_time:
