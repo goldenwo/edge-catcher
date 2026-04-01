@@ -91,6 +91,7 @@ class AdapterInfo(BaseModel):
     api_key_set: bool
     download_status: str
     default_start_date: Optional[str] = None
+    db_size_mb: Optional[float] = None
 
 
 class AdapterDownloadRequest(BaseModel):
@@ -196,6 +197,9 @@ class BacktestStatusResponse(BaseModel):
     running: bool
     progress: str
     error: Optional[str] = None
+    trades_processed: Optional[int] = None
+    trades_estimated: Optional[int] = None
+    net_pnl_cents: Optional[int] = None
 
 class BacktestHistoryItem(BaseModel):
     task_id: str

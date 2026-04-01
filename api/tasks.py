@@ -74,6 +74,9 @@ class BacktestTaskState:
     progress: str = ""
     error: Optional[str] = None
     result: Optional[dict] = None  # BacktestResult.to_dict() when complete
+    trades_processed: int = 0
+    trades_estimated: int = 0
+    net_pnl_cents: int = 0
 
 
 backtest_states: Dict[str, BacktestTaskState] = {}
