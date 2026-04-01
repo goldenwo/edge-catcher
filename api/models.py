@@ -120,3 +120,89 @@ class AISettingsResponse(BaseModel):
     anthropic: bool
     openai: bool
     openrouter: bool
+
+
+# ── Pipeline Status ──────────────────────────────────────────────────────────
+
+class PipelineDataStatus(BaseModel):
+    has_data: bool
+    markets: int
+    trades: int
+
+class PipelineHypothesesStatus(BaseModel):
+    count: int
+
+class PipelineAnalysisStatus(BaseModel):
+    count: int
+    latest_verdict: Optional[str] = None
+
+class PipelineStrategiesStatus(BaseModel):
+    count: int
+    names: list[str]
+
+class PipelineBacktestStatus(BaseModel):
+    count: int
+    latest_sharpe: Optional[float] = None
+
+class PipelineStatusResponse(BaseModel):
+    data: PipelineDataStatus
+    hypotheses: PipelineHypothesesStatus
+    analysis: PipelineAnalysisStatus
+    strategies: PipelineStrategiesStatus
+    backtest: PipelineBacktestStatus
+
+
+# ── Strategies ───────────────────────────────────────────────────────────────
+
+class StrategyInfo(BaseModel):
+    name: str
+    class_name: str
+
+class StrategizeRequest(BaseModel):
+    hypothesis_id: str
+    run_id: Optional[str] = None
+    provider: Optional[str] = None
+
+class StrategizeResponse(BaseModel):
+    code: str
+    strategy_name: str
+    error: Optional[str] = None
+
+class StrategySaveRequest(BaseModel):
+    code: str
+    strategy_name: str
+
+class StrategySaveResponse(BaseModel):
+    ok: bool
+    path: Optional[str] = None
+    error: Optional[str] = None
+
+
+# ── Backtest ─────────────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    series: str
+    strategies: list[str]
+    start: Optional[str] = None
+    end: Optional[str] = None
+    cash: float = 10000.0
+    slippage: int = 1
+    tp: Optional[int] = None
+    sl: Optional[int] = None
+    min_price: Optional[int] = None
+    max_price: Optional[int] = None
+
+class BacktestStatusResponse(BaseModel):
+    running: bool
+    progress: str
+    error: Optional[str] = None
+
+class BacktestHistoryItem(BaseModel):
+    task_id: str
+    series: str
+    strategies: list[str]
+    timestamp: str
+    total_trades: int
+    net_pnl_cents: int
+    sharpe: float
+    win_rate: float
