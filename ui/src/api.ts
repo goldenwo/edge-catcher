@@ -151,6 +151,7 @@ export const api = {
     min_price?: number; max_price?: number;
   }) => req<{ task_id: string }>('/api/backtest', json(params)),
   backtestStatus: (taskId: string) => req<BacktestStatusResp>(`/api/backtest/${taskId}/status`),
+  stopBacktest: (taskId: string) => req<{ ok: boolean }>(`/api/backtest/${taskId}/stop`, { method: 'POST' }),
   backtestResult: (taskId: string) => req<Record<string, unknown>>(`/api/backtest/${taskId}/result`),
   backtestHistory: () => req<BacktestHistoryItem[]>('/api/backtest/history'),
 }

@@ -12,6 +12,8 @@ class AdapterMeta:
     requires_api_key: bool
     api_key_env_var: Optional[str] = None
     default_start_date: Optional[str] = None  # ISO date, shown as default in UI
+    markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
+    db_file: str = "data/kalshi.db"  # database file this adapter writes to
 
 ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
@@ -21,6 +23,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-03-21",
+        markets_yaml="config/markets.yaml",
     ),
     AdapterMeta(
         id="coinbase_btc",
@@ -29,6 +32,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var=None,
         default_start_date="2025-03-21",
+        db_file="data/btc.db",
     ),
     AdapterMeta(
         id="kalshi_sports",
@@ -37,6 +41,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-sports.yaml",
     ),
     AdapterMeta(
         id="kalshi_crypto",
@@ -45,6 +50,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-crypto.yaml",
     ),
     AdapterMeta(
         id="kalshi_weather",
@@ -53,6 +59,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-weather.yaml",
     ),
     AdapterMeta(
         id="kalshi_financials",
@@ -61,6 +68,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-financials.yaml",
     ),
     AdapterMeta(
         id="kalshi_entertainment",
@@ -69,6 +77,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-entertainment.yaml",
     ),
     AdapterMeta(
         id="kalshi_politics",
@@ -77,6 +86,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-politics.yaml",
     ),
     AdapterMeta(
         id="kalshi_esports",
@@ -85,6 +95,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-esports.yaml",
     ),
 ]
 

@@ -130,11 +130,11 @@ class Reporter:
         json_path = base.with_suffix(".json")
         md_path = base.with_suffix(".md")
 
-        with open(json_path, "w") as f:
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         logger.info("Saved JSON report to %s", json_path)
 
-        with open(md_path, "w") as f:
+        with open(md_path, "w", encoding="utf-8") as f:
             f.write(self.to_markdown(report))
         logger.info("Saved markdown report to %s", md_path)
 

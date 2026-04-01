@@ -118,10 +118,9 @@ export default function Backtest() {
         api.backtestHistory().then(setHistory).catch(() => {})
         refreshPipeline()
       }
-    } catch (e) {
-      clearInterval(intervalRef.current)
-      setRunning(false)
-      setError(e instanceof Error ? e.message : String(e))
+    } catch {
+      // Keep polling — the backtest thread may still be running even if the
+      // status endpoint had a transient error.  The Stop button stays visible.
     }
   }
 
@@ -154,6 +153,16 @@ export default function Backtest() {
       intervalRef.current = setInterval(() => pollStatus(task_id), 2000)
     } catch (e) {
       setRunning(false)
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleStop = async () => {
+    if (!taskId) return
+    try {
+      await api.stopBacktest(taskId)
+      setProgress('Stopping...')
+    } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
   }
@@ -372,11 +381,19 @@ export default function Backtest() {
               <div className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
               <span className="text-gray-300">{progress || 'Starting backtest...'}</span>
             </div>
-            {livePnl != null && (
-              <span className={livePnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                P&L: {livePnl >= 0 ? '+' : ''}{(livePnl / 100).toFixed(2)}$
-              </span>
-            )}
+            <div className="flex items-center gap-4">
+              {livePnl != null && (
+                <span className={livePnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  P&L: {livePnl >= 0 ? '+' : ''}{(livePnl / 100).toFixed(2)}$
+                </span>
+              )}
+              <button
+                onClick={handleStop}
+                className="px-3 py-1 rounded bg-red-600 hover:bg-red-500 text-xs font-medium transition-colors"
+              >
+                Stop
+              </button>
+            </div>
           </div>
           {tradesEstimated != null && tradesEstimated > 0 && (
             <div className="h-1.5 w-full rounded-full bg-gray-700 overflow-hidden">

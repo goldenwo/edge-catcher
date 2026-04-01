@@ -77,6 +77,7 @@ class BacktestTaskState:
     trades_processed: int = 0
     trades_estimated: int = 0
     net_pnl_cents: int = 0
+    cancel_requested: bool = False
 
 
 backtest_states: Dict[str, BacktestTaskState] = {}
