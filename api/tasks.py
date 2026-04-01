@@ -1,8 +1,33 @@
 """In-process download state singleton."""
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+_HISTORY_FILE = Path("data/.adapter_history.json")
+
+
+def _load_history() -> Dict[str, str]:
+    """Load persisted per-adapter last_run timestamps."""
+    if _HISTORY_FILE.exists():
+        try:
+            return json.loads(_HISTORY_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_adapter_history(adapter_id: str, last_run: str) -> None:
+    """Persist a successful download timestamp for an adapter."""
+    history = _load_history()
+    history[adapter_id] = last_run
+    _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _HISTORY_FILE.write_text(json.dumps(history))
 
 
 @dataclass
@@ -33,7 +58,12 @@ adapter_states: Dict[str, AdapterDownloadState] = {}
 
 def get_adapter_state(adapter_id: str) -> AdapterDownloadState:
     if adapter_id not in adapter_states:
-        adapter_states[adapter_id] = AdapterDownloadState()
+        history = _load_history()
+        last_run = history.get(adapter_id)
+        adapter_states[adapter_id] = AdapterDownloadState(
+            last_run=last_run,
+            progress="Idle" if not last_run else f"Last run: {last_run}",
+        )
     return adapter_states[adapter_id]
 
 
