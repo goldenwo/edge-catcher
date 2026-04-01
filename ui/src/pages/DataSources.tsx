@@ -9,6 +9,7 @@ interface AdapterInfo {
   api_key_set: boolean
   download_status: 'idle' | 'running' | 'complete' | 'error'
   default_start_date: string | null
+  db_size_mb: number | null
 }
 
 interface AdapterDownloadStatus {
@@ -145,6 +146,9 @@ function AdapterCard({ adapter }: { adapter: AdapterInfo }) {
           <div className="flex items-center gap-2 mb-1">
             <span className="font-semibold text-gray-100">{adapter.name}</span>
             {adapter.api_key_env_var && <StatusBadge set={apiKeySet} required={adapter.requires_api_key} />}
+            {adapter.db_size_mb != null
+              ? <span className="text-xs px-2 py-0.5 rounded bg-emerald-950 text-emerald-400">{adapter.db_size_mb >= 1024 ? `${(adapter.db_size_mb / 1024).toFixed(1)} GB` : `${adapter.db_size_mb} MB`}</span>
+              : <span className="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-500">No data</span>}
           </div>
           <p className="text-sm text-gray-400">{adapter.description}</p>
         </div>
@@ -164,7 +168,7 @@ function AdapterCard({ adapter }: { adapter: AdapterInfo }) {
             disabled={!canDownload}
             className="px-4 py-2 rounded text-sm font-medium transition-colors bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white self-end"
           >
-            {status.running ? 'Running…' : 'Download'}
+            {status.running ? 'Running…' : adapter.download_status === 'complete' ? 'Re-download' : 'Download'}
           </button>
         </div>
       </div>
