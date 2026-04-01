@@ -700,8 +700,8 @@ class TestNoLookahead:
 		)
 		# Exactly one completed trade (settled after close_time)
 		assert result.total_trades == 1
-		assert result.trade_log[0].exit_reason == 'settlement'
-		assert result.trade_log[0].exit_price == 100  # result='yes', side='yes'
+		assert result.trade_sample[0].exit_reason == 'settlement'
+		assert result.trade_sample[0].exit_price == 100  # result='yes', side='yes'
 
 
 # ---------------------------------------------------------------------------
@@ -712,29 +712,26 @@ class TestBacktestResult:
 	def _make_result(self, pnls: list[int]) -> BacktestResult:
 		from datetime import datetime, timezone
 		now = datetime.now(timezone.utc)
-		trades = [
-			CompletedTrade(
+		port = Portfolio(1000.0)
+		for i, p in enumerate(pnls):
+			port.equity_snapshots.append((now, 1000.0 + sum(pnls[:i+1])))
+			ct = CompletedTrade(
 				ticker='T', side='yes', strategy='REDACTED',
 				entry_price=50, entry_time=now,
 				exit_price=50 + p, exit_time=now,
 				pnl_cents=p, exit_reason='settlement',
 			)
-			for p in pnls
-		]
-		port = Portfolio(1000.0)
-		for i, p in enumerate(pnls):
-			port.equity_snapshots.append((now, 1000.0 + sum(pnls[:i+1])))
-		port.trade_log = trades
+			port._record_trade(ct)
 		# Re-run metrics the way the backtester does
 		from edge_catcher.runner.event_backtest import _compute_metrics
 		sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy = _compute_metrics(
-			trades, port.equity_snapshots,
+			port, port.equity_snapshots,
 		)
 		return BacktestResult(
-			total_trades=len(pnls),
+			total_trades=port.total_trades,
 			wins=wins,
 			losses=losses,
-			net_pnl_cents=sum(pnls),
+			net_pnl_cents=port.net_pnl_cents,
 			sharpe=sharpe,
 			max_drawdown_pct=max_dd,
 			win_rate=win_rate,
@@ -742,7 +739,7 @@ class TestBacktestResult:
 			avg_loss_cents=avg_loss,
 			equity_curve=port.equity_snapshots,
 			per_strategy=per_strategy,
-			trade_log=trades,
+			trade_sample=port._trade_sample,
 		)
 
 	def test_win_rate(self):
@@ -880,9 +877,9 @@ class TestIntegration:
 			db_path=db_path,
 		)
 		assert result.total_trades == 1
-		assert result.trade_log[0].exit_reason == 'take_profit'
+		assert result.trade_sample[0].exit_reason == 'take_profit'
 		# exit = 59 - 1(slippage) = 58; entry = 51; pnl = 7
-		assert result.trade_log[0].pnl_cents == 7
+		assert result.trade_sample[0].pnl_cents == 7
 
 	def test_strategy_tp_settles_if_no_tp_sl(self, tmp_path):
 		"""ActiveExitStub holds to settlement if TP/SL never hit."""
@@ -910,7 +907,7 @@ class TestIntegration:
 			db_path=db_path,
 		)
 		assert result.total_trades == 1
-		assert result.trade_log[0].exit_reason == 'settlement'
+		assert result.trade_sample[0].exit_reason == 'settlement'
 
 	def test_multi_ticker_multi_strategy(self, tmp_path):
 		"""Multiple tickers + strategies A and C in same run."""
