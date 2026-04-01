@@ -878,6 +878,20 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
         start = date.fromisoformat(body.start) if body.start else None
         end = date.fromisoformat(body.end) if body.end else None
 
+        def on_progress(info: dict) -> None:
+            state.trades_processed = info["trades_processed"]
+            state.trades_estimated = info["trades_estimated"]
+            state.net_pnl_cents = info["net_pnl_cents"]
+            pct = (
+                info["trades_processed"] / info["trades_estimated"] * 100
+                if info["trades_estimated"]
+                else 0
+            )
+            state.progress = (
+                f"Processed {info['trades_processed']:,} / ~{info['trades_estimated']:,} trades "
+                f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
+            )
+
         backtester = EventBacktester()
         result = backtester.run(
             series=body.series,
@@ -887,6 +901,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
             initial_cash=body.cash,
             slippage_cents=body.slippage,
             db_path=_db_path(),
+            on_progress=on_progress,
         )
 
         result_dict = result.to_dict()
@@ -986,7 +1001,14 @@ async def backtest_status(task_id: str) -> BacktestStatusResponse:
     state = get_backtest_state(task_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
-    return BacktestStatusResponse(running=state.running, progress=state.progress, error=state.error)
+    return BacktestStatusResponse(
+        running=state.running,
+        progress=state.progress,
+        error=state.error,
+        trades_processed=state.trades_processed if state.trades_estimated else None,
+        trades_estimated=state.trades_estimated or None,
+        net_pnl_cents=state.net_pnl_cents if state.trades_estimated else None,
+    )
 
 
 @app.get("/api/backtest/{task_id}/result")
