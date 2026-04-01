@@ -348,7 +348,7 @@ def _make_trade(ticker: str = 'TEST-1', yes_price: int = 80, offset_hours: float
 
 class TestPortfolio:
 	def test_open_position_deducts_cash(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		result = port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		assert result is True
@@ -356,7 +356,7 @@ class TestPortfolio:
 		assert port.has_position('T', 'REDACTED')
 
 	def test_open_position_slippage_increases_cost(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=2)
 		assert port.cash == 948.0
@@ -371,7 +371,7 @@ class TestPortfolio:
 		assert not port.has_position('T', 'REDACTED')
 
 	def test_close_position_adds_proceeds(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=0)
@@ -401,7 +401,7 @@ class TestPortfolio:
 		assert port.cash == 1025.0
 
 	def test_settle_yes_position_loss(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
@@ -428,8 +428,34 @@ class TestPortfolio:
 		assert ct.exit_price == 0
 		assert ct.pnl_cents == -30
 
+	def test_entry_fee_charged_at_open(self):
+		# Buy NO at 87¢: fee = 1.0 * 0.07 * 87 * 13 / 100 = 0.7917¢ per contract
+		port = Portfolio(1000.0, fee_pct=1.0)
+		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
+		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		expected_fee = 0.07 * 87 * 13 / 100  # ~0.7917
+		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
+		assert port.cash == pytest.approx(1000.0 - 87 - expected_fee, rel=1e-6)
+
+	def test_fee_scales_with_fee_pct(self):
+		# fee_pct=0.25 simulates maker fee (0.25 * 0.07 = 1.75% equivalent)
+		port = Portfolio(1000.0, fee_pct=0.25)
+		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
+		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		expected_fee = 0.25 * 0.07 * 87 * 13 / 100
+		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
+
+	def test_no_fee_at_settlement(self):
+		# Fee is only charged at entry — settlement should not add more fees
+		port = Portfolio(1000.0, fee_pct=1.0)
+		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
+		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		fee_at_entry = port.total_fees_paid
+		port.settle_position('T', 'REDACTED', 'yes', _dt(2))
+		assert port.total_fees_paid == fee_at_entry  # no new fees at settlement
+
 	def test_get_equity_marks_at_entry(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		# equity = cash(950) + position_entry_value(50) = 1000
@@ -637,7 +663,7 @@ class TestActiveExitStub:
 
 class TestSlippage:
 	def test_entry_slippage_applied(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=2, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=3)
 		pos = port.positions[('T', 'REDACTED')]
