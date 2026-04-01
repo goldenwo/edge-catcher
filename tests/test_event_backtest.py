@@ -13,16 +13,187 @@ from edge_catcher.runner.event_backtest import (
 	Portfolio,
 	Position,
 )
-from edge_catcher.runner.strategies import (
-	Signal,
-	BuyYesInRange,
-	BuyNoOnDrop,
-	BuyNoInRange,
-	ActiveExitStub,
-	FadeFirstTrade,
-	ThresholdFade,
-)
+from edge_catcher.runner.strategies import Signal, Strategy
 from edge_catcher.storage.models import Market, Trade
+
+
+# ---------------------------------------------------------------------------
+# Test-only strategy stubs (originals moved to gitignored strategies_local.py)
+# ---------------------------------------------------------------------------
+
+class BuyYesInRange(Strategy):
+	"""Buy YES when yes_price is in [min_price, max_price]."""
+	name = 'REDACTED'
+
+	def __init__(self, min_price: int = 70, max_price: int = 99, size: int = 1,
+	             take_profit=None, stop_loss=None) -> None:
+		self.min_price = min_price
+		self.max_price = max_price
+		self.size = size
+		self.take_profit = take_profit
+		self.stop_loss = stop_loss
+
+	def on_trade(self, trade, market, portfolio):
+		if self.take_profit is not None and portfolio.has_position(trade.ticker, self.name):
+			pos = portfolio.positions.get((trade.ticker, self.name))
+			if pos is not None:
+				if self.take_profit is not None and trade.yes_price >= pos.entry_price + self.take_profit:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=trade.yes_price,
+						size=pos.size, reason=f'take_profit: {trade.yes_price}>={pos.entry_price}+{self.take_profit}')]
+				if self.stop_loss is not None and trade.yes_price <= pos.entry_price - self.stop_loss:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=trade.yes_price,
+						size=pos.size, reason=f'stop_loss: {trade.yes_price}<={pos.entry_price}-{self.stop_loss}')]
+			return []
+		if (self.min_price <= trade.yes_price <= self.max_price
+				and not portfolio.has_position(trade.ticker, self.name)):
+			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
+				size=self.size, reason=f'yes_price={trade.yes_price} in [{self.min_price},{self.max_price}]')]
+		return []
+
+
+class BuyNoOnDrop(Strategy):
+	"""Contrarian NO — buy NO when yes_price drops >= threshold."""
+	name = 'REDACTED'
+
+	def __init__(self, min_price: int = 50, max_price: int = 80, drop_threshold: int = 5, size: int = 1) -> None:
+		self.min_price = min_price
+		self.max_price = max_price
+		self.drop_threshold = drop_threshold
+		self.size = size
+		self._last_known_price: dict[str, int] = {}
+
+	def on_trade(self, trade, market, portfolio):
+		signals: list[Signal] = []
+		prev = self._last_known_price.get(trade.ticker)
+		if (prev is not None
+				and self.min_price <= trade.yes_price <= self.max_price
+				and (prev - trade.yes_price) >= self.drop_threshold
+				and not portfolio.has_position(trade.ticker, self.name)):
+			no_price = 100 - trade.yes_price
+			signals.append(Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
+				size=self.size, reason=f'yes_price dropped {prev}->{trade.yes_price}'))
+		self._last_known_price[trade.ticker] = trade.yes_price
+		return signals
+
+
+class BuyNoInRange(Strategy):
+	"""Longshot fade — buy NO when yes_price in [min, max]."""
+	name = 'REDACTED'
+
+	def __init__(self, min_price: int = 5, max_price: int = 30, size: int = 1,
+	             take_profit=None, stop_loss=None) -> None:
+		self.min_price = min_price
+		self.max_price = max_price
+		self.size = size
+		self.take_profit = take_profit
+		self.stop_loss = stop_loss
+
+	def on_trade(self, trade, market, portfolio):
+		if self.take_profit is not None and portfolio.has_position(trade.ticker, self.name):
+			pos = portfolio.positions.get((trade.ticker, self.name))
+			if pos is not None:
+				current_no_price = 100 - trade.yes_price
+				if self.take_profit is not None and current_no_price >= pos.entry_price + self.take_profit:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=current_no_price,
+						size=pos.size, reason=f'take_profit: no={current_no_price}>={pos.entry_price}+{self.take_profit}')]
+				if self.stop_loss is not None and current_no_price <= pos.entry_price - self.stop_loss:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=current_no_price,
+						size=pos.size, reason=f'stop_loss: no={current_no_price}<={pos.entry_price}-{self.stop_loss}')]
+			return []
+		if (self.min_price <= trade.yes_price <= self.max_price
+				and not portfolio.has_position(trade.ticker, self.name)):
+			no_price = 100 - trade.yes_price
+			return [Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
+				size=self.size, reason=f'yes_price={trade.yes_price} in longshot range [{self.min_price},{self.max_price}]')]
+		return []
+
+
+class ActiveExitStub(Strategy):
+	"""Active exit — buy YES in range, exit on TP/SL."""
+	name = 'TP'
+
+	def __init__(self, min_price: int = 40, max_price: int = 60, take_profit: int = 8,
+	             stop_loss: int = 5, size: int = 1) -> None:
+		self.min_price = min_price
+		self.max_price = max_price
+		self.take_profit = take_profit
+		self.stop_loss = stop_loss
+		self.size = size
+
+	def on_trade(self, trade, market, portfolio):
+		if portfolio.has_position(trade.ticker, self.name):
+			pos = portfolio.positions.get((trade.ticker, self.name))
+			if pos is not None:
+				if trade.yes_price >= pos.entry_price + self.take_profit:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=trade.yes_price,
+						size=pos.size, reason='take_profit')]
+				if trade.yes_price <= pos.entry_price - self.stop_loss:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=trade.yes_price,
+						size=pos.size, reason='stop_loss')]
+			return []
+		if self.min_price <= trade.yes_price <= self.max_price:
+			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
+				size=self.size, reason=f'yes_price={trade.yes_price} in [{self.min_price},{self.max_price}]')]
+		return []
+
+
+class FadeFirstTrade(Strategy):
+	"""Opening Mispricing Fade — fade the first trade per market when extreme."""
+	name = 'REDACTED'
+
+	def __init__(self, threshold_high: int = 60, threshold_low: int = 40,
+	             take_profit: int = 8, stop_loss: int = 5, size: int = 1) -> None:
+		self.threshold_high = threshold_high
+		self.threshold_low = threshold_low
+		self.take_profit = take_profit
+		self.stop_loss = stop_loss
+		self.size = size
+		self._seen_tickers: dict[str, bool] = {}
+
+	def on_trade(self, trade, market, portfolio):
+		if portfolio.has_position(trade.ticker, self.name):
+			pos = portfolio.positions.get((trade.ticker, self.name))
+			if pos is not None:
+				check_price = trade.yes_price if pos.side == 'yes' else 100 - trade.yes_price
+				if check_price >= pos.entry_price + self.take_profit:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=check_price,
+						size=pos.size, reason='take_profit')]
+				if check_price <= pos.entry_price - self.stop_loss:
+					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=check_price,
+						size=pos.size, reason='stop_loss')]
+			return []
+		if trade.ticker in self._seen_tickers:
+			return []
+		self._seen_tickers[trade.ticker] = True
+		if trade.yes_price > self.threshold_high:
+			no_price = 100 - trade.yes_price
+			return [Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
+				size=self.size, reason=f'REDACTED high: yes_price={trade.yes_price} > {self.threshold_high}')]
+		if trade.yes_price < self.threshold_low:
+			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
+				size=self.size, reason=f'REDACTED low: yes_price={trade.yes_price} < {self.threshold_low}')]
+		return []
+
+
+class ThresholdFade(Strategy):
+	"""Favorite-Longshot Bias for 15-min BTC contracts."""
+	name = 'REDACTED'
+
+	def __init__(self, fav_threshold: int = 85, long_threshold: int = 15, size: int = 1) -> None:
+		self.fav_threshold = fav_threshold
+		self.long_threshold = long_threshold
+		self.size = size
+
+	def on_trade(self, trade, market, portfolio):
+		if portfolio.has_position(trade.ticker, self.name):
+			return []
+		if trade.yes_price >= self.fav_threshold:
+			return [Signal(action='buy', ticker=trade.ticker, side='no', price=100 - trade.yes_price,
+				size=self.size, reason=f'FLB fade fav: yes_price={trade.yes_price} >= {self.fav_threshold}')]
+		if trade.yes_price <= self.long_threshold:
+			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
+				size=self.size, reason=f'FLB longshot: yes_price={trade.yes_price} <= {self.long_threshold}')]
+		return []
 
 
 # ---------------------------------------------------------------------------
