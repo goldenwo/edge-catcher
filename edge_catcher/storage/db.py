@@ -97,6 +97,23 @@ CREATE TABLE IF NOT EXISTS hypothesis_runs (
     verdict TEXT,
     UNIQUE(run_id)
 );
+
+CREATE TABLE IF NOT EXISTS backtest_results (
+    task_id TEXT PRIMARY KEY,
+    series TEXT NOT NULL,
+    strategies TEXT NOT NULL,
+    start_date TEXT,
+    end_date TEXT,
+    run_timestamp TEXT NOT NULL,
+    total_trades INTEGER,
+    wins INTEGER,
+    losses INTEGER,
+    net_pnl_cents INTEGER,
+    sharpe REAL,
+    max_drawdown_pct REAL,
+    win_rate REAL,
+    result_path TEXT
+);
 """
 
 _INDEXES_SQL = """

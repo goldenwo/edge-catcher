@@ -193,3 +193,33 @@ def test_cache_size_pragma_set(tmp_db_conn):
     """_configure_connection() sets cache_size to -32768 (32 MB cap)."""
     cache_size = tmp_db_conn.execute("PRAGMA cache_size").fetchone()[0]
     assert cache_size == -524288
+
+
+# ---------------------------------------------------------------------------
+# backtest_results table
+# ---------------------------------------------------------------------------
+
+def test_backtest_results_table_exists(tmp_db_conn):
+    """backtest_results table is created by init_db."""
+    row = tmp_db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
+    ).fetchone()
+    assert row is not None, "backtest_results table should exist after init_db"
+
+
+def test_backtest_results_insert_and_query(tmp_db_conn):
+    """Can insert and query a backtest result row."""
+    tmp_db_conn.execute(
+        """INSERT INTO backtest_results
+           (task_id, series, strategies, run_timestamp, total_trades, wins, losses,
+            net_pnl_cents, sharpe, max_drawdown_pct, win_rate, result_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("task-001", "KXBTCD", '["example"]', "2026-03-31T00:00:00Z",
+         100, 60, 40, 500, 1.5, 5.0, 0.6, "reports/backtest_task-001.json"),
+    )
+    tmp_db_conn.commit()
+    row = tmp_db_conn.execute(
+        "SELECT * FROM backtest_results WHERE task_id = ?", ("task-001",)
+    ).fetchone()
+    assert row["series"] == "KXBTCD"
+    assert row["sharpe"] == 1.5
