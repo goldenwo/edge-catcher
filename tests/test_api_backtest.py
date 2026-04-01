@@ -23,3 +23,16 @@ def test_backtest_state_lifecycle():
     assert state.result["total_trades"] == 10
 
     backtest_states.clear()
+
+
+def test_backtest_state_progress_fields():
+    """BacktestTaskState has progress tracking fields."""
+    state = BacktestTaskState(task_id="test-prog")
+    assert state.trades_processed == 0
+    assert state.trades_estimated == 0
+    assert state.net_pnl_cents == 0
+
+    state.trades_processed = 5000
+    state.trades_estimated = 20000
+    state.net_pnl_cents = 150
+    assert state.trades_processed == 5000
