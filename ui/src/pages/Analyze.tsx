@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api, ResultDetail, ResultSummary } from '../api'
 import Badge from '../components/Badge'
 
@@ -8,7 +9,8 @@ function fmt(n: number | null | undefined, decimals = 4) {
   return n == null ? '—' : n.toFixed(decimals)
 }
 
-export default function Results() {
+export default function Analyze() {
+  const navigate = useNavigate()
   const [rows, setRows] = useState<ResultSummary[]>([])
   const [detail, setDetail] = useState<ResultDetail | null>(null)
   const [summary, setSummary] = useState<string | null>(null)
@@ -65,7 +67,7 @@ export default function Results() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">Results</h1>
+      <h1 className="text-2xl font-semibold">Analyze</h1>
 
       {error && (
         <div className="rounded border border-red-700 bg-red-950 px-4 py-3 text-sm text-red-300">
@@ -182,13 +184,25 @@ export default function Results() {
             )}
 
           <div>
-            <button
-              onClick={interpret}
-              disabled={interpreting}
-              className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-sm transition-colors"
-            >
-              {interpreting ? 'Interpreting…' : 'Interpret with AI'}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={interpret}
+                disabled={interpreting}
+                className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-sm transition-colors"
+              >
+                {interpreting ? 'Interpreting…' : 'Interpret with AI'}
+              </button>
+              <button
+                onClick={() =>
+                  navigate(
+                    `/strategize?hypothesis_id=${encodeURIComponent(detail.hypothesis_id)}&run_id=${encodeURIComponent(detail.run_id)}`
+                  )
+                }
+                className="px-3 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-sm transition-colors"
+              >
+                Generate Strategy
+              </button>
+            </div>
             {summary && (
               <div className="mt-3 rounded border border-gray-700 bg-gray-950 p-4 text-sm text-gray-300 whitespace-pre-wrap">
                 {summary}

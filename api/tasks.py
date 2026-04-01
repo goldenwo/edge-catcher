@@ -35,3 +35,23 @@ def get_adapter_state(adapter_id: str) -> AdapterDownloadState:
     if adapter_id not in adapter_states:
         adapter_states[adapter_id] = AdapterDownloadState()
     return adapter_states[adapter_id]
+
+
+@dataclass
+class BacktestTaskState:
+    task_id: str = ""
+    running: bool = False
+    progress: str = ""
+    error: Optional[str] = None
+    result: Optional[dict] = None  # BacktestResult.to_dict() when complete
+
+
+backtest_states: Dict[str, BacktestTaskState] = {}
+
+
+def get_backtest_state(task_id: str) -> Optional[BacktestTaskState]:
+    return backtest_states.get(task_id)
+
+
+def is_backtest_running() -> bool:
+    return any(s.running for s in backtest_states.values())
