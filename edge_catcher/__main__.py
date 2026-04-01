@@ -224,10 +224,8 @@ def _cmd_paper_trade_15m(args) -> None:
     ))
 
 
-def _cmd_backtest(args) -> None:
-    import json
-    from datetime import date
-    from edge_catcher.runner.event_backtest import EventBacktester
+def _build_strategy_map():
+    """Build the strategy name → class mapping. Returns (strategy_map, has_local)."""
     from edge_catcher.runner.strategies import ExampleStrategy
     try:
         from edge_catcher.runner.strategies_local import (
@@ -266,73 +264,163 @@ def _cmd_backtest(args) -> None:
             'Fflow': REDACTED, 'REDACTED': REDACTED,
             'Ffvol': REDACTED, 'REDACTED': REDACTED,
         })
-    strategy_names = [s.strip() for s in args.strategy.split(',')]
+    return strategy_map, _has_local
 
-    strategies = []
-    for name in strategy_names:
-        cls = strategy_map.get(name)
-        if cls is None:
-            print(f"Unknown strategy: {name}. Available: REDACTED, REDACTED, REDACTED, REDACTED, TP, REDACTED", file=sys.stderr)
+
+def _cmd_backtest(args) -> None:
+    import json
+    from datetime import date
+
+    json_mode = getattr(args, 'json', False)
+
+    # --- --list-strategies: output unique strategy names and exit ---
+    if getattr(args, 'list_strategies', False):
+        strategy_map, _ = _build_strategy_map()
+        # Deduplicate: keep first name per class (preserves logical ordering)
+        seen_classes: set = set()
+        unique_names: list = []
+        for name, cls in strategy_map.items():
+            if cls not in seen_classes:
+                seen_classes.add(cls)
+                unique_names.append(name)
+        print(json.dumps({"strategies": sorted(unique_names)}))
+        return
+
+    # --- --list-series: query DB for distinct series and exit ---
+    if getattr(args, 'list_series', False):
+        import sqlite3
+        db_path = args.db_path
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker"
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+            conn.close()
+            series = [r[0] for r in rows]
+            print(json.dumps({"series": series, "db_path": db_path, "total_markets": total}))
+        except Exception as exc:
+            print(json.dumps({"status": "error", "message": str(exc)}))
             sys.exit(1)
-        kwargs: dict = {}
-        if args.min_price is not None:
-            kwargs['min_price'] = args.min_price
-        if args.max_price is not None:
-            kwargs['max_price'] = args.max_price
-        if name in ('TP', 'A', 'Avol', 'REDACTED', 'REDACTED', 'C', 'Cvol', 'REDACTED', 'REDACTED',
-                    'Amom', 'REDACTED', 'Cmom', 'REDACTED'):
-            if args.tp is not None:
-                kwargs['take_profit'] = args.tp
-            if args.sl is not None:
-                kwargs['stop_loss'] = args.sl
-        if name in ('D', 'H1', 'REDACTED'):
-            if args.tp is not None:
-                kwargs['take_profit'] = args.tp
-            if args.sl is not None:
-                kwargs['stop_loss'] = args.sl
-            if args.h1_threshold_high is not None:
-                kwargs['threshold_high'] = args.h1_threshold_high
-            if args.h1_threshold_low is not None:
-                kwargs['threshold_low'] = args.h1_threshold_low
-        if name in ('H5_15M', 'H5_15m', 'REDACTED'):
-            if args.h5_fav_threshold is not None:
-                kwargs['fav_threshold'] = args.h5_fav_threshold
-            if args.h5_long_threshold is not None:
-                kwargs['long_threshold'] = args.h5_long_threshold
-        # Load BTC OHLC data for momentum-filtered strategies
-        if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
-            import sqlite3 as _sql
-            _conn = _sql.connect(str(args.db_path))
-            _conn.row_factory = _sql.Row
-            _rows = _conn.execute('SELECT timestamp, close FROM btc_ohlc ORDER BY timestamp').fetchall()
-            kwargs['btc_closes'] = {r['timestamp']: r['close'] for r in _rows}
-            _conn.close()
-            print(f'  Loaded {len(kwargs["btc_closes"])} BTC candles for momentum filter', file=sys.stderr)
+        return
 
-        strategies.append(cls(**kwargs))
+    strategy_map, _has_local = _build_strategy_map()
 
-    start = date.fromisoformat(args.start) if args.start else None
-    end = date.fromisoformat(args.end) if args.end else None
+    try:
+        if not args.series:
+            msg = "--series is required for backtest (e.g. --series KXBTCD)"
+            if json_mode:
+                print(json.dumps({"status": "error", "message": msg}))
+            else:
+                print(f"error: {msg}", file=sys.stderr)
+            sys.exit(1)
 
-    backtester = EventBacktester()
-    result = backtester.run(
-        series=args.series,
-        strategies=strategies,
-        start=start,
-        end=end,
-        initial_cash=args.cash,
-        slippage_cents=args.slippage,
-        db_path=Path(args.db_path),
-        fee_pct=args.fee_pct,
-    )
+        strategy_names = [s.strip() for s in args.strategy.split(',')]
 
-    print(result.summary())
+        strategies = []
+        for name in strategy_names:
+            cls = strategy_map.get(name)
+            if cls is None:
+                msg = f"Unknown strategy: {name}. Available: {', '.join(sorted(strategy_map))}"
+                if json_mode:
+                    print(json.dumps({"status": "error", "message": msg}))
+                else:
+                    print(msg, file=sys.stderr)
+                sys.exit(1)
+            kwargs: dict = {}
+            if args.min_price is not None:
+                kwargs['min_price'] = args.min_price
+            if args.max_price is not None:
+                kwargs['max_price'] = args.max_price
+            if name in ('TP', 'A', 'Avol', 'REDACTED', 'REDACTED', 'C', 'Cvol', 'REDACTED', 'REDACTED',
+                        'Amom', 'REDACTED', 'Cmom', 'REDACTED'):
+                if args.tp is not None:
+                    kwargs['take_profit'] = args.tp
+                if args.sl is not None:
+                    kwargs['stop_loss'] = args.sl
+            if name in ('D', 'H1', 'REDACTED'):
+                if args.tp is not None:
+                    kwargs['take_profit'] = args.tp
+                if args.sl is not None:
+                    kwargs['stop_loss'] = args.sl
+                if args.h1_threshold_high is not None:
+                    kwargs['threshold_high'] = args.h1_threshold_high
+                if args.h1_threshold_low is not None:
+                    kwargs['threshold_low'] = args.h1_threshold_low
+            if name in ('H5_15M', 'H5_15m', 'REDACTED'):
+                if args.h5_fav_threshold is not None:
+                    kwargs['fav_threshold'] = args.h5_fav_threshold
+                if args.h5_long_threshold is not None:
+                    kwargs['long_threshold'] = args.h5_long_threshold
+            # Load BTC OHLC data for momentum-filtered strategies
+            if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
+                import sqlite3 as _sql
+                _conn = _sql.connect(str(args.db_path))
+                _conn.row_factory = _sql.Row
+                _rows = _conn.execute('SELECT timestamp, close FROM btc_ohlc ORDER BY timestamp').fetchall()
+                kwargs['btc_closes'] = {r['timestamp']: r['close'] for r in _rows}
+                _conn.close()
+                print(f'  Loaded {len(kwargs["btc_closes"])} BTC candles for momentum filter', file=sys.stderr)
 
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, 'w') as f:
-        json.dump(result.to_dict(), f, indent=2)
-    print(f"\nJSON saved to {args.output}")
+            strategies.append(cls(**kwargs))
+
+        start = date.fromisoformat(args.start) if args.start else None
+        end = date.fromisoformat(args.end) if args.end else None
+
+        from edge_catcher.runner.event_backtest import EventBacktester
+        backtester = EventBacktester()
+        result = backtester.run(
+            series=args.series,
+            strategies=strategies,
+            start=start,
+            end=end,
+            initial_cash=args.cash,
+            slippage_cents=args.slippage,
+            db_path=Path(args.db_path),
+            fee_pct=args.fee_pct,
+        )
+
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(result.to_dict(), f, indent=2)
+
+        if json_mode:
+            payload = result.to_dict()
+            payload['status'] = 'ok'
+            print(json.dumps(payload))
+        else:
+            print(result.summary())
+            print(f"\nJSON saved to {args.output}")
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        if json_mode:
+            print(json.dumps({"status": "error", "message": str(exc)}))
+            sys.exit(1)
+        raise
+
+
+def _cmd_list_dbs(args) -> None:
+    import json
+    import sqlite3
+
+    data_dir = Path("data")
+    databases = []
+    for db_file in sorted(data_dir.glob("*.db")):
+        size_mb = round(db_file.stat().st_size / (1024 * 1024), 1)
+        try:
+            conn = sqlite3.connect(str(db_file))
+            rows = conn.execute(
+                "SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker"
+            ).fetchall()
+            conn.close()
+            series = [r[0] for r in rows]
+        except Exception:
+            series = []
+        databases.append({"path": str(db_file), "size_mb": size_mb, "series": series})
+    print(json.dumps({"databases": databases}))
 
 
 def _cmd_archive(args) -> None:
@@ -394,7 +482,7 @@ def main() -> None:
     ar.add_argument("--archive-dir", default="data/archive")
 
     bt = sub.add_parser("backtest", help="Run event-driven backtest on historical trade data")
-    bt.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD, KXBTC15M)")
+    bt.add_argument("--series", default=None, help="Series ticker (e.g. KXBTCD, KXBTC15M)")
     bt.add_argument("--strategy", default="A", help="Comma-separated strategy names: A,B,C,TP")
     bt.add_argument("--start", default=None, help="Start date ISO format (e.g. 2025-06-01)")
     bt.add_argument("--end", default=None, help="End date ISO format (e.g. 2026-03-30)")
@@ -416,6 +504,15 @@ def main() -> None:
     bt.add_argument("--output", default="reports/backtest_result.json")
     bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
                     help="Multiplier on 0.07*P*(1-P) entry fee formula (default: 1.0 = full Kalshi taker fee; 0.25 = maker fee; 0.0 = no fee)")
+    bt.add_argument("--json", action="store_true", default=False,
+                    help="Output only valid JSON to stdout; progress goes to stderr")
+    bt.add_argument("--list-strategies", action="store_true", default=False, dest="list_strategies",
+                    help="Print available strategy names as JSON and exit")
+    bt.add_argument("--list-series", action="store_true", default=False, dest="list_series",
+                    help="Print distinct series_ticker values from the DB as JSON and exit")
+
+    ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
+    ldbs.set_defaults(func=_cmd_list_dbs)
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
@@ -467,6 +564,8 @@ def main() -> None:
 
     if args.command == "backtest":
         _cmd_backtest(args)
+    elif args.command == "list-dbs":
+        _cmd_list_dbs(args)
     elif args.command == "download":
         _cmd_download(args)
     elif args.command == "download-btc":
