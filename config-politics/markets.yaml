@@ -1,0 +1,27 @@
+# Politics & Elections series — government actions, appointments
+# Most are one-off events; including highest-volume recurring ones
+adapters:
+  kalshi:
+    enabled: true
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0.2
+    series:
+      # Elections (recurring primaries)
+      - KXTXPRIMARY     # Texas primary (37 events — highest)
+      - KXILPRIMARY     # Illinois primary (24 events)
+      - KXNCPRIMARY     # NC primary (16 events)
+      - KXMSPRIMARY     # MS primary (5 events)
+      - KXARPRIMARY     # AR primary (3 events)
+      # Politics (recurring)
+      - KXTRUTHSOCIAL   # Trump Truth Social posts (7 events)
+      - KXTRUMPACT      # Trump actions (4 events)
+      # Mentions (social signal markets)
+      - KXNBAMENTION    # NBA mentions (18 events)
+      - KXNCAABMENTION  # NCAA mentions (16 events)
+      - KXMLBMENTION    # MLB mentions (10 events)
+    statuses:
+      - settled
+    min_available_ram_mb: 400
+    pagination:
+      default_limit: 200
+      max_limit: 1000

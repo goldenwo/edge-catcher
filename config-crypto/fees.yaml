@@ -1,0 +1,6 @@
+# Fee models — same as BTC (all Kalshi)
+kalshi:
+  taker: 0.07
+  maker: 0.0175
+  model: percent_of_profit
+  last_verified: "2026-04-01"

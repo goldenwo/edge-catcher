@@ -1,0 +1,22 @@
+# Financials/Economics series — indexes, yields, etc.
+adapters:
+  kalshi:
+    enabled: true
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0.2
+    series:
+      # Index price targets
+      - KXNASDAQ100U   # Nasdaq 100 up/down (5 events)
+      - KXINXU         # S&P 500 up/down (5 events)
+      # Yields
+      - KXUSTYLD       # US Treasury yield daily (4 events)
+      # Economics
+      - KXJOBLESS      # Jobless claims
+      - KXFREDDIE      # Freddie Mac
+      - KXHALFTRIL     # Half trillion (econ)
+    statuses:
+      - settled
+    min_available_ram_mb: 400
+    pagination:
+      default_limit: 200
+      max_limit: 1000
