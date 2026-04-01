@@ -1,0 +1,8 @@
+# Fee models per market — do not hardcode fees in hypothesis code
+# last_verified: date fees were last confirmed against exchange documentation
+kalshi:
+  taker: 0.07        # 7% of profit
+  maker: 0.0175      # 1.75% of profit
+  model: percent_of_profit  # fees applied to profit, not notional
+  last_verified: "2026-03-26"
+  notes: "Kalshi charges percent of profit on winning side. Verify before live use."

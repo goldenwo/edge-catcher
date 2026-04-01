@@ -1,0 +1,17 @@
+# Sports market download config — separate from BTC
+adapters:
+  kalshi:
+    enabled: true
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0.2
+    series:
+      - KXNBASPREAD  # NBA point spreads (~8,876 settled markets)
+      - KXMLBSPREAD  # MLB run spreads (~489 settled markets)
+      - KXNBAGAME    # NBA moneyline (~1,388 settled markets)
+      - KXMLBGAME    # MLB moneyline (~166 settled markets)
+    statuses:
+      - settled
+    min_available_ram_mb: 400
+    pagination:
+      default_limit: 200
+      max_limit: 1000
