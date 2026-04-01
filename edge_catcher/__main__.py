@@ -402,6 +402,131 @@ def _cmd_backtest(args) -> None:
         raise
 
 
+def _cmd_research(args) -> None:
+    import json as _json
+    from edge_catcher.research import ResearchAgent, Hypothesis, Tracker, Reporter, Evaluator, Thresholds
+
+    research_db = getattr(args, 'research_db', 'data/research.db')
+    tracker = Tracker(research_db)
+    agent = ResearchAgent(tracker=tracker)
+
+    subcmd = getattr(args, 'research_command', None)
+
+    if subcmd == 'run':
+        h = Hypothesis(
+            strategy=args.strategy,
+            series=args.series,
+            db_path=args.db_path,
+            start_date=args.start,
+            end_date=args.end,
+            fee_pct=args.fee_pct,
+        )
+        result = agent.run_hypothesis(h)
+        output = Reporter._result_to_dict(result)
+        print(_json.dumps(output, indent=2))
+
+    elif subcmd == 'sweep':
+        results = agent.sweep_all_series(
+            strategy=args.strategy,
+            fee_pct=args.fee_pct,
+            start=args.start,
+            end=args.end,
+            max_runs=args.max_runs,
+        )
+        reporter = Reporter()
+        report = reporter.generate_report(results)
+        if getattr(args, 'output', None):
+            reporter.save(report, args.output)
+            print(f"Report saved to {args.output}", file=sys.stderr)
+        print(_json.dumps(report, indent=2))
+
+    elif subcmd == 'sweep-all':
+        from edge_catcher.research.agent import _STRATEGY_FAMILY
+        strategy_map, _ = _build_strategy_map()
+        all_strategies = [s for s in strategy_map if s not in ('example',)]
+        all_results: list = []
+        for strategy in all_strategies:
+            results = agent.sweep_all_series(
+                strategy=strategy,
+                fee_pct=args.fee_pct,
+                start=args.start,
+                end=args.end,
+                max_runs=max(1, args.max_runs // len(all_strategies)),
+            )
+            all_results.extend(results)
+        reporter = Reporter()
+        report = reporter.generate_report(all_results)
+        if getattr(args, 'output', None):
+            reporter.save(report, args.output)
+            print(f"Report saved to {args.output}", file=sys.stderr)
+        print(_json.dumps(report, indent=2))
+
+    elif subcmd == 'status':
+        stats = tracker.stats()
+        rows = tracker.list_results()
+        print(f"\nResearch DB: {research_db}")
+        print(f"Total results: {stats['total']}")
+        for verdict, count in sorted(stats['by_verdict'].items()):
+            print(f"  {verdict}: {count}")
+        if rows:
+            print(f"\nRecent results (last 10):")
+            print(f"  {'Verdict':<10} {'Strategy':<12} {'Series':<20} {'Sharpe':>7} {'WinRate':>8} {'PnL(¢)':>9}")
+            print(f"  {'-'*10} {'-'*12} {'-'*20} {'-'*7} {'-'*8} {'-'*9}")
+            for row in rows[:10]:
+                print(
+                    f"  {row['verdict']:<10} {row['strategy']:<12} {row['series']:<20} "
+                    f"{row['sharpe']:>7.2f} {row['win_rate']:>7.1%} {row['net_pnl_cents']:>9.0f}"
+                )
+
+    elif subcmd == 'report':
+        rows = tracker.list_results()
+        if not rows:
+            print("No results in tracker yet. Run some hypotheses first.", file=sys.stderr)
+            sys.exit(1)
+
+        # Reconstruct minimal HypothesisResult objects from tracker rows for reporting
+        from edge_catcher.research.hypothesis import HypothesisResult
+        results = []
+        for row in rows:
+            h = Hypothesis(
+                id=row['id'],
+                strategy=row['strategy'],
+                series=row['series'],
+                db_path=row['db_path'],
+                start_date=row['start_date'],
+                end_date=row['end_date'],
+                fee_pct=row['fee_pct'],
+            )
+            results.append(HypothesisResult(
+                hypothesis=h,
+                status=row['status'],
+                total_trades=row['total_trades'],
+                wins=row['wins'],
+                losses=row['losses'],
+                win_rate=row['win_rate'],
+                net_pnl_cents=row['net_pnl_cents'],
+                sharpe=row['sharpe'],
+                max_drawdown_pct=row['max_drawdown_pct'],
+                fees_paid_cents=row['fees_paid_cents'],
+                avg_win_cents=0.0,
+                avg_loss_cents=0.0,
+                per_strategy={},
+                verdict=row['verdict'],
+                verdict_reason=row['verdict_reason'],
+                raw_json={},
+            ))
+
+        reporter = Reporter()
+        report = reporter.generate_report(results)
+        output_path = getattr(args, 'output', None) or 'reports/research-findings'
+        reporter.save(report, output_path)
+        print(f"Report saved to {output_path}.json and {output_path}.md")
+
+    else:
+        print("Usage: python -m edge_catcher research {run|sweep|sweep-all|status|report}")
+        sys.exit(1)
+
+
 def _cmd_list_dbs(args) -> None:
     import json
     import sqlite3
@@ -514,6 +639,43 @@ def main() -> None:
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
 
+    rs = sub.add_parser("research", help="Automated hypothesis research across market categories")
+    rs.add_argument("--research-db", default="data/research.db", dest="research_db",
+                    help="Path to research tracker SQLite DB (default: data/research.db)")
+    rs_sub = rs.add_subparsers(dest="research_command")
+
+    rs_run = rs_sub.add_parser("run", help="Run a single hypothesis")
+    rs_run.add_argument("--strategy", required=True, help="Strategy name (e.g. Cvol, D, Cstack)")
+    rs_run.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD)")
+    rs_run.add_argument("--db-path", required=True, dest="db_path", help="Path to database")
+    rs_run.add_argument("--start", required=True, help="Start date ISO (e.g. 2025-01-01)")
+    rs_run.add_argument("--end", required=True, help="End date ISO (e.g. 2025-12-31)")
+    rs_run.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
+                        help="Fee multiplier (default: 1.0)")
+
+    rs_sweep = rs_sub.add_parser("sweep", help="Sweep one strategy across all available series/DBs")
+    rs_sweep.add_argument("--strategy", required=True, help="Strategy name")
+    rs_sweep.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
+    rs_sweep.add_argument("--start", default="2025-01-01", help="Start date (default: 2025-01-01)")
+    rs_sweep.add_argument("--end", default="2025-12-31", help="End date (default: 2025-12-31)")
+    rs_sweep.add_argument("--max-runs", type=int, default=50, dest="max_runs",
+                          help="Maximum hypotheses to run (default: 50)")
+    rs_sweep.add_argument("--output", default=None, help="Save report to this base path")
+
+    rs_sweepall = rs_sub.add_parser("sweep-all", help="Sweep ALL strategies across ALL available data")
+    rs_sweepall.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
+    rs_sweepall.add_argument("--start", default="2025-01-01")
+    rs_sweepall.add_argument("--end", default="2025-12-31")
+    rs_sweepall.add_argument("--max-runs", type=int, default=200, dest="max_runs",
+                             help="Total maximum hypotheses to run (default: 200)")
+    rs_sweepall.add_argument("--output", default="reports/research-findings")
+
+    rs_status = rs_sub.add_parser("status", help="Show what has been tested")
+
+    rs_report = rs_sub.add_parser("report", help="Generate report from tracked results")
+    rs_report.add_argument("--output", default="reports/research-findings",
+                           help="Output base path (suffixes .json and .md added)")
+
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
     pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
@@ -562,7 +724,9 @@ def main() -> None:
     args = parser.parse_args()
     _setup_logging(getattr(args, "verbose", False))
 
-    if args.command == "backtest":
+    if args.command == "research":
+        _cmd_research(args)
+    elif args.command == "backtest":
         _cmd_backtest(args)
     elif args.command == "list-dbs":
         _cmd_list_dbs(args)
