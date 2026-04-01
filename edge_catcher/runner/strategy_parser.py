@@ -70,7 +70,7 @@ def list_strategies(
         return []
 
     results = []
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.ClassDef) and _is_strategy_subclass(node):
             name = _extract_name_attr(node) or _camel_to_snake(node.name)
             results.append({"name": name, "class_name": node.name})
