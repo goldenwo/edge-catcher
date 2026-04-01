@@ -391,7 +391,7 @@ class TestPortfolio:
 		assert ct.pnl_cents == 8  # 59 - 51
 
 	def test_settle_yes_position_win(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
@@ -411,7 +411,7 @@ class TestPortfolio:
 		assert port.cash == 925.0
 
 	def test_settle_no_position_win(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
@@ -732,6 +732,7 @@ class TestBacktestResult:
 			wins=wins,
 			losses=losses,
 			net_pnl_cents=port.net_pnl_cents,
+			total_fees_paid=0,
 			sharpe=sharpe,
 			max_drawdown_pct=max_dd,
 			win_rate=win_rate,
@@ -818,6 +819,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=0,
 			db_path=db_path,
+			fee_pct=0.0,
 		)
 		assert result.total_trades == 1
 		assert result.wins == 1
@@ -846,6 +848,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=0,
 			db_path=db_path,
+			fee_pct=0.0,
 		)
 		assert result.total_trades == 1
 		assert result.wins == 1

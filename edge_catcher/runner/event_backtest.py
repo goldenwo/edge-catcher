@@ -47,9 +47,11 @@ class CompletedTrade:
 # ---------------------------------------------------------------------------
 
 class Portfolio:
-	def __init__(self, initial_cash: float) -> None:
+	def __init__(self, initial_cash: float, fee_pct: float = 0.07) -> None:
 		self.cash: float = initial_cash
 		self.initial_cash: float = initial_cash
+		self.fee_pct: float = fee_pct
+		self.total_fees_paid: int = 0
 		self.positions: dict[tuple[str, str], Position] = {}
 		self.equity_snapshots: list[tuple[datetime, float]] = []
 		# Running counters (O(1) memory regardless of trade count)
@@ -134,6 +136,11 @@ class Portfolio:
 		actual_exit = max(0, exit_price - slippage)
 		self.cash += actual_exit * pos.size
 		pnl = (actual_exit - pos.entry_price) * pos.size
+		if pnl > 0 and self.fee_pct > 0:
+			fee = int(pnl * self.fee_pct)
+			pnl -= fee
+			self.cash -= fee
+			self.total_fees_paid += fee
 		ct = CompletedTrade(
 			ticker=ticker,
 			side=pos.side,
@@ -165,6 +172,11 @@ class Portfolio:
 			settlement_price = 100 if result == 'no' else 0
 		self.cash += settlement_price * pos.size
 		pnl = (settlement_price - pos.entry_price) * pos.size
+		if pnl > 0 and self.fee_pct > 0:
+			fee = int(pnl * self.fee_pct)
+			pnl -= fee
+			self.cash -= fee
+			self.total_fees_paid += fee
 		ct = CompletedTrade(
 			ticker=ticker,
 			side=pos.side,
@@ -198,6 +210,7 @@ class BacktestResult:
 	wins: int
 	losses: int
 	net_pnl_cents: int
+	total_fees_paid: int
 	sharpe: float
 	max_drawdown_pct: float
 	win_rate: float
@@ -214,6 +227,7 @@ class BacktestResult:
 			f'Wins / Losses:   {self.wins} / {self.losses}',
 			f'Win rate:        {self.win_rate:.1%}',
 			f'Net P&L:         {self.net_pnl_cents:+d}¢  ({self.net_pnl_cents / 100:+.2f}$)',
+			f'Fees paid:       {self.total_fees_paid}¢  ({self.total_fees_paid / 100:.2f}$)',
 			f'Avg win:         {self.avg_win_cents:+.1f}¢',
 			f'Avg loss:        {self.avg_loss_cents:+.1f}¢',
 			f'Sharpe:          {self.sharpe:.3f}',
@@ -236,6 +250,7 @@ class BacktestResult:
 			'wins': self.wins,
 			'losses': self.losses,
 			'net_pnl_cents': self.net_pnl_cents,
+			'total_fees_paid': self.total_fees_paid,
 			'sharpe': self.sharpe,
 			'max_drawdown_pct': self.max_drawdown_pct,
 			'win_rate': self.win_rate,
@@ -380,13 +395,14 @@ class EventBacktester:
 		initial_cash: float = 10000.0,
 		slippage_cents: int = 1,
 		db_path: Path = Path('data/kalshi.db'),
+		fee_pct: float = 0.07,
 	) -> BacktestResult:
 		# Ensure SQLite temp files go to the DB directory, not /tmp (which may be a small tmpfs)
 		db_dir = str(Path(db_path).parent.resolve())
 		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
-			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents)
+			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct)
 		finally:
 			conn.close()
 
@@ -399,6 +415,7 @@ class EventBacktester:
 		end: Optional[date],
 		initial_cash: float,
 		slippage_cents: int,
+		fee_pct: float = 0.07,
 	) -> BacktestResult:
 		# --- 1. Load markets for series (with optional date bounds) ---
 		market_query = 'SELECT * FROM markets WHERE series_ticker = ?'
@@ -421,13 +438,14 @@ class EventBacktester:
 			# Return empty result if no matching markets
 			return BacktestResult(
 				total_trades=0, wins=0, losses=0, net_pnl_cents=0,
+				total_fees_paid=0,
 				sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
 				avg_win_cents=0.0, avg_loss_cents=0.0,
 				equity_curve=[], per_strategy={}, trade_sample=[],
 			)
 
 		tickers = list(market_map.keys())
-		portfolio = Portfolio(initial_cash)
+		portfolio = Portfolio(initial_cash, fee_pct=fee_pct)
 
 		# --- 2. Build temp table for efficient ticker join ---
 		conn.execute('CREATE TEMP TABLE IF NOT EXISTS _bt_tickers (ticker TEXT PRIMARY KEY)')
@@ -529,6 +547,7 @@ class EventBacktester:
 			wins=wins,
 			losses=losses,
 			net_pnl_cents=portfolio.net_pnl_cents,
+			total_fees_paid=portfolio.total_fees_paid,
 			sharpe=sharpe,
 			max_drawdown_pct=max_dd,
 			win_rate=win_rate,

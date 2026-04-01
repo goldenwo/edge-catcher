@@ -320,6 +320,7 @@ def _cmd_backtest(args) -> None:
         initial_cash=args.cash,
         slippage_cents=args.slippage,
         db_path=Path(args.db_path),
+        fee_pct=args.fee_pct,
     )
 
     print(result.summary())
@@ -410,6 +411,8 @@ def main() -> None:
                     help="H5_15m longshot threshold — buy YES at or below this (default: 15)")
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
     bt.add_argument("--output", default="reports/backtest_result.json")
+    bt.add_argument("--fee-pct", type=float, default=0.07, dest="fee_pct",
+                    help="Fee as fraction of profit on wins (default: 0.07 = 7%% Kalshi taker fee)")
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
