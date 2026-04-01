@@ -51,8 +51,46 @@ class Portfolio:
 		self.cash: float = initial_cash
 		self.initial_cash: float = initial_cash
 		self.positions: dict[tuple[str, str], Position] = {}
-		self.trade_log: list[CompletedTrade] = []
 		self.equity_snapshots: list[tuple[datetime, float]] = []
+		# Running counters (O(1) memory regardless of trade count)
+		self.total_trades: int = 0
+		self.wins: int = 0
+		self.losses: int = 0
+		self.net_pnl_cents: int = 0
+		self._sum_win_pnl: float = 0.0
+		self._sum_loss_pnl: float = 0.0
+		self._pnl_values: list[int] = []           # all pnl ints — tiny vs full objects
+		self._trade_sample: list[CompletedTrade] = []  # ring buffer, last 100
+		self._per_strategy: dict[str, dict] = {}   # running per-strategy counters
+
+	def _record_trade(self, ct: CompletedTrade) -> None:
+		"""Accumulate a completed trade into running counters. O(1) per trade."""
+		self.total_trades += 1
+		self.net_pnl_cents += ct.pnl_cents
+		self._pnl_values.append(ct.pnl_cents)
+		if ct.pnl_cents > 0:
+			self.wins += 1
+			self._sum_win_pnl += ct.pnl_cents
+		else:
+			self.losses += 1
+			self._sum_loss_pnl += ct.pnl_cents
+		# Ring-buffer sample: keep only the last 100 full objects
+		self._trade_sample.append(ct)
+		if len(self._trade_sample) > 100:
+			self._trade_sample.pop(0)
+		# Per-strategy running counters
+		s = self._per_strategy.setdefault(ct.strategy, {
+			'total_trades': 0, 'wins': 0, 'losses': 0,
+			'net_pnl_cents': 0, '_sum_win_pnl': 0.0, '_sum_loss_pnl': 0.0,
+		})
+		s['total_trades'] += 1
+		s['net_pnl_cents'] += ct.pnl_cents
+		if ct.pnl_cents > 0:
+			s['wins'] += 1
+			s['_sum_win_pnl'] += ct.pnl_cents
+		else:
+			s['losses'] += 1
+			s['_sum_loss_pnl'] += ct.pnl_cents
 
 	def has_position(self, ticker: str, strategy: str) -> bool:
 		return (ticker, strategy) in self.positions
@@ -107,7 +145,7 @@ class Portfolio:
 			pnl_cents=pnl,
 			exit_reason=reason,
 		)
-		self.trade_log.append(ct)
+		self._record_trade(ct)
 		return ct
 
 	def settle_position(
@@ -138,7 +176,7 @@ class Portfolio:
 			pnl_cents=pnl,
 			exit_reason='settlement',
 		)
-		self.trade_log.append(ct)
+		self._record_trade(ct)
 		return ct
 
 	def get_equity(self) -> float:
@@ -167,7 +205,7 @@ class BacktestResult:
 	avg_loss_cents: float
 	equity_curve: list[tuple[datetime, float]]
 	per_strategy: dict[str, dict]
-	trade_log: list[CompletedTrade]
+	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
 
 	def summary(self) -> str:
 		lines = [
@@ -217,7 +255,7 @@ class BacktestResult:
 					'pnl_cents': ct.pnl_cents,
 					'exit_reason': ct.exit_reason,
 				}
-				for ct in self.trade_log[:5000]  # cap at 5000 to prevent huge output files
+				for ct in self.trade_sample  # at most 100 entries (ring buffer)
 			],
 		}
 
@@ -278,27 +316,24 @@ def _row_to_trade(row: sqlite3.Row) -> Trade:
 # ---------------------------------------------------------------------------
 
 def _compute_metrics(
-	trade_log: list[CompletedTrade],
+	portfolio: 'Portfolio',
 	equity_snapshots: list[tuple[datetime, float]],
-) -> tuple[float, float, float, float, float, float, dict[str, dict]]:
-	"""Returns (sharpe, max_drawdown_pct, win_rate, avg_win, avg_loss, per_strategy)."""
-	total = len(trade_log)
-	wins = sum(1 for t in trade_log if t.pnl_cents > 0)
-	losses = total - wins
+) -> tuple[float, float, float, float, float, int, int, dict[str, dict]]:
+	"""Returns (sharpe, max_drawdown_pct, win_rate, avg_win, avg_loss, wins, losses, per_strategy).
+	Reads pre-accumulated counters from portfolio — O(1) space, O(trades) time for Sharpe only."""
+	total = portfolio.total_trades
+	wins = portfolio.wins
+	losses = portfolio.losses
 	win_rate = wins / total if total > 0 else 0.0
+	avg_win = portfolio._sum_win_pnl / wins if wins > 0 else 0.0
+	avg_loss = portfolio._sum_loss_pnl / losses if losses > 0 else 0.0
 
-	win_pnls = [t.pnl_cents for t in trade_log if t.pnl_cents > 0]
-	loss_pnls = [t.pnl_cents for t in trade_log if t.pnl_cents <= 0]
-	avg_win = statistics.mean(win_pnls) if win_pnls else 0.0
-	avg_loss = statistics.mean(loss_pnls) if loss_pnls else 0.0
-
-	# Sharpe from per-trade PnL distribution
+	# Sharpe from _pnl_values (list of ints, negligible memory vs full objects)
 	sharpe = 0.0
 	if total >= 2:
-		pnls = [t.pnl_cents for t in trade_log]
-		std = statistics.stdev(pnls)
+		std = statistics.stdev(portfolio._pnl_values)
 		if std > 0:
-			sharpe = statistics.mean(pnls) / std * math.sqrt(total)
+			sharpe = statistics.mean(portfolio._pnl_values) / std * math.sqrt(total)
 
 	# Max drawdown from equity snapshots
 	max_dd = 0.0
@@ -312,31 +347,19 @@ def _compute_metrics(
 				if dd > max_dd:
 					max_dd = dd
 
-	# Per-strategy breakdown
+	# Finalize per-strategy dicts (convert running sums to rates/averages)
 	per_strategy: dict[str, dict] = {}
-	for ct in trade_log:
-		s = per_strategy.setdefault(ct.strategy, {
-			'total_trades': 0, 'wins': 0, 'losses': 0,
-			'net_pnl_cents': 0, 'win_rate': 0.0,
-			'avg_win_cents': 0.0, 'avg_loss_cents': 0.0,
-			'_wins': [], '_losses': [],
-		})
-		s['total_trades'] += 1
-		s['net_pnl_cents'] += ct.pnl_cents
-		if ct.pnl_cents > 0:
-			s['wins'] += 1
-			s['_wins'].append(ct.pnl_cents)
-		else:
-			s['losses'] += 1
-			s['_losses'].append(ct.pnl_cents)
-
-	for s in per_strategy.values():
+	for strat, s in portfolio._per_strategy.items():
 		t = s['total_trades']
-		s['win_rate'] = s['wins'] / t if t > 0 else 0.0
-		s['avg_win_cents'] = statistics.mean(s['_wins']) if s['_wins'] else 0.0
-		s['avg_loss_cents'] = statistics.mean(s['_losses']) if s['_losses'] else 0.0
-		del s['_wins']
-		del s['_losses']
+		per_strategy[strat] = {
+			'total_trades': t,
+			'wins': s['wins'],
+			'losses': s['losses'],
+			'net_pnl_cents': s['net_pnl_cents'],
+			'win_rate': s['wins'] / t if t > 0 else 0.0,
+			'avg_win_cents': s['_sum_win_pnl'] / s['wins'] if s['wins'] > 0 else 0.0,
+			'avg_loss_cents': s['_sum_loss_pnl'] / s['losses'] if s['losses'] > 0 else 0.0,
+		}
 
 	return sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy
 
@@ -400,7 +423,7 @@ class EventBacktester:
 				total_trades=0, wins=0, losses=0, net_pnl_cents=0,
 				sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
 				avg_win_cents=0.0, avg_loss_cents=0.0,
-				equity_curve=[], per_strategy={}, trade_log=[],
+				equity_curve=[], per_strategy={}, trade_sample=[],
 			)
 
 		tickers = list(market_map.keys())
@@ -496,20 +519,16 @@ class EventBacktester:
 
 		conn.execute('DROP TABLE IF EXISTS _bt_tickers')
 
-		# --- 6. Compute metrics ---
-		trade_log = portfolio.trade_log
-		total = len(trade_log)
-		net_pnl = sum(ct.pnl_cents for ct in trade_log)
-
+		# --- 6. Compute metrics from running accumulators ---
 		sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy = _compute_metrics(
-			trade_log, portfolio.equity_snapshots,
+			portfolio, portfolio.equity_snapshots,
 		)
 
 		return BacktestResult(
-			total_trades=total,
+			total_trades=portfolio.total_trades,
 			wins=wins,
 			losses=losses,
-			net_pnl_cents=net_pnl,
+			net_pnl_cents=portfolio.net_pnl_cents,
 			sharpe=sharpe,
 			max_drawdown_pct=max_dd,
 			win_rate=win_rate,
@@ -517,5 +536,5 @@ class EventBacktester:
 			avg_loss_cents=avg_loss,
 			equity_curve=portfolio.equity_snapshots,
 			per_strategy=per_strategy,
-			trade_log=trade_log,
+			trade_sample=portfolio._trade_sample,
 		)

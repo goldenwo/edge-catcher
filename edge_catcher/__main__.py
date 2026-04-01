@@ -234,6 +234,7 @@ def _cmd_backtest(args) -> None:
             BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
             FadeFirstTrade, ThresholdFade, REDACTED,
             REDACTED, REDACTED,
+            REDACTED, REDACTED,
             REDACTED,
         )
         _has_local = True
@@ -256,8 +257,10 @@ def _cmd_backtest(args) -> None:
             'A': BuyYesInRange, 'Avol': REDACTED,
             'B': BuyNoOnDrop, 'C': BuyNoInRange, 'Cvol': REDACTED,
             'D': FadeFirstTrade, 'H1': FadeFirstTrade,
+            'Dvol': REDACTED, 'REDACTED': REDACTED,
             'Amom': REDACTED, 'REDACTED': REDACTED,
             'Cmom': REDACTED, 'REDACTED': REDACTED,
+            'Cstack': REDACTED, 'REDACTED': REDACTED,
             'H5_15m': ThresholdFade, 'H5_15M': ThresholdFade,
         })
     strategy_names = [s.strip() for s in args.strategy.split(',')]
@@ -294,7 +297,7 @@ def _cmd_backtest(args) -> None:
             if args.h5_long_threshold is not None:
                 kwargs['long_threshold'] = args.h5_long_threshold
         # Load BTC OHLC data for momentum-filtered strategies
-        if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED'):
+        if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
             import sqlite3 as _sql
             _conn = _sql.connect(str(args.db_path))
             _conn.row_factory = _sql.Row
