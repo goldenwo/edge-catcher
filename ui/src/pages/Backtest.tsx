@@ -36,7 +36,7 @@ function fmtPct(n: unknown): string {
 }
 
 export default function Backtest() {
-  const { status: pipeline, loading: pipelineLoading } = usePipeline()
+  const { status: pipeline, loading: pipelineLoading, refresh: refreshPipeline } = usePipeline()
 
   // Config form state
   const [seriesList, setSeriesList] = useState<string[]>([])
@@ -108,8 +108,9 @@ export default function Backtest() {
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e))
         }
-        // Refresh history
+        // Refresh history + pipeline status
         api.backtestHistory().then(setHistory).catch(() => {})
+        refreshPipeline()
       }
     } catch (e) {
       clearInterval(intervalRef.current)

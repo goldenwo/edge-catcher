@@ -86,7 +86,7 @@ def _parse_strategy_response(response: str) -> tuple[str, str]:
     import ast
     try:
         tree = ast.parse(code)
-        for node in ast.walk(tree):
+        for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 for item in node.body:
                     if isinstance(item, ast.Assign):
