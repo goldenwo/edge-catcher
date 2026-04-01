@@ -879,9 +879,11 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
         end = date.fromisoformat(body.end) if body.end else None
 
         def on_progress(info: dict) -> None:
+            if state.cancel_requested:
+                return
             state.trades_processed = info["trades_processed"]
             state.trades_estimated = info["trades_estimated"]
-            state.net_pnl_cents = info["net_pnl_cents"]
+            state.net_pnl_cents = int(info["net_pnl_cents"])
             pct = (
                 info["trades_processed"] / info["trades_estimated"] * 100
                 if info["trades_estimated"]
@@ -902,7 +904,12 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
             slippage_cents=body.slippage,
             db_path=_db_path(),
             on_progress=on_progress,
+            is_cancelled=lambda: state.cancel_requested,
         )
+
+        if state.cancel_requested:
+            state.error = "Backtest stopped by user"
+            return
 
         result_dict = result.to_dict()
         state.result = result_dict
@@ -961,6 +968,18 @@ async def start_backtest(
     return {"task_id": task_id}
 
 
+@app.post("/api/backtest/{task_id}/stop")
+async def stop_backtest(task_id: str, _: None = Depends(check_auth)) -> dict:
+    state = get_backtest_state(task_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not state.running:
+        raise HTTPException(status_code=409, detail="Task is not running")
+    state.cancel_requested = True
+    state.progress = "Stopping..."
+    return {"ok": True}
+
+
 @app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
 async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
     import json
@@ -986,7 +1005,7 @@ async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistor
                 strategies=json.loads(r["strategies"]),
                 timestamp=r["run_timestamp"],
                 total_trades=r["total_trades"] or 0,
-                net_pnl_cents=r["net_pnl_cents"] or 0,
+                net_pnl_cents=int(r["net_pnl_cents"] or 0),
                 sharpe=r["sharpe"] or 0.0,
                 win_rate=r["win_rate"] or 0.0,
             )
@@ -1007,7 +1026,7 @@ async def backtest_status(task_id: str) -> BacktestStatusResponse:
         error=state.error,
         trades_processed=state.trades_processed if state.trades_estimated else None,
         trades_estimated=state.trades_estimated or None,
-        net_pnl_cents=state.net_pnl_cents if state.trades_estimated else None,
+        net_pnl_cents=int(state.net_pnl_cents) if state.trades_estimated else None,
     )
 
 

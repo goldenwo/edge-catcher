@@ -15,6 +15,7 @@ def _download_args(**overrides):
     defaults = dict(
         db_path="data/kalshi.db",
         config="config",
+        markets=None,
         dry_run=False,
         skip_market_scan=False,
         max_trade_markets=None,
