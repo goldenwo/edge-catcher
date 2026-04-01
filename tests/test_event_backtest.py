@@ -1021,6 +1021,75 @@ class TestIntegration:
 		assert result.total_trades == 0
 		assert result.net_pnl_cents == 0
 
+	def test_on_progress_callback_fires(self, tmp_path):
+		"""on_progress callback fires with structured data."""
+		close = _dt(2)
+		markets = [{
+			'ticker': 'PROG-A',
+			'series_ticker': 'PROGSERIES',
+			'close_time': _iso(close),
+			'open_time': _iso(_dt(-24)),
+			'result': 'yes',
+			'status': 'settled',
+		}]
+		trades = [
+			{'trade_id': f'tp{i}', 'ticker': 'PROG-A', 'yes_price': 80, 'no_price': 20,
+			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0) + timedelta(seconds=i))}
+			for i in range(5)
+		]
+		db_path = _make_db(tmp_path, markets, trades)
+		progress_calls = []
+		result = EventBacktester().run(
+			series='PROGSERIES',
+			strategies=[BuyYesInRange(min_price=70, max_price=99)],
+			initial_cash=1000.0,
+			slippage_cents=0,
+			db_path=db_path,
+			fee_pct=0.0,
+			on_progress=lambda info: progress_calls.append(info),
+		)
+		# Initial callback at trade 0 should always fire
+		assert len(progress_calls) >= 1
+		first = progress_calls[0]
+		assert first["trades_processed"] == 0
+		assert first["trades_estimated"] == 5
+		assert "net_pnl_cents" in first
+		assert "wins" in first
+		assert "losses" in first
+
+	def test_on_progress_callback_fires_at_10k(self, tmp_path):
+		"""on_progress callback fires at 10k trade checkpoint."""
+		close = _dt(2)
+		markets = [{
+			'ticker': 'PROG-B',
+			'series_ticker': 'PROGSERIES2',
+			'close_time': _iso(close),
+			'open_time': _iso(_dt(-24)),
+			'result': 'yes',
+			'status': 'settled',
+		}]
+		trades = [
+			{'trade_id': f'tq{i}', 'ticker': 'PROG-B', 'yes_price': 80, 'no_price': 20,
+			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0) + timedelta(seconds=i))}
+			for i in range(10_001)
+		]
+		db_path = _make_db(tmp_path, markets, trades)
+		progress_calls = []
+		result = EventBacktester().run(
+			series='PROGSERIES2',
+			strategies=[BuyYesInRange(min_price=70, max_price=99)],
+			initial_cash=100000.0,
+			slippage_cents=0,
+			db_path=db_path,
+			fee_pct=0.0,
+			on_progress=lambda info: progress_calls.append(info),
+		)
+		# Initial callback + at least one 10k checkpoint
+		assert len(progress_calls) >= 2
+		second = progress_calls[1]
+		assert second["trades_processed"] == 10000
+		assert second["trades_estimated"] == 10001
+
 
 # ---------------------------------------------------------------------------
 # FadeFirstTrade unit tests
