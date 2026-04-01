@@ -408,16 +408,17 @@ def _run_coinbase_download(state, start_date: str | None = None) -> None:
     from datetime import datetime, timezone
 
     from edge_catcher.adapters.coinbase import CoinbaseAdapter
-    from edge_catcher.storage.db import get_connection, init_db
+    from edge_catcher.storage.db import get_connection, init_btc_ohlc_table
 
     state.running = True
     state.progress = "Initializing..."
     state.error = None
     state.rows_fetched = 0
     try:
-        db_path = Path(os.getenv("DB_PATH", "data/kalshi.db"))
-        init_db(db_path)
+        db_path = Path(os.getenv("BTC_DB_PATH", "data/btc.db"))
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = get_connection(db_path)
+        init_btc_ohlc_table(conn)
         adapter = CoinbaseAdapter()
         if start_date:
             start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
@@ -441,7 +442,9 @@ def _run_coinbase_download(state, start_date: str | None = None) -> None:
         state.running = False
 
 
-def _run_kalshi_adapter_download(state, start_date: str | None = None) -> None:
+def _run_kalshi_adapter_download(
+    state, start_date: str | None = None, markets_yaml: str | None = None
+) -> None:
     """Run Kalshi download, updating the per-adapter state."""
     from datetime import datetime, timezone
 
@@ -455,7 +458,6 @@ def _run_kalshi_adapter_download(state, start_date: str | None = None) -> None:
     )
 
     db = _db_path()
-    cfg = _config_path()
 
     state.running = True
     state.progress = "Initializing..."
@@ -464,7 +466,8 @@ def _run_kalshi_adapter_download(state, start_date: str | None = None) -> None:
 
     try:
         init_db(db)
-        adapter = KalshiAdapter(config_path=_markets_yaml())
+        config_file = Path(markets_yaml) if markets_yaml else _markets_yaml()
+        adapter = KalshiAdapter(config_path=config_file)
         conn = get_connection(db)
         try:
             markets_count = 0
@@ -591,8 +594,9 @@ async def start_adapter_download(
         raise HTTPException(status_code=409, detail="Download already in progress")
     if req.api_key and meta.api_key_env_var:
         _save_api_key(meta.api_key_env_var, req.api_key)
-    if adapter_id == "kalshi":
-        target, args = _run_kalshi_adapter_download, (state, req.start_date)
+    if meta.markets_yaml:
+        target = _run_kalshi_adapter_download
+        args = (state, req.start_date, meta.markets_yaml)
     elif adapter_id == "coinbase_btc":
         target, args = _run_coinbase_download, (state, req.start_date)
     else:

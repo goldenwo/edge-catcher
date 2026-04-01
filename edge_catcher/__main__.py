@@ -37,8 +37,9 @@ def _cmd_download(args) -> None:
     db_path = Path(args.db_path)
     init_db(db_path)
 
+    markets_file = Path(args.markets) if args.markets else Path(args.config) / "markets.yaml"
     adapter = KalshiAdapter(
-        config_path=Path(args.config) / "markets.yaml",
+        config_path=markets_file,
         dry_run=args.dry_run,
     )
 
@@ -133,13 +134,14 @@ def _cmd_download(args) -> None:
 
 def _cmd_download_btc(args) -> None:
     from edge_catcher.adapters.coinbase import CoinbaseAdapter
-    from edge_catcher.storage.db import get_connection, init_db
+    from edge_catcher.storage.db import get_connection, init_btc_ohlc_table
     from datetime import datetime, timezone
     import time
 
     db_path = Path(args.db)
-    init_db(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(db_path)
+    init_btc_ohlc_table(conn)
 
     # Default start: 2025-03-21T00:00:00 UTC (earliest Kalshi market open)
     start_ts = int(datetime(2025, 3, 21, tzinfo=timezone.utc).timestamp())
@@ -355,7 +357,7 @@ def _cmd_backtest(args) -> None:
             # Load BTC OHLC data for momentum-filtered strategies
             if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
                 import sqlite3 as _sql
-                _conn = _sql.connect(str(args.db_path))
+                _conn = _sql.connect(str(args.btc_db))
                 _conn.row_factory = _sql.Row
                 _rows = _conn.execute('SELECT timestamp, close FROM btc_ohlc ORDER BY timestamp').fetchall()
                 kwargs['btc_closes'] = {r['timestamp']: r['close'] for r in _rows}
@@ -586,6 +588,13 @@ def main() -> None:
              "Use on restart when markets are already in DB.",
     )
     dl.add_argument(
+        "--markets",
+        default=None,
+        metavar="FILE",
+        help="Path to markets YAML file (default: {config}/markets.yaml). "
+             "Example: --markets config/markets-crypto.yaml",
+    )
+    dl.add_argument(
         "--max-trade-markets",
         type=int,
         default=None,
@@ -594,7 +603,7 @@ def main() -> None:
     )
 
     btc = sub.add_parser("download-btc", help="Download BTC-USD 1-minute OHLC from Coinbase")
-    btc.add_argument("--db", default="data/kalshi.db", help="Path to SQLite DB")
+    btc.add_argument("--db", default="data/btc.db", help="Path to SQLite DB for BTC OHLC data")
     btc.set_defaults(func=_cmd_download_btc)
 
     an = sub.add_parser("analyze", help="Run hypothesis analysis against local DB")
@@ -635,6 +644,8 @@ def main() -> None:
                     help="Print available strategy names as JSON and exit")
     bt.add_argument("--list-series", action="store_true", default=False, dest="list_series",
                     help="Print distinct series_ticker values from the DB as JSON and exit")
+    bt.add_argument("--btc-db", default="data/btc.db", dest="btc_db",
+                    help="Path to BTC OHLC database (default: data/btc.db)")
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
