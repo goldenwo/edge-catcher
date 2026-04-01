@@ -24,10 +24,12 @@ class LLMClient:
         "anthropic": {
             "formalizer": "claude-sonnet-4-20250514",
             "interpreter": "claude-haiku-4-20250414",
+            "strategizer": "claude-sonnet-4-20250514",
         },
         "openai": {
             "formalizer": "gpt-4o",
             "interpreter": "gpt-4o-mini",
+            "strategizer": "gpt-4o",
         },
     }
 
