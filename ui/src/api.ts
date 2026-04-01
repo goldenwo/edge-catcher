@@ -106,6 +106,9 @@ export interface BacktestStatusResp {
   running: boolean
   progress: string
   error: string | null
+  trades_processed?: number | null
+  trades_estimated?: number | null
+  net_pnl_cents?: number | null
 }
 
 export interface BacktestHistoryItem {

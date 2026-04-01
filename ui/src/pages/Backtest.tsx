@@ -57,6 +57,9 @@ export default function Backtest() {
   const [taskId, setTaskId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState('')
+  const [tradesProcessed, setTradesProcessed] = useState<number | null>(null)
+  const [tradesEstimated, setTradesEstimated] = useState<number | null>(null)
+  const [livePnl, setLivePnl] = useState<number | null>(null)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -95,6 +98,9 @@ export default function Backtest() {
     try {
       const s = await api.backtestStatus(tid)
       setProgress(s.progress)
+      setTradesProcessed(s.trades_processed ?? null)
+      setTradesEstimated(s.trades_estimated ?? null)
+      setLivePnl(s.net_pnl_cents ?? null)
       if (s.error) {
         clearInterval(intervalRef.current)
         setRunning(false)
@@ -124,6 +130,9 @@ export default function Backtest() {
     setError(null)
     setResult(null)
     setProgress('')
+    setTradesProcessed(null)
+    setTradesEstimated(null)
+    setLivePnl(null)
     setRunning(true)
 
     const params: Record<string, unknown> = {
@@ -357,11 +366,26 @@ export default function Backtest() {
 
       {/* Progress */}
       {running && (
-        <div className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3 text-sm">
-          <div className="flex items-center gap-3">
-            <div className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
-            <span className="text-gray-300">{progress || 'Starting backtest...'}</span>
+        <div className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3 text-sm space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
+              <span className="text-gray-300">{progress || 'Starting backtest...'}</span>
+            </div>
+            {livePnl != null && (
+              <span className={livePnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                P&L: {livePnl >= 0 ? '+' : ''}{(livePnl / 100).toFixed(2)}$
+              </span>
+            )}
           </div>
+          {tradesEstimated != null && tradesEstimated > 0 && (
+            <div className="h-1.5 w-full rounded-full bg-gray-700 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-indigo-500 transition-all duration-500"
+                style={{ width: `${Math.min(100, ((tradesProcessed ?? 0) / tradesEstimated) * 100)}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
