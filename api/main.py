@@ -39,8 +39,13 @@ from api.models import (
     ResultDetail,
     ResultSummary,
     StatusResponse,
+    PipelineStatusResponse, PipelineDataStatus, PipelineHypothesesStatus,
+    PipelineAnalysisStatus, PipelineStrategiesStatus, PipelineBacktestStatus,
+    StrategyInfo, StrategizeRequest, StrategizeResponse,
+    StrategySaveRequest, StrategySaveResponse,
+    BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
 )
-from api.tasks import download_state, get_adapter_state
+from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 
 logger = logging.getLogger(__name__)
 
@@ -621,6 +626,329 @@ async def save_ai_key(body: AIKeyRequest) -> dict:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider!r}")
     _save_api_key(env_var, body.api_key)
     return {"ok": True}
+
+
+# ── pipeline status ───────────────────────────────────────────────────────────
+
+@app.get("/api/pipeline/status", response_model=PipelineStatusResponse)
+async def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
+    import yaml as _yaml
+    from edge_catcher.runner.strategy_parser import list_strategies
+
+    db = _db_path()
+
+    # Data + Analysis + Backtest — single DB connection
+    data_status = PipelineDataStatus(has_data=False, markets=0, trades=0)
+    analysis_count = 0
+    latest_verdict = None
+    bt_count = 0
+    latest_sharpe = None
+    if db.exists():
+        from edge_catcher.storage.db import get_connection
+        conn = get_connection(db)
+        try:
+            m = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+            t = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            data_status = PipelineDataStatus(has_data=t > 0, markets=m, trades=t)
+
+            analysis_count = conn.execute("SELECT COUNT(*) FROM analysis_results").fetchone()[0]
+            row = conn.execute(
+                "SELECT verdict FROM analysis_results ORDER BY run_timestamp DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                latest_verdict = row["verdict"]
+
+            bt_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
+            ).fetchone()
+            if bt_exists:
+                bt_count = conn.execute("SELECT COUNT(*) FROM backtest_results").fetchone()[0]
+                bt_row = conn.execute(
+                    "SELECT sharpe FROM backtest_results ORDER BY run_timestamp DESC LIMIT 1"
+                ).fetchone()
+                if bt_row:
+                    latest_sharpe = bt_row["sharpe"]
+        finally:
+            conn.close()
+
+    # Hypotheses — merge config/ and config.local/, using dict to deduplicate
+    merged_hyps: dict = {}
+    for cfg_dir in [_config_path(), Path("config.local")]:
+        cfg_file = cfg_dir / "hypotheses.yaml"
+        if cfg_file.exists():
+            with open(cfg_file) as f:
+                data = _yaml.safe_load(f) or {}
+            merged_hyps.update(data.get("hypotheses", {}))
+    hyp_count = len(merged_hyps)
+
+    # Strategies
+    strategies_path = Path("edge_catcher/runner/strategies_local.py")
+    strats = list_strategies(file_path=strategies_path)
+    pub_strats = list_strategies(file_path=Path("edge_catcher/runner/strategies.py"))
+    all_strats = pub_strats + strats
+
+    return PipelineStatusResponse(
+        data=data_status,
+        hypotheses=PipelineHypothesesStatus(count=hyp_count),
+        analysis=PipelineAnalysisStatus(count=analysis_count, latest_verdict=latest_verdict),
+        strategies=PipelineStrategiesStatus(count=len(all_strats), names=[s["name"] for s in all_strats]),
+        backtest=PipelineBacktestStatus(count=bt_count, latest_sharpe=latest_sharpe),
+    )
+
+
+# ── series list ───────────────────────────────────────────────────────────────
+
+@app.get("/api/series")
+async def get_series(_: None = Depends(check_auth)) -> list[str]:
+    db = _db_path()
+    if not db.exists():
+        return []
+    from edge_catcher.storage.db import get_connection
+    conn = get_connection(db)
+    try:
+        rows = conn.execute("SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
+# ── strategies ────────────────────────────────────────────────────────────────
+
+@app.get("/api/strategies", response_model=list[StrategyInfo])
+async def get_strategies(_: None = Depends(check_auth)) -> list[StrategyInfo]:
+    from edge_catcher.runner.strategy_parser import list_strategies
+    pub = list_strategies(file_path=Path("edge_catcher/runner/strategies.py"))
+    local = list_strategies(file_path=Path("edge_catcher/runner/strategies_local.py"))
+    return [StrategyInfo(**s) for s in pub + local]
+
+
+# ── strategize (AI) ───────────────────────────────────────────────────────────
+
+@app.post("/api/strategize", response_model=StrategizeResponse)
+async def strategize_endpoint(
+    body: StrategizeRequest,
+    _: None = Depends(check_auth),
+) -> StrategizeResponse:
+    try:
+        from edge_catcher.ai.client import LLMClient
+        from edge_catcher.ai.strategizer import strategize
+    except ImportError:
+        raise HTTPException(status_code=501, detail="AI deps missing. Run: pip install -e '.[ai]'")
+
+    client = LLMClient(provider=body.provider)
+    result = strategize(body.hypothesis_id, body.run_id, client, _db_path(), _config_path())
+    return StrategizeResponse(**result)
+
+
+# ── strategy save ─────────────────────────────────────────────────────────────
+
+@app.post("/api/strategies/save", response_model=StrategySaveResponse)
+async def save_strategy_endpoint(
+    body: StrategySaveRequest,
+    _: None = Depends(check_auth),
+) -> StrategySaveResponse:
+    from edge_catcher.runner.strategy_parser import save_strategy
+    result = save_strategy(
+        body.code,
+        body.strategy_name,
+        Path("edge_catcher/runner/strategies_local.py"),
+    )
+    return StrategySaveResponse(**result)
+
+
+# ── backtest ──────────────────────────────────────────────────────────────────
+
+def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
+    """Background task: run backtest and store results."""
+    import inspect
+    import importlib
+    from datetime import date, datetime, timezone
+
+    from edge_catcher.runner.event_backtest import EventBacktester
+    from edge_catcher.runner.strategy_parser import list_strategies
+
+    state = backtest_states[task_id]
+    state.running = True
+    state.progress = "Loading strategies..."
+
+    try:
+        # Build strategy map from public + local strategies
+        strategy_map: dict[str, type] = {}
+
+        # Import public strategies
+        from edge_catcher.runner import strategies as pub_mod
+        for attr_name in dir(pub_mod):
+            obj = getattr(pub_mod, attr_name)
+            if isinstance(obj, type) and hasattr(obj, 'name') and hasattr(obj, 'on_trade'):
+                if hasattr(obj, 'name') and isinstance(getattr(obj, 'name', None), str):
+                    strategy_map[obj.name] = obj
+
+        # Import local strategies (if file exists)
+        local_path = Path("edge_catcher/runner/strategies_local.py")
+        if local_path.exists():
+            try:
+                import edge_catcher.runner.strategies_local as local_mod
+                importlib.reload(local_mod)  # Pick up recent saves
+                for attr_name in dir(local_mod):
+                    obj = getattr(local_mod, attr_name)
+                    if isinstance(obj, type) and hasattr(obj, 'on_trade'):
+                        name_attr = getattr(obj, 'name', None)
+                        if isinstance(name_attr, str):
+                            strategy_map[name_attr] = obj
+            except Exception as e:
+                logger.warning("Failed to import strategies_local: %s", e)
+
+        # Instantiate requested strategies
+        strategies = []
+        optional_kwargs = {}
+        if body.tp is not None:
+            optional_kwargs['take_profit'] = body.tp
+        if body.sl is not None:
+            optional_kwargs['stop_loss'] = body.sl
+        if body.min_price is not None:
+            optional_kwargs['min_price'] = body.min_price
+        if body.max_price is not None:
+            optional_kwargs['max_price'] = body.max_price
+
+        for name in body.strategies:
+            cls = strategy_map.get(name)
+            if cls is None:
+                state.error = f"Unknown strategy: {name}. Available: {list(strategy_map.keys())}"
+                state.running = False
+                return
+            # Filter kwargs to only those the class accepts
+            sig = inspect.signature(cls.__init__)
+            valid_kwargs = {k: v for k, v in optional_kwargs.items() if k in sig.parameters}
+            strategies.append(cls(**valid_kwargs))
+
+        state.progress = f"Running backtest on {body.series}..."
+
+        start = date.fromisoformat(body.start) if body.start else None
+        end = date.fromisoformat(body.end) if body.end else None
+
+        backtester = EventBacktester()
+        result = backtester.run(
+            series=body.series,
+            strategies=strategies,
+            start=start,
+            end=end,
+            initial_cash=body.cash,
+            slippage_cents=body.slippage,
+            db_path=_db_path(),
+        )
+
+        result_dict = result.to_dict()
+        state.result = result_dict
+
+        # Save to JSON file
+        result_path = Path(f"reports/backtest_{task_id}.json")
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        with open(result_path, "w") as f:
+            json.dump(result_dict, f, indent=2, default=str)
+
+        # Index in DB
+        from edge_catcher.storage.db import get_connection, init_db
+        init_db(_db_path())
+        conn = get_connection(_db_path())
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO backtest_results
+                   (task_id, series, strategies, start_date, end_date, run_timestamp,
+                    total_trades, wins, losses, net_pnl_cents, sharpe, max_drawdown_pct,
+                    win_rate, result_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (task_id, body.series, json.dumps(body.strategies),
+                 body.start, body.end, datetime.now(timezone.utc).isoformat(),
+                 result_dict["total_trades"], result_dict["wins"], result_dict["losses"],
+                 result_dict["net_pnl_cents"], result_dict["sharpe"],
+                 result_dict["max_drawdown_pct"], result_dict["win_rate"],
+                 str(result_path)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        state.progress = "Complete"
+    except Exception as e:
+        logger.error("Backtest failed: %s", e)
+        state.error = str(e)
+        state.progress = "Error"
+    finally:
+        state.running = False
+
+
+@app.post("/api/backtest")
+async def start_backtest(
+    body: BacktestRequest,
+    _: None = Depends(check_auth),
+) -> dict:
+    import threading
+
+    if is_backtest_running():
+        raise HTTPException(status_code=409, detail="A backtest is already running")
+
+    task_id = str(uuid.uuid4())
+    backtest_states[task_id] = BacktestTaskState(task_id=task_id)
+    threading.Thread(target=_run_backtest_task, args=(task_id, body), daemon=True).start()
+    return {"task_id": task_id}
+
+
+@app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
+async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
+    import json
+    db = _db_path()
+    if not db.exists():
+        return []
+    from edge_catcher.storage.db import get_connection
+    conn = get_connection(db)
+    try:
+        # Check table exists
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
+        ).fetchone()
+        if not exists:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT 50"
+        ).fetchall()
+        return [
+            BacktestHistoryItem(
+                task_id=r["task_id"],
+                series=r["series"],
+                strategies=json.loads(r["strategies"]),
+                timestamp=r["run_timestamp"],
+                total_trades=r["total_trades"] or 0,
+                net_pnl_cents=r["net_pnl_cents"] or 0,
+                sharpe=r["sharpe"] or 0.0,
+                win_rate=r["win_rate"] or 0.0,
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@app.get("/api/backtest/{task_id}/status", response_model=BacktestStatusResponse)
+async def backtest_status(task_id: str) -> BacktestStatusResponse:
+    state = get_backtest_state(task_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
+    return BacktestStatusResponse(running=state.running, progress=state.progress, error=state.error)
+
+
+@app.get("/api/backtest/{task_id}/result")
+async def backtest_result(task_id: str) -> dict:
+    state = get_backtest_state(task_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
+    if state.running:
+        raise HTTPException(status_code=409, detail="Backtest still running")
+    if state.error:
+        raise HTTPException(status_code=500, detail=state.error)
+    if not state.result:
+        raise HTTPException(status_code=404, detail="No result available")
+    return state.result
 
 
 # ── static UI (production) ────────────────────────────────────────────────────
