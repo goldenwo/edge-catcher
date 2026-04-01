@@ -27,6 +27,7 @@ class Position:
 	entry_time: datetime
 	size: int
 	strategy: str
+	entry_fee: float = 0.0
 
 
 @dataclass
@@ -38,8 +39,9 @@ class CompletedTrade:
 	entry_time: datetime
 	exit_price: int
 	exit_time: datetime
-	pnl_cents: int
+	pnl_cents: float
 	exit_reason: str    # 'settlement', 'take_profit', 'stop_loss'
+	fee_cents: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +121,7 @@ class Portfolio:
 			entry_time=time,
 			size=signal.size,
 			strategy=strategy_name,
+			entry_fee=fee,
 		)
 		return True
 
@@ -137,7 +140,7 @@ class Portfolio:
 			return None
 		actual_exit = max(0, exit_price - slippage)
 		self.cash += actual_exit * pos.size
-		pnl = (actual_exit - pos.entry_price) * pos.size
+		pnl = (actual_exit - pos.entry_price) * pos.size - pos.entry_fee
 		ct = CompletedTrade(
 			ticker=ticker,
 			side=pos.side,
@@ -148,6 +151,7 @@ class Portfolio:
 			exit_time=time,
 			pnl_cents=pnl,
 			exit_reason=reason,
+			fee_cents=pos.entry_fee,
 		)
 		self._record_trade(ct)
 		return ct
@@ -168,7 +172,7 @@ class Portfolio:
 		else:  # 'no'
 			settlement_price = 100 if result == 'no' else 0
 		self.cash += settlement_price * pos.size
-		pnl = (settlement_price - pos.entry_price) * pos.size
+		pnl = (settlement_price - pos.entry_price) * pos.size - pos.entry_fee
 		ct = CompletedTrade(
 			ticker=ticker,
 			side=pos.side,
@@ -179,6 +183,7 @@ class Portfolio:
 			exit_time=time,
 			pnl_cents=pnl,
 			exit_reason='settlement',
+			fee_cents=pos.entry_fee,
 		)
 		self._record_trade(ct)
 		return ct
@@ -213,13 +218,15 @@ class BacktestResult:
 	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
 
 	def summary(self) -> str:
+		gross_pnl = self.net_pnl_cents + self.total_fees_paid
 		lines = [
 			'=== Backtest Results ===',
 			f'Total trades:    {self.total_trades}',
 			f'Wins / Losses:   {self.wins} / {self.losses}',
 			f'Win rate:        {self.win_rate:.1%}',
-			f'Net P&L:         {self.net_pnl_cents:+d}¢  ({self.net_pnl_cents / 100:+.2f}$)',
+			f'Gross P&L:       {gross_pnl:+.2f}¢  ({gross_pnl / 100:+.2f}$)',
 			f'Fees paid:       {self.total_fees_paid:.2f}¢  ({self.total_fees_paid / 100:.2f}$)',
+			f'Net P&L:         {self.net_pnl_cents:+.2f}¢  ({self.net_pnl_cents / 100:+.2f}$)',
 			f'Avg win:         {self.avg_win_cents:+.1f}¢',
 			f'Avg loss:        {self.avg_loss_cents:+.1f}¢',
 			f'Sharpe:          {self.sharpe:.3f}',
@@ -232,7 +239,7 @@ class BacktestResult:
 				f"  [{strat}] trades={s['total_trades']} "
 				f"wins={s['wins']} losses={s['losses']} "
 				f"win_rate={s['win_rate']:.1%} "
-				f"net_pnl={s['net_pnl_cents']:+d}¢"
+				f"net_pnl={s['net_pnl_cents']:+.0f}¢"
 			)
 		return '\n'.join(lines)
 
@@ -260,6 +267,7 @@ class BacktestResult:
 					'exit_price': ct.exit_price,
 					'exit_time': ct.exit_time.isoformat(),
 					'pnl_cents': ct.pnl_cents,
+					'fee_cents': ct.fee_cents,
 					'exit_reason': ct.exit_reason,
 				}
 				for ct in self.trade_sample  # at most 100 entries (ring buffer)

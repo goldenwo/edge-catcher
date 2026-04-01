@@ -381,7 +381,7 @@ class TestPortfolio:
 		assert ct.exit_reason == 'take_profit'
 
 	def test_close_position_slippage_reduces_exit(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry = 51
 		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=1)  # exit = 59
@@ -420,7 +420,7 @@ class TestPortfolio:
 		assert ct.pnl_cents == 70
 
 	def test_settle_no_position_loss(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
@@ -671,7 +671,7 @@ class TestSlippage:
 		assert port.cash == 1000.0 - 53 * 2
 
 	def test_exit_slippage_applied(self):
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_pct=0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry=51
 		ct = port.close_position('T', 'REDACTED', 65, _dt(1), 'take_profit', slippage=2)
@@ -904,6 +904,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=1,
 			db_path=db_path,
+			fee_pct=0.0,
 		)
 		assert result.total_trades == 1
 		assert result.trade_sample[0].exit_reason == 'take_profit'
