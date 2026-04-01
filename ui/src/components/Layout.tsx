@@ -37,9 +37,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100 overflow-hidden">
       <aside className="w-52 shrink-0 flex flex-col border-r border-gray-800 py-6 px-4">
-        <span className="text-sm font-semibold tracking-widest text-gray-400 uppercase mb-6">
+        <NavLink
+          to="/"
+          className="text-sm font-semibold tracking-widest text-gray-400 uppercase mb-6 hover:text-white transition-colors"
+        >
           Edge Catcher
-        </span>
+        </NavLink>
 
         <span className="text-[10px] font-medium tracking-wider text-gray-500 uppercase mb-2 px-3">
           Pipeline
