@@ -1,12 +1,18 @@
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? ''
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init)
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error((body as { detail?: string }).detail ?? res.statusText)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15_000)
+  try {
+    const res = await fetch(`${BASE}${path}`, { ...init, signal: controller.signal })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }))
+      throw new Error((body as { detail?: string }).detail ?? res.statusText)
+    }
+    return res.json() as Promise<T>
+  } finally {
+    clearTimeout(timeout)
   }
-  return res.json() as Promise<T>
 }
 
 const json = (body: unknown) => ({
@@ -115,11 +121,19 @@ export interface BacktestHistoryItem {
   task_id: string
   series: string
   strategies: string[]
+  hypothesis_id: string | null
   timestamp: string
   total_trades: number
   net_pnl_cents: number
   sharpe: number
   win_rate: number
+}
+
+export interface FeeInfo {
+  id: string
+  name: string
+  description: string
+  formula: string
 }
 
 export const api = {
@@ -146,12 +160,14 @@ export const api = {
   saveStrategy: (code: string, strategy_name: string) =>
     req<StrategySaveResponse>('/api/strategies/save', json({ code, strategy_name })),
   startBacktest: (params: {
-    series: string; strategies: string[]; start?: string; end?: string;
-    cash?: number; slippage?: number; tp?: number; sl?: number;
-    min_price?: number; max_price?: number;
+    series: string; strategies: string[]; hypothesis_id?: string;
+    start?: string; end?: string; cash?: number; slippage?: number;
+    tp?: number; sl?: number; min_price?: number; max_price?: number;
   }) => req<{ task_id: string }>('/api/backtest', json(params)),
+  backtestActive: () => req<{ task_id: string | null }>('/api/backtest/active'),
   backtestStatus: (taskId: string) => req<BacktestStatusResp>(`/api/backtest/${taskId}/status`),
   stopBacktest: (taskId: string) => req<{ ok: boolean }>(`/api/backtest/${taskId}/stop`, { method: 'POST' }),
   backtestResult: (taskId: string) => req<Record<string, unknown>>(`/api/backtest/${taskId}/result`),
   backtestHistory: () => req<BacktestHistoryItem[]>('/api/backtest/history'),
+  feeInfo: (series: string) => req<FeeInfo>(`/api/series/${encodeURIComponent(series)}/fee-info`),
 }
