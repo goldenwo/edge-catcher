@@ -1,4 +1,4 @@
-"""Coinbase Advanced Trade public API adapter for BTC-USD 1-minute OHLC."""
+"""Coinbase Advanced Trade public API adapter for 1-minute OHLC (any product)."""
 
 import logging
 import time
@@ -9,12 +9,15 @@ logger = logging.getLogger(__name__)
 
 
 class CoinbaseAdapter:
-    BASE_URL = "https://api.coinbase.com/api/v3/brokerage/market/products/BTC-USD/candles"
+    BASE_URL_TEMPLATE = "https://api.coinbase.com/api/v3/brokerage/market/products/{product_id}/candles"
     GRANULARITY = "ONE_MINUTE"
     PAGE_SIZE = 350
     RATE_LIMIT_SLEEP = 0.4
 
-    def __init__(self):
+    def __init__(self, product_id: str = "BTC-USD"):
+        self.product_id = product_id
+        self.table_name = product_id.split("-")[0].lower() + "_ohlc"
+        self.base_url = self.BASE_URL_TEMPLATE.format(product_id=product_id)
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "edge-catcher/1.0"})
 
@@ -26,14 +29,14 @@ class CoinbaseAdapter:
             "granularity": self.GRANULARITY,
             "limit": str(self.PAGE_SIZE),
         }
-        resp = self.session.get(self.BASE_URL, params=params, timeout=30)
+        resp = self.session.get(self.base_url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         return data.get("candles", [])
 
     def download_range(self, start_ts: int, end_ts: int, conn, progress_callback=None) -> int:
         """
-        Download all candles in [start_ts, end_ts], insert into btc_ohlc table.
+        Download all candles in [start_ts, end_ts], insert into self.table_name.
         Skips rows already in DB (INSERT OR IGNORE).
         Returns count of new rows inserted.
 
@@ -65,7 +68,7 @@ class CoinbaseAdapter:
 
             if rows:
                 conn.executemany(
-                    "INSERT OR IGNORE INTO btc_ohlc (timestamp, open, high, low, close, volume) "
+                    f"INSERT OR IGNORE INTO {self.table_name} (timestamp, open, high, low, close, volume) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     rows,
                 )
