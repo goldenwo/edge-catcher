@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, AISettings } from '../api'
+import { api, AISettings, ModelSettings } from '../api'
 
 interface ProviderConfig {
   id: keyof AISettings
@@ -112,6 +112,9 @@ function ProviderCard({
 export default function Settings() {
   const [settings, setSettings] = useState<AISettings | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [modelSettings, setModelSettings] = useState<ModelSettings | null>(null)
+  const [modelSaving, setModelSaving] = useState(false)
+  const [modelSaved, setModelSaved] = useState(false)
 
   function load() {
     api.aiSettings()
@@ -119,7 +122,25 @@ export default function Settings() {
       .catch(e => setError(e.message))
   }
 
+  function loadModels() {
+    api.aiModels().then(setModelSettings).catch(() => {})
+  }
+
   useEffect(() => { load() }, [])
+  useEffect(() => { loadModels() }, [])
+
+  async function handleModelSave(model: string) {
+    setModelSaving(true)
+    setModelSaved(false)
+    try {
+      await api.saveAiModel(model || null)
+      setModelSaved(true)
+      setTimeout(() => setModelSaved(false), 3000)
+    } catch {
+    } finally {
+      setModelSaving(false)
+    }
+  }
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -146,10 +167,39 @@ export default function Settings() {
               key={p.id}
               provider={p}
               isSet={settings?.[p.id] ?? false}
-              onSaved={load}
+              onSaved={() => { load(); loadModels() }}
             />
           ))}
         </div>
+      </section>
+
+      <section>
+        <h2 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+          Model
+        </h2>
+
+        {!modelSettings?.models.length ? (
+          <p className="text-sm text-gray-500">Set an API key above to choose a model.</p>
+        ) : (
+          <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <select
+                value={modelSettings.current_model ?? ''}
+                onChange={e => handleModelSave(e.target.value)}
+                disabled={modelSaving}
+                className="flex-1 px-3 py-1.5 rounded bg-gray-800 border border-gray-700 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
+              >
+                <option value="">Provider default</option>
+                {modelSettings.models.map(m => (
+                  <option key={m.id} value={m.id}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+            {modelSaved && (
+              <p className="text-xs text-green-400">Saved — model will be used for all AI features.</p>
+            )}
+          </div>
+        )}
       </section>
     </div>
   )
