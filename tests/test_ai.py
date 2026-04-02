@@ -357,3 +357,28 @@ def test_interpret_passes_full_report_to_llm(tmp_path):
     user_prompt = call_args.args[1]  # second positional arg
     assert "INCONCLUSIVE" in user_prompt
     assert "test" in user_prompt
+
+
+# ── LLMClient: model override ─────────────────────────────────────────────────
+
+def test_client_explicit_model_overrides_default():
+    """Explicit model= kwarg is used for all tasks regardless of provider defaults."""
+    env = {**_clean_env(), "ANTHROPIC_API_KEY": "sk-ant-test"}
+    with patch.dict(os.environ, env, clear=True):
+        client = LLMClient(model="claude-opus-4-20250514")
+    assert client._resolve_model("interpreter") == "claude-opus-4-20250514"
+    assert client._resolve_model("formalizer") == "claude-opus-4-20250514"
+
+
+def test_client_env_model_override():
+    """EDGE_CATCHER_LLM_MODEL env var is passed through by callers."""
+    env = {
+        **_clean_env(),
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "EDGE_CATCHER_LLM_MODEL": "claude-opus-4-20250514",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
+        client = LLMClient(model=model_override)
+    assert client._resolve_model("interpreter") == "claude-opus-4-20250514"
+    assert client._resolve_model("strategizer") == "claude-opus-4-20250514"
