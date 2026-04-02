@@ -348,7 +348,7 @@ def _make_trade(ticker: str = 'TEST-1', yes_price: int = 80, offset_hours: float
 
 class TestPortfolio:
 	def test_open_position_deducts_cash(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		result = port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		assert result is True
@@ -356,7 +356,7 @@ class TestPortfolio:
 		assert port.has_position('T', 'REDACTED')
 
 	def test_open_position_slippage_increases_cost(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=2)
 		assert port.cash == 948.0
@@ -371,7 +371,7 @@ class TestPortfolio:
 		assert not port.has_position('T', 'REDACTED')
 
 	def test_close_position_adds_proceeds(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=0)
@@ -381,7 +381,7 @@ class TestPortfolio:
 		assert ct.exit_reason == 'take_profit'
 
 	def test_close_position_slippage_reduces_exit(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry = 51
 		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=1)  # exit = 59
@@ -391,7 +391,7 @@ class TestPortfolio:
 		assert ct.pnl_cents == 8  # 59 - 51
 
 	def test_settle_yes_position_win(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
@@ -401,7 +401,7 @@ class TestPortfolio:
 		assert port.cash == 1025.0
 
 	def test_settle_yes_position_loss(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
@@ -411,7 +411,7 @@ class TestPortfolio:
 		assert port.cash == 925.0
 
 	def test_settle_no_position_win(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
@@ -420,7 +420,7 @@ class TestPortfolio:
 		assert ct.pnl_cents == 70
 
 	def test_settle_no_position_loss(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
@@ -430,16 +430,16 @@ class TestPortfolio:
 
 	def test_entry_fee_charged_at_open(self):
 		# Buy NO at 87¢: fee = 1.0 * 0.07 * 87 * 13 / 100 = 0.7917¢ per contract
-		port = Portfolio(1000.0, fee_pct=1.0)
+		port = Portfolio(1000.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		expected_fee = 0.07 * 87 * 13 / 100  # ~0.7917
 		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
 		assert port.cash == pytest.approx(1000.0 - 87 - expected_fee, rel=1e-6)
 
-	def test_fee_scales_with_fee_pct(self):
-		# fee_pct=0.25 simulates maker fee (0.25 * 0.07 = 1.75% equivalent)
-		port = Portfolio(1000.0, fee_pct=0.25)
+	def test_fee_scales_with_fee_fn(self):
+		# fee_fn with 0.25 multiplier simulates maker fee (0.25 * 0.07 = 1.75% equivalent)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.25 * 0.07 * p * (100 - p) / 100 * s)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		expected_fee = 0.25 * 0.07 * 87 * 13 / 100
@@ -447,7 +447,7 @@ class TestPortfolio:
 
 	def test_no_fee_at_settlement(self):
 		# Fee is only charged at entry — settlement should not add more fees
-		port = Portfolio(1000.0, fee_pct=1.0)
+		port = Portfolio(1000.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		fee_at_entry = port.total_fees_paid
@@ -455,7 +455,7 @@ class TestPortfolio:
 		assert port.total_fees_paid == fee_at_entry  # no new fees at settlement
 
 	def test_get_equity_marks_at_entry(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
 		# equity = cash(950) + position_entry_value(50) = 1000
@@ -663,7 +663,7 @@ class TestActiveExitStub:
 
 class TestSlippage:
 	def test_entry_slippage_applied(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=2, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=3)
 		pos = port.positions[('T', 'REDACTED')]
@@ -671,7 +671,7 @@ class TestSlippage:
 		assert port.cash == 1000.0 - 53 * 2
 
 	def test_exit_slippage_applied(self):
-		port = Portfolio(1000.0, fee_pct=0.0)
+		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry=51
 		ct = port.close_position('T', 'REDACTED', 65, _dt(1), 'take_profit', slippage=2)
@@ -766,6 +766,7 @@ class TestBacktestResult:
 			avg_loss_cents=avg_loss,
 			equity_curve=port.equity_snapshots,
 			per_strategy=per_strategy,
+			per_strategy_curves=port._per_strategy_curves,
 			trade_sample=port._trade_sample,
 		)
 
@@ -845,7 +846,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=0,
 			db_path=db_path,
-			fee_pct=0.0,
+			fee_fn=lambda p, s: 0.0,
 		)
 		assert result.total_trades == 1
 		assert result.wins == 1
@@ -874,7 +875,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=0,
 			db_path=db_path,
-			fee_pct=0.0,
+			fee_fn=lambda p, s: 0.0,
 		)
 		assert result.total_trades == 1
 		assert result.wins == 1
@@ -904,7 +905,7 @@ class TestIntegration:
 			initial_cash=1000.0,
 			slippage_cents=1,
 			db_path=db_path,
-			fee_pct=0.0,
+			fee_fn=lambda p, s: 0.0,
 		)
 		assert result.total_trades == 1
 		assert result.trade_sample[0].exit_reason == 'take_profit'
@@ -1020,6 +1021,75 @@ class TestIntegration:
 		)
 		assert result.total_trades == 0
 		assert result.net_pnl_cents == 0
+
+	def test_on_progress_callback_fires(self, tmp_path):
+		"""on_progress callback fires with structured data."""
+		close = _dt(2)
+		markets = [{
+			'ticker': 'PROG-A',
+			'series_ticker': 'PROGSERIES',
+			'close_time': _iso(close),
+			'open_time': _iso(_dt(-24)),
+			'result': 'yes',
+			'status': 'settled',
+		}]
+		trades = [
+			{'trade_id': f'tp{i}', 'ticker': 'PROG-A', 'yes_price': 80, 'no_price': 20,
+			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0) + timedelta(seconds=i))}
+			for i in range(5)
+		]
+		db_path = _make_db(tmp_path, markets, trades)
+		progress_calls = []
+		result = EventBacktester().run(
+			series='PROGSERIES',
+			strategies=[BuyYesInRange(min_price=70, max_price=99)],
+			initial_cash=1000.0,
+			slippage_cents=0,
+			db_path=db_path,
+			fee_fn=lambda p, s: 0.0,
+			on_progress=lambda info: progress_calls.append(info),
+		)
+		# Initial callback at trade 0 should always fire
+		assert len(progress_calls) >= 1
+		first = progress_calls[0]
+		assert first["trades_processed"] == 0
+		assert first["trades_estimated"] == 5
+		assert "net_pnl_cents" in first
+		assert "wins" in first
+		assert "losses" in first
+
+	def test_on_progress_callback_fires_at_10k(self, tmp_path):
+		"""on_progress callback fires at 10k trade checkpoint."""
+		close = _dt(2)
+		markets = [{
+			'ticker': 'PROG-B',
+			'series_ticker': 'PROGSERIES2',
+			'close_time': _iso(close),
+			'open_time': _iso(_dt(-24)),
+			'result': 'yes',
+			'status': 'settled',
+		}]
+		trades = [
+			{'trade_id': f'tq{i}', 'ticker': 'PROG-B', 'yes_price': 80, 'no_price': 20,
+			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0) + timedelta(seconds=i))}
+			for i in range(10_001)
+		]
+		db_path = _make_db(tmp_path, markets, trades)
+		progress_calls = []
+		result = EventBacktester().run(
+			series='PROGSERIES2',
+			strategies=[BuyYesInRange(min_price=70, max_price=99)],
+			initial_cash=100000.0,
+			slippage_cents=0,
+			db_path=db_path,
+			fee_fn=lambda p, s: 0.0,
+			on_progress=lambda info: progress_calls.append(info),
+		)
+		# Initial callback + at least one 10k checkpoint
+		assert len(progress_calls) >= 2
+		second = progress_calls[1]
+		assert second["trades_processed"] == 10000
+		assert second["trades_estimated"] == 10001
 
 
 # ---------------------------------------------------------------------------

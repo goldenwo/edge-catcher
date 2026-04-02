@@ -44,7 +44,7 @@ def ensure_venv() -> None:
 
     print("Installing/verifying Python dependencies...")
     subprocess.run(
-        [str(_venv_python()), "-m", "pip", "install", "-e", ".[ui]", "--quiet"],
+        [str(_venv_python()), "-m", "pip", "install", "-e", ".[ui,ai]", "--quiet"],
         cwd=ROOT,
         check=True,
     )

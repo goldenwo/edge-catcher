@@ -1,8 +1,9 @@
 """Registry of all available data adapters."""
 from __future__ import annotations
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+from edge_catcher.fees import FeeModel, KALSHI_FEE, ZERO_FEE
 
 @dataclass
 class AdapterMeta:
@@ -12,6 +13,9 @@ class AdapterMeta:
     requires_api_key: bool
     api_key_env_var: Optional[str] = None
     default_start_date: Optional[str] = None  # ISO date, shown as default in UI
+    markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
+    db_file: str = "data/kalshi.db"  # database file this adapter writes to
+    fee_model: FeeModel = field(default_factory=lambda: KALSHI_FEE)
 
 ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
@@ -21,6 +25,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-03-21",
+        markets_yaml="config/markets.yaml",
     ),
     AdapterMeta(
         id="coinbase_btc",
@@ -29,6 +34,8 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var=None,
         default_start_date="2025-03-21",
+        db_file="data/btc.db",
+        fee_model=ZERO_FEE,
     ),
     AdapterMeta(
         id="kalshi_sports",
@@ -37,6 +44,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-sports.yaml",
     ),
     AdapterMeta(
         id="kalshi_crypto",
@@ -45,6 +53,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-crypto.yaml",
     ),
     AdapterMeta(
         id="kalshi_weather",
@@ -53,6 +62,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-weather.yaml",
     ),
     AdapterMeta(
         id="kalshi_financials",
@@ -61,6 +71,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-financials.yaml",
     ),
     AdapterMeta(
         id="kalshi_entertainment",
@@ -69,6 +80,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-entertainment.yaml",
     ),
     AdapterMeta(
         id="kalshi_politics",
@@ -77,6 +89,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-politics.yaml",
     ),
     AdapterMeta(
         id="kalshi_esports",
@@ -85,6 +98,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
+        markets_yaml="config/markets-esports.yaml",
     ),
 ]
 
@@ -95,3 +109,22 @@ def is_api_key_set(meta: AdapterMeta) -> bool:
     if not meta.api_key_env_var:
         return False
     return bool(os.getenv(meta.api_key_env_var))
+
+def get_fee_model(adapter_id: str) -> FeeModel:
+    """Return the fee model for a specific adapter by ID (preferred lookup)."""
+    adapter = get_adapter(adapter_id)
+    return adapter.fee_model if adapter else KALSHI_FEE
+
+def get_fee_model_for_db(db_path: str) -> FeeModel:
+    """Return the fee model for the adapter that writes to db_path.
+
+    When multiple adapters share the same db_file (e.g. all Kalshi adapters
+    share data/kalshi.db), returns the fee model of the first match.
+    Prefer get_fee_model(adapter_id) when the adapter ID is known.
+    """
+    from pathlib import Path
+    normalized = str(Path(db_path).resolve())
+    for a in ADAPTERS:
+        if str(Path(a.db_file).resolve()) == normalized:
+            return a.fee_model
+    return KALSHI_FEE  # fallback
