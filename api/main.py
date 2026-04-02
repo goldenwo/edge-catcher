@@ -45,6 +45,7 @@ from api.models import (
     StrategySaveRequest, StrategySaveResponse,
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
     FeeInfoResponse,
+    ModelOption, ModelSettingsResponse, ModelOverrideRequest,
 )
 from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 
@@ -322,7 +323,8 @@ async def formalize_hypothesis(
 
     cfg_file = _config_path() / "hypotheses.yaml"
     try:
-        client = LLMClient(provider=body.provider)
+        model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
+        client = LLMClient(provider=body.provider, model=model_override)
         result = formalize(body.description, client, config_path=cfg_file)
     except Exception as exc:
         return FormalizeResponse(message="", error=str(exc))
@@ -377,7 +379,8 @@ async def interpret_result(
         ) as f:
             json.dump(report_data, f, default=str)
             temp_path = Path(f.name)
-        client = LLMClient(provider=body.provider)
+        model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
+        client = LLMClient(provider=body.provider, model=model_override)
         summary = interpret(temp_path, client)
         return InterpretResponse(summary=summary)
     except Exception as exc:
@@ -662,6 +665,38 @@ _AI_PROVIDERS = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+_AI_MODEL_OPTIONS: dict[str, list[dict[str, str]]] = {
+    "anthropic": [
+        {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5 (fast, cheap)"},
+        {"id": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4 (balanced)"},
+        {"id": "claude-opus-4-20250514", "label": "Claude Opus 4 (most capable)"},
+    ],
+    "openai": [
+        {"id": "gpt-4o-mini", "label": "GPT-4o Mini (fast, cheap)"},
+        {"id": "gpt-4o", "label": "GPT-4o (balanced)"},
+        {"id": "o3-mini", "label": "o3-mini (reasoning)"},
+    ],
+    "openrouter": [
+        {"id": "anthropic/claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5"},
+        {"id": "anthropic/claude-sonnet-4-20250514", "label": "Claude Sonnet 4"},
+        {"id": "openai/gpt-4o", "label": "GPT-4o"},
+    ],
+}
+
+
+def _detect_active_provider() -> Optional[str]:
+    """Replicate LLMClient._resolve_provider logic for the API layer."""
+    env_provider = os.getenv("EDGE_CATCHER_LLM_PROVIDER")
+    if env_provider:
+        return env_provider
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    if os.getenv("OPENROUTER_API_KEY"):
+        return "openrouter"
+    return None
+
 
 @app.get("/api/settings/ai", response_model=AISettingsResponse)
 async def get_ai_settings() -> AISettingsResponse:
@@ -678,6 +713,34 @@ async def save_ai_key(body: AIKeyRequest) -> dict:
     if not env_var:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {body.provider!r}")
     _save_api_key(env_var, body.api_key)
+    return {"ok": True}
+
+
+@app.get("/api/settings/ai/models", response_model=ModelSettingsResponse)
+async def get_ai_models() -> ModelSettingsResponse:
+    provider = _detect_active_provider()
+    current = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
+    options = _AI_MODEL_OPTIONS.get(provider or "", [])
+    return ModelSettingsResponse(
+        provider=provider,
+        current_model=current,
+        models=[ModelOption(**m) for m in options],
+    )
+
+
+@app.post("/api/settings/ai/model")
+async def save_ai_model(body: ModelOverrideRequest) -> dict:
+    if body.model:
+        provider = _detect_active_provider()
+        valid_ids = {m["id"] for m in _AI_MODEL_OPTIONS.get(provider or "", [])}
+        if body.model not in valid_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {body.model!r} is not available for provider {provider!r}",
+            )
+        _save_api_key("EDGE_CATCHER_LLM_MODEL", body.model)
+    else:
+        _clear_api_key("EDGE_CATCHER_LLM_MODEL")
     return {"ok": True}
 
 
@@ -812,7 +875,8 @@ async def strategize_endpoint(
     except ImportError:
         raise HTTPException(status_code=501, detail="AI deps missing. Run: pip install -e '.[ai]'")
 
-    client = LLMClient(provider=body.provider)
+    model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
+    client = LLMClient(provider=body.provider, model=model_override)
     result = strategize(body.hypothesis_id, body.run_id, client, _db_path(), _config_path())
     return StrategizeResponse(**result)
 
