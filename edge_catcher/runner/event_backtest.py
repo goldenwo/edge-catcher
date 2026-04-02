@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from edge_catcher.fees import KALSHI_FEE
 from edge_catcher.storage.db import get_connection
 from edge_catcher.storage.models import Market, Trade
 from edge_catcher.runner.strategies import Signal, Strategy
@@ -49,10 +50,10 @@ class CompletedTrade:
 # ---------------------------------------------------------------------------
 
 class Portfolio:
-	def __init__(self, initial_cash: float, fee_pct: float = 1.0) -> None:
+	def __init__(self, initial_cash: float, fee_fn: Optional[Callable[[int, int], float]] = None) -> None:
 		self.cash: float = initial_cash
 		self.initial_cash: float = initial_cash
-		self.fee_pct: float = fee_pct
+		self.fee_fn: Callable[[int, int], float] = fee_fn or KALSHI_FEE.calculate
 		self.total_fees_paid: float = 0.0
 		self.positions: dict[tuple[str, str], Position] = {}
 		self.equity_snapshots: list[tuple[datetime, float]] = []
@@ -66,6 +67,7 @@ class Portfolio:
 		self._pnl_values: list[int] = []           # all pnl ints — tiny vs full objects
 		self._trade_sample: list[CompletedTrade] = []  # ring buffer, last 100
 		self._per_strategy: dict[str, dict] = {}   # running per-strategy counters
+		self._per_strategy_curves: dict[str, list[tuple[datetime, float]]] = {}  # cumulative P&L curves
 
 	def _record_trade(self, ct: CompletedTrade) -> None:
 		"""Accumulate a completed trade into running counters. O(1) per trade."""
@@ -86,15 +88,20 @@ class Portfolio:
 		s = self._per_strategy.setdefault(ct.strategy, {
 			'total_trades': 0, 'wins': 0, 'losses': 0,
 			'net_pnl_cents': 0, '_sum_win_pnl': 0.0, '_sum_loss_pnl': 0.0,
+			'_pnl_values': [],
 		})
 		s['total_trades'] += 1
 		s['net_pnl_cents'] += ct.pnl_cents
+		s['_pnl_values'].append(ct.pnl_cents)
 		if ct.pnl_cents > 0:
 			s['wins'] += 1
 			s['_sum_win_pnl'] += ct.pnl_cents
 		else:
 			s['losses'] += 1
 			s['_sum_loss_pnl'] += ct.pnl_cents
+		# Per-strategy equity curve (initial cash + cumulative P&L)
+		curve = self._per_strategy_curves.setdefault(ct.strategy, [])
+		curve.append((ct.exit_time, self.initial_cash + s['net_pnl_cents']))
 
 	def has_position(self, ticker: str, strategy: str) -> bool:
 		return (ticker, strategy) in self.positions
@@ -109,7 +116,7 @@ class Portfolio:
 		"""Deduct cost and entry fee from cash and record position. Returns False if insufficient cash."""
 		actual_entry = signal.price + slippage
 		cost = actual_entry * signal.size
-		fee = self.fee_pct * 0.07 * actual_entry * (100 - actual_entry) / 100 * signal.size
+		fee = self.fee_fn(actual_entry, signal.size)
 		if cost + fee > self.cash:
 			return False
 		self.cash -= cost + fee
@@ -197,6 +204,17 @@ class Portfolio:
 		self.equity_snapshots.append((time, self.get_equity()))
 
 
+def _downsample(pts: list[tuple[datetime, float]], max_pts: int) -> list[tuple[str, float]]:
+	"""Evenly downsample a time series to max_pts, always keeping first and last."""
+	n = len(pts)
+	if n <= max_pts:
+		return [(t.isoformat(), v) for t, v in pts]
+	indices = {0, n - 1}
+	for i in range(1, max_pts - 1):
+		indices.add(round(i * (n - 1) / (max_pts - 1)))
+	return [(pts[i][0].isoformat(), pts[i][1]) for i in sorted(indices)]
+
+
 # ---------------------------------------------------------------------------
 # BacktestResult
 # ---------------------------------------------------------------------------
@@ -215,6 +233,7 @@ class BacktestResult:
 	avg_loss_cents: float
 	equity_curve: list[tuple[datetime, float]]
 	per_strategy: dict[str, dict]
+	per_strategy_curves: dict[str, list[tuple[datetime, float]]]
 	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
 
 	def summary(self) -> str:
@@ -255,8 +274,12 @@ class BacktestResult:
 			'win_rate': self.win_rate,
 			'avg_win_cents': self.avg_win_cents,
 			'avg_loss_cents': self.avg_loss_cents,
-			'equity_curve': [(t.isoformat(), e) for t, e in self.equity_curve[-1000:]],  # keep last 1000 points
+			'equity_curve': _downsample(self.equity_curve, 1000),
 			'per_strategy': self.per_strategy,
+			'per_strategy_curves': {
+				name: _downsample(pts, 1000)
+				for name, pts in self.per_strategy_curves.items()
+			},
 			'trade_log': [
 				{
 					'ticker': ct.ticker,
@@ -366,6 +389,12 @@ def _compute_metrics(
 	per_strategy: dict[str, dict] = {}
 	for strat, s in portfolio._per_strategy.items():
 		t = s['total_trades']
+		strat_sharpe = 0.0
+		pnls = s['_pnl_values']
+		if t >= 2:
+			std = statistics.stdev(pnls)
+			if std > 0:
+				strat_sharpe = statistics.mean(pnls) / std * math.sqrt(t)
 		per_strategy[strat] = {
 			'total_trades': t,
 			'wins': s['wins'],
@@ -374,6 +403,7 @@ def _compute_metrics(
 			'win_rate': s['wins'] / t if t > 0 else 0.0,
 			'avg_win_cents': s['_sum_win_pnl'] / s['wins'] if s['wins'] > 0 else 0.0,
 			'avg_loss_cents': s['_sum_loss_pnl'] / s['losses'] if s['losses'] > 0 else 0.0,
+			'sharpe': strat_sharpe,
 		}
 
 	return sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy
@@ -395,7 +425,7 @@ class EventBacktester:
 		initial_cash: float = 10000.0,
 		slippage_cents: int = 1,
 		db_path: Path = Path('data/kalshi.db'),
-		fee_pct: float = 1.0,
+		fee_fn: Optional[Callable[[int, int], float]] = None,
 		on_progress: Optional[Callable[[dict], None]] = None,
 		is_cancelled: Optional[Callable[[], bool]] = None,
 	) -> BacktestResult:
@@ -404,7 +434,7 @@ class EventBacktester:
 		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
-			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_pct, on_progress, is_cancelled)
+			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_fn, on_progress, is_cancelled)
 		finally:
 			conn.close()
 
@@ -417,7 +447,7 @@ class EventBacktester:
 		end: Optional[date],
 		initial_cash: float,
 		slippage_cents: int,
-		fee_pct: float = 1.0,
+		fee_fn: Optional[Callable[[int, int], float]] = None,
 		on_progress: Optional[Callable[[dict], None]] = None,
 		is_cancelled: Optional[Callable[[], bool]] = None,
 	) -> BacktestResult:
@@ -444,14 +474,14 @@ class EventBacktester:
 			total_fees_paid=0,
 			sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
 			avg_win_cents=0.0, avg_loss_cents=0.0,
-			equity_curve=[], per_strategy={}, trade_sample=[],
+			equity_curve=[], per_strategy={}, per_strategy_curves={}, trade_sample=[],
 		)
 
 		if not market_map or _cancelled():
 			return _empty
 
 		tickers = list(market_map.keys())
-		portfolio = Portfolio(initial_cash, fee_pct=fee_pct)
+		portfolio = Portfolio(initial_cash, fee_fn=fee_fn)
 
 		# --- 2. Build temp table for efficient ticker join ---
 		conn.execute('CREATE TEMP TABLE IF NOT EXISTS _bt_tickers (ticker TEXT PRIMARY KEY)')
@@ -585,6 +615,12 @@ class EventBacktester:
 
 		conn.execute('DROP TABLE IF EXISTS _bt_tickers')
 
+		# Prepend initial data point to each per-strategy curve
+		if portfolio.equity_snapshots:
+			start_time = portfolio.equity_snapshots[0][0]
+			for curve in portfolio._per_strategy_curves.values():
+				curve.insert(0, (start_time, portfolio.initial_cash))
+
 		# --- 6. Compute metrics from running accumulators ---
 		sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy = _compute_metrics(
 			portfolio, portfolio.equity_snapshots,
@@ -603,5 +639,6 @@ class EventBacktester:
 			avg_loss_cents=avg_loss,
 			equity_curve=portfolio.equity_snapshots,
 			per_strategy=per_strategy,
+			per_strategy_curves=portfolio._per_strategy_curves,
 			trade_sample=portfolio._trade_sample,
 		)
