@@ -23,7 +23,7 @@ class LLMClient:
     _DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "anthropic": {
             "formalizer": "claude-sonnet-4-20250514",
-            "interpreter": "claude-haiku-4-20250414",
+            "interpreter": "claude-haiku-4-5-20251001",
             "strategizer": "claude-sonnet-4-20250514",
         },
         "openai": {
