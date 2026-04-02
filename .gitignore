@@ -66,3 +66,4 @@ edge_catcher/runner/strategies_local.py
 
 # Analysis scripts with specific hypotheses
 scripts/kxbtc15m_analysis.py
+scripts/retail_flow_analysis.py
