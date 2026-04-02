@@ -81,8 +81,8 @@ class KalshiAdapter(MarketAdapter):
         # API key: explicit param takes priority, then environment variable
         self.api_key: Optional[str] = api_key or os.environ.get("KALSHI_API_KEY")
         self.dry_run: bool = dry_run
-        self.min_available_ram_mb: int = int(
-            kalshi_cfg.get("min_available_ram_mb", 400)
+        self.min_available_ram_pct: float = float(
+            kalshi_cfg.get("min_available_ram_pct", 10)
         )
 
         self.session = requests.Session()
@@ -97,14 +97,17 @@ class KalshiAdapter(MarketAdapter):
     # ------------------------------------------------------------------
 
     def _check_memory(self) -> None:
-        """Pause if available RAM is below threshold. Logs warning and sleeps until recovered."""
+        """Pause if available RAM drops below a percentage of total. Scales across machines."""
         try:
             import psutil
-            available_mb = psutil.virtual_memory().available / (1024 * 1024)
-            if available_mb < self.min_available_ram_mb:
+            mem = psutil.virtual_memory()
+            available_pct = mem.available / mem.total * 100
+            if available_pct < self.min_available_ram_pct:
+                available_mb = mem.available / (1024 * 1024)
+                total_gb = mem.total / (1024 ** 3)
                 logger.warning(
-                    f"Low RAM: {available_mb:.0f}MB available "
-                    f"(threshold: {self.min_available_ram_mb}MB). Pausing 30s..."
+                    f"Low RAM: {available_mb:.0f}MB free ({available_pct:.1f}% of {total_gb:.0f}GB). "
+                    f"Threshold: {self.min_available_ram_pct}%. Pausing 30s..."
                 )
                 time.sleep(30)
         except ImportError:

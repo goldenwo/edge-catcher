@@ -1,0 +1,37 @@
+# Crypto altcoin series — same microstructure as BTC, highest transfer probability
+adapters:
+  kalshi:
+    enabled: true
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    series:
+      # 15-minute contracts (REDACTED target)
+      - KXETH15M    # ETH 15-minute
+      - KXSOL15M    # SOL 15-minute
+      - KXXRP15M    # XRP 15-minute
+      - KXDOGE15M   # DOGE 15-minute
+      - KXBNB15M    # BNB 15-minute
+      - KXHYPE15M   # HYPE 15-minute
+      # Daily contracts (REDACTED target)
+      - KXETHD      # ETH daily
+      - KXSOLD      # SOL daily
+      - KXXRPD      # XRP daily
+      - KXDOGED     # DOGE daily
+      - KXBNBD      # BNB daily
+      - KXHYPED     # HYPE daily
+      # Hourly contracts
+      - KXETH       # ETH hourly
+      - KXSOL       # SOL hourly
+      - KXXRP       # XRP hourly
+      - KXDOGE      # DOGE hourly
+      - KXBNB       # BNB hourly
+      - KXHYPE      # HYPE hourly
+      # Cross-crypto
+      - KXBTCETHATH  # BTC/ETH ATH ratio
+      - KXSOLE       # SOL extended?
+    statuses:
+      - settled
+    min_available_ram_pct: 10
+    pagination:
+      default_limit: 200
+      max_limit: 1000

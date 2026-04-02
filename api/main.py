@@ -44,6 +44,7 @@ from api.models import (
     StrategyInfo, StrategizeRequest, StrategizeResponse,
     StrategySaveRequest, StrategySaveResponse,
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
+    FeeInfoResponse,
 )
 from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 
@@ -764,6 +765,30 @@ async def get_series(_: None = Depends(check_auth)) -> list[str]:
         conn.close()
 
 
+@app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
+async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
+    from api.adapter_registry import get_fee_model_for_db
+    from edge_catcher.storage.db import get_connection
+    db = _db_path()
+    if db.exists():
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM markets WHERE series_ticker = ? LIMIT 1", (series,)
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
+        finally:
+            conn.close()
+    fee_model = get_fee_model_for_db(str(db))
+    return FeeInfoResponse(
+        id=fee_model.id,
+        name=fee_model.name,
+        description=fee_model.description,
+        formula=fee_model.formula,
+    )
+
+
 # ── strategies ────────────────────────────────────────────────────────────────
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
@@ -818,6 +843,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 
     from edge_catcher.runner.event_backtest import EventBacktester
     from edge_catcher.runner.strategy_parser import list_strategies
+    from api.adapter_registry import get_fee_model_for_db
 
     state = backtest_states[task_id]
     state.running = True
@@ -878,6 +904,24 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
         start = date.fromisoformat(body.start) if body.start else None
         end = date.fromisoformat(body.end) if body.end else None
 
+        def on_progress(info: dict) -> None:
+            if state.cancel_requested:
+                return
+            state.trades_processed = info["trades_processed"]
+            state.trades_estimated = info["trades_estimated"]
+            state.net_pnl_cents = int(info["net_pnl_cents"])
+            pct = (
+                info["trades_processed"] / info["trades_estimated"] * 100
+                if info["trades_estimated"]
+                else 0
+            )
+            state.progress = (
+                f"Processed {info['trades_processed']:,} / ~{info['trades_estimated']:,} trades "
+                f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
+            )
+
+        fee_model = get_fee_model_for_db(str(_db_path()))
+
         backtester = EventBacktester()
         result = backtester.run(
             series=body.series,
@@ -887,7 +931,14 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
             initial_cash=body.cash,
             slippage_cents=body.slippage,
             db_path=_db_path(),
+            fee_fn=fee_model.calculate,
+            on_progress=on_progress,
+            is_cancelled=lambda: state.cancel_requested,
         )
+
+        if state.cancel_requested:
+            state.error = "Backtest stopped by user"
+            return
 
         result_dict = result.to_dict()
         state.result = result_dict
@@ -908,14 +959,14 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                 """INSERT OR REPLACE INTO backtest_results
                    (task_id, series, strategies, start_date, end_date, run_timestamp,
                     total_trades, wins, losses, net_pnl_cents, sharpe, max_drawdown_pct,
-                    win_rate, result_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    win_rate, result_path, hypothesis_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (task_id, body.series, json.dumps(body.strategies),
                  body.start, body.end, datetime.now(timezone.utc).isoformat(),
                  result_dict["total_trades"], result_dict["wins"], result_dict["losses"],
                  result_dict["net_pnl_cents"], result_dict["sharpe"],
                  result_dict["max_drawdown_pct"], result_dict["win_rate"],
-                 str(result_path)),
+                 str(result_path), body.hypothesis_id),
             )
             conn.commit()
         finally:
@@ -946,6 +997,18 @@ async def start_backtest(
     return {"task_id": task_id}
 
 
+@app.post("/api/backtest/{task_id}/stop")
+async def stop_backtest(task_id: str, _: None = Depends(check_auth)) -> dict:
+    state = get_backtest_state(task_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not state.running:
+        raise HTTPException(status_code=409, detail="Task is not running")
+    state.cancel_requested = True
+    state.progress = "Stopping..."
+    return {"ok": True}
+
+
 @app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
 async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
     import json
@@ -969,9 +1032,10 @@ async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistor
                 task_id=r["task_id"],
                 series=r["series"],
                 strategies=json.loads(r["strategies"]),
+                hypothesis_id=r["hypothesis_id"] if "hypothesis_id" in r.keys() else None,
                 timestamp=r["run_timestamp"],
                 total_trades=r["total_trades"] or 0,
-                net_pnl_cents=r["net_pnl_cents"] or 0,
+                net_pnl_cents=int(r["net_pnl_cents"] or 0),
                 sharpe=r["sharpe"] or 0.0,
                 win_rate=r["win_rate"] or 0.0,
             )
@@ -981,12 +1045,28 @@ async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistor
         conn.close()
 
 
+@app.get("/api/backtest/active")
+async def backtest_active() -> dict:
+    """Return the task_id of the currently running backtest, if any."""
+    for tid, state in backtest_states.items():
+        if state.running:
+            return {"task_id": tid}
+    return {"task_id": None}
+
+
 @app.get("/api/backtest/{task_id}/status", response_model=BacktestStatusResponse)
 async def backtest_status(task_id: str) -> BacktestStatusResponse:
     state = get_backtest_state(task_id)
     if not state:
         raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
-    return BacktestStatusResponse(running=state.running, progress=state.progress, error=state.error)
+    return BacktestStatusResponse(
+        running=state.running,
+        progress=state.progress,
+        error=state.error,
+        trades_processed=state.trades_processed if state.trades_estimated else None,
+        trades_estimated=state.trades_estimated or None,
+        net_pnl_cents=int(state.net_pnl_cents) if state.trades_estimated else None,
+    )
 
 
 @app.get("/api/backtest/{task_id}/result")
