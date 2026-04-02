@@ -768,7 +768,19 @@ async def get_series(_: None = Depends(check_auth)) -> list[str]:
 @app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
 async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
     from api.adapter_registry import get_fee_model_for_db
-    fee_model = get_fee_model_for_db(str(_db_path()))
+    from edge_catcher.storage.db import get_connection
+    db = _db_path()
+    if db.exists():
+        conn = get_connection(db)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM markets WHERE series_ticker = ? LIMIT 1", (series,)
+            ).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
+        finally:
+            conn.close()
+    fee_model = get_fee_model_for_db(str(db))
     return FeeInfoResponse(
         id=fee_model.id,
         name=fee_model.name,

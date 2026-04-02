@@ -110,8 +110,18 @@ def is_api_key_set(meta: AdapterMeta) -> bool:
         return False
     return bool(os.getenv(meta.api_key_env_var))
 
+def get_fee_model(adapter_id: str) -> FeeModel:
+    """Return the fee model for a specific adapter by ID (preferred lookup)."""
+    adapter = get_adapter(adapter_id)
+    return adapter.fee_model if adapter else KALSHI_FEE
+
 def get_fee_model_for_db(db_path: str) -> FeeModel:
-    """Return the fee model for the adapter that writes to db_path."""
+    """Return the fee model for the adapter that writes to db_path.
+
+    When multiple adapters share the same db_file (e.g. all Kalshi adapters
+    share data/kalshi.db), returns the fee model of the first match.
+    Prefer get_fee_model(adapter_id) when the adapter ID is known.
+    """
     from pathlib import Path
     normalized = str(Path(db_path).resolve())
     for a in ADAPTERS:

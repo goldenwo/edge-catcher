@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
+
+# The fee function signature: (price_cents, size) -> fee_cents
+FeeCalc = Callable[[int, int], float]
 
 
 @dataclass(frozen=True)
@@ -17,7 +21,7 @@ class FeeModel:
     name: str
     description: str
     formula: str
-    _calc: object  # Callable[[int, int], float] stored as object to keep dataclass frozen
+    _calc: FeeCalc  # type: ignore[misc]  # frozen dataclass + callable field
 
     def calculate(self, price: int, size: int) -> float:
         return self._calc(price, size)
