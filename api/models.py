@@ -123,6 +123,21 @@ class AISettingsResponse(BaseModel):
     openrouter: bool
 
 
+class ModelOption(BaseModel):
+    id: str
+    label: str
+
+
+class ModelSettingsResponse(BaseModel):
+    provider: Optional[str]
+    current_model: Optional[str]
+    models: list[ModelOption]
+
+
+class ModelOverrideRequest(BaseModel):
+    model: Optional[str] = None
+
+
 # ── Pipeline Status ──────────────────────────────────────────────────────────
 
 class PipelineDataStatus(BaseModel):
