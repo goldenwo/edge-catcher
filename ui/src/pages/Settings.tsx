@@ -134,6 +134,7 @@ export default function Settings() {
     setModelSaved(false)
     try {
       await api.saveAiModel(model || null)
+      loadModels()
       setModelSaved(true)
       setTimeout(() => setModelSaved(false), 3000)
     } catch {
