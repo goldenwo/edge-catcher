@@ -818,6 +818,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 
     from edge_catcher.runner.event_backtest import EventBacktester
     from edge_catcher.runner.strategy_parser import list_strategies
+    from api.adapter_registry import get_fee_model_for_db
 
     state = backtest_states[task_id]
     state.running = True
@@ -894,6 +895,8 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                 f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
             )
 
+        fee_model = get_fee_model_for_db(str(_db_path()))
+
         backtester = EventBacktester()
         result = backtester.run(
             series=body.series,
@@ -903,6 +906,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
             initial_cash=body.cash,
             slippage_cents=body.slippage,
             db_path=_db_path(),
+            fee_fn=fee_model.calculate,
             on_progress=on_progress,
             is_cancelled=lambda: state.cancel_requested,
         )
@@ -930,14 +934,14 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                 """INSERT OR REPLACE INTO backtest_results
                    (task_id, series, strategies, start_date, end_date, run_timestamp,
                     total_trades, wins, losses, net_pnl_cents, sharpe, max_drawdown_pct,
-                    win_rate, result_path)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    win_rate, result_path, hypothesis_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (task_id, body.series, json.dumps(body.strategies),
                  body.start, body.end, datetime.now(timezone.utc).isoformat(),
                  result_dict["total_trades"], result_dict["wins"], result_dict["losses"],
                  result_dict["net_pnl_cents"], result_dict["sharpe"],
                  result_dict["max_drawdown_pct"], result_dict["win_rate"],
-                 str(result_path)),
+                 str(result_path), body.hypothesis_id),
             )
             conn.commit()
         finally:
@@ -1003,6 +1007,7 @@ async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistor
                 task_id=r["task_id"],
                 series=r["series"],
                 strategies=json.loads(r["strategies"]),
+                hypothesis_id=r["hypothesis_id"] if "hypothesis_id" in r.keys() else None,
                 timestamp=r["run_timestamp"],
                 total_trades=r["total_trades"] or 0,
                 net_pnl_cents=int(r["net_pnl_cents"] or 0),
@@ -1013,6 +1018,15 @@ async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistor
         ]
     finally:
         conn.close()
+
+
+@app.get("/api/backtest/active")
+async def backtest_active() -> dict:
+    """Return the task_id of the currently running backtest, if any."""
+    for tid, state in backtest_states.items():
+        if state.running:
+            return {"task_id": tid}
+    return {"task_id": None}
 
 
 @app.get("/api/backtest/{task_id}/status", response_model=BacktestStatusResponse)
