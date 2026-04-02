@@ -167,9 +167,10 @@ def test_parse_trade_bad_datetime(adapter):
 # ---------------------------------------------------------------------------
 
 def test_check_memory_sleeps_when_ram_low(adapter):
-    """_check_memory() calls time.sleep(30) when available RAM < threshold."""
+    """_check_memory() calls time.sleep(30) when available RAM < threshold %."""
     mock_vm = MagicMock()
-    mock_vm.available = (adapter.min_available_ram_mb - 50) * 1024 * 1024  # below threshold
+    mock_vm.total = 32 * 1024 ** 3  # 32 GB
+    mock_vm.available = int(0.02 * mock_vm.total)  # 2% free — below 5% threshold
 
     mock_psutil = MagicMock()
     mock_psutil.virtual_memory.return_value = mock_vm
@@ -182,9 +183,10 @@ def test_check_memory_sleeps_when_ram_low(adapter):
 
 
 def test_check_memory_no_sleep_when_ram_ok(adapter):
-    """_check_memory() does not sleep when available RAM >= threshold."""
+    """_check_memory() does not sleep when available RAM >= threshold %."""
     mock_vm = MagicMock()
-    mock_vm.available = (adapter.min_available_ram_mb + 200) * 1024 * 1024  # above threshold
+    mock_vm.total = 32 * 1024 ** 3  # 32 GB
+    mock_vm.available = int(0.50 * mock_vm.total)  # 50% free — well above 5%
 
     mock_psutil = MagicMock()
     mock_psutil.virtual_memory.return_value = mock_vm

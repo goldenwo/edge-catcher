@@ -4,7 +4,7 @@ adapters:
     enabled: true
     # NOTE: Verify this is correct for crypto series (KXBTC). Main API may be api.kalshi.com
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
-    rate_limit_seconds: 0.2  # minimum seconds between requests
+    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
     series:
       - KXBTC    # BTC hourly
       - KXBTCD   # BTC daily
@@ -15,7 +15,7 @@ adapters:
     # "settled" maps to the "finalized" status Kalshi returns for resolved markets
     statuses:
       - settled
-    min_available_ram_mb: 400  # pause download if available RAM drops below this
+    min_available_ram_pct: 10  # pause download if available RAM drops below this % of total
     pagination:
       default_limit: 200
       max_limit: 1000
