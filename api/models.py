@@ -184,6 +184,7 @@ class StrategySaveResponse(BaseModel):
 class BacktestRequest(BaseModel):
     series: str
     strategies: list[str]
+    hypothesis_id: Optional[str] = None
     start: Optional[str] = None
     end: Optional[str] = None
     cash: float = 10000.0
@@ -205,8 +206,16 @@ class BacktestHistoryItem(BaseModel):
     task_id: str
     series: str
     strategies: list[str]
+    hypothesis_id: Optional[str] = None
     timestamp: str
     total_trades: int
     net_pnl_cents: int
     sharpe: float
     win_rate: float
+
+
+class FeeInfoResponse(BaseModel):
+    id: str
+    name: str
+    description: str
+    formula: str

@@ -44,6 +44,7 @@ from api.models import (
     StrategyInfo, StrategizeRequest, StrategizeResponse,
     StrategySaveRequest, StrategySaveResponse,
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
+    FeeInfoResponse,
 )
 from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 
@@ -762,6 +763,18 @@ async def get_series(_: None = Depends(check_auth)) -> list[str]:
         return [r[0] for r in rows]
     finally:
         conn.close()
+
+
+@app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
+async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
+    from api.adapter_registry import get_fee_model_for_db
+    fee_model = get_fee_model_for_db(str(_db_path()))
+    return FeeInfoResponse(
+        id=fee_model.id,
+        name=fee_model.name,
+        description=fee_model.description,
+        formula=fee_model.formula,
+    )
 
 
 # ── strategies ────────────────────────────────────────────────────────────────
