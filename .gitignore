@@ -56,14 +56,16 @@ logs/
 credentials.json
 node_modules/
 
-# Temporary sweep/test scripts
-run_sweep.py
-run_filter_tests.py
+# Temporary sweep/test scripts (all run_* are private research)
+run_*.py
 TASK.md
+TASK-*.md
 
 # Local strategies (edge-specific, never commit)
 edge_catcher/runner/strategies_local.py
 
-# Analysis scripts with specific hypotheses
-scripts/kxbtc15m_analysis.py
-scripts/retail_flow_analysis.py
+# Private research scripts and analysis (entire folder)
+scripts/
+
+# Flow strategy tests (reveals strategy logic)
+tests/test_flow_strategy.py
