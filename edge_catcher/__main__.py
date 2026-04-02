@@ -34,10 +34,18 @@ def _cmd_download(args) -> None:
 
     logger = logging.getLogger(__name__)
 
-    db_path = Path(args.db_path)
-    init_db(db_path)
-
     markets_file = Path(args.markets) if args.markets else Path(args.config) / "markets.yaml"
+
+    # Derive DB path from markets file name when not explicitly provided
+    # e.g. markets-crypto.yaml → data/kalshi-crypto.db, markets.yaml → data/kalshi.db
+    if args.db_path:
+        db_path = Path(args.db_path)
+    else:
+        stem = markets_file.stem  # e.g. "markets-crypto" or "markets"
+        suffix = stem.removeprefix("markets")  # e.g. "-crypto" or ""
+        db_path = Path(f"data/kalshi{suffix}.db")
+
+    init_db(db_path)
     adapter = KalshiAdapter(
         config_path=markets_file,
         dry_run=args.dry_run,
@@ -228,45 +236,43 @@ def _cmd_paper_trade_15m(args) -> None:
 
 def _build_strategy_map():
     """Build the strategy name → class mapping. Returns (strategy_map, has_local)."""
-    from edge_catcher.runner.strategies import ExampleStrategy
+    import importlib
+    from edge_catcher.runner.strategy_parser import STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE
+
+    pub_mod = importlib.import_module(STRATEGIES_PUBLIC_MODULE)
+    ExampleStrategy = pub_mod.ExampleStrategy
+
+    local_mod = None
     try:
-        from edge_catcher.runner.strategies_local import (
-            BuyYesInRange, BuyNoOnDrop, BuyNoInRange, ActiveExitStub,
-            FadeFirstTrade, ThresholdFade, REDACTED,
-            REDACTED, REDACTED,
-            REDACTED, REDACTED,
-            REDACTED,
-            REDACTED, REDACTED,
-        )
-        _has_local = True
+        local_mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
     except ImportError:
-        _has_local = False
+        pass
 
     strategy_map: dict = {
         'example': ExampleStrategy,
     }
-    if _has_local:
+    if local_mod is not None:
         strategy_map.update({
-            'REDACTED': BuyYesInRange,
-            'REDACTED': REDACTED,
-            'REDACTED': BuyNoOnDrop,
-            'REDACTED': BuyNoInRange,
-            'REDACTED': REDACTED,
-            'REDACTED': FadeFirstTrade,
-            'TP': ActiveExitStub,
-            'REDACTED': ThresholdFade,
-            'A': BuyYesInRange, 'Avol': REDACTED,
-            'B': BuyNoOnDrop, 'C': BuyNoInRange, 'Cvol': REDACTED,
-            'D': FadeFirstTrade, 'H1': FadeFirstTrade,
-            'Dvol': REDACTED, 'REDACTED': REDACTED,
-            'Amom': REDACTED, 'REDACTED': REDACTED,
-            'Cmom': REDACTED, 'REDACTED': REDACTED,
-            'Cstack': REDACTED, 'REDACTED': REDACTED,
-            'H5_15m': ThresholdFade, 'H5_15M': ThresholdFade,
-            'Fflow': REDACTED, 'REDACTED': REDACTED,
-            'Ffvol': REDACTED, 'REDACTED': REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'TP': local_mod.REDACTED,
+            'REDACTED': local_mod.REDACTED,
+            'A': local_mod.REDACTED, 'Avol': local_mod.REDACTED,
+            'B': local_mod.REDACTED, 'C': local_mod.REDACTED, 'Cvol': local_mod.REDACTED,
+            'D': local_mod.REDACTED, 'H1': local_mod.REDACTED,
+            'Dvol': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
+            'Amom': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
+            'Cmom': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
+            'Cstack': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
+            'H5_15m': local_mod.REDACTED, 'H5_15M': local_mod.REDACTED,
+            'Fflow': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
+            'Ffvol': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
         })
-    return strategy_map, _has_local
+    return strategy_map, local_mod is not None
 
 
 def _cmd_backtest(args) -> None:
@@ -520,7 +526,8 @@ def _cmd_research(args) -> None:
 
         reporter = Reporter()
         report = reporter.generate_report(results)
-        output_path = getattr(args, 'output', None) or 'reports/research-findings'
+        from edge_catcher.reports import RESEARCH_OUTPUT
+        output_path = getattr(args, 'output', None) or str(RESEARCH_OUTPUT)
         reporter.save(report, output_path)
         print(f"Report saved to {output_path}.json and {output_path}.md")
 
@@ -579,7 +586,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     dl = sub.add_parser("download", help="Download market data from Kalshi")
-    dl.add_argument("--db-path", default="data/kalshi.db")
+    dl.add_argument("--db-path", default=None,
+                     help="DB path (default: derived from --markets file, e.g. data/kalshi-crypto.db)")
     dl.add_argument("--dry-run", action="store_true", help="Fetch one page only")
     dl.add_argument(
         "--skip-market-scan",
@@ -609,7 +617,8 @@ def main() -> None:
     an = sub.add_parser("analyze", help="Run hypothesis analysis against local DB")
     an.add_argument("--hypothesis", default=None, help="Hypothesis ID (default: all)")
     an.add_argument("--db-path", default="data/kalshi.db")
-    an.add_argument("--output", default="reports/latest_analysis.json")
+    from edge_catcher.reports import ANALYSIS_OUTPUT, BACKTEST_OUTPUT, RESEARCH_OUTPUT
+    an.add_argument("--output", default=str(ANALYSIS_OUTPUT))
 
     ar = sub.add_parser("archive", help="Archive trades older than 90 days")
     ar.add_argument("--db-path", default="data/kalshi.db")
@@ -635,7 +644,7 @@ def main() -> None:
     bt.add_argument("--h5-long-threshold", type=int, default=None, dest="h5_long_threshold",
                     help="H5_15m longshot threshold — buy YES at or below this (default: 15)")
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
-    bt.add_argument("--output", default="reports/backtest_result.json")
+    bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
     bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
                     help="Multiplier on 0.07*P*(1-P) entry fee formula (default: 1.0 = full Kalshi taker fee; 0.25 = maker fee; 0.0 = no fee)")
     bt.add_argument("--json", action="store_true", default=False,
@@ -679,12 +688,12 @@ def main() -> None:
     rs_sweepall.add_argument("--end", default="2025-12-31")
     rs_sweepall.add_argument("--max-runs", type=int, default=200, dest="max_runs",
                              help="Total maximum hypotheses to run (default: 200)")
-    rs_sweepall.add_argument("--output", default="reports/research-findings")
+    rs_sweepall.add_argument("--output", default=str(RESEARCH_OUTPUT))
 
     rs_status = rs_sub.add_parser("status", help="Show what has been tested")
 
     rs_report = rs_sub.add_parser("report", help="Generate report from tracked results")
-    rs_report.add_argument("--output", default="reports/research-findings",
+    rs_report.add_argument("--output", default=str(RESEARCH_OUTPUT),
                            help="Output base path (suffixes .json and .md added)")
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
@@ -722,8 +731,8 @@ def main() -> None:
     ip.add_argument(
         "report",
         nargs="?",
-        default="reports/latest_analysis.json",
-        help="Path to analysis JSON (default: reports/latest_analysis.json)",
+        default=str(ANALYSIS_OUTPUT),
+        help=f"Path to analysis JSON (default: {ANALYSIS_OUTPUT})",
     )
     ip.add_argument(
         "--provider",
