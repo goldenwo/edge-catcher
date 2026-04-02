@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, StrategyInfo, BacktestHistoryItem } from '../api'
+import { api, StrategyInfo, BacktestHistoryItem, FeeInfo } from '../api'
 import { usePipeline } from '../components/PipelineStatus'
 import EquityCurve from '../components/EquityCurve'
 
@@ -13,6 +13,7 @@ interface BacktestResult {
   max_drawdown_cents?: number
   per_strategy?: Record<string, Record<string, unknown>>
   equity_curve?: [string, number][]
+  per_strategy_curves?: Record<string, [string, number][]>
   trade_log?: Record<string, unknown>[]
   [key: string]: unknown
 }
@@ -53,6 +54,8 @@ export default function Backtest() {
   const [minPrice, setMinPrice] = useState<string>('')
   const [maxPrice, setMaxPrice] = useState<string>('')
 
+  const [feeInfo, setFeeInfo] = useState<FeeInfo | null>(null)
+
   // Run state
   const [taskId, setTaskId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -73,16 +76,43 @@ export default function Backtest() {
   const hasStrategies = (pipeline?.strategies.count ?? 0) > 0
   const prerequisitesMet = hasData && hasStrategies
 
-  // Load series, strategies, and history on mount
+  const clearPolling = () => {
+    clearInterval(intervalRef.current)
+    intervalRef.current = undefined
+  }
+
+  // Load series, strategies, and history (re-fetch when pipeline status arrives)
   useEffect(() => {
     api.series().then(setSeriesList).catch(() => {})
     api.strategies().then(setStrategiesList).catch(() => {})
     api.backtestHistory().then(setHistory).catch(() => {})
-  }, [])
+  }, [pipeline])
 
-  // Cleanup polling on unmount
   useEffect(() => {
-    return () => clearInterval(intervalRef.current)
+    if (!series) {
+      setFeeInfo(null)
+      return
+    }
+    api.feeInfo(series).then(setFeeInfo).catch(() => setFeeInfo(null))
+  }, [series])
+
+  // Check for running backtest on mount, resume polling, cleanup on unmount
+  useEffect(() => {
+    let cancelled = false
+
+    api.backtestActive().then(({ task_id }) => {
+      if (cancelled || !task_id) return
+      setTaskId(task_id)
+      setRunning(true)
+      clearPolling()
+      intervalRef.current = setInterval(() => pollStatus(task_id), 2000)
+      pollStatus(task_id)
+    }).catch(() => {})
+
+    return () => {
+      cancelled = true
+      clearPolling()
+    }
   }, [])
 
   const toggleStrategy = (name: string) => {
@@ -102,11 +132,11 @@ export default function Backtest() {
       setTradesEstimated(s.trades_estimated ?? null)
       setLivePnl(s.net_pnl_cents ?? null)
       if (s.error) {
-        clearInterval(intervalRef.current)
+        clearPolling()
         setRunning(false)
         setError(s.error)
       } else if (!s.running) {
-        clearInterval(intervalRef.current)
+        clearPolling()
         setRunning(false)
         try {
           const r = await api.backtestResult(tid)
@@ -140,7 +170,7 @@ export default function Backtest() {
     }
     if (startDate) params.start = startDate
     if (endDate) params.end = endDate
-    if (cash !== 10000) params.cash = cash
+    params.cash = cash * 100 // convert dollars to cents for backend
     if (slippage !== 1) params.slippage = slippage
     if (tp) params.tp = Number(tp)
     if (sl) params.sl = Number(sl)
@@ -150,6 +180,7 @@ export default function Backtest() {
     try {
       const { task_id } = await api.startBacktest(params as Parameters<typeof api.startBacktest>[0])
       setTaskId(task_id)
+      clearPolling()
       intervalRef.current = setInterval(() => pollStatus(task_id), 2000)
     } catch (e) {
       setRunning(false)
@@ -224,6 +255,11 @@ export default function Backtest() {
                 <option key={s} value={s}>{s}</option>
               ))}
             </select>
+            {feeInfo && (
+              <p className="text-xs text-gray-500 mt-1">
+                Fees: {feeInfo.name} — <span className="font-mono">{feeInfo.formula}</span>
+              </p>
+            )}
           </div>
 
           {/* Date range */}
@@ -418,6 +454,7 @@ export default function Backtest() {
               ['Net P&L', fmtDollar(result.net_pnl_cents)],
               ['Sharpe', fmt(result.sharpe)],
               ['Max Drawdown', fmtDollar(result.max_drawdown_cents)],
+              ['Fees Paid', fmtDollar(result.total_fees_paid)],
             ] as [string, string | number][]).map(([label, value]) => (
               <div key={label} className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3">
                 <dt className="text-xs text-gray-500">{label}</dt>
@@ -462,7 +499,7 @@ export default function Backtest() {
             <div>
               <h3 className="text-sm font-medium text-gray-300 mb-2">Equity Curve</h3>
               <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
-                <EquityCurve data={result.equity_curve} />
+                <EquityCurve data={result.equity_curve} series={result.per_strategy_curves} />
               </div>
             </div>
           )}
@@ -516,6 +553,7 @@ export default function Backtest() {
               <thead className="border-b border-gray-800 bg-gray-900">
                 <tr>
                   <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Timestamp</th>
+                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Hypothesis</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Series</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Strategies</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Trades</th>
@@ -535,6 +573,9 @@ export default function Backtest() {
                   >
                     <td className="px-4 py-3 text-xs text-gray-400">
                       {new Date(h.timestamp).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-gray-300">
+                      {h.hypothesis_id ?? <span className="text-gray-600">—</span>}
                     </td>
                     <td className="px-4 py-3 font-mono">{h.series}</td>
                     <td className="px-4 py-3 text-gray-400 text-xs">
