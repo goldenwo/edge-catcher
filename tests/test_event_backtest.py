@@ -1058,8 +1058,8 @@ class TestIntegration:
 		assert "wins" in first
 		assert "losses" in first
 
-	def test_on_progress_callback_fires_at_10k(self, tmp_path):
-		"""on_progress callback fires at 10k trade checkpoint."""
+	def test_on_progress_callback_fires_at_1k(self, tmp_path):
+		"""on_progress callback fires every 1k trades (plus initial call at 0)."""
 		close = _dt(2)
 		markets = [{
 			'ticker': 'PROG-B',
@@ -1072,7 +1072,7 @@ class TestIntegration:
 		trades = [
 			{'trade_id': f'tq{i}', 'ticker': 'PROG-B', 'yes_price': 80, 'no_price': 20,
 			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0) + timedelta(seconds=i))}
-			for i in range(10_001)
+			for i in range(2_001)
 		]
 		db_path = _make_db(tmp_path, markets, trades)
 		progress_calls = []
@@ -1085,11 +1085,12 @@ class TestIntegration:
 			fee_fn=lambda p, s: 0.0,
 			on_progress=lambda info: progress_calls.append(info),
 		)
-		# Initial callback + at least one 10k checkpoint
+		# Initial callback (trades_processed=0) + at least one 1k checkpoint
 		assert len(progress_calls) >= 2
+		assert progress_calls[0]["trades_processed"] == 0
 		second = progress_calls[1]
-		assert second["trades_processed"] == 10000
-		assert second["trades_estimated"] == 10001
+		assert second["trades_processed"] == 1000
+		assert second["trades_estimated"] == 2001
 
 
 # ---------------------------------------------------------------------------
