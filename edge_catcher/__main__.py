@@ -161,6 +161,30 @@ def _cmd_download_btc(args) -> None:
     print(f"Downloaded {n:,} new BTC-USD candles.")
 
 
+def _cmd_download_altcoin_ohlc(args) -> None:
+    from edge_catcher.adapters.coinbase import CoinbaseAdapter
+    from edge_catcher.storage.db import get_connection, init_ohlc_table
+    from datetime import datetime, timezone, date
+
+    db_path = Path(args.db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = get_connection(db_path)
+
+    start_ts = int(datetime.fromisoformat(args.start_date).replace(tzinfo=timezone.utc).timestamp())
+    end_date = args.end_date or date.today().isoformat()
+    end_ts = int(datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc).timestamp())
+
+    coins = [c.strip().upper() for c in args.coins.split(",") if c.strip()]
+    for coin in coins:
+        product_id = f"{coin}-USD"
+        adapter = CoinbaseAdapter(product_id=product_id)
+        init_ohlc_table(conn, adapter.table_name)
+        n = adapter.download_range(start_ts, end_ts, conn)
+        print(f"Downloading {product_id}: {n:,} candles")
+
+    conn.close()
+
+
 def _cmd_analyze(args) -> None:
     from edge_catcher.runner.backtest import run_backtest
     from edge_catcher.reports.formatter import format_json_file
@@ -275,6 +299,50 @@ def _build_strategy_map():
     return strategy_map, local_mod is not None
 
 
+def _load_coin_closes(series: str, btc_db: str, altcoin_db: str) -> dict:
+    """Load price closes dict {timestamp: close} for the coin matching the series prefix."""
+    import sqlite3 as _sql
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    # Map series prefix → (coin, db_path, table_name)
+    _SERIES_MAP = [
+        ("KXBTC", "BTC", btc_db, "btc_ohlc"),
+        ("KXSOL", "SOL", altcoin_db, "sol_ohlc"),
+        ("KXETH", "ETH", altcoin_db, "eth_ohlc"),
+        ("KXXRP", "XRP", altcoin_db, "xrp_ohlc"),
+        ("KXDOGE", "DOGE", altcoin_db, "doge_ohlc"),
+        ("KXBNB", "BNB", altcoin_db, "bnb_ohlc"),
+        ("KXHYPE", "HYPE", altcoin_db, "hype_ohlc"),
+    ]
+
+    db_path = btc_db
+    table = "btc_ohlc"
+    coin = "BTC"
+    for prefix, c, db, tbl in _SERIES_MAP:
+        if series.upper().startswith(prefix):
+            coin, db_path, table = c, db, tbl
+            break
+
+    try:
+        _conn = _sql.connect(str(db_path))
+        _conn.row_factory = _sql.Row
+        # Check table exists before querying
+        exists = _conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            _conn.close()
+            _log.warning("_load_coin_closes: table %s not found in %s — skipping momentum filter", table, db_path)
+            return {}
+        _rows = _conn.execute(f"SELECT timestamp, close FROM {table} ORDER BY timestamp").fetchall()
+        _conn.close()
+        return {r["timestamp"]: r["close"] for r in _rows}
+    except Exception as exc:
+        _log.warning("_load_coin_closes: could not load %s from %s: %s — skipping momentum filter", table, db_path, exc)
+        return {}
+
+
 def _cmd_backtest(args) -> None:
     import json
     from datetime import date
@@ -360,15 +428,10 @@ def _cmd_backtest(args) -> None:
                     kwargs['fav_threshold'] = args.h5_fav_threshold
                 if args.h5_long_threshold is not None:
                     kwargs['long_threshold'] = args.h5_long_threshold
-            # Load BTC OHLC data for momentum-filtered strategies
+            # Load coin OHLC data for momentum-filtered strategies
             if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
-                import sqlite3 as _sql
-                _conn = _sql.connect(str(args.btc_db))
-                _conn.row_factory = _sql.Row
-                _rows = _conn.execute('SELECT timestamp, close FROM btc_ohlc ORDER BY timestamp').fetchall()
-                kwargs['btc_closes'] = {r['timestamp']: r['close'] for r in _rows}
-                _conn.close()
-                print(f'  Loaded {len(kwargs["btc_closes"])} BTC candles for momentum filter', file=sys.stderr)
+                kwargs['btc_closes'] = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
+                print(f'  Loaded {len(kwargs["btc_closes"])} candles for momentum filter', file=sys.stderr)
 
             strategies.append(cls(**kwargs))
 
@@ -617,6 +680,16 @@ def main() -> None:
     btc.add_argument("--db", default="data/btc.db", help="Path to SQLite DB for BTC OHLC data")
     btc.set_defaults(func=_cmd_download_btc)
 
+    altcoin = sub.add_parser("download-altcoin-ohlc", help="Download 1-minute OHLC for altcoins from Coinbase")
+    altcoin.add_argument("--db", default="data/altcoin_ohlc.db", help="Path to SQLite DB for altcoin OHLC data")
+    altcoin.add_argument("--coins", default="SOL,ETH,XRP,DOGE,BNB",
+                         help="Comma-separated coin symbols (default: SOL,ETH,XRP,DOGE,BNB)")
+    altcoin.add_argument("--start-date", default="2025-01-01", dest="start_date",
+                         help="Start date ISO format (default: 2025-01-01)")
+    altcoin.add_argument("--end-date", default=None, dest="end_date",
+                         help="End date ISO format (default: today)")
+    altcoin.set_defaults(func=_cmd_download_altcoin_ohlc)
+
     an = sub.add_parser("analyze", help="Run hypothesis analysis against local DB")
     an.add_argument("--hypothesis", default=None, help="Hypothesis ID (default: all)")
     an.add_argument("--db-path", default="data/kalshi.db")
@@ -658,6 +731,8 @@ def main() -> None:
                     help="Print distinct series_ticker values from the DB as JSON and exit")
     bt.add_argument("--btc-db", default="data/btc.db", dest="btc_db",
                     help="Path to BTC OHLC database (default: data/btc.db)")
+    bt.add_argument("--altcoin-ohlc-db", default="data/altcoin_ohlc.db", dest="altcoin_ohlc_db",
+                    help="Path to altcoin OHLC database (default: data/altcoin_ohlc.db)")
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
@@ -757,6 +832,8 @@ def main() -> None:
         _cmd_download(args)
     elif args.command == "download-btc":
         _cmd_download_btc(args)
+    elif args.command == "download-altcoin-ohlc":
+        _cmd_download_altcoin_ohlc(args)
     elif args.command == "analyze":
         _cmd_analyze(args)
     elif args.command == "archive":

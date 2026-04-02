@@ -138,9 +138,27 @@ CREATE INDEX IF NOT EXISTS idx_btc_ohlc_ts ON btc_ohlc (timestamp);
 """
 
 
+def init_ohlc_table(conn: sqlite3.Connection, table_name: str = "btc_ohlc") -> None:
+    """Create an OHLC table and index for the given table_name if they don't exist."""
+    conn.execute(
+        f"""CREATE TABLE IF NOT EXISTS {table_name} (
+            timestamp INTEGER PRIMARY KEY,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{table_name}_ts ON {table_name} (timestamp)"
+    )
+    conn.commit()
+
+
 def init_btc_ohlc_table(conn: sqlite3.Connection) -> None:
-    """Create btc_ohlc table and index if they don't exist."""
-    conn.executescript(_BTC_OHLC_SQL)
+    """Create btc_ohlc table and index if they don't exist. Backward-compat wrapper."""
+    init_ohlc_table(conn, "btc_ohlc")
 
 
 def _configure_connection(conn: sqlite3.Connection) -> None:
