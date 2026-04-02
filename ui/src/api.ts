@@ -81,6 +81,17 @@ export interface AISettings {
   openrouter: boolean
 }
 
+export interface ModelOption {
+  id: string
+  label: string
+}
+
+export interface ModelSettings {
+  provider: string | null
+  current_model: string | null
+  models: ModelOption[]
+}
+
 // ── Pipeline Status ─────────────────────────────────────────────────────────
 
 export interface PipelineStatus {
@@ -152,6 +163,9 @@ export const api = {
   aiSettings: () => req<AISettings>('/api/settings/ai'),
   saveAiKey: (provider: string, api_key: string) =>
     req<{ ok: boolean }>('/api/settings/ai', json({ provider, api_key })),
+  aiModels: () => req<ModelSettings>('/api/settings/ai/models'),
+  saveAiModel: (model: string | null) =>
+    req<{ ok: boolean }>('/api/settings/ai/model', json({ model })),
   pipelineStatus: () => req<PipelineStatus>('/api/pipeline/status'),
   series: () => req<string[]>('/api/series'),
   strategies: () => req<StrategyInfo[]>('/api/strategies'),
