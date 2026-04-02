@@ -233,7 +233,7 @@ async def analyze(
             hypothesis_id=body.hypothesis_id,
             db_path=_db_path(),
             config_path=_config_path(),
-            output_path=Path("reports/latest_analysis.json"),
+            output_path=None,  # uses ANALYSIS_OUTPUT default
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -798,9 +798,9 @@ async def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusRespon
     hyp_count = len(merged_hyps)
 
     # Strategies
-    strategies_path = Path("edge_catcher/runner/strategies_local.py")
-    strats = list_strategies(file_path=strategies_path)
-    pub_strats = list_strategies(file_path=Path("edge_catcher/runner/strategies.py"))
+    from edge_catcher.runner.strategy_parser import STRATEGIES_LOCAL_PATH, STRATEGIES_PUBLIC_PATH
+    strats = list_strategies(file_path=STRATEGIES_LOCAL_PATH)
+    pub_strats = list_strategies(file_path=STRATEGIES_PUBLIC_PATH)
     all_strats = pub_strats + strats
 
     return PipelineStatusResponse(
@@ -856,9 +856,9 @@ async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfo
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
 async def get_strategies(_: None = Depends(check_auth)) -> list[StrategyInfo]:
-    from edge_catcher.runner.strategy_parser import list_strategies
-    pub = list_strategies(file_path=Path("edge_catcher/runner/strategies.py"))
-    local = list_strategies(file_path=Path("edge_catcher/runner/strategies_local.py"))
+    from edge_catcher.runner.strategy_parser import list_strategies, STRATEGIES_PUBLIC_PATH, STRATEGIES_LOCAL_PATH
+    pub = list_strategies(file_path=STRATEGIES_PUBLIC_PATH)
+    local = list_strategies(file_path=STRATEGIES_LOCAL_PATH)
     return [StrategyInfo(**s) for s in pub + local]
 
 
@@ -888,11 +888,11 @@ async def save_strategy_endpoint(
     body: StrategySaveRequest,
     _: None = Depends(check_auth),
 ) -> StrategySaveResponse:
-    from edge_catcher.runner.strategy_parser import save_strategy
+    from edge_catcher.runner.strategy_parser import save_strategy, STRATEGIES_LOCAL_PATH
     result = save_strategy(
         body.code,
         body.strategy_name,
-        Path("edge_catcher/runner/strategies_local.py"),
+        STRATEGIES_LOCAL_PATH,
     )
     return StrategySaveResponse(**result)
 
@@ -906,7 +906,9 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
     from datetime import date, datetime, timezone
 
     from edge_catcher.runner.event_backtest import EventBacktester
-    from edge_catcher.runner.strategy_parser import list_strategies
+    from edge_catcher.runner.strategy_parser import (
+        list_strategies, STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
+    )
     from api.adapter_registry import get_fee_model_for_db
 
     state = backtest_states[task_id]
@@ -918,7 +920,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
         strategy_map: dict[str, type] = {}
 
         # Import public strategies
-        from edge_catcher.runner import strategies as pub_mod
+        pub_mod = importlib.import_module(STRATEGIES_PUBLIC_MODULE)
         for attr_name in dir(pub_mod):
             obj = getattr(pub_mod, attr_name)
             if isinstance(obj, type) and hasattr(obj, 'name') and hasattr(obj, 'on_trade'):
@@ -926,10 +928,9 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                     strategy_map[obj.name] = obj
 
         # Import local strategies (if file exists)
-        local_path = Path("edge_catcher/runner/strategies_local.py")
-        if local_path.exists():
+        if STRATEGIES_LOCAL_PATH.exists():
             try:
-                import edge_catcher.runner.strategies_local as local_mod
+                local_mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
                 importlib.reload(local_mod)  # Pick up recent saves
                 for attr_name in dir(local_mod):
                     obj = getattr(local_mod, attr_name)
@@ -1008,7 +1009,8 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
         state.result = result_dict
 
         # Save to JSON file
-        result_path = Path(f"reports/backtest_{task_id}.json")
+        from edge_catcher.reports import BACKTEST_DIR
+        result_path = BACKTEST_DIR / f"backtest_{task_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         import json
         with open(result_path, "w") as f:

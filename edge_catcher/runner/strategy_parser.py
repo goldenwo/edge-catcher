@@ -9,6 +9,13 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Centralized strategy paths ───────────────────────────────────────────────
+# Change these four constants to reorganize strategy files into subfolders.
+STRATEGIES_PUBLIC_PATH = Path("edge_catcher/runner/strategies.py")
+STRATEGIES_LOCAL_PATH = Path("edge_catcher/runner/strategies_local.py")
+STRATEGIES_PUBLIC_MODULE = "edge_catcher.runner.strategies"
+STRATEGIES_LOCAL_MODULE = "edge_catcher.runner.strategies_local"
+
 # Default preamble for new strategies_local.py files
 _PREAMBLE = '''\
 """Local strategies — gitignored. Your edge stays private."""

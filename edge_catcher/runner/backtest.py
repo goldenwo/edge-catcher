@@ -29,7 +29,7 @@ def run_backtest(
     hypothesis_id: Optional[str] = None,
     db_path: Path = Path("data/kalshi.db"),
     config_path: Path = Path("config"),
-    output_path: Path = Path("reports/latest_analysis.json"),
+    output_path: Optional[Path] = None,
 ) -> dict:
     """Run hypothesis analysis, persist to DB, write JSON output.
 
@@ -45,9 +45,10 @@ def run_backtest(
     Raises:
         FileNotFoundError: if db_path does not exist
     """
+    from edge_catcher.reports import ANALYSIS_OUTPUT
     db_path = Path(db_path)
     config_path = Path(config_path)
-    output_path = Path(output_path)
+    output_path = Path(output_path) if output_path else ANALYSIS_OUTPUT
 
     if not db_path.exists():
         raise FileNotFoundError(
@@ -91,7 +92,7 @@ def main():
     parser.add_argument("--hypothesis", default=None, help="Hypothesis ID to run")
     parser.add_argument("--db-path", default="data/kalshi.db")
     parser.add_argument(
-        "--output", default="reports/latest_analysis.json"
+        "--output", default=None
     )
     args = parser.parse_args()
 
