@@ -2,11 +2,14 @@ const WIDTH = 800
 const HEIGHT = 200
 const PADDING = { top: 20, right: 20, bottom: 30, left: 60 }
 
+const SERIES_COLORS = ['#60a5fa', '#f472b6', '#facc15', '#a78bfa', '#fb923c', '#34d399']
+
 interface EquityCurveProps {
   data: [string, number][]
+  series?: Record<string, [string, number][]>
 }
 
-export default function EquityCurve({ data }: EquityCurveProps) {
+export default function EquityCurve({ data, series }: EquityCurveProps) {
   if (!data || data.length === 0) {
     return (
       <div className="text-sm text-gray-500 text-center py-8">
@@ -59,6 +62,25 @@ export default function EquityCurve({ data }: EquityCurveProps) {
         stroke="#34d399"
         strokeWidth="1.5"
       />
+
+      {/* Per-strategy series */}
+      {series && Object.entries(series).map(([name, sData], idx) => {
+        const pts = sData.map((d, i) => {
+          const x = PADDING.left + (i / (sData.length - 1)) * plotW
+          const y = PADDING.top + (1 - (d[1] - minY) / rangeY) * plotH
+          return `${x},${y}`
+        }).join(' ')
+        return (
+          <polyline
+            key={name}
+            points={pts}
+            fill="none"
+            stroke={SERIES_COLORS[idx % SERIES_COLORS.length]}
+            strokeWidth="1"
+            opacity={0.6}
+          />
+        )
+      })}
 
       {/* Y-axis labels */}
       <text
