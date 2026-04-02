@@ -62,6 +62,7 @@ def _clean_env() -> dict:
         "OPENAI_API_KEY",
         "OPENROUTER_API_KEY",
         "EDGE_CATCHER_LLM_PROVIDER",
+        "EDGE_CATCHER_LLM_MODEL",
     ]:
         clean.pop(key, None)
     return clean
@@ -124,6 +125,13 @@ def test_client_env_provider_var_overrides_key_detection():
     with patch.dict(os.environ, env, clear=True):
         client = LLMClient()
     assert client.provider == "openai"
+
+
+def test_client_resolve_model_with_no_provider():
+    """_resolve_model does not crash when provider is None."""
+    with patch.dict(os.environ, _clean_env(), clear=True):
+        client = LLMClient()
+    assert client._resolve_model("interpreter") is None
 
 
 def test_client_missing_anthropic_package_raises():
