@@ -23,7 +23,7 @@ class LLMClient:
     _DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "anthropic": {
             "formalizer": "claude-sonnet-4-20250514",
-            "interpreter": "claude-haiku-4-20250414",
+            "interpreter": "claude-haiku-4-5-20251001",
             "strategizer": "claude-sonnet-4-20250514",
         },
         "openai": {
@@ -71,7 +71,7 @@ class LLMClient:
     def _resolve_model(self, task: str) -> Optional[str]:
         if self.model:
             return self.model
-        return self._DEFAULT_MODELS.get(self.provider or {}, {}).get(task)
+        return self._DEFAULT_MODELS.get(self.provider or "", {}).get(task)
 
     # ── public API ────────────────────────────────────────────────────────────
 
