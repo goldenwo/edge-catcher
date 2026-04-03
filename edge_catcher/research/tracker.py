@@ -191,6 +191,21 @@ class Tracker:
         finally:
             conn.close()
 
+    def list_pending(self) -> list[dict]:
+        """Return hypotheses that have no result row (saved but not yet executed)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT h.*
+                   FROM hypotheses h
+                   LEFT JOIN results r ON h.id = r.hypothesis_id
+                   WHERE r.hypothesis_id IS NULL
+                   ORDER BY h.created_at ASC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
     def stats(self) -> dict:
         """Return summary counts."""
         conn = self._connect()
