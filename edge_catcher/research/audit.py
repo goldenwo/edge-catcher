@@ -52,8 +52,8 @@ class AuditLog:
 		self.db_path.parent.mkdir(parents=True, exist_ok=True)
 		self._init()
 
-	def _connect(self) -> sqlite3.Connection:
-		conn = sqlite3.connect(str(self.db_path))
+	def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+		conn = sqlite3.connect(str(self.db_path), timeout=timeout)
 		conn.row_factory = sqlite3.Row
 		return conn
 
