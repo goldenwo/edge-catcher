@@ -58,6 +58,7 @@ node_modules/
 
 # Temporary sweep/test scripts (all run_* are private research)
 run_*.py
+!edge_catcher/research/run_queue.py
 TASK.md
 TASK-*.md
 
