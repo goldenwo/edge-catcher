@@ -1,6 +1,6 @@
 # edge-catcher
 
-A production-grade hypothesis testing pipeline for detecting pricing inefficiencies in prediction markets, sports betting, and options.
+A production-grade hypothesis testing pipeline for detecting pricing inefficiencies in prediction markets (Kalshi), with automated backtesting, strategy research, and an optional AI-driven ideation loop.
 
 Built for rigorous, anti-p-hacking statistical research: pre-registered hypotheses, out-of-sample validation, clustered standard errors, and multi-comparison correction.
 
@@ -8,12 +8,13 @@ Built for rigorous, anti-p-hacking statistical research: pre-registered hypothes
 
 ## Features
 
-- **Multi-market adapter pattern** — Kalshi supported out of the box; plug in sports or options adapters
+- **Multi-market adapter pattern** — Kalshi (BTC, altcoins, sports, weather, politics, esports, entertainment, financials) + Coinbase OHLC
+- **Event-driven backtester** — Run strategies against historical trade data with fee-adjusted PnL, Sharpe ratio, win rate, and per-strategy breakdowns
+- **Autonomous research loop** — Grid sweep across all strategy×series combinations, then LLM-driven hypothesis ideation for novel strategies
 - **Incremental data pipeline** — SQLite with WAL mode, resumable downloads, 90-day rolling archive
 - **Rigorous statistics** — `proportions_ztest` for binary outcomes, clustered SEs by expiration date, Harvey-Liu-Zhu threshold (t > 3.0), Bonferroni correction
-- **5-verdict system** — `INSUFFICIENT_DATA` / `NO_EDGE` / `INCONCLUSIVE` / `EDGE_EXISTS` / `EDGE_NOT_TRADEABLE`
-- **Fee-adjusted edge** — Config-driven fee models (Kalshi maker/taker) applied before any verdict
-- **AI-powered workflow (optional)** — Describe hypotheses in plain English, get structured configs; interpret results in natural language
+- **AI-powered workflow (optional)** — Claude Code CLI (no API key needed), Anthropic, OpenAI, or OpenRouter for hypothesis formalization, result interpretation, and strategy ideation
+- **Web UI** — React + FastAPI dashboard for data source management, backtesting, and strategy generation
 - **No auto-trading** — Research and alerting only
 
 ---
@@ -23,31 +24,67 @@ Built for rigorous, anti-p-hacking statistical research: pre-registered hypothes
 ```
 edge-catcher/
 ├── edge_catcher/
-│   ├── adapters/         # Market data collectors (Kalshi, ...)
+│   ├── adapters/         # Market data collectors
+│   │   ├── base.py       # MarketAdapter abstract interface
+│   │   ├── kalshi.py     # Kalshi API adapter (markets + trades)
+│   │   └── coinbase.py   # Coinbase OHLC adapter (any product)
 │   ├── hypotheses/       # Statistical hypothesis modules
 │   │   ├── examples/     # Example hypothesis template
 │   │   ├── kalshi/       # Kalshi-specific hypotheses
 │   │   └── registry.py   # Auto-discovery + multi-comparison correction
-│   ├── ai/               # Optional AI integration
-│   │   ├── client.py     # LLM client (Anthropic, OpenAI, OpenRouter)
-│   │   ├── formalizer.py # English → hypothesis config + stub
+│   ├── ai/               # LLM integration
+│   │   ├── client.py     # Provider-agnostic client (Anthropic, OpenAI, OpenRouter, Claude Code CLI)
+│   │   ├── formalizer.py # English → hypothesis config
 │   │   ├── interpreter.py# Analysis JSON → English summary
+│   │   ├── strategizer.py# Hypothesis → strategy code generation
 │   │   └── prompts/      # Editable system prompts
-│   ├── runner/           # Backtest orchestration
+│   ├── research/         # Autonomous research agent
+│   │   ├── agent.py      # Hypothesis runner + adjacent generation
+│   │   ├── loop.py       # Grid + LLM phase orchestrator
+│   │   ├── llm_ideator.py# LLM-driven hypothesis proposals
+│   │   ├── grid_planner.py# Exhaustive strategy×series grid
+│   │   ├── evaluator.py  # Promote/explore/kill verdict engine
+│   │   ├── tracker.py    # SQLite result persistence
+│   │   ├── run_queue.py  # Parallel execution with audit logging
+│   │   ├── audit.py      # Integrity checks + decision log
+│   │   └── reporter.py   # Research report generation
+│   ├── runner/           # Backtest engine
+│   │   ├── backtest.py   # Core backtester
+│   │   ├── event_backtest.py # Event-driven backtest
+│   │   ├── strategies.py # Public strategy framework
+│   │   ├── strategy_parser.py # Strategy discovery + validation
+│   │   └── strategies_local.py.example # Template for private strategies
 │   ├── storage/          # SQLite persistence layer
-│   └── reports/          # JSON → human-readable formatting
+│   │   ├── db.py         # Connection management, WAL, OHLC tables
+│   │   ├── models.py     # Market, Trade dataclasses
+│   │   └── archiver.py   # 90-day rolling archive
+│   ├── reports/          # Report formatting
+│   └── fees.py           # Config-driven fee models
+├── api/                  # FastAPI backend
+│   ├── main.py           # REST endpoints
+│   ├── adapter_registry.py # All data source definitions
+│   ├── tasks.py          # Background download state
+│   └── models.py         # API schemas
+├── ui/                   # React + Vite frontend
 ├── config/
-│   ├── markets.yaml      # Adapter config (series, rate limits)
-│   ├── fees.yaml         # Fee models per market
-│   └── hypotheses.yaml   # Hypothesis configs and thresholds
-└── tests/                # pytest suite (60 tests)
+│   ├── markets.yaml            # BTC (default)
+│   ├── markets-altcrypto.yaml  # ETH/SOL/XRP/DOGE/BNB/HYPE
+│   ├── markets-sports.yaml     # NBA/MLB spreads
+│   ├── markets-weather.yaml    # Temperature/rain
+│   ├── markets-financials.yaml # Nasdaq/S&P/yields/jobless
+│   ├── markets-entertainment.yaml # Spotify/awards
+│   ├── markets-politics.yaml   # Elections/mentions
+│   ├── markets-esports.yaml    # CS2/LoL/ATP/J-League
+│   ├── fees.yaml               # Fee models per market
+│   └── hypotheses.yaml         # Hypothesis configs
+└── tests/                # pytest suite (255+ tests)
 ```
 
 ---
 
 ## Quickstart
 
-**Requirements:** Python 3.11+, a Kalshi API key (free at [kalshi.com](https://kalshi.com))
+**Requirements:** Python 3.11+
 
 ```bash
 # Clone and install
@@ -55,19 +92,119 @@ git clone https://github.com/goldenwo/edge-catcher.git
 cd edge-catcher
 pip install -e ".[dev]"
 
-# Set your API key
-cp .env.example .env
-# Edit .env: KALSHI_API_KEY=your_key_here
-
 # Download market data (Kalshi BTC series by default)
 python -m edge_catcher download
 
+# Download BTC OHLC from Coinbase (no API key needed)
+python -m edge_catcher download-btc
+
+# Run a backtest
+python -m edge_catcher backtest --series KXBTCD --strategy example --json
+
 # Run all registered hypotheses
 python -m edge_catcher analyze
-
-# Archive trades older than 90 days
-python -m edge_catcher archive
 ```
+
+---
+
+## CLI Reference
+
+```bash
+# Data download
+python -m edge_catcher download                      # Kalshi BTC contracts
+python -m edge_catcher download --markets config/markets-altcrypto.yaml  # Altcoins
+python -m edge_catcher download-btc                  # Coinbase BTC-USD OHLC
+python -m edge_catcher download-altcoin-ohlc         # Coinbase altcoin OHLC (SOL,ETH,XRP,DOGE,BNB)
+
+# Backtesting
+python -m edge_catcher backtest --series KXBTCD --strategy example --json
+python -m edge_catcher backtest --list-strategies    # Show available strategies
+python -m edge_catcher backtest --list-series        # Show available series
+python -m edge_catcher list-dbs                      # Scan all databases
+
+# Research loop
+python -m edge_catcher research loop --grid-only --max-runs 50 --parallel 4
+python -m edge_catcher research loop --max-runs 200 --parallel 4 --max-llm-calls 5
+python -m edge_catcher research status               # Show progress
+python -m edge_catcher research audit decisions       # Review LLM decisions
+
+# Analysis
+python -m edge_catcher analyze
+python -m edge_catcher archive                       # Archive old trades
+
+# AI tools (optional)
+python -m edge_catcher formalize "your hypothesis in plain English"
+python -m edge_catcher interpret
+```
+
+---
+
+## Autonomous Research Loop
+
+The research loop automates hypothesis generation and testing across all available data:
+
+```
+Grid Phase ──→ LLM Ideation ──→ Strategy Generation ──→ Backtest ──→ Evaluate
+   (exhaustive)     (opus)          (sonnet)            (local)     (promote/explore/kill)
+       │                                                                    │
+       └────────────────────────── feedback ────────────────────────────────┘
+```
+
+**Grid phase:** Tests every strategy×series combination. No LLM calls, fast.
+
+**LLM phase:** Analyzes results, proposes new hypotheses and novel strategies. Uses Claude Code CLI by default (no API key required if `claude` is on PATH).
+
+```bash
+# Warm up the grid first (need 10+ results before LLM activates)
+python -m edge_catcher research loop --grid-only --max-runs 50 --parallel 4
+
+# Full loop with LLM ideation
+python -m edge_catcher research loop --max-runs 200 --parallel 4 --max-llm-calls 5
+
+# Overnight unattended
+export EDGE_CATCHER_CC_BUDGET_USD=1  # cap per-call spend
+while true; do
+    python -m edge_catcher research loop --max-runs 100 --parallel 4 --max-llm-calls 5
+    EXIT=$?
+    if [ $EXIT -ne 2 ]; then break; fi
+    echo "Budget exhausted, continuing..."
+done
+```
+
+Exit code 2 = more work to do. Exit code 0 = grid exhausted. The loop auto-deduplicates and resumes.
+
+---
+
+## Data Sources
+
+### Kalshi Adapters
+
+Kalshi adapters download settled contracts and trade history. No API key required for settled data.
+
+| Adapter | Config | Database |
+|---------|--------|----------|
+| BTC (hourly/daily/weekly/15M) | `config/markets.yaml` | `data/kalshi.db` |
+| Altcoins (ETH/SOL/XRP/DOGE/BNB/HYPE) | `config/markets-altcrypto.yaml` | `data/kalshi-altcrypto.db` |
+| Sports (NBA/MLB) | `config/markets-sports.yaml` | `data/kalshi-sports.db` |
+| Weather | `config/markets-weather.yaml` | `data/kalshi-weather.db` |
+| Financials | `config/markets-financials.yaml` | `data/kalshi-financials.db` |
+| Entertainment | `config/markets-entertainment.yaml` | `data/kalshi-entertainment.db` |
+| Politics | `config/markets-politics.yaml` | `data/kalshi-politics.db` |
+| Esports | `config/markets-esports.yaml` | `data/kalshi-esports.db` |
+
+### Coinbase OHLC Adapters
+
+Coinbase adapters download 1-minute OHLC candles. No API key required (public endpoints).
+
+| Adapter | Product | Database | Table |
+|---------|---------|----------|-------|
+| BTC-USD | `BTC-USD` | `data/btc.db` | `btc_ohlc` |
+| ETH-USD | `ETH-USD` | `data/ohlc.db` | `eth_ohlc` |
+| SOL-USD | `SOL-USD` | `data/ohlc.db` | `sol_ohlc` |
+| XRP-USD | `XRP-USD` | `data/ohlc.db` | `xrp_ohlc` |
+| DOGE-USD | `DOGE-USD` | `data/ohlc.db` | `doge_ohlc` |
+
+All Coinbase adapters share a global rate limiter (~6.6 req/s, safe under Coinbase's 10 req/s public limit).
 
 ---
 
@@ -84,9 +221,8 @@ adapters:
       - KXBTCD   # BTC daily contracts
     statuses:
       - settled
+    min_available_ram_pct: 10  # RAM guard for Pi/low-memory machines
 ```
-
-Add any Kalshi series ticker to pull that market's data.
 
 ### Fees (`config/fees.yaml`)
 
@@ -98,151 +234,70 @@ kalshi:
     formula: "0.07 * P * (1 - P)"
 ```
 
-Fees are applied to the edge calculation before the verdict is issued.
+---
+
+## AI Integration
+
+AI features are optional. The core pipeline works without any API key.
+
+### Provider Priority
+
+1. **Claude Code CLI** — auto-detected if `claude` is on PATH (no API key needed)
+2. **Anthropic** — `ANTHROPIC_API_KEY`
+3. **OpenAI** — `OPENAI_API_KEY`
+4. **OpenRouter** — `OPENROUTER_API_KEY`
+
+Override with `--provider` or `EDGE_CATCHER_LLM_PROVIDER` env var.
+
+### Task Models (Claude Code CLI defaults)
+
+| Task | Model | Effort | Purpose |
+|------|-------|--------|---------|
+| Ideator | opus | high | Analyze results, propose new hypotheses |
+| Strategizer | sonnet | high | Generate strategy code from proposals |
+| Formalizer | sonnet | default | Plain English → structured hypothesis |
+| Interpreter | haiku | default | Summarize results |
+
+Per-call budget cap: `EDGE_CATCHER_CC_BUDGET_USD=1`
 
 ---
 
-## Writing a Hypothesis
+## Web UI
 
-Create a module under `edge_catcher/hypotheses/<market>/your_hypothesis.py`:
+```bash
+# Install UI dependencies
+pip install -e ".[ui]"
+cd ui && npm install
+
+# Run backend + frontend
+uvicorn api.main:app --reload &
+npm run dev
+```
+
+The UI provides:
+- Data source management (download, API key config, status monitoring)
+- Strategy backtesting with real-time progress
+- AI-powered hypothesis formalization and interpretation
+- Model/provider configuration
+
+---
+
+## Writing a Strategy
+
+Strategies live in `edge_catcher/runner/strategies.py` (public) or `edge_catcher/runner/strategies_local.py` (private, gitignored):
 
 ```python
-from edge_catcher.hypotheses.base import HypothesisResult
+from edge_catcher.runner.strategies import Strategy, Signal
 
-HYPOTHESIS_ID = "my_hypothesis"
+class MyStrategy(Strategy):
+    name = "my_strategy"
 
-def run(db_conn, config_path) -> HypothesisResult:
-    # 1. Query settled markets from db_conn
-    # 2. Compute price signal (VWAP or last_price)
-    # 3. Bucket by implied probability
-    # 4. Run proportions_ztest per bucket
-    # 5. Cluster by expiration date
-    # 6. Return HypothesisResult with verdict + per-bucket stats
-    ...
+    def on_trade(self, trade, market, context) -> Signal | None:
+        # Return Signal.BUY_YES, Signal.BUY_NO, or None
+        ...
 ```
 
-Register it in `config/hypotheses.yaml`:
-
-```yaml
-hypotheses:
-  my_hypothesis:
-    name: "My Hypothesis"
-    module: "edge_catcher.hypotheses.my_market.my_hypothesis"
-    market: kalshi
-    status: exploratory   # or confirmatory
-    thresholds:
-      t_stat: 3.0
-      min_n_per_bucket: 30
-      min_independent_obs: 80
-```
-
-The registry discovers it automatically and applies Bonferroni correction when multiple hypotheses run together.
-
----
-
-## AI-Powered Workflow (Optional)
-
-Edge-catcher includes optional AI features that let you describe hypotheses in plain English and get human-readable research summaries. **AI is completely optional** — the core pipeline (download, analyze, archive) works without any API key.
-
-### Setup
-
-```bash
-# Install with AI support
-pip install -e ".[ai]"
-
-# Set your LLM API key (pick one)
-export ANTHROPIC_API_KEY=sk-ant-...    # Anthropic (recommended)
-export OPENAI_API_KEY=sk-...           # OpenAI
-export OPENROUTER_API_KEY=sk-or-...    # OpenRouter (any model)
-```
-
-Provider is auto-detected from whichever API key is set (priority: Anthropic → OpenAI → OpenRouter). Override with `--provider` or `EDGE_CATCHER_LLM_PROVIDER` env var.
-
-### Full Workflow
-
-```
- FORMALIZE ──→ IMPLEMENT ──→ DOWNLOAD ──→ ANALYZE ──→ INTERPRET
-    🤖             👤            ⚙️           ⚙️          🤖
-   (AI)        (you code)    (Python)     (Python)      (AI)
-  ~$0.01         free          free         free       ~$0.002
-```
-
-AI bookends the process. The entire data pipeline and statistical engine runs locally — no tokens burned, no data sent to any LLM during download or analysis.
-
-### Step 1: Formalize a Hypothesis
-
-Describe your market hunch in plain English:
-
-```bash
-python -m edge_catcher formalize "I think Kalshi election contracts for \
-  longshot candidates are overpriced because people overestimate underdogs"
-```
-
-This calls an LLM (Sonnet by default) which generates:
-- A new entry in `config/hypotheses.yaml` with proper buckets, thresholds, and fee model
-- A stub Python module at `edge_catcher/hypotheses/custom/<hypothesis_id>.py`
-- Instructions on what to do next
-
-### Step 2: Implement Your Test
-
-Edit the generated stub module to add your statistical logic. The example template at `edge_catcher/hypotheses/examples/example_hypothesis.py` shows the standard pattern:
-
-1. Query settled markets from the SQLite database
-2. Compute a price signal per market (VWAP or last_price)
-3. Bucket contracts by implied probability
-4. Run `proportions_ztest` per bucket
-5. Cluster standard errors by expiration date
-6. Return a `HypothesisResult` with verdict and per-bucket statistics
-
-### Step 3: Download & Analyze
-
-```bash
-# Download settled market data (pure Python, no AI)
-python -m edge_catcher download
-
-# Run your hypothesis (pure Python + scipy/statsmodels)
-python -m edge_catcher analyze --hypothesis your_hypothesis_id
-```
-
-### Step 4: Interpret Results
-
-Turn the raw JSON analysis into a plain-English research summary:
-
-```bash
-python -m edge_catcher interpret
-# or specify a specific report:
-python -m edge_catcher interpret reports/latest_analysis.json
-```
-
-This calls an LLM (Haiku by default) which reads your analysis JSON and outputs a structured summary including:
-- The verdict (e.g., "This analysis found EDGE_EXISTS")
-- Key findings per price bucket
-- Fee-adjusted edge and tradeability assessment
-- Caveats, limitations, and suggested next steps
-
-### CLI Options
-
-```bash
-# Override provider or model
-python -m edge_catcher formalize --provider openai --model gpt-4o "your hypothesis"
-python -m edge_catcher interpret --provider anthropic --model claude-haiku-4-20250414
-
-# Works with any OpenRouter model
-export OPENROUTER_API_KEY=sk-or-...
-python -m edge_catcher formalize --provider openrouter --model meta-llama/llama-4-70b "your hypothesis"
-```
-
-### What AI Does vs. Doesn't Do
-
-| | Uses AI | Runs Locally |
-|---|:-:|:-:|
-| Formalize (English → config) | ✅ | |
-| Implement (write test logic) | | ✅ (you) |
-| Download (fetch market data) | | ✅ |
-| Analyze (statistical tests) | | ✅ |
-| Interpret (JSON → English) | ✅ | |
-
-AI never touches your data pipeline or statistical analysis. It only translates at the human boundaries.
+Strategies are auto-discovered by the backtester and research loop.
 
 ---
 
@@ -250,15 +305,11 @@ AI never touches your data pipeline or statistical analysis. It only translates 
 
 ### Why t > 3.0 instead of 1.96?
 
-The Harvey-Liu-Zhu (2016) threshold of t > 3.0 corrects for multiple comparison bias in financial research. At t = 1.96, ~5% of random noise passes significance. Requiring t > 3.0 drops the false discovery rate to <0.3%.
+The Harvey-Liu-Zhu (2016) threshold corrects for multiple comparison bias in financial research. At t = 1.96, ~5% of random noise passes significance. Requiring t > 3.0 drops the false discovery rate to <0.3%.
 
 ### Why clustered standard errors?
 
-Contracts expiring on the same date share a common shock (e.g., BTC price at 3pm). Treating them as independent inflates the effective sample size and produces misleadingly small p-values. We cluster by expiration date and use the within-cluster majority outcome as the unit of observation.
-
-### Why `proportions_ztest` not t-test?
-
-Binary outcomes (YES/NO) follow a Bernoulli distribution. The z-test for proportions is the correct test; t-tests assume normally distributed residuals, which doesn't hold for 0/1 data.
+Contracts expiring on the same date share a common shock. Treating them as independent inflates the effective sample size. We cluster by expiration date and use the within-cluster majority outcome as the unit of observation.
 
 ### Verdict logic
 
@@ -278,25 +329,7 @@ EDGE_NOT_TRADEABLE   → signal is real but fee-adjusted edge ≤ 0
 pytest tests/ -v
 ```
 
-All 60 tests run against mocked API responses — no live API key needed.
-
----
-
-## Adding a New Market Adapter
-
-Implement the base interface in `edge_catcher/adapters/`:
-
-```python
-from edge_catcher.adapters.base import BaseAdapter
-
-class MyAdapter(BaseAdapter):
-    def collect_markets(self, series_tickers=None) -> List[Market]:
-        ...
-    def collect_trades(self, ticker: str) -> List[Trade]:
-        ...
-```
-
-The `Market` and `Trade` dataclasses are shared across all adapters — hypotheses don't need to know which adapter produced the data.
+255+ tests run against mocked API responses — no live API key needed.
 
 ---
 
