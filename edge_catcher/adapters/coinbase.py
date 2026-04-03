@@ -1,18 +1,35 @@
 """Coinbase Advanced Trade public API adapter for 1-minute OHLC (any product)."""
 
 import logging
+import threading
 import time
 
 import requests
 
 logger = logging.getLogger(__name__)
 
+# Shared rate limiter: Coinbase allows 10 req/s for public endpoints.
+# A global lock ensures concurrent adapters don't exceed the limit.
+_rate_lock = threading.Lock()
+_last_request_time = 0.0
+_MIN_REQUEST_INTERVAL = 0.15  # ~6.6 req/s max across all adapters (safe margin)
+
+
+def _rate_limit():
+    """Block until enough time has passed since the last Coinbase request."""
+    global _last_request_time
+    with _rate_lock:
+        now = time.monotonic()
+        wait = _MIN_REQUEST_INTERVAL - (now - _last_request_time)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_time = time.monotonic()
+
 
 class CoinbaseAdapter:
     BASE_URL_TEMPLATE = "https://api.coinbase.com/api/v3/brokerage/market/products/{product_id}/candles"
     GRANULARITY = "ONE_MINUTE"
     PAGE_SIZE = 350
-    RATE_LIMIT_SLEEP = 0.4
 
     def __init__(self, product_id: str = "BTC-USD"):
         self.product_id = product_id
@@ -23,6 +40,7 @@ class CoinbaseAdapter:
 
     def fetch_candles(self, start_ts: int, end_ts: int) -> list[dict]:
         """Fetch one page of candles. Returns list of raw candle dicts."""
+        _rate_limit()
         params = {
             "start": str(start_ts),
             "end": str(end_ts),
@@ -87,6 +105,5 @@ class CoinbaseAdapter:
                 )
 
             cursor = window_end
-            time.sleep(self.RATE_LIMIT_SLEEP)
 
         return total_inserted
