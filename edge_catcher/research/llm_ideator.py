@@ -132,13 +132,18 @@ class LLMIdeator:
 				)
 
 		if explored:
-			parts.append("\n## Explored Strategies (worth investigating)")
+			explore_by_strategy: dict[str, list[dict]] = {}
 			for r in explored:
-				parts.append(
-					f"- {r['strategy']} × {r['series']}: "
-					f"Sharpe={r['sharpe']:.2f}, WinRate={r['win_rate']:.1%}, "
-					f"Reason: {r['verdict_reason']}"
-				)
+				explore_by_strategy.setdefault(r["strategy"], []).append(r)
+			parts.append("\n## Explored Strategies (inconclusive)")
+			for strat, strat_results in explore_by_strategy.items():
+				parts.append(f"### {strat} ({len(strat_results)} explores)")
+				for r in strat_results[:5]:
+					parts.append(
+						f"  - {r['series']}: {r['verdict_reason']}"
+					)
+				if len(strat_results) > 5:
+					parts.append(f"  - ... and {len(strat_results) - 5} more")
 
 		if kill_by_strategy:
 			parts.append("\n## Kill Patterns")
