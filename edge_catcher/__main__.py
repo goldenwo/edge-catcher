@@ -531,8 +531,61 @@ def _cmd_research(args) -> None:
         reporter.save(report, output_path)
         print(f"Report saved to {output_path}.json and {output_path}.md")
 
+    elif subcmd == 'loop':
+        from edge_catcher.research.loop import LoopOrchestrator
+        orch = LoopOrchestrator(
+            research_db=research_db,
+            start_date=args.start,
+            end_date=args.end,
+            max_runs=args.max_runs,
+            max_time_minutes=args.max_time,
+            parallel=args.parallel,
+            fee_pct=args.fee_pct,
+            max_llm_calls=args.max_llm_calls,
+            grid_only=args.grid_only,
+            llm_only=args.llm_only,
+            output_path=args.output,
+        )
+        exit_code, results = orch.run()
+
+        # Print summary
+        verdicts = {}
+        for r in results:
+            verdicts[r.verdict] = verdicts.get(r.verdict, 0) + 1
+        print(f"\nLoop complete: {len(results)} runs")
+        for v, c in sorted(verdicts.items()):
+            print(f"  {v}: {c}")
+        if exit_code == 2:
+            print("\nBudget exhausted — run again to continue.")
+        sys.exit(exit_code)
+
+    elif subcmd == 'audit':
+        from edge_catcher.research.audit import AuditLog
+        audit_log = AuditLog(research_db)
+        audit_type = getattr(args, 'audit_type', None)
+
+        if audit_type == 'decisions':
+            for d in audit_log.list_decisions()[:20]:
+                print(f"  [{d['created_at']}] model={d['model']} hash={d['prompt_hash'][:12]}...")
+        elif audit_type == 'integrity':
+            for c in audit_log.list_integrity_checks():
+                print(f"  [{c['created_at']}] {c['checkpoint']}: "
+                      f"hash={c['result_hash'][:12]}... count={c['result_count']}")
+        elif audit_type == 'trace':
+            trace_id = getattr(args, 'trace_id', None)
+            if not trace_id:
+                print("Usage: research audit trace --id <hypothesis-id>")
+                sys.exit(1)
+            execs = [e for e in audit_log.list_executions() if e['hypothesis_id'] == trace_id]
+            if execs:
+                for e in execs:
+                    print(f"  Phase: {e['phase']}, Verdict: {e['verdict']}, "
+                          f"Status: {e['status']}, At: {e['completed_at']}")
+            else:
+                print(f"  No audit records for hypothesis {trace_id}")
+
     else:
-        print("Usage: python -m edge_catcher research {run|sweep|sweep-all|status|report}")
+        print("Usage: python -m edge_catcher research {run|sweep|sweep-all|status|report|loop|audit}")
         sys.exit(1)
 
 
@@ -695,6 +748,32 @@ def main() -> None:
     rs_report = rs_sub.add_parser("report", help="Generate report from tracked results")
     rs_report.add_argument("--output", default=str(RESEARCH_OUTPUT),
                            help="Output base path (suffixes .json and .md added)")
+
+    # Loop subcommand
+    rs_loop = rs_sub.add_parser("loop", help="Autonomous research loop: grid sweep + LLM ideation")
+    rs_loop.add_argument("--max-runs", type=int, default=100, dest="max_runs",
+                         help="Max total backtests across both phases (default: 100)")
+    rs_loop.add_argument("--max-time", type=float, default=None, dest="max_time",
+                         help="Wall-clock timeout in minutes")
+    rs_loop.add_argument("--parallel", type=int, default=1,
+                         help="Concurrent backtests (default: 1)")
+    rs_loop.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
+    rs_loop.add_argument("--start", default="2025-01-01")
+    rs_loop.add_argument("--end", default="2025-12-31")
+    rs_loop.add_argument("--max-llm-calls", type=int, default=10, dest="max_llm_calls",
+                         help="Cap on LLM API calls in ideation phase (default: 10)")
+    rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",
+                         help="Skip LLM phase")
+    rs_loop.add_argument("--llm-only", action="store_true", dest="llm_only",
+                         help="Skip grid, ideate from existing results")
+    rs_loop.add_argument("--output", default=None, help="Save report to this base path")
+
+    # Audit subcommand
+    rs_audit = rs_sub.add_parser("audit", help="Query the research audit log")
+    rs_audit.add_argument("audit_type", choices=["decisions", "integrity", "trace"],
+                          help="What to query")
+    rs_audit.add_argument("--id", default=None, dest="trace_id",
+                          help="Hypothesis ID for trace queries")
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
