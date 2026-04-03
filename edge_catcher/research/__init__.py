@@ -5,6 +5,11 @@ from .evaluator import Evaluator, Thresholds
 from .tracker import Tracker
 from .reporter import Reporter
 from .agent import ResearchAgent
+from .audit import AuditLog
+from .grid_planner import GridPlanner
+from .run_queue import RunQueue
+from .llm_ideator import LLMIdeator
+from .loop import LoopOrchestrator
 
 __all__ = [
     "Hypothesis",
@@ -14,4 +19,9 @@ __all__ = [
     "Tracker",
     "Reporter",
     "ResearchAgent",
+    "AuditLog",
+    "GridPlanner",
+    "RunQueue",
+    "LLMIdeator",
+    "LoopOrchestrator",
 ]

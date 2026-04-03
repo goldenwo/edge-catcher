@@ -2,8 +2,21 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Optional
 from edge_catcher.fees import FeeModel, KALSHI_FEE, ZERO_FEE
+
+
+def _db_file_from_markets_yaml(markets_yaml: str) -> str:
+    """Derive DB path from markets YAML filename.
+
+    e.g. config/markets-weather.yaml → data/kalshi-weather.db
+         config/markets.yaml         → data/kalshi.db
+    """
+    stem = PurePosixPath(markets_yaml).stem  # "markets-weather"
+    suffix = stem.removeprefix("markets")     # "-weather"
+    return f"data/kalshi{suffix}.db"
+
 
 @dataclass
 class AdapterMeta:
@@ -14,8 +27,14 @@ class AdapterMeta:
     api_key_env_var: Optional[str] = None
     default_start_date: Optional[str] = None  # ISO date, shown as default in UI
     markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
-    db_file: str = "data/kalshi.db"  # database file this adapter writes to
+    db_file: str = ""  # database file this adapter writes to (auto-derived from markets_yaml)
     fee_model: FeeModel = field(default_factory=lambda: KALSHI_FEE)
+
+    def __post_init__(self):
+        if not self.db_file and self.markets_yaml:
+            self.db_file = _db_file_from_markets_yaml(self.markets_yaml)
+        elif not self.db_file:
+            self.db_file = "data/kalshi.db"
 
 ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
@@ -53,7 +72,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-crypto.yaml",
+        markets_yaml="config/markets-altcrypto.yaml",
     ),
     AdapterMeta(
         id="kalshi_weather",
