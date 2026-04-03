@@ -29,6 +29,7 @@ class AdapterMeta:
     markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
     db_file: str = ""  # database file this adapter writes to (auto-derived from markets_yaml)
     fee_model: FeeModel = field(default_factory=lambda: KALSHI_FEE)
+    coinbase_product_id: Optional[str] = None  # e.g. "ETH-USD" — set for Coinbase adapters
 
     def __post_init__(self):
         if not self.db_file and self.markets_yaml:
@@ -55,6 +56,47 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-03-21",
         db_file="data/btc.db",
         fee_model=ZERO_FEE,
+        coinbase_product_id="BTC-USD",
+    ),
+    AdapterMeta(
+        id="coinbase_eth",
+        name="Coinbase ETH-USD",
+        description="Download 1-minute ETH-USD OHLC candles from Coinbase (no API key required).",
+        requires_api_key=False,
+        default_start_date="2025-01-01",
+        db_file="data/ohlc.db",
+        fee_model=ZERO_FEE,
+        coinbase_product_id="ETH-USD",
+    ),
+    AdapterMeta(
+        id="coinbase_sol",
+        name="Coinbase SOL-USD",
+        description="Download 1-minute SOL-USD OHLC candles from Coinbase (no API key required).",
+        requires_api_key=False,
+        default_start_date="2025-01-01",
+        db_file="data/ohlc.db",
+        fee_model=ZERO_FEE,
+        coinbase_product_id="SOL-USD",
+    ),
+    AdapterMeta(
+        id="coinbase_xrp",
+        name="Coinbase XRP-USD",
+        description="Download 1-minute XRP-USD OHLC candles from Coinbase (no API key required).",
+        requires_api_key=False,
+        default_start_date="2025-01-01",
+        db_file="data/ohlc.db",
+        fee_model=ZERO_FEE,
+        coinbase_product_id="XRP-USD",
+    ),
+    AdapterMeta(
+        id="coinbase_doge",
+        name="Coinbase DOGE-USD",
+        description="Download 1-minute DOGE-USD OHLC candles from Coinbase (no API key required).",
+        requires_api_key=False,
+        default_start_date="2025-01-01",
+        db_file="data/ohlc.db",
+        fee_model=ZERO_FEE,
+        coinbase_product_id="DOGE-USD",
     ),
     AdapterMeta(
         id="kalshi_sports",
