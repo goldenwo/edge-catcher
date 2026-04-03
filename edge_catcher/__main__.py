@@ -258,6 +258,18 @@ def _cmd_paper_trade_15m(args) -> None:
     ))
 
 
+def _cmd_paper_trade_v2(args) -> None:
+    from dotenv import load_dotenv
+    load_dotenv()
+    from edge_catcher.monitors.paper_trader_v2 import run_paper_trader_v2, ALL_SERIES
+    import asyncio
+    series = [s.strip().upper() for s in args.series.split(",") if s.strip()] if args.series else list(ALL_SERIES)
+    asyncio.run(run_paper_trader_v2(
+        db_path=Path(args.db),
+        active_series=series,
+    ))
+
+
 def _build_strategy_map():
     """Build the strategy name → class mapping. Returns (strategy_map, has_local)."""
     import importlib
@@ -869,6 +881,14 @@ def main() -> None:
                       help='Buy YES when first yes_ask < this (cents)', dest='threshold_low')
     pt15.set_defaults(func=_cmd_paper_trade_15m)
 
+    ptv2 = sub.add_parser('paper-trade-v2',
+                          help='Unified paper trader — KXBTCD, KXBTC15M, KXXRP, KXNBAMENTION, KXSOLD')
+    ptv2.add_argument('--db', default='data/paper_trades_v2.db',
+                      help='SQLite DB path (default: data/paper_trades_v2.db)')
+    ptv2.add_argument('--series', default=None,
+                      help='Comma-separated series to subscribe (default: all 5)')
+    ptv2.set_defaults(func=_cmd_paper_trade_v2)
+
     fm = sub.add_parser(
         "formalize",
         help="Formalize a hypothesis from plain English (requires AI)",
@@ -925,6 +945,8 @@ def main() -> None:
         _cmd_paper_trade(args)
     elif args.command == "paper-trade-15m":
         _cmd_paper_trade_15m(args)
+    elif args.command == "paper-trade-v2":
+        _cmd_paper_trade_v2(args)
     else:
         parser.print_help()
         sys.exit(1)
