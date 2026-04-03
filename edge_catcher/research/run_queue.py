@@ -111,7 +111,10 @@ class RunQueue:
 				}
 
 				for future in as_completed(futures):
-					results.append(future.result())
+					try:
+						results.append(future.result())
+					except Exception as exc:
+						logger.error("Parallel run failed: %s", exc)
 
 		logger.info("RunQueue: completed %d/%d runs", len(results), len(hypotheses))
 		return results
