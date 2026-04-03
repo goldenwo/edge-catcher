@@ -307,3 +307,18 @@ class TestListDbs:
         _cmd_list_dbs(argparse.Namespace())
         data = json.loads(capsys.readouterr().out)
         assert data == {"databases": []}
+
+
+def test_research_loop_help(capsys):
+    """Verify the loop subcommand is registered."""
+    import subprocess, sys
+    proc = subprocess.run(
+        [sys.executable, "-m", "edge_catcher", "research", "loop", "--help"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0
+    assert "--max-runs" in proc.stdout
+    assert "--max-time" in proc.stdout
+    assert "--grid-only" in proc.stdout
+    assert "--llm-only" in proc.stdout
+    assert "--max-llm-calls" in proc.stdout
