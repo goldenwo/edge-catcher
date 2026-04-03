@@ -25,11 +25,13 @@ class LLMClient:
             "formalizer": "claude-sonnet-4-20250514",
             "interpreter": "claude-haiku-4-5-20251001",
             "strategizer": "claude-sonnet-4-20250514",
+            "ideator": "claude-sonnet-4-20250514",
         },
         "openai": {
             "formalizer": "gpt-4o",
             "interpreter": "gpt-4o-mini",
             "strategizer": "gpt-4o",
+            "ideator": "gpt-4o",
         },
     }
 
