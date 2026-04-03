@@ -179,6 +179,30 @@ class TestTracker:
         assert stats["by_verdict"]["kill"] == 1
         assert stats["by_verdict"]["explore"] == 1
 
+    def test_list_pending_returns_hypotheses_without_results(self, tmp_path):
+        tracker = Tracker(tmp_path / "research.db")
+        # Save a hypothesis with a result
+        r = _make_result(strategy="C", verdict="promote", verdict_reason="p")
+        tracker.save_result(r)
+        # Save a hypothesis WITHOUT a result
+        h_pending = Hypothesis(
+            strategy="D", series="KXETH", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+            tags=["source:llm_ideated"],
+        )
+        tracker.save_hypothesis(h_pending)
+        pending = tracker.list_pending()
+        assert len(pending) == 1
+        assert pending[0]["strategy"] == "D"
+        assert pending[0]["series"] == "KXETH"
+
+    def test_list_pending_empty_when_all_have_results(self, tmp_path):
+        tracker = Tracker(tmp_path / "research.db")
+        r = _make_result(strategy="C", verdict="promote", verdict_reason="p")
+        tracker.save_result(r)
+        pending = tracker.list_pending()
+        assert pending == []
+
 
 # ---------------------------------------------------------------------------
 # Reporter
