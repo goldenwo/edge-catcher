@@ -71,8 +71,9 @@ def _clean_env() -> dict:
 # ── LLMClient: provider auto-detection ───────────────────────────────────────
 
 def test_client_no_api_key_raises():
-    """complete() raises LLMError with a helpful message when no key is set."""
-    with patch.dict(os.environ, _clean_env(), clear=True):
+    """complete() raises LLMError with a helpful message when no key and no CLI."""
+    with patch.dict(os.environ, _clean_env(), clear=True), \
+         patch("edge_catcher.ai.client.shutil.which", return_value=None):
         client = LLMClient()
         with pytest.raises(LLMError, match="API key"):
             client.complete("system", "user")
@@ -129,7 +130,8 @@ def test_client_env_provider_var_overrides_key_detection():
 
 def test_client_resolve_model_with_no_provider():
     """_resolve_model does not crash when provider is None."""
-    with patch.dict(os.environ, _clean_env(), clear=True):
+    with patch.dict(os.environ, _clean_env(), clear=True), \
+         patch("edge_catcher.ai.client.shutil.which", return_value=None):
         client = LLMClient()
     assert client._resolve_model("interpreter") is None
 
