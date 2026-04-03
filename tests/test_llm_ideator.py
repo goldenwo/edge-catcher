@@ -116,6 +116,8 @@ class TestLLMIdeatorIdeate:
 			],
 			"novel_strategy_proposals": [],
 		})
+		mock_client.last_usage = {"input_tokens": 100, "output_tokens": 50}
+		mock_client._resolve_model.return_value = "test-model"
 
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=mock_client)
 		hypotheses, novel = ideator.ideate(
