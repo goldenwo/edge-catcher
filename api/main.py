@@ -457,7 +457,8 @@ def _run_coinbase_download(adapter_id: str, state, start_date: str | None = None
 
 
 def _run_kalshi_adapter_download(
-    adapter_id: str, state, start_date: str | None = None, markets_yaml: str | None = None
+    adapter_id: str, state, start_date: str | None = None,
+    markets_yaml: str | None = None, db_file: str | None = None,
 ) -> None:
     """Run Kalshi download, updating the per-adapter state."""
     from datetime import datetime, timezone
@@ -471,7 +472,7 @@ def _run_kalshi_adapter_download(
         upsert_trades_batch,
     )
 
-    db = _db_path()
+    db = Path(db_file) if db_file else _db_path()
 
     state.running = True
     state.progress = "Initializing..."
@@ -648,7 +649,7 @@ async def start_adapter_download(
         _save_api_key(meta.api_key_env_var, req.api_key)
     if meta.markets_yaml:
         target = _run_kalshi_adapter_download
-        args = (adapter_id, state, req.start_date, meta.markets_yaml)
+        args = (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
     elif adapter_id == "coinbase_btc":
         target, args = _run_coinbase_download, (adapter_id, state, req.start_date)
     else:
