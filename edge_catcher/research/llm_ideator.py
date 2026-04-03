@@ -63,20 +63,32 @@ class LLMIdeator:
 
 		existing, novel = self.parse_response(response)
 
-		model = self.client.model
-		model_str = model if isinstance(model, str) else ""
+		# Filter out strategies that don't actually exist
+		strategy_set = set(available_strategies)
+		valid_existing = [e for e in existing if e.get("strategy") in strategy_set]
+		if len(valid_existing) < len(existing):
+			rejected = [e["strategy"] for e in existing if e.get("strategy") not in strategy_set]
+			logger.warning(
+				"Rejected %d existing_strategy_hypotheses with unknown strategies: %s",
+				len(rejected), rejected,
+			)
+
+		model = self.client._resolve_model("ideator") or ""
+		usage = self.client.last_usage
+		token_count = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
 
 		self.audit.record_decision(
 			prompt_hash=prompt_hash,
 			prompt_text=user_prompt,
 			response_text=response,
-			parsed_output={"existing": existing, "novel": novel},
-			model=model_str,
+			parsed_output={"existing": valid_existing, "novel": novel},
+			model=model,
+			token_count=token_count,
 		)
 
 		# Convert existing strategy hypotheses to Hypothesis objects
 		hypotheses: list[Hypothesis] = []
-		for entry in existing:
+		for entry in valid_existing:
 			hypotheses.append(Hypothesis(
 				strategy=entry["strategy"],
 				series=entry["series"],

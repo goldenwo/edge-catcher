@@ -321,9 +321,12 @@ class LoopOrchestrator:
 		prompt_hash = hashlib.sha256(
 			("strategizer" + system_prompt + user_prompt).encode()
 		).hexdigest()
-		model_str = client.model if isinstance(client.model, str) else ""
 
 		response = client.complete(system_prompt, user_prompt, task="strategizer")
+
+		model_str = client._resolve_model("strategizer") or ""
+		usage = client.last_usage
+		token_count = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
 
 		# Fix 3: Extract code and strategy name — audit on every exit path
 		code: str | None = None
@@ -340,6 +343,7 @@ class LoopOrchestrator:
 				parsed_output={"code": None, "strategy_name": None,
 							   "validation_ok": False, "error": str(exc)},
 				model=model_str,
+				token_count=token_count,
 			)
 			return []
 
@@ -362,6 +366,7 @@ class LoopOrchestrator:
 				parsed_output={"code": code, "strategy_name": strategy_name,
 							   "validation_ok": False, "error": error},
 				model=model_str,
+				token_count=token_count,
 			)
 			return []
 
@@ -373,6 +378,7 @@ class LoopOrchestrator:
 			parsed_output={"code": code, "strategy_name": strategy_name,
 						   "validation_ok": True, "error": None},
 			model=model_str,
+			token_count=token_count,
 		)
 
 		# Save to strategies_local.py

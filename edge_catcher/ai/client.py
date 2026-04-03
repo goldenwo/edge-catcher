@@ -1,9 +1,12 @@
 """Provider-agnostic LLM client (Anthropic, OpenAI, OpenRouter, Claude Code CLI)."""
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -52,6 +55,7 @@ class LLMClient:
         self.provider = self._resolve_provider(provider)
         self.model = model
         self.api_key = api_key or self._resolve_api_key()
+        self.last_usage: dict[str, int] = {}
 
     # -- provider / key resolution ---------------------------------------------
 
@@ -88,7 +92,12 @@ class LLMClient:
     # -- public API ------------------------------------------------------------
 
     def complete(self, system_prompt: str, user_prompt: str, task: str = "formalizer") -> str:
-        """Call the LLM and return the response text."""
+        """Call the LLM and return the response text.
+
+        After each call, ``self.last_usage`` is updated with token counts
+        (keys vary by provider).
+        """
+        self.last_usage = {}
         if self.provider == "claude-code":
             model = self._resolve_model(task)
             return self._call_claude_code(system_prompt, user_prompt, model, task=task)
@@ -168,9 +177,29 @@ class LLMClient:
         msg = client.messages.create(
             model=model,
             max_tokens=2048,
-            system=system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": user_prompt}],
         )
+        usage = msg.usage
+        cache_created = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        self.last_usage = {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": cache_created,
+            "cache_read_input_tokens": cache_read,
+        }
+        if cache_created or cache_read:
+            logger.info(
+                "Prompt cache: created=%d read=%d input=%d output=%d",
+                cache_created, cache_read, usage.input_tokens, usage.output_tokens,
+            )
         return msg.content[0].text
 
     def _call_openai(self, system_prompt: str, user_prompt: str, model: str) -> str:
@@ -186,6 +215,12 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         )
+        openai_usage = resp.usage
+        if openai_usage:
+            self.last_usage = {
+                "input_tokens": openai_usage.prompt_tokens,
+                "output_tokens": openai_usage.completion_tokens,
+            }
         return resp.choices[0].message.content
 
     def _call_openrouter(self, system_prompt: str, user_prompt: str, model: str) -> str:
@@ -210,4 +245,11 @@ class LLMClient:
             timeout=60,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        data = resp.json()
+        or_usage = data.get("usage")
+        if or_usage:
+            self.last_usage = {
+                "input_tokens": or_usage.get("prompt_tokens", 0),
+                "output_tokens": or_usage.get("completion_tokens", 0),
+            }
+        return data["choices"][0]["message"]["content"]
