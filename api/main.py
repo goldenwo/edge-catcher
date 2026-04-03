@@ -417,22 +417,25 @@ def _clear_api_key(env_var: str) -> None:
     os.environ.pop(env_var, None)
 
 
-def _run_coinbase_download(adapter_id: str, state, start_date: str | None = None) -> None:
+def _run_coinbase_download(
+    adapter_id: str, state, start_date: str | None = None,
+    product_id: str = "BTC-USD", db_file: str = "data/btc.db",
+) -> None:
     from datetime import datetime, timezone
 
     from edge_catcher.adapters.coinbase import CoinbaseAdapter
-    from edge_catcher.storage.db import get_connection, init_btc_ohlc_table
+    from edge_catcher.storage.db import get_connection, init_ohlc_table
 
     state.running = True
     state.progress = "Initializing..."
     state.error = None
     state.rows_fetched = 0
     try:
-        db_path = Path(os.getenv("BTC_DB_PATH", "data/btc.db"))
+        db_path = Path(db_file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = get_connection(db_path)
-        init_btc_ohlc_table(conn)
-        adapter = CoinbaseAdapter()
+        adapter = CoinbaseAdapter(product_id=product_id)
+        init_ohlc_table(conn, adapter.table_name)
         if start_date:
             start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
         else:
@@ -547,11 +550,14 @@ def _adapter_has_data(meta) -> bool:
             ).fetchone()[0]
             conn.close()
             return count > 0
-        else:
-            # coinbase_btc — check btc_ohlc table
-            count = conn.execute("SELECT COUNT(*) FROM btc_ohlc").fetchone()[0]
+        elif meta.coinbase_product_id:
+            table = meta.coinbase_product_id.split("-")[0].lower() + "_ohlc"
+            count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             conn.close()
             return count > 0
+        else:
+            conn.close()
+            return False
     except Exception:
         return False
 
@@ -650,8 +656,9 @@ async def start_adapter_download(
     if meta.markets_yaml:
         target = _run_kalshi_adapter_download
         args = (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
-    elif adapter_id == "coinbase_btc":
-        target, args = _run_coinbase_download, (adapter_id, state, req.start_date)
+    elif meta.coinbase_product_id:
+        target = _run_coinbase_download
+        args = (adapter_id, state, req.start_date, meta.coinbase_product_id, meta.db_file)
     else:
         raise HTTPException(status_code=400, detail=f"No download handler for {adapter_id!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
