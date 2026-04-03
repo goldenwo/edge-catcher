@@ -734,7 +734,7 @@ def main() -> None:
     btc.set_defaults(func=_cmd_download_btc)
 
     altcoin = sub.add_parser("download-altcoin-ohlc", help="Download 1-minute OHLC for altcoins from Coinbase")
-    altcoin.add_argument("--db", default="data/altcoin_ohlc.db", help="Path to SQLite DB for altcoin OHLC data")
+    altcoin.add_argument("--db", default="data/ohlc.db", help="Path to SQLite DB for altcoin OHLC data")
     altcoin.add_argument("--coins", default="SOL,ETH,XRP,DOGE,BNB",
                          help="Comma-separated coin symbols (default: SOL,ETH,XRP,DOGE,BNB)")
     altcoin.add_argument("--start-date", default="2025-01-01", dest="start_date",
@@ -784,8 +784,8 @@ def main() -> None:
                     help="Print distinct series_ticker values from the DB as JSON and exit")
     bt.add_argument("--btc-db", default="data/btc.db", dest="btc_db",
                     help="Path to BTC OHLC database (default: data/btc.db)")
-    bt.add_argument("--altcoin-ohlc-db", default="data/altcoin_ohlc.db", dest="altcoin_ohlc_db",
-                    help="Path to altcoin OHLC database (default: data/altcoin_ohlc.db)")
+    bt.add_argument("--altcoin-ohlc-db", default="data/ohlc.db", dest="altcoin_ohlc_db",
+                    help="Path to altcoin OHLC database (default: data/ohlc.db)")
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
