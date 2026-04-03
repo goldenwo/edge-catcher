@@ -429,11 +429,12 @@ class TestPortfolio:
 		assert ct.pnl_cents == -30
 
 	def test_entry_fee_charged_at_open(self):
-		# Buy NO at 87¢: fee = 1.0 * 0.07 * 87 * 13 / 100 = 0.7917¢ per contract
+		# Buy NO at 87¢: fee = ceil(0.07 * 1 * 0.87 * 0.13 * 100) = ceil(0.7917) = 1¢
+		import math
 		port = Portfolio(1000.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
 		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		expected_fee = 0.07 * 87 * 13 / 100  # ~0.7917
+		expected_fee = math.ceil(0.07 * 1 * 0.87 * 0.13 * 100)  # 1¢
 		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
 		assert port.cash == pytest.approx(1000.0 - 87 - expected_fee, rel=1e-6)
 
