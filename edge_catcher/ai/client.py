@@ -1,7 +1,8 @@
-"""Provider-agnostic LLM client (Anthropic, OpenAI, OpenRouter)."""
+"""Provider-agnostic LLM client (Anthropic, OpenAI, OpenRouter, Claude Code CLI)."""
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Optional
 
 
@@ -18,6 +19,7 @@ class LLMClient:
     2. ``EDGE_CATCHER_LLM_PROVIDER`` env var
     3. Auto-detect from which API key env var is set
        (ANTHROPIC_API_KEY first, then OPENAI_API_KEY, then OPENROUTER_API_KEY)
+    4. Fall back to ``claude-code`` if the ``claude`` CLI is on PATH
     """
 
     _DEFAULT_MODELS: dict[str, dict[str, str]] = {
@@ -33,6 +35,12 @@ class LLMClient:
             "strategizer": "gpt-4o",
             "ideator": "gpt-4o",
         },
+        "claude-code": {
+            "formalizer": "sonnet",
+            "interpreter": "haiku",
+            "strategizer": "sonnet",
+            "ideator": "opus",
+        },
     }
 
     def __init__(
@@ -45,7 +53,7 @@ class LLMClient:
         self.model = model
         self.api_key = api_key or self._resolve_api_key()
 
-    # ── provider / key resolution ─────────────────────────────────────────────
+    # -- provider / key resolution ---------------------------------------------
 
     def _resolve_provider(self, explicit: Optional[str]) -> Optional[str]:
         if explicit:
@@ -59,6 +67,8 @@ class LLMClient:
             return "openai"
         if os.getenv("OPENROUTER_API_KEY"):
             return "openrouter"
+        if shutil.which("claude") or shutil.which("npx"):
+            return "claude-code"
         return None
 
     def _resolve_api_key(self) -> Optional[str]:
@@ -75,10 +85,13 @@ class LLMClient:
             return self.model
         return self._DEFAULT_MODELS.get(self.provider or "", {}).get(task)
 
-    # ── public API ────────────────────────────────────────────────────────────
+    # -- public API ------------------------------------------------------------
 
     def complete(self, system_prompt: str, user_prompt: str, task: str = "formalizer") -> str:
         """Call the LLM and return the response text."""
+        if self.provider == "claude-code":
+            model = self._resolve_model(task)
+            return self._call_claude_code(system_prompt, user_prompt, model, task=task)
         if not self.provider or not self.api_key:
             raise LLMError(
                 "AI features require an API key. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, "
@@ -93,7 +106,55 @@ class LLMClient:
             return self._call_openrouter(system_prompt, user_prompt, model)
         raise LLMError(f"Unknown provider: {self.provider!r}")
 
-    # ── provider implementations ──────────────────────────────────────────────
+    # -- provider implementations ----------------------------------------------
+
+    # Effort level per task for claude-code provider.
+    _CLAUDE_CODE_EFFORT: dict[str, str] = {
+        "ideator": "high",
+        "strategizer": "high",
+    }
+
+    def _call_claude_code(
+        self, system_prompt: str, user_prompt: str, model: str | None,
+        task: str = "",
+    ) -> str:
+        """Call Claude Code CLI in one-shot mode (no API key required).
+
+        Uses ``claude`` directly if on PATH, otherwise falls back to
+        ``npx @anthropic-ai/claude-code``.
+        """
+        import subprocess
+        if shutil.which("claude"):
+            cmd = ["claude", "-p", "--bare"]
+        else:
+            cmd = ["npx", "--yes", "@anthropic-ai/claude-code", "-p", "--bare"]
+        if model:
+            cmd += ["--model", model]
+        effort = self._CLAUDE_CODE_EFFORT.get(task)
+        if effort:
+            cmd += ["--effort", effort]
+        budget = os.getenv("EDGE_CATCHER_CC_BUDGET_USD")
+        if budget:
+            cmd += ["--max-budget-usd", budget]
+        prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        timeout = 300
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            raise LLMError(
+                "Claude Code CLI not found. Install it: npm install -g @anthropic-ai/claude-code"
+            )
+        except subprocess.TimeoutExpired:
+            raise LLMError("Claude Code CLI timed out after 5 minutes")
+        if proc.returncode != 0:
+            raise LLMError(f"Claude Code CLI failed (exit {proc.returncode}): {proc.stderr.strip()}")
+        return proc.stdout.strip()
 
     def _call_anthropic(self, system_prompt: str, user_prompt: str, model: str) -> str:
         try:
