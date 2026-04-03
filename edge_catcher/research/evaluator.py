@@ -10,11 +10,9 @@ from .hypothesis import HypothesisResult
 @dataclass
 class Thresholds:
     min_sharpe: float = 1.0          # below this → kill
-    min_win_rate: float = 0.85       # below this (for hold-to-settlement) → kill
     min_trades: int = 50             # too few trades → inconclusive (explore, not kill)
     min_net_pnl_cents: float = 0.0   # must be positive after fees → kill if not
     promote_sharpe: float = 2.0      # above this → promote (requires all promote thresholds)
-    promote_win_rate: float = 0.87   # above this → promote (requires all promote thresholds)
 
 
 class Evaluator:
@@ -48,21 +46,11 @@ class Evaluator:
                 "kill",
                 f"Sharpe {result.sharpe:.2f} < {thresholds.min_sharpe:.2f}",
             )
-        if result.win_rate < thresholds.min_win_rate:
-            return (
-                "kill",
-                f"win rate {result.win_rate:.1%} < {thresholds.min_win_rate:.1%}",
-            )
-
-        # Promote conditions — must exceed ALL promote thresholds
-        if (
-            result.sharpe >= thresholds.promote_sharpe
-            and result.win_rate >= thresholds.promote_win_rate
-        ):
+        # Promote conditions
+        if result.sharpe >= thresholds.promote_sharpe:
             return (
                 "promote",
-                f"Sharpe {result.sharpe:.2f} ≥ {thresholds.promote_sharpe:.2f} "
-                f"and win rate {result.win_rate:.1%} ≥ {thresholds.promote_win_rate:.1%}",
+                f"Sharpe {result.sharpe:.2f} ≥ {thresholds.promote_sharpe:.2f}",
             )
 
         # Between kill and promote → explore further
