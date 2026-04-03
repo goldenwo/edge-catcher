@@ -32,28 +32,55 @@ class GridPlanner:
 		if not strategies or not series_map:
 			return []
 
-		# Find warm strategies (those with prior promote/explore results)
-		warm_strategies = self._find_warm_strategies()
+		# Load all results once to avoid N+1 queries
+		results = self.tracker.list_results()
 
-		# Build the full grid
+		# Build set of already-tested dedup keys
+		tested_keys: set[tuple] = set()
+		for r in results:
+			tested_keys.add((
+				r["strategy"], r["series"], r["db_path"],
+				r["start_date"], r["end_date"], r["fee_pct"],
+			))
+
+		# Also include hypotheses without results (pending from prior LLM runs)
+		pending = self.tracker.list_pending()
+		for p in pending:
+			tested_keys.add((
+				p["strategy"], p["series"], p["db_path"],
+				p["start_date"], p["end_date"], p["fee_pct"],
+			))
+
+		# Find warm strategies (those with prior promote/explore results)
+		warm_strategies = {
+			r["strategy"] for r in results
+			if r["verdict"] in ("promote", "explore")
+		}
+
+		# Count tested series for coverage ordering
+		series_test_counts: dict[str, int] = Counter()
+		for r in results:
+			series_test_counts[r["series"]] += 1
+
+		# Build the full grid, filtering against tested keys
 		hypotheses: list[Hypothesis] = []
 		for strategy in strategies:
 			for db_path, series_list in series_map.items():
 				for series in series_list:
-					h = Hypothesis(
-						strategy=strategy,
-						series=series,
-						db_path=db_path,
-						start_date=start_date,
-						end_date=end_date,
-						fee_pct=fee_pct,
-						tags=["source:grid"],
-					)
-					if not self.tracker.is_tested(h):
-						hypotheses.append(h)
+					dedup_key = (strategy, series, db_path,
+								 start_date, end_date, fee_pct)
+					if dedup_key not in tested_keys:
+						hypotheses.append(Hypothesis(
+							strategy=strategy,
+							series=series,
+							db_path=db_path,
+							start_date=start_date,
+							end_date=end_date,
+							fee_pct=fee_pct,
+							tags=["source:grid"],
+						))
 
 		# Order: warm leads first, then by least-tested series
-		series_test_counts = self._count_tested_series()
 		hypotheses.sort(
 			key=lambda h: (
 				0 if h.strategy in warm_strategies else 1,
@@ -67,19 +94,3 @@ class GridPlanner:
 			sum(len(sl) for sl in series_map.values()),
 		)
 		return hypotheses
-
-	def _find_warm_strategies(self) -> set[str]:
-		"""Return strategy names that have at least one promote or explore result."""
-		results = self.tracker.list_results()
-		return {
-			r["strategy"] for r in results
-			if r["verdict"] in ("promote", "explore")
-		}
-
-	def _count_tested_series(self) -> dict[str, int]:
-		"""Return {series: count_of_tests} for ordering by coverage."""
-		results = self.tracker.list_results()
-		counts: dict[str, int] = Counter()
-		for r in results:
-			counts[r["series"]] += 1
-		return counts

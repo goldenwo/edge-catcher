@@ -217,11 +217,19 @@ class LoopOrchestrator:
 		if budget <= 0:
 			return results
 
-		# Verify integrity before ideation
+		# Verify integrity before ideation — compare against the most recent
+		# post_grid checkpoint from this run (list is DESC, so last appended = first)
 		current_results = self.tracker.list_results()
 		current_hash = self.audit.compute_result_hash(current_results)
 		integrity_checks = self.audit.list_integrity_checks()
-		post_grid = [c for c in integrity_checks if c["checkpoint"] == "post_grid"]
+		# Find the post_grid checkpoint that was recorded AFTER the most recent
+		# loop_start (i.e., from this invocation, not a prior one)
+		loop_starts = [c for c in integrity_checks if c["checkpoint"] == "loop_start"]
+		this_run_start = loop_starts[0]["created_at"] if loop_starts else ""
+		post_grid = [
+			c for c in integrity_checks
+			if c["checkpoint"] == "post_grid" and c["created_at"] >= this_run_start
+		]
 		if post_grid and post_grid[0]["result_hash"] != current_hash:
 			logger.error("Integrity check failed: results modified since grid phase")
 			return results
