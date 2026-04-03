@@ -59,6 +59,7 @@ class LLMIdeator:
 		).hexdigest()
 
 		response = self.client.complete(system_prompt, user_prompt, task="ideator")
+		logger.info("LLM ideation response:\n%s", response[:2000])
 
 		existing, novel = self.parse_response(response)
 

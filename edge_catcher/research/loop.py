@@ -241,6 +241,7 @@ class LoopOrchestrator:
 			ideator = LLMIdeator(
 				tracker=self.tracker, audit=self.audit, client=client,
 			)
+			logger.info("Starting LLM ideation call...")
 			hypotheses, novel_proposals = ideator.ideate(
 				available_strategies=strategies,
 				series_map=series_map,
@@ -253,10 +254,18 @@ class LoopOrchestrator:
 			return results
 
 		# Process novel strategy proposals (generate code via strategizer)
+		logger.info(
+			"LLM ideation returned %d existing hypotheses, %d novel proposals",
+			len(hypotheses), len(novel_proposals),
+		)
 		llm_calls_used = 1  # the ideation call itself
 		for proposal in novel_proposals:
 			if llm_calls_used >= self.max_llm_calls:
 				break
+			logger.info("Generating novel strategy %d/%d: %s",
+				llm_calls_used, min(len(novel_proposals), self.max_llm_calls - 1),
+				proposal.get("name", "unknown"),
+			)
 			try:
 				hypotheses.extend(
 					self._generate_novel_strategy(

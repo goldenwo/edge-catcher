@@ -125,9 +125,9 @@ class LLMClient:
         """
         import subprocess
         if shutil.which("claude"):
-            cmd = ["claude", "-p", "--bare"]
+            cmd = ["claude", "-p"]
         else:
-            cmd = ["npx", "--yes", "@anthropic-ai/claude-code", "-p", "--bare"]
+            cmd = ["npx", "--yes", "@anthropic-ai/claude-code", "-p"]
         if model:
             cmd += ["--model", model]
         effort = self._CLAUDE_CODE_EFFORT.get(task)
@@ -145,6 +145,8 @@ class LLMClient:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                shell=True,
+                encoding="utf-8",
             )
         except FileNotFoundError:
             raise LLMError(
@@ -153,7 +155,8 @@ class LLMClient:
         except subprocess.TimeoutExpired:
             raise LLMError("Claude Code CLI timed out after 5 minutes")
         if proc.returncode != 0:
-            raise LLMError(f"Claude Code CLI failed (exit {proc.returncode}): {proc.stderr.strip()}")
+            detail = proc.stderr.strip() or proc.stdout.strip()
+            raise LLMError(f"Claude Code CLI failed (exit {proc.returncode}): {detail}")
         return proc.stdout.strip()
 
     def _call_anthropic(self, system_prompt: str, user_prompt: str, model: str) -> str:
