@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import logging
@@ -317,20 +318,62 @@ class LoopOrchestrator:
 			f"Generate a strategy class that trades this edge."
 		)
 
+		prompt_hash = hashlib.sha256(
+			("strategizer" + system_prompt + user_prompt).encode()
+		).hexdigest()
+		model_str = client.model if isinstance(client.model, str) else ""
+
 		response = client.complete(system_prompt, user_prompt, task="strategizer")
 
-		# Extract code and strategy name using the existing strategizer parser
+		# Fix 3: Extract code and strategy name — audit on every exit path
+		code: str | None = None
+		strategy_name: str | None = None
+
 		try:
 			code, strategy_name = _parse_strategy_response(response)
 		except ValueError as exc:
 			logger.warning("Failed to parse strategizer response: %s", exc)
+			self.audit.record_decision(
+				prompt_hash=prompt_hash,
+				prompt_text=user_prompt,
+				response_text=response,
+				parsed_output={"code": None, "strategy_name": None,
+							   "validation_ok": False, "error": str(exc)},
+				model=model_str,
+			)
 			return []
+
+		# Fix 2: Log if code's name attribute differs from the proposal name
+		proposal_name = proposal.get("name", "")
+		if strategy_name != proposal_name:
+			logger.warning(
+				"Strategy name mismatch: proposal='%s', code='%s'. Using code name.",
+				proposal_name, strategy_name,
+			)
 
 		# Validate
 		ok, error = validate_strategy_code(code)
 		if not ok:
 			logger.warning("Generated strategy failed validation: %s", error)
+			self.audit.record_decision(
+				prompt_hash=prompt_hash,
+				prompt_text=user_prompt,
+				response_text=response,
+				parsed_output={"code": code, "strategy_name": strategy_name,
+							   "validation_ok": False, "error": error},
+				model=model_str,
+			)
 			return []
+
+		# Fix 3: Audit successful parse + validation
+		self.audit.record_decision(
+			prompt_hash=prompt_hash,
+			prompt_text=user_prompt,
+			response_text=response,
+			parsed_output={"code": code, "strategy_name": strategy_name,
+						   "validation_ok": True, "error": None},
+			model=model_str,
+		)
 
 		# Save to strategies_local.py
 		result = save_strategy(code, strategy_name, STRATEGIES_LOCAL_PATH)
@@ -344,6 +387,17 @@ class LoopOrchestrator:
 			importlib.reload(mod)
 		except Exception as exc:
 			logger.warning("Failed to reload strategies_local: %s", exc)
+
+		# Fix 1: Verify strategy actually registered in the strategy map after reload
+		available = list_strategies(STRATEGIES_LOCAL_PATH)
+		available_names = [s["name"] for s in available]
+		if strategy_name not in available_names:
+			logger.warning(
+				"Strategy '%s' not found in strategy map after reload. "
+				"Available: %s",
+				strategy_name, available_names,
+			)
+			return []
 
 		# Generate hypotheses for the new strategy across available data
 		hypotheses: list[Hypothesis] = []

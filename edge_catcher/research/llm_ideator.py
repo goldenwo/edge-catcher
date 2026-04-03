@@ -102,12 +102,10 @@ class LLMIdeator:
 		explored = [r for r in results if r["verdict"] == "explore"]
 		killed = [r for r in results if r["verdict"] == "kill"]
 
-		# Kill patterns: aggregate by strategy
+		# Kill patterns: aggregate by strategy (store raw verdict_reason for grouping)
 		kill_by_strategy: dict[str, list[str]] = {}
 		for r in killed:
-			kill_by_strategy.setdefault(r["strategy"], []).append(
-				f"{r['series']}: {r['verdict_reason']}"
-			)
+			kill_by_strategy.setdefault(r["strategy"], []).append(r["verdict_reason"])
 
 		# Coverage: what series/strategy combos exist
 		tested_combos = {(r["strategy"], r["series"]) for r in results}
@@ -148,12 +146,21 @@ class LLMIdeator:
 
 		if kill_by_strategy:
 			parts.append("\n## Kill Patterns")
-			for strat, reasons in kill_by_strategy.items():
+			sorted_kills = sorted(
+				kill_by_strategy.items(), key=lambda x: len(x[1]), reverse=True
+			)
+			shown = sorted_kills[:10]
+			omitted = sorted_kills[10:]
+			for strat, reasons in shown:
+				reason_counts = Counter(reasons)
 				parts.append(f"### {strat} ({len(reasons)} kills)")
-				for reason in reasons[:5]:
-					parts.append(f"  - {reason}")
-				if len(reasons) > 5:
-					parts.append(f"  - ... and {len(reasons) - 5} more")
+				for reason, count in reason_counts.most_common():
+					parts.append(f"  - {reason}: {count}x")
+			if omitted:
+				omitted_kills = sum(len(r) for _, r in omitted)
+				parts.append(
+					f"\n{len(omitted)} strategies with {omitted_kills} total kills omitted"
+				)
 
 		parts.append(f"\n## Available Strategies: {', '.join(available_strategies)}")
 
