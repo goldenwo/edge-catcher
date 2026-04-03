@@ -137,7 +137,7 @@ class LLMClient:
         if budget:
             cmd += ["--max-budget-usd", budget]
         prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-        timeout = 300
+        timeout = 3600
         try:
             proc = subprocess.run(
                 cmd,
