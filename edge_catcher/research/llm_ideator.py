@@ -451,7 +451,8 @@ class LLMIdeator:
 	def _describe_winning_pattern(promotes: list[dict]) -> str:
 		descriptions = []
 		for r in promotes[:3]:  # limit to 3 for brevity
-			descriptions.append(f"{r['strategy']} (Sharpe {r['sharpe']:.2f} on {r['series']})")
+			sharpe = r["sharpe"] if r.get("sharpe") is not None else 0.0
+			descriptions.append(f"{r['strategy']} (Sharpe {sharpe:.2f} on {r['series']})")
 		return f"Winning patterns to expand: {', '.join(descriptions)}. Explore variants of these."
 
 	def _load_system_prompt(self) -> str:
