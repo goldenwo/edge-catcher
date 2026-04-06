@@ -69,3 +69,15 @@ class TestValidationPipeline:
 		verdict, reason, gate_results = pipeline.validate(_make_result(), ctx)
 		assert verdict == "promote"
 		assert gate_results == []
+
+
+class TestPipelineWithRealGates:
+	def test_default_gates_instantiate(self):
+		"""default_gates() should return 4 gates in the correct order."""
+		from edge_catcher.research.validation.pipeline import default_gates
+		gates = default_gates()
+		assert len(gates) == 4
+		assert gates[0].name == "deflated_sharpe"
+		assert gates[1].name == "monte_carlo"
+		assert gates[2].name == "walk_forward"
+		assert gates[3].name == "param_sensitivity"
