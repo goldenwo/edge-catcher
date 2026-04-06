@@ -235,3 +235,100 @@ class TestWalkForwardGate:
 		gr = gate.check(result, ctx)
 		assert not gr.passed
 		assert "date range" in gr.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# Parameter Sensitivity Gate
+# ---------------------------------------------------------------------------
+
+class TestParameterSensitivityGate:
+	SAMPLE_STRATEGY = '''
+class TestStrategy(Strategy):
+	name = "TestStrat"
+	lookback = 20
+	threshold = 0.85
+	max_hold = 60
+
+	def on_trade(self, market, trade):
+		pass
+'''
+
+	def test_robust_strategy_passes(self):
+		"""Strategy where neighbors also perform well should pass."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		mock_agent = MagicMock()
+		mock_agent.read_strategy_code.return_value = self.SAMPLE_STRATEGY
+
+		result = _make_result(sharpe=2.5, total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = ParameterSensitivityGate()
+		# Mock _run_neighbor to avoid filesystem/import side effects
+		# Original Sharpe = 2.5. All neighbors return 1.8 (>= 50% of 2.5)
+		with patch.object(gate, "_run_neighbor", return_value=1.8):
+			gr = gate.check(result, ctx)
+		assert gr.passed
+
+	def test_fragile_strategy_fails(self):
+		"""Strategy where most neighbors collapse should fail."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		mock_agent = MagicMock()
+		mock_agent.read_strategy_code.return_value = self.SAMPLE_STRATEGY
+
+		result = _make_result(sharpe=2.5, total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = ParameterSensitivityGate()
+		# All neighbors return very low Sharpe
+		with patch.object(gate, "_run_neighbor", return_value=0.1):
+			gr = gate.check(result, ctx)
+		assert not gr.passed
+
+	def test_no_params_passes(self):
+		"""Strategy with no numeric params should pass (nothing to perturb)."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		code = '''
+class MinimalStrategy(Strategy):
+	name = "Minimal"
+
+	def on_trade(self, market, trade):
+		pass
+'''
+		mock_agent = MagicMock()
+		mock_agent.read_strategy_code.return_value = code
+
+		result = _make_result(sharpe=2.5, total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = ParameterSensitivityGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+
+	def test_no_source_fails(self):
+		"""If strategy source can't be read, gate fails."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		mock_agent = MagicMock()
+		mock_agent.read_strategy_code.return_value = None
+
+		result = _make_result(sharpe=2.5, total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = ParameterSensitivityGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
