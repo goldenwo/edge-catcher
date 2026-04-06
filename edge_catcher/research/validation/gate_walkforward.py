@@ -179,12 +179,16 @@ class WalkForwardGate(Gate):
 		for i in range(self.n_windows):
 			w_start = start + timedelta(days=i * window_days)
 			is_end_dt = w_start + timedelta(days=is_days)
+			oos_start_dt = is_end_dt + timedelta(days=1)
 			oos_end_dt = w_start + timedelta(days=window_days)
+
+			if oos_start_dt >= oos_end_dt:
+				continue  # window too small for a gap
 
 			windows.append((
 				w_start.strftime("%Y-%m-%d"),
 				is_end_dt.strftime("%Y-%m-%d"),
-				is_end_dt.strftime("%Y-%m-%d"),
+				oos_start_dt.strftime("%Y-%m-%d"),
 				oos_end_dt.strftime("%Y-%m-%d"),
 			))
 
