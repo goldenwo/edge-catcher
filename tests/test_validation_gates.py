@@ -656,6 +656,14 @@ class MinimalStrategy(Strategy):
 		assert hasattr(gate, '_file_lock')
 		assert isinstance(gate._file_lock, type(threading.Lock()))
 
+	def test_sensitivity_gate_shares_lock_across_instances(self):
+		"""Two ParameterSensitivityGate instances must share the same lock."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		gate_a = ParameterSensitivityGate()
+		gate_b = ParameterSensitivityGate()
+		assert gate_a._file_lock is gate_b._file_lock
+
 
 # ---------------------------------------------------------------------------
 # Pipeline review tier integration
