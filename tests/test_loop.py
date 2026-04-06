@@ -228,3 +228,37 @@ class TestRefinementResumeWalkBackwards:
         assert start_iteration == 2
         agent.read_strategy_code.assert_any_call("FooV3")
         agent.read_strategy_code.assert_any_call("FooV2")
+
+
+class TestShouldKeepRefinementBaseline:
+    def test_should_keep_refinement_compares_against_baseline(self):
+        """Refinement should be compared against the original baseline, not just previous iteration."""
+        # Original baseline: Sharpe 2.0
+        baseline_results = [
+            {"status": "ok", "sharpe": 2.0, "verdict": "explore"},
+        ]
+
+        # Previous iteration (V2): regressed to Sharpe 1.2
+        prev_results = [
+            {"status": "ok", "sharpe": 1.2, "verdict": "explore"},
+        ]
+
+        # New iteration (V3): Sharpe 1.5 — better than V2 but worse than original
+        h = Hypothesis(strategy="FooV3", series="X", db_path="d.db",
+                       start_date="2025-01-01", end_date="2025-12-31")
+        refined = [HypothesisResult(
+            hypothesis=h, status="ok", total_trades=100, wins=60, losses=40,
+            win_rate=0.6, net_pnl_cents=300, sharpe=1.5, max_drawdown_pct=5.0,
+            fees_paid_cents=50, avg_win_cents=15, avg_loss_cents=-7.5,
+            per_strategy={}, verdict="explore", verdict_reason="", raw_json={},
+        )]
+
+        # With baseline awareness, should NOT keep (1.5 < 2.0)
+        assert not LoopOrchestrator._should_keep_refinement(
+            prev_results, refined, baseline_results=baseline_results
+        )
+
+        # Without baseline (old behavior), would keep (1.5 > 1.2)
+        assert LoopOrchestrator._should_keep_refinement(
+            prev_results, refined, baseline_results=None
+        )
