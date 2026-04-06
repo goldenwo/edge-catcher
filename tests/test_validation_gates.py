@@ -744,3 +744,33 @@ class TestPipelineReviewTier:
 		verdict, reason, gate_results = pipeline.validate(result, ctx)
 		assert verdict == "explore"
 		assert len(gate_results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Evaluator validate verdict
+# ---------------------------------------------------------------------------
+
+class TestEvaluatorValidateVerdict:
+	def test_borderline_sharpe_gets_validate(self):
+		"""Sharpe 1.0-2.0 with >= 100 trades should get 'validate', not 'explore'."""
+		from edge_catcher.research.evaluator import Evaluator, Thresholds
+
+		result = _make_result(sharpe=1.5, total_trades=150, net_pnl_cents=200.0)
+		verdict, reason = Evaluator().evaluate(result, Thresholds())
+		assert verdict == "validate"
+
+	def test_low_trade_count_still_explore(self):
+		"""Sharpe 1.5 but < 100 trades should stay 'explore'."""
+		from edge_catcher.research.evaluator import Evaluator, Thresholds
+
+		result = _make_result(sharpe=1.5, total_trades=80, net_pnl_cents=200.0)
+		verdict, reason = Evaluator().evaluate(result, Thresholds())
+		assert verdict == "explore"
+
+	def test_high_sharpe_still_candidate(self):
+		"""Sharpe >= 2.0 should still get 'candidate', not 'validate'."""
+		from edge_catcher.research.evaluator import Evaluator, Thresholds
+
+		result = _make_result(sharpe=2.5, total_trades=150, net_pnl_cents=500.0)
+		verdict, reason = Evaluator().evaluate(result, Thresholds())
+		assert verdict == "candidate"
