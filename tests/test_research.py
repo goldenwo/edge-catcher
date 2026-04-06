@@ -654,12 +654,12 @@ class TestResearchJournal:
     def test_get_latest_trajectory_returns_most_recent(self, tmp_path):
         from edge_catcher.research.journal import ResearchJournal
         journal = ResearchJournal(tmp_path / "research.db")
-        journal.write_entry("run-001", "trajectory", {"status": "stuck", "total_runs": 10})
-        journal.write_entry("run-002", "trajectory", {"status": "improving", "total_runs": 20})
+        journal.write_entry("run-001", "trajectory", {"status": "stuck", "total_sessions": 10})
+        journal.write_entry("run-002", "trajectory", {"status": "improving", "total_sessions": 20})
         traj = journal.get_latest_trajectory()
         assert traj is not None
         assert traj["status"] == "improving"
-        assert traj["total_runs"] == 20
+        assert traj["total_sessions"] == 20
 
     def test_get_latest_trajectory_ignores_other_types(self, tmp_path):
         from edge_catcher.research.journal import ResearchJournal
@@ -671,7 +671,7 @@ class TestResearchJournal:
         from edge_catcher.research.journal import ResearchJournal
         journal = ResearchJournal(tmp_path / "research.db")
         journal.write_entry("run-001", "outcome", {"phase": "grid", "strategy": "Bar", "best_sharpe": 1.2, "verdicts": {"promote": 0, "explore": 1, "kill": 2}})
-        journal.write_entry("run-001", "trajectory", {"status": "plateauing", "total_runs": 30, "promote_rate": 0.02})
+        journal.write_entry("run-001", "trajectory", {"status": "plateauing", "total_sessions": 30, "promote_rate": 0.02})
 
         ctx = journal.build_context_for_prompt()
         # Trajectory header should appear before outcome
@@ -1117,7 +1117,7 @@ class TestLoopJournalIntegration:
         assert len(trajectory_entries) == 1
         traj = trajectory_entries[0]["content"]
         assert traj["status"] in {"improving", "plateauing", "stuck"}
-        assert traj["total_runs"] == 1
+        assert traj["total_sessions"] == 1
         assert traj["new_promotes"] == 1
         assert traj["new_kills"] == 1
         assert traj["best_sharpe_this_run"] == pytest.approx(3.0)
