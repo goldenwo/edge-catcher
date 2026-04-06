@@ -302,6 +302,22 @@ class TestWalkForwardGate:
 		assert not gr.passed
 		assert "date range" in gr.reason.lower()
 
+	def test_walkforward_no_date_overlap(self):
+		"""IS end date and OOS start date should not overlap."""
+		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+
+		gate = WalkForwardGate(n_windows=5, oos_ratio=0.3)
+		windows = gate._make_windows("2025-01-01", "2025-12-31")
+
+		for is_start, is_end, oos_start, oos_end in windows:
+			# OOS should start the day after IS ends
+			from datetime import datetime, timedelta
+			is_end_dt = datetime.fromisoformat(is_end)
+			oos_start_dt = datetime.fromisoformat(oos_start)
+			assert oos_start_dt > is_end_dt, (
+				f"OOS start {oos_start} should be after IS end {is_end}"
+			)
+
 
 # ---------------------------------------------------------------------------
 # Parameter Sensitivity Gate
