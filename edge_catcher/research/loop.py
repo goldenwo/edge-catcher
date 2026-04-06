@@ -373,8 +373,7 @@ class LoopOrchestrator:
 			if remaining_time is not None and remaining_time <= 0:
 				break
 
-			# Determine starting version: check if prior refinement versions exist
-			# (e.g., FooV2 already exists from a prior run → start at iteration 2)
+			# Determine starting version: find latest refinement with actual code
 			existing_version = self._count_existing_refinements(strategy_name)
 			if existing_version >= self.max_refinements:
 				logger.info(
@@ -383,15 +382,18 @@ class LoopOrchestrator:
 				)
 				continue
 
+			# Walk backwards from latest version to find one with actual code
 			current_name = strategy_name
-			# If prior versions exist, start refining from the latest version
+			start_iteration = 1
 			if existing_version > 0:
-				current_name = f"{strategy_name}V{existing_version + 1}"
-				# Verify the latest version actually exists in code
-				if not agent.read_strategy_code(current_name):
-					current_name = strategy_name
+				for v in range(existing_version + 1, 0, -1):
+					candidate = f"{strategy_name}V{v}"
+					if agent.read_strategy_code(candidate):
+						current_name = candidate
+						start_iteration = v
+						break
 
-			for iteration in range(existing_version + 1, self.max_refinements + 1):
+			for iteration in range(start_iteration, self.max_refinements + 1):
 				if budget <= 0 or llm_calls_used >= llm_budget:
 					break
 				remaining_time = self._remaining_time(start_time)

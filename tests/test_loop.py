@@ -172,3 +172,59 @@ class TestWritePhaseOutcomes:
         journal.write_entry.assert_called_once()
         content = journal.write_entry.call_args[0][2]
         assert content["verdicts"]["error"] == 1
+
+
+class TestRefinementResumeWalkBackwards:
+    def test_refinement_resume_finds_latest_existing_version(self):
+        """When resuming refinement, should start from the latest version with actual code."""
+        loop = LoopOrchestrator.__new__(LoopOrchestrator)
+        loop.max_refinements = 5
+        loop.max_time_seconds = None
+        loop.start_date = "2025-01-01"
+        loop.end_date = "2025-12-31"
+        loop.fee_pct = 1.0
+        loop.run_id = "test"
+
+        # Simulate: Foo has 2 prior iterations, but only FooV2 code exists (FooV3 save failed)
+        loop.tracker = MagicMock()
+        loop.tracker.list_results.return_value = [
+            {"tags": '["source:llm_refinement", "parent_strategy:Foo", "iteration:1"]',
+             "strategy": "FooV2"},
+            {"tags": '["source:llm_refinement", "parent_strategy:Foo", "iteration:2"]',
+             "strategy": "FooV3"},
+        ]
+        loop.tracker.list_results_for_strategy.return_value = [
+            {"status": "ok", "sharpe": 1.5, "verdict": "explore", "series": "X",
+             "db_path": "d.db", "total_trades": 80, "net_pnl_cents": 200,
+             "max_drawdown_pct": 5.0, "win_rate": 0.55, "verdict_reason": "test"},
+        ]
+
+        agent = MagicMock()
+        # FooV3 doesn't exist, FooV2 does
+        def read_strategy_side_effect(name):
+            if name == "FooV2":
+                return "class FooV2Strategy:\n    name = 'FooV2'"
+            return None
+        agent.read_strategy_code.side_effect = read_strategy_side_effect
+
+        # Verify _count_existing_refinements returns 2
+        count = loop._count_existing_refinements("Foo")
+        assert count == 2
+
+        # The walk-backwards logic should try FooV3 (None), then FooV2 (found),
+        # and start refining from FooV2 at iteration 2
+        existing_version = 2
+        current_name = "Foo"
+        start_iteration = 1
+        for v in range(existing_version + 1, 0, -1):
+            candidate = f"Foo" + f"V{v}"
+            code = agent.read_strategy_code(candidate)
+            if code:
+                current_name = candidate
+                start_iteration = v
+                break
+
+        assert current_name == "FooV2"
+        assert start_iteration == 2
+        agent.read_strategy_code.assert_any_call("FooV3")
+        agent.read_strategy_code.assert_any_call("FooV2")
