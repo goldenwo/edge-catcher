@@ -104,3 +104,61 @@ class TestDeflatedSharpeGate:
 		gate = DeflatedSharpeGate()
 		gr = gate.check(result, ctx)
 		assert not gr.passed
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo Gate
+# ---------------------------------------------------------------------------
+
+class TestMonteCarloGate:
+	def test_strong_signal_passes(self):
+		"""Consistently positive trades should pass Monte Carlo."""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
+
+		pnl = [10] * 90 + [-1] * 10  # very strong positive bias
+		result = _make_result(pnl_values=pnl, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = MonteCarloGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+		assert gr.details["p_value"] < 0.05
+
+	def test_noise_fails(self):
+		"""Zero-mean noise should fail Monte Carlo."""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
+
+		# Symmetric around zero — no edge
+		pnl = [5, -5] * 50
+		result = _make_result(pnl_values=pnl, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = MonteCarloGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+		assert gr.details["p_value"] >= 0.05
+
+	def test_insufficient_data_fails(self):
+		"""Too few trades should fail."""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
+
+		pnl = [10]
+		result = _make_result(pnl_values=pnl, total_trades=1)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = MonteCarloGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+
+	def test_reproducibility(self):
+		"""Same dedup_key should produce same p-value."""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
+
+		pnl = [10] * 70 + [-5] * 30
+		result = _make_result(pnl_values=pnl, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = MonteCarloGate()
+		gr1 = gate.check(result, ctx)
+		gr2 = gate.check(result, ctx)
+		assert gr1.details["p_value"] == gr2.details["p_value"]
