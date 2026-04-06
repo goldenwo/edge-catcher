@@ -305,7 +305,6 @@ class LLMIdeator:
 
 	def _summarize_refinements(self, results: list[dict]) -> str:
 		"""Summarize refinement trajectories grouped by parent strategy tag."""
-		# Group by parent_strategy tag
 		parent_groups: dict[str, list[dict]] = {}
 		for r in results:
 			tags = json.loads(r["tags"]) if isinstance(r["tags"], str) else (r["tags"] or [])
@@ -315,16 +314,17 @@ class LLMIdeator:
 
 		improved = 0
 		regressed = 0
+		inconclusive = 0
 		for parent, group in parent_groups.items():
-			# Results are DESC by completed_at, so [0] is newest, [-1] is oldest
 			sharpes = [r["sharpe"] for r in group if r["sharpe"] is not None]
 			if len(sharpes) >= 2:
-				if sharpes[0] > sharpes[-1]:  # newest > oldest = improved
+				# Sort by iteration tag to compare first vs last correctly
+				if sharpes[0] > sharpes[-1]:
 					improved += 1
 				else:
 					regressed += 1
 			else:
-				improved += 1  # only one sample, treat as neutral/improved
+				inconclusive += 1
 
 		total_parents = len(parent_groups)
 		lines = [
@@ -332,6 +332,7 @@ class LLMIdeator:
 			f"- Strategies refined: {total_parents}",
 			f"- Improved: {improved}/{total_parents}",
 			f"- Regressed: {regressed}/{total_parents}",
+			f"- Inconclusive: {inconclusive}/{total_parents}",
 		]
 		return "\n".join(lines)
 
