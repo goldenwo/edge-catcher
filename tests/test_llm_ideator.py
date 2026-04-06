@@ -148,3 +148,22 @@ class TestLLMIdeatorIdeate:
 				start_date="2025-01-01",
 				end_date="2025-12-31",
 			)
+
+
+class TestSummarizeRefinements:
+	def test_summarize_refinements_single_sample_is_neutral(self):
+		"""A refinement group with only 1 result should not count as improved."""
+		import json
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		results = [
+			{
+				"strategy": "FooV2", "verdict": "explore", "sharpe": 1.5,
+				"tags": json.dumps(["source:llm_refinement", "parent_strategy:Foo", "iteration:1"]),
+				"total_trades": 80, "win_rate": 0.55, "net_pnl_cents": 200,
+				"series": "X", "db_path": "d.db",
+			}
+		]
+
+		summary = LLMIdeator._summarize_refinements(None, results)
+		assert "Improved: 0/1" in summary or "Inconclusive: 1" in summary
