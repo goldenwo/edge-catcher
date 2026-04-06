@@ -75,7 +75,7 @@ class ResearchJournal:
 			rows = conn.execute(
 				"""SELECT id, run_id, entry_type, content, created_at
 				   FROM research_journal
-				   ORDER BY created_at DESC
+				   ORDER BY created_at DESC, id DESC
 				   LIMIT ?""",
 				(limit,),
 			).fetchall()
@@ -95,7 +95,7 @@ class ResearchJournal:
 			row = conn.execute(
 				"""SELECT content FROM research_journal
 				   WHERE entry_type = 'trajectory'
-				   ORDER BY created_at DESC
+				   ORDER BY created_at DESC, id DESC
 				   LIMIT 1""",
 			).fetchone()
 			if row is None:
@@ -107,8 +107,10 @@ class ResearchJournal:
 	def build_context_for_prompt(self, max_chars: int = 8000) -> str:
 		"""Format recent journal entries as text for LLM prompt inclusion.
 
-		Returns a markdown-formatted summary, newest first, truncated by character
-		budget. Trajectory entries get priority placement (always included first).
+		Returns a markdown-formatted summary, newest first. The latest trajectory
+		entry is always included first (even if it alone exceeds max_chars, since
+		trajectory entries are small and most actionable). Remaining entries are
+		added newest-first until the character budget is exhausted.
 		"""
 		entries = self.read_recent(limit=200)
 
@@ -157,8 +159,10 @@ class ResearchJournal:
 		run_id:
 			The UUID of the current loop invocation.
 		results:
-			All result dicts from the tracker (each must have 'run_id', 'verdict',
-			and 'sharpe' keys).
+			List of result dicts built by the loop, each with keys 'run_id'
+			(loop invocation UUID), 'verdict', and 'sharpe'. These are NOT
+			raw tracker rows — the loop constructs them from HypothesisResult
+			objects.
 		prev_trajectory:
 			The previous trajectory entry content dict, or None if first run.
 		"""
