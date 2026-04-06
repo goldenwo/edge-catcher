@@ -41,8 +41,17 @@ def _make_result(pnl_values=None, sharpe=2.5, total_trades=100, **kwargs) -> Hyp
 # ---------------------------------------------------------------------------
 
 class TestDeflatedSharpeGate:
-	def _make_tracker_with_results(self, sharpes: list[float], strategies: list[str] | None = None):
-		"""Mock tracker that returns results with given Sharpe values."""
+	def _make_tracker_with_results(
+		self,
+		sharpes: list[float],
+		strategies: list[str] | None = None,
+	):
+		"""Mock tracker that returns results with given Sharpe values.
+
+		``sharpes`` are treated as per-trade Sharpes (not backtester-scaled).
+		We set ``total_trades=1`` so that the gate's division by sqrt(total_trades)
+		is a no-op (sqrt(1) == 1), preserving the original test intent.
+		"""
 		if strategies is None:
 			strategies = [f"strat_{i}" for i in range(len(sharpes))]
 		rows = []
@@ -50,6 +59,9 @@ class TestDeflatedSharpeGate:
 			rows.append({
 				"strategy": strat, "sharpe": sharpe, "status": "ok",
 				"verdict": "explore", "id": str(i),
+				# total_trades=1 keeps bt_sharpe / sqrt(1) == sharpe, so the
+				# existing test values remain meaningful as per-trade Sharpes.
+				"total_trades": 1,
 			})
 		tracker = MagicMock()
 		tracker.list_results.return_value = rows
@@ -104,6 +116,60 @@ class TestDeflatedSharpeGate:
 		gate = DeflatedSharpeGate()
 		gr = gate.check(result, ctx)
 		assert not gr.passed
+
+	def test_dsr_gate_sharpe_scale_consistency(self):
+		"""sr_observed and sr0 should be on the same scale.
+
+		The backtester reports Sharpe as mean/std * sqrt(N) (scaled).
+		sr_observed is computed as mean/std (per-trade, unscaled).
+		ok_sharpes from tracker must be normalized to per-trade scale too,
+		or sr0 ends up ~sqrt(N) times larger than sr_observed, breaking DSR.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# PnL with known per-trade Sharpe ~0.116 (mean=10, std~86)
+		# Backtester reports: 0.116 * sqrt(200) ~= 1.64
+		pnl = [10 + (i % 3 - 1) * 100 for i in range(200)]
+		mu = statistics.mean(pnl)
+		std = statistics.stdev(pnl)
+		per_trade_sharpe = mu / std
+		backtester_sharpe = per_trade_sharpe * math.sqrt(len(pnl))
+
+		h = _make_hypothesis(strategy="TestStrat", series="X", db_path="d.db",
+							 start_date="2025-01-01", end_date="2025-12-31")
+		result = _make_result(
+			pnl_values=pnl, sharpe=backtester_sharpe, total_trades=200,
+			strategy="TestStrat",
+		)
+
+		# Tracker rows use backtester-scale Sharpes (1.0–1.9) with 200 trades each.
+		# Per-trade equivalents are ~0.07–0.13.
+		tracker = MagicMock()
+		tracker.list_results.return_value = [
+			{"strategy": f"S{i}", "status": "ok", "sharpe": 1.0 + i * 0.1, "total_trades": 200}
+			for i in range(10)
+		]
+
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=h)
+		gate = DeflatedSharpeGate(threshold=0.95)
+		gate_result = gate.check(result, ctx)
+
+		sr_observed = gate_result.details["sr_observed"]
+		sr0 = gate_result.details["sr0"]
+
+		# sr_observed is per-trade (~0.116). After fix, ok_sharpes are normalized
+		# to per-trade scale, so sr0 is also ~0.03–0.05. The ratio sr_observed/sr0
+		# should be in a reasonable range (0.5–10).
+		#
+		# Before the fix, ok_sharpes are raw backtester Sharpes (~1.0–1.9 for 200
+		# trades), making sr0 ~0.48, so ratio = 0.116/0.48 = 0.24 — below 0.5.
+		assert sr0 != 0, "sr0 should not be zero"
+		ratio = abs(sr_observed) / abs(sr0)
+		assert ratio >= 0.5, (
+			f"sr_observed ({sr_observed:.4f}) and sr0 ({sr0:.4f}) are on different "
+			f"scales (ratio={ratio:.3f} < 0.5). ok_sharpes must be divided by "
+			f"sqrt(total_trades) to match the per-trade sr_observed scale."
+		)
 
 
 # ---------------------------------------------------------------------------

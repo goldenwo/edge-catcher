@@ -60,8 +60,17 @@ class DeflatedSharpeGate(Gate):
 				details={},
 			)
 		all_results = context.tracker.list_results()
-		ok_sharpes = [r["sharpe"] for r in all_results if r.get("status") == "ok"]
-		strategy_names = {r["strategy"] for r in all_results if r.get("status") == "ok"}
+
+		# Collect per-trade Sharpes and count strategies that contributed
+		ok_results = [r for r in all_results if r.get("status") == "ok"]
+		strategy_names = set()
+		ok_sharpes = []
+		for r in ok_results:
+			bt_sharpe = r["sharpe"]
+			trades = r.get("total_trades", 0)
+			if trades >= 1:
+				ok_sharpes.append(bt_sharpe / math.sqrt(trades))
+				strategy_names.add(r["strategy"])
 		N = len(strategy_names)
 
 		if N < 2 or len(ok_sharpes) < 2:
