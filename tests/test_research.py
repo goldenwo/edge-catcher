@@ -335,14 +335,19 @@ class TestResearchAgent:
         mock_proc.stdout = self._mock_backtest_output()
         mock_proc.stderr = ""
 
-        with patch("subprocess.run", return_value=mock_proc):
+        mock_pipeline = MagicMock()
+        mock_pipeline.validate.return_value = ("promote", "passed all gates", [])
+
+        with patch("subprocess.run", return_value=mock_proc), \
+             patch("edge_catcher.research.agent.ValidationPipeline", return_value=mock_pipeline), \
+             patch("edge_catcher.research.agent.default_gates", return_value=[]):
             result = agent.run_hypothesis(h)
 
         assert result.status == "ok"
         assert result.total_trades == 100
         assert result.win_rate == 0.90
         assert result.sharpe == 2.5
-        assert result.verdict == "candidate"
+        assert result.verdict == "promote"
 
     def test_run_hypothesis_error_json(self, tmp_path):
         agent = self._make_agent(tmp_path)
@@ -519,3 +524,91 @@ class TestRunBacktestOnly:
             data = agent.run_backtest_only(h)
 
         assert data is None
+
+
+# ---------------------------------------------------------------------------
+# Validation pipeline integration
+# ---------------------------------------------------------------------------
+
+class TestValidationIntegration:
+    """Test that the validation pipeline is wired into run_hypothesis."""
+
+    def test_candidate_goes_through_validation(self, tmp_path):
+        """When evaluator returns 'candidate', validation pipeline should run."""
+        from unittest.mock import patch, MagicMock
+        import json
+
+        tracker = Tracker(tmp_path / "research.db")
+        agent = ResearchAgent(tracker=tracker)
+
+        h = Hypothesis(
+            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+        )
+
+        fake_output = json.dumps({
+            "status": "ok",
+            "total_trades": 100, "wins": 90, "losses": 10,
+            "win_rate": 0.90, "net_pnl_cents": 500.0,
+            "sharpe": 2.5, "max_drawdown_pct": 5.0,
+            "total_fees_paid": 100.0,
+            "avg_win_cents": 10.0, "avg_loss_cents": -5.0,
+            "per_strategy": {},
+            "pnl_values": [10] * 90 + [-5] * 10,
+        })
+        mock_proc = MagicMock(stdout=fake_output, stderr="", returncode=0)
+
+        # Mock validation pipeline to always promote
+        mock_pipeline = MagicMock()
+        mock_pipeline.validate.return_value = (
+            "promote", "passed all gates", [],
+        )
+
+        with patch("subprocess.run", return_value=mock_proc), \
+             patch("edge_catcher.research.agent.ValidationPipeline", return_value=mock_pipeline), \
+             patch("edge_catcher.research.agent.default_gates", return_value=[]):
+            result = agent.run_hypothesis(h)
+
+        assert result.verdict == "promote"
+        mock_pipeline.validate.assert_called_once()
+
+    def test_candidate_never_persists_on_error(self, tmp_path):
+        """If validation crashes, verdict should be 'explore', not 'candidate'."""
+        from unittest.mock import patch, MagicMock
+        import json
+
+        tracker = Tracker(tmp_path / "research.db")
+        agent = ResearchAgent(tracker=tracker)
+
+        h = Hypothesis(
+            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+        )
+
+        fake_output = json.dumps({
+            "status": "ok",
+            "total_trades": 100, "wins": 90, "losses": 10,
+            "win_rate": 0.90, "net_pnl_cents": 500.0,
+            "sharpe": 2.5, "max_drawdown_pct": 5.0,
+            "total_fees_paid": 100.0,
+            "avg_win_cents": 10.0, "avg_loss_cents": -5.0,
+            "per_strategy": {},
+            "pnl_values": [10] * 90 + [-5] * 10,
+        })
+        mock_proc = MagicMock(stdout=fake_output, stderr="", returncode=0)
+
+        # Mock validation pipeline to raise
+        mock_pipeline = MagicMock()
+        mock_pipeline.validate.side_effect = RuntimeError("boom")
+
+        with patch("subprocess.run", return_value=mock_proc), \
+             patch("edge_catcher.research.agent.ValidationPipeline", return_value=mock_pipeline), \
+             patch("edge_catcher.research.agent.default_gates", return_value=[]):
+            result = agent.run_hypothesis(h)
+
+        assert result.verdict == "explore"
+        assert "validation pipeline error" in result.verdict_reason
+        # Verify it was saved to tracker
+        rows = tracker.list_results()
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "explore"

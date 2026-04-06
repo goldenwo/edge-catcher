@@ -10,6 +10,7 @@ from .grid_planner import GridPlanner
 from .run_queue import RunQueue
 from .llm_ideator import LLMIdeator
 from .loop import LoopOrchestrator
+from .validation import ValidationPipeline, GateContext, GateResult, Gate
 
 __all__ = [
     "Hypothesis",
@@ -24,4 +25,8 @@ __all__ = [
     "RunQueue",
     "LLMIdeator",
     "LoopOrchestrator",
+    "ValidationPipeline",
+    "GateContext",
+    "GateResult",
+    "Gate",
 ]

@@ -12,6 +12,8 @@ from .evaluator import Evaluator, Thresholds
 from .hypothesis import Hypothesis, HypothesisResult
 from .reporter import Reporter
 from .tracker import Tracker
+from .validation.pipeline import ValidationPipeline, default_gates
+from .validation.gate import GateContext
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,47 @@ class ResearchAgent:
             self.thresholds,
         )
 
+        # ── Validation pipeline for candidates ──
+        validation_details = None
+        if verdict == "candidate":
+            try:
+                pipeline = ValidationPipeline(default_gates())
+                context = GateContext(
+                    tracker=self.tracker,
+                    pnl_values=data.get("pnl_values", []),
+                    hypothesis=h,
+                    agent=self,
+                )
+                verdict, verdict_reason, gate_results = pipeline.validate(
+                    HypothesisResult(
+                        hypothesis=h, status="ok",
+                        total_trades=data.get("total_trades", 0),
+                        wins=data.get("wins", 0),
+                        losses=data.get("losses", 0),
+                        win_rate=data.get("win_rate", 0.0),
+                        net_pnl_cents=data.get("net_pnl_cents", 0.0),
+                        sharpe=data.get("sharpe", 0.0),
+                        max_drawdown_pct=data.get("max_drawdown_pct", 0.0),
+                        fees_paid_cents=data.get("total_fees_paid", 0.0),
+                        avg_win_cents=data.get("avg_win_cents", 0.0),
+                        avg_loss_cents=data.get("avg_loss_cents", 0.0),
+                        per_strategy=data.get("per_strategy", {}),
+                        verdict="candidate", verdict_reason="",
+                        raw_json=data,
+                    ),
+                    context,
+                )
+                validation_details = [
+                    {"gate_name": g.gate_name, "passed": g.passed,
+                     "reason": g.reason, "details": g.details}
+                    for g in gate_results
+                ]
+            except Exception as exc:
+                logger.warning("Validation pipeline error: %s", exc)
+                verdict = "explore"
+                verdict_reason = f"validation pipeline error: {exc}"
+                validation_details = []
+
         result = HypothesisResult(
             hypothesis=h,
             status="ok",
@@ -163,7 +206,7 @@ class ResearchAgent:
             raw_json=data,
         )
 
-        self.tracker.save_result(result)
+        self.tracker.save_result(result, validation_details=validation_details)
         logger.info(
             "  → verdict=%s | trades=%d win_rate=%.1f%% sharpe=%.2f pnl=%.0f¢  [%s]",
             result.verdict, result.total_trades, result.win_rate * 100,

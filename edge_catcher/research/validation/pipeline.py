@@ -47,3 +47,18 @@ class ValidationPipeline:
 		gate_names = ", ".join(g.gate_name for g in gate_results)
 		reason = f"passed all validation gates ({gate_names})" if gate_names else "no gates configured"
 		return "promote", reason, gate_results
+
+
+def default_gates() -> list[Gate]:
+	"""Return the default gate pipeline in recommended order (cheap → expensive)."""
+	from .gate_dsr import DeflatedSharpeGate
+	from .gate_monte_carlo import MonteCarloGate
+	from .gate_walkforward import WalkForwardGate
+	from .gate_sensitivity import ParameterSensitivityGate
+
+	return [
+		DeflatedSharpeGate(),
+		MonteCarloGate(),
+		WalkForwardGate(),
+		ParameterSensitivityGate(),
+	]
