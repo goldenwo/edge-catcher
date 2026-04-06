@@ -434,15 +434,13 @@ class ResearchAgent:
 
         result: dict[str, list[str]] = {}
         for db_file in sorted(Path("data").glob("*.db")):
-            # Skip tracker's own database
             if db_file.name == "research.db":
                 continue
             try:
-                conn = sqlite3.connect(str(db_file))
-                rows = conn.execute(
-                    "SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker"
-                ).fetchall()
-                conn.close()
+                with sqlite3.connect(str(db_file)) as conn:
+                    rows = conn.execute(
+                        "SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker"
+                    ).fetchall()
                 series = [r[0] for r in rows if r[0]]
                 if series:
                     result[str(db_file)] = series
@@ -453,6 +451,13 @@ class ResearchAgent:
     @staticmethod
     def _row_to_result(row: dict, h: Hypothesis) -> HypothesisResult:
         """Reconstruct a HypothesisResult from a tracker row dict."""
+        raw_json = row.get("raw_json", {})
+        if isinstance(raw_json, str):
+            try:
+                raw_json = json.loads(raw_json)
+            except (json.JSONDecodeError, ValueError):
+                raw_json = {}
+
         return HypothesisResult(
             hypothesis=h,
             status=row.get("status", "ok"),
@@ -466,8 +471,8 @@ class ResearchAgent:
             fees_paid_cents=row.get("fees_paid_cents", 0.0),
             avg_win_cents=row.get("avg_win_cents", 0.0),
             avg_loss_cents=row.get("avg_loss_cents", 0.0),
-            per_strategy={},
+            per_strategy=raw_json.get("per_strategy", {}),
             verdict=row.get("verdict", "kill"),
             verdict_reason=row.get("verdict_reason", ""),
-            raw_json={},
+            raw_json=raw_json,
         )
