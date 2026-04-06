@@ -54,16 +54,15 @@ class Evaluator:
                 f"only {result.total_trades} trades (need ≥{thresholds.promote_min_trades}) — "
                 f"not enough for promotion validation",
             )
-        # Candidate for promotion — needs validation pipeline
+        # Strong candidate for promotion — needs full validation pipeline
         if result.sharpe >= thresholds.promote_sharpe:
             return (
                 "candidate",
                 f"Sharpe {result.sharpe:.2f} ≥ {thresholds.promote_sharpe:.2f} — needs validation",
             )
-
-        # Between kill and promote → explore further
+        # Borderline — run pipeline with softer expectations
         return (
-            "explore",
-            f"Sharpe {result.sharpe:.2f}, win rate {result.win_rate:.1%}, "
-            f"PnL {result.net_pnl_cents:.0f}¢ — worth investigating",
+            "validate",
+            f"Sharpe {result.sharpe:.2f} in [{thresholds.min_sharpe}, {thresholds.promote_sharpe}) "
+            f"with {result.total_trades} trades — borderline, needs validation",
         )
