@@ -672,32 +672,30 @@ class LoopOrchestrator:
 				})
 
 	def _find_refinement_candidates(self) -> list[str]:
-		"""Find LLM-generated strategies with 'explore' verdicts worth refining.
+		"""Find strategies with 'explore' verdicts worth refining.
 
-		Excludes strategies that already have refinement children (to avoid
-		re-refining on subsequent loop invocations).
+		Includes both LLM-generated and grid strategies.
+		Excludes strategies that already have refinement children.
 		"""
 		all_results = self.tracker.list_results()
 
-		# Find strategies tagged as LLM-generated
-		llm_strategies: set[str] = set()
-		# Track which base strategies already have refinement versions
 		already_refined: set[str] = set()
 		for r in all_results:
 			tags = json.loads(r["tags"]) if isinstance(r["tags"], str) else (r["tags"] or [])
-			if "source:llm_novel_strategy" in tags:
-				llm_strategies.add(r["strategy"])
 			for tag in tags:
 				if tag.startswith("parent_strategy:"):
 					already_refined.add(tag.split(":", 1)[1])
 
-		# Filter: has explore, no promotes, and not already refined
+		# Group by strategy, check verdicts
+		by_strategy: dict[str, set[str]] = defaultdict(set)
+		for r in all_results:
+			if r.get("status") == "ok":
+				by_strategy[r["strategy"]].add(r["verdict"])
+
 		candidates = []
-		for strat in llm_strategies:
+		for strat, verdicts in by_strategy.items():
 			if strat in already_refined:
 				continue
-			strat_results = [r for r in all_results if r["strategy"] == strat]
-			verdicts = {r["verdict"] for r in strat_results}
 			if "explore" in verdicts and "promote" not in verdicts:
 				candidates.append(strat)
 
