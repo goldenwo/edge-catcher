@@ -171,6 +171,48 @@ class ResearchAgent:
         )
         return result
 
+    def run_backtest_only(self, h: Hypothesis) -> dict | None:
+        """Run backtester subprocess, return parsed JSON dict.
+
+        Does NOT evaluate or save to tracker.
+        Returns None on subprocess failure (timeout, non-zero exit, malformed JSON).
+        """
+        cmd = [
+            sys.executable, "-m", "edge_catcher", "backtest",
+            "--series", h.series,
+            "--strategy", h.strategy,
+            "--db-path", h.db_path,
+            "--fee-pct", str(h.fee_pct),
+            "--json",
+        ]
+        if h.start_date:
+            cmd += ["--start", h.start_date]
+        if h.end_date:
+            cmd += ["--end", h.end_date]
+
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("run_backtest_only: timed out for %s/%s", h.strategy, h.series)
+            return None
+        except Exception as exc:
+            logger.warning("run_backtest_only: subprocess failed: %s", exc)
+            return None
+
+        try:
+            data = json.loads(proc.stdout.strip())
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("run_backtest_only: JSON parse error: %s", exc)
+            return None
+
+        if data.get("status") == "error":
+            logger.warning("run_backtest_only: backtest error: %s", data.get("message"))
+            return None
+
+        return data
+
     # ------------------------------------------------------------------
     # Adjacent hypothesis generation
     # ------------------------------------------------------------------
