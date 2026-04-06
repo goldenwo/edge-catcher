@@ -175,7 +175,8 @@ class Tracker:
                           r.status, r.total_trades, r.wins, r.losses, r.win_rate,
                           r.net_pnl_cents, r.sharpe, r.max_drawdown_pct,
                           r.fees_paid_cents, r.avg_win_cents, r.avg_loss_cents,
-                          r.verdict, r.verdict_reason, r.completed_at
+                          r.verdict, r.verdict_reason, r.validation_details,
+                          r.completed_at
                    FROM hypotheses h
                    JOIN results r ON h.id = r.hypothesis_id
                    WHERE h.strategy = ?
