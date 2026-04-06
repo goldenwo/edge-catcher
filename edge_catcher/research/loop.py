@@ -578,7 +578,7 @@ class LoopOrchestrator:
 			series_list = []
 			best_sharpe = 0.0
 			for r in strat_results:
-				verdicts[r.verdict] = verdicts.get(r.verdict, 0) + 1
+				verdicts[r.verdict] += 1
 				series_list.append(r.hypothesis.series)
 				if r.status == "ok":
 					best_sharpe = max(best_sharpe, r.sharpe)
