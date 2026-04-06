@@ -180,7 +180,10 @@ class ResearchJournal:
 		if prev_trajectory is not None:
 			prev_best_sharpe = prev_trajectory.get("best_sharpe_overall", 0.0)
 
-		if promote_rate > 0 or best_this_run > (prev_best_sharpe * 0.95):
+		# On first run (no baseline), only promotes count as improving
+		if promote_rate > 0:
+			return "improving"
+		if prev_best_sharpe > 0 and best_this_run > (prev_best_sharpe * 0.95):
 			return "improving"
 		elif any(r.get("verdict") == "explore" for r in this_run):
 			return "plateauing"

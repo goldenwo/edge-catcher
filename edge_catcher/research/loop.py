@@ -11,6 +11,7 @@ import re
 import sys
 import time
 import uuid
+from collections import defaultdict
 from pathlib import Path
 
 from .agent import ResearchAgent
@@ -72,6 +73,7 @@ class LoopOrchestrator:
 		"""
 		from .journal import ResearchJournal
 		journal = ResearchJournal(db_path=self.research_db)
+		self._journal = journal
 
 		start_time = time.monotonic()
 		self.audit.record_integrity(
@@ -274,6 +276,7 @@ class LoopOrchestrator:
 			client = LLMClient()
 			ideator = LLMIdeator(
 				tracker=self.tracker, audit=self.audit, client=client,
+				journal=self._journal,
 			)
 			logger.info("Starting LLM ideation call...")
 			hypotheses, novel_proposals = ideator.ideate(
@@ -568,7 +571,6 @@ class LoopOrchestrator:
 		phase: str,
 	) -> None:
 		"""Write outcome journal entries — one per strategy, aggregated across series."""
-		from collections import defaultdict
 		by_strategy: dict[str, list[HypothesisResult]] = defaultdict(list)
 		for r in results:
 			by_strategy[r.hypothesis.strategy].append(r)
@@ -598,7 +600,6 @@ class LoopOrchestrator:
 		all_results: list[HypothesisResult],
 	) -> None:
 		"""Write trajectory + observation entries at end of run."""
-		from collections import defaultdict
 		from .journal import ResearchJournal
 
 		# Build result dicts for trajectory classification
