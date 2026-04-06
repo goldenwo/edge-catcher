@@ -43,8 +43,14 @@ class ValidationPipeline:
 
 			logger.info("  Gate '%s' PASSED: %s", gate.name, gate_result.reason)
 
-		# All gates passed
+		# All gates passed — check if any gate flagged "review" tier
 		gate_names = ", ".join(g.gate_name for g in gate_results)
+		has_review = any(gr.tier == "review" for gr in gate_results)
+
+		if has_review:
+			reason = f"passed all gates but DSR in review band ({gate_names})"
+			return "review", reason, gate_results
+
 		reason = f"passed all validation gates ({gate_names})" if gate_names else "no gates configured"
 		return "promote", reason, gate_results
 
@@ -53,12 +59,12 @@ def default_gates() -> list[Gate]:
 	"""Return the default gate pipeline in recommended order (cheap → expensive)."""
 	from .gate_dsr import DeflatedSharpeGate
 	from .gate_monte_carlo import MonteCarloGate
-	from .gate_walkforward import WalkForwardGate
+	from .gate_temporal_consistency import TemporalConsistencyGate
 	from .gate_sensitivity import ParameterSensitivityGate
 
 	return [
 		DeflatedSharpeGate(),
 		MonteCarloGate(),
-		WalkForwardGate(),
+		TemporalConsistencyGate(),
 		ParameterSensitivityGate(),
 	]
