@@ -297,7 +297,7 @@ class LLMIdeator:
 			lines.append(f"- Best performer: \"{best['strategy']}\" (Sharpe {best['sharpe']:.2f} on {best['series']})")
 
 		# Common failure: low trade count
-		low_trade = [r for r in results if (r["total_trades"] or 0) < 50]
+		low_trade = [r for r in results if (r["total_trades"] or 0) < 50 and r["verdict"] == "kill"]
 		if len(low_trade) > total * 0.5:
 			lines.append(f"- Common failure: strategies with <50 trades ({len(low_trade)}/{total} proposals)")
 
@@ -316,13 +316,13 @@ class LLMIdeator:
 		improved = 0
 		regressed = 0
 		for parent, group in parent_groups.items():
-			# Compare best sharpe of refined vs original (first result in group as baseline proxy)
+			# Results are DESC by completed_at, so [0] is newest, [-1] is oldest
 			sharpes = [r["sharpe"] for r in group if r["sharpe"] is not None]
 			if len(sharpes) >= 2:
-				if sharpes[-1] < max(sharpes[:-1]):
-					regressed += 1
-				else:
+				if sharpes[0] > sharpes[-1]:  # newest > oldest = improved
 					improved += 1
+				else:
+					regressed += 1
 			else:
 				improved += 1  # only one sample, treat as neutral/improved
 
@@ -398,7 +398,7 @@ class LLMIdeator:
 
 		# Trade count bottleneck
 		if novel:
-			low_trade_kills = [r for r in novel if (r["total_trades"] or 0) < 50]
+			low_trade_kills = [r for r in novel if (r["total_trades"] or 0) < 50 and r["verdict"] == "kill"]
 			if len(low_trade_kills) > len(novel) * 0.5:
 				directives.append(
 					f"Trade frequency bottleneck: {len(low_trade_kills)}/{len(novel)} "
@@ -444,7 +444,7 @@ class LLMIdeator:
 	def _hit_rate(results: list[dict]) -> float:
 		if not results:
 			return 0.0
-		non_kill = sum(1 for r in results if r["verdict"] != "kill")
+		non_kill = sum(1 for r in results if r["verdict"] in ("promote", "explore"))
 		return non_kill / len(results)
 
 	@staticmethod
