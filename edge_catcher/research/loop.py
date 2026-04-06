@@ -66,6 +66,13 @@ class LoopOrchestrator:
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
 		self.run_id = str(uuid.uuid4())
+		self._cached_results: list[dict] | None = None
+
+	def _list_results(self, refresh: bool = False) -> list[dict]:
+		"""Return cached tracker results, refreshing if requested."""
+		if self._cached_results is None or refresh:
+			self._cached_results = self.tracker.list_results()
+		return self._cached_results
 
 	def run(self) -> tuple[int, list[HypothesisResult]]:
 		"""Execute the research loop. Returns (exit_code, all_results).
@@ -80,7 +87,7 @@ class LoopOrchestrator:
 		self.audit.record_integrity(
 			checkpoint="loop_start",
 			result_hash="",
-			result_count=len(self.tracker.list_results()),
+			result_count=len(self._list_results()),
 		)
 
 		agent = ResearchAgent(tracker=self.tracker, force=self.force)
@@ -105,7 +112,11 @@ class LoopOrchestrator:
 				force=self.force,
 			)
 
-			budget_for_grid = self.max_runs
+			# Reserve at least 20% of budget for LLM + refinement phases
+			if self.grid_only:
+				budget_for_grid = self.max_runs
+			else:
+				budget_for_grid = max(1, int(self.max_runs * 0.8))
 			grid_batch = grid_hypotheses[:budget_for_grid]
 
 			remaining_time = self._remaining_time(start_time)
@@ -122,7 +133,7 @@ class LoopOrchestrator:
 			)
 
 		# ── Integrity Checkpoint ──────────────────────────────────────────
-		tracker_results = self.tracker.list_results()
+		tracker_results = self._list_results(refresh=True)
 		result_hash = self.audit.compute_result_hash(tracker_results)
 		self.audit.record_integrity(
 			checkpoint="post_grid",
@@ -173,12 +184,11 @@ class LoopOrchestrator:
 		self._write_journal_summary(journal, all_results)
 
 		# ── Report ────────────────────────────────────────────────────────
+		end_results = self._list_results(refresh=True)
 		self.audit.record_integrity(
 			checkpoint="loop_end",
-			result_hash=self.audit.compute_result_hash(
-				self.tracker.list_results()
-			),
-			result_count=len(self.tracker.list_results()),
+			result_hash=self.audit.compute_result_hash(end_results),
+			result_count=len(end_results),
 		)
 
 		if all_results and self.output_path:
@@ -256,7 +266,7 @@ class LoopOrchestrator:
 
 		# Verify integrity before ideation — compare against the most recent
 		# post_grid checkpoint from this run (list is DESC, so last appended = first)
-		current_results = self.tracker.list_results()
+		current_results = self._list_results(refresh=True)
 		current_hash = self.audit.compute_result_hash(current_results)
 		integrity_checks = self.audit.list_integrity_checks()
 		# Find the post_grid checkpoint that was recorded AFTER the most recent
@@ -348,8 +358,9 @@ class LoopOrchestrator:
 		results: list[HypothesisResult] = []
 		llm_calls_used = 0
 
-		# Find refinement candidates: LLM-generated strategies with explore but no promote
-		candidates = self._find_refinement_candidates()
+		# Find refinement candidates: strategies with explore but no promote
+		cached = self._list_results()
+		candidates = self._find_refinement_candidates(cached)
 		if not candidates:
 			logger.info("Refinement phase: no candidates found")
 			return results
@@ -375,7 +386,7 @@ class LoopOrchestrator:
 				break
 
 			# Determine starting version: find latest refinement with actual code
-			existing_version = self._count_existing_refinements(strategy_name)
+			existing_version = self._count_existing_refinements(strategy_name, cached)
 			if existing_version >= self.max_refinements:
 				logger.info(
 					"Strategy '%s' already has %d refinement(s), skipping",
@@ -671,13 +682,14 @@ class LoopOrchestrator:
 					"evidence": "low trade count may indicate overly restrictive entry conditions",
 				})
 
-	def _find_refinement_candidates(self) -> list[str]:
+	def _find_refinement_candidates(self, all_results: list[dict] | None = None) -> list[str]:
 		"""Find strategies with 'explore' verdicts worth refining.
 
 		Includes both LLM-generated and grid strategies.
 		Excludes strategies that already have refinement children.
 		"""
-		all_results = self.tracker.list_results()
+		if all_results is None:
+			all_results = self._list_results()
 
 		already_refined: set[str] = set()
 		for r in all_results:
@@ -701,9 +713,10 @@ class LoopOrchestrator:
 
 		return sorted(candidates)
 
-	def _count_existing_refinements(self, base_strategy: str) -> int:
+	def _count_existing_refinements(self, base_strategy: str, all_results: list[dict] | None = None) -> int:
 		"""Count how many refinement iterations already exist for a base strategy."""
-		all_results = self.tracker.list_results()
+		if all_results is None:
+			all_results = self._list_results()
 		max_iteration = 0
 		for r in all_results:
 			tags = json.loads(r["tags"]) if isinstance(r["tags"], str) else (r["tags"] or [])
