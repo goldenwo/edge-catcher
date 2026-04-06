@@ -145,13 +145,12 @@ class WalkForwardGate(Gate):
 
 		# Query DB for actual data range
 		try:
-			conn = sqlite3.connect(h.db_path)
-			row = conn.execute(
-				"SELECT MIN(open_time) as min_t, MAX(close_time) as max_t "
-				"FROM markets WHERE series_ticker = ?",
-				(h.series,),
-			).fetchone()
-			conn.close()
+			with sqlite3.connect(h.db_path) as conn:
+				row = conn.execute(
+					"SELECT MIN(open_time) as min_t, MAX(close_time) as max_t "
+					"FROM markets WHERE series_ticker = ?",
+					(h.series,),
+				).fetchone()
 			if row and row[0] and row[1]:
 				db_start = row[0][:10]  # ISO date portion
 				db_end = row[1][:10]
