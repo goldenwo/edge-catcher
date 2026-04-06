@@ -11,6 +11,7 @@ from .run_queue import RunQueue
 from .llm_ideator import LLMIdeator
 from .loop import LoopOrchestrator
 from .validation import ValidationPipeline, GateContext, GateResult, Gate
+from .journal import ResearchJournal
 
 __all__ = [
     "Hypothesis",
@@ -29,4 +30,5 @@ __all__ = [
     "GateContext",
     "GateResult",
     "Gate",
+    "ResearchJournal",
 ]

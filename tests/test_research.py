@@ -612,3 +612,144 @@ class TestValidationIntegration:
         rows = tracker.list_results()
         assert len(rows) == 1
         assert rows[0]["verdict"] == "explore"
+
+
+# ---------------------------------------------------------------------------
+# ResearchJournal
+# ---------------------------------------------------------------------------
+
+class TestResearchJournal:
+    def test_init_creates_table(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        # Should be able to read without error
+        entries = journal.read_recent()
+        assert entries == []
+
+    def test_write_and_read_recent(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        journal.write_entry("run-001", "outcome", {"phase": "grid", "strategy": "Foo", "best_sharpe": 1.5})
+        journal.write_entry("run-001", "observation", {"pattern": "X killed often", "evidence": "4/5 kills"})
+
+        entries = journal.read_recent()
+        assert len(entries) == 2
+        # Newest first
+        assert entries[0]["entry_type"] == "observation"
+        assert entries[1]["entry_type"] == "outcome"
+        # Content is deserialized
+        assert entries[1]["content"]["strategy"] == "Foo"
+
+    def test_write_invalid_entry_type_raises(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        with pytest.raises(ValueError, match="entry_type"):
+            journal.write_entry("run-001", "bogus", {})
+
+    def test_get_latest_trajectory_none_when_empty(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        assert journal.get_latest_trajectory() is None
+
+    def test_get_latest_trajectory_returns_most_recent(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        journal.write_entry("run-001", "trajectory", {"status": "stuck", "total_runs": 10})
+        journal.write_entry("run-002", "trajectory", {"status": "improving", "total_runs": 20})
+        traj = journal.get_latest_trajectory()
+        assert traj is not None
+        assert traj["status"] == "improving"
+        assert traj["total_runs"] == 20
+
+    def test_get_latest_trajectory_ignores_other_types(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        journal.write_entry("run-001", "outcome", {"phase": "grid", "strategy": "Foo"})
+        assert journal.get_latest_trajectory() is None
+
+    def test_build_context_trajectory_first(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        journal.write_entry("run-001", "outcome", {"phase": "grid", "strategy": "Bar", "best_sharpe": 1.2, "verdicts": {"promote": 0, "explore": 1, "kill": 2}})
+        journal.write_entry("run-001", "trajectory", {"status": "plateauing", "total_runs": 30, "promote_rate": 0.02})
+
+        ctx = journal.build_context_for_prompt()
+        # Trajectory header should appear before outcome
+        traj_pos = ctx.find("## Research Trajectory")
+        outcome_pos = ctx.find("- **[grid]**")
+        assert traj_pos != -1
+        assert outcome_pos != -1
+        assert traj_pos < outcome_pos
+
+    def test_build_context_character_budget(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        # Write many outcome entries to exceed budget
+        for i in range(100):
+            journal.write_entry(f"run-{i:03d}", "outcome", {
+                "phase": "grid",
+                "strategy": f"Strategy{i:04d}",
+                "best_sharpe": 1.5,
+                "verdicts": {"promote": 1, "explore": 0, "kill": 0},
+            })
+        ctx = journal.build_context_for_prompt(max_chars=500)
+        assert len(ctx) <= 500
+
+    def test_build_context_empty_journal(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        journal = ResearchJournal(tmp_path / "research.db")
+        ctx = journal.build_context_for_prompt()
+        assert ctx == ""
+
+    def test_classify_trajectory_improving_with_promote(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        results = [
+            {"run_id": "run-001", "verdict": "promote", "sharpe": 2.5},
+            {"run_id": "run-001", "verdict": "kill", "sharpe": 0.3},
+        ]
+        status = ResearchJournal.classify_trajectory("run-001", results, None)
+        assert status == "improving"
+
+    def test_classify_trajectory_improving_near_prev_best(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        results = [
+            {"run_id": "run-002", "verdict": "explore", "sharpe": 2.4},
+            {"run_id": "run-001", "verdict": "promote", "sharpe": 2.5},
+        ]
+        prev = {"status": "improving", "best_sharpe_overall": 2.5}
+        # 2.4 >= 2.5 * 0.95 = 2.375 → improving
+        status = ResearchJournal.classify_trajectory("run-002", results, prev)
+        assert status == "improving"
+
+    def test_classify_trajectory_plateauing(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        results = [
+            {"run_id": "run-002", "verdict": "explore", "sharpe": 1.2},
+            {"run_id": "run-002", "verdict": "kill", "sharpe": 0.5},
+            {"run_id": "run-001", "verdict": "promote", "sharpe": 2.5},
+        ]
+        prev = {"status": "improving", "best_sharpe_overall": 2.5}
+        # no promotes, best_this=1.2 < 2.375, but has explore → plateauing
+        status = ResearchJournal.classify_trajectory("run-002", results, prev)
+        assert status == "plateauing"
+
+    def test_classify_trajectory_stuck(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        results = [
+            {"run_id": "run-002", "verdict": "kill", "sharpe": 0.3},
+            {"run_id": "run-002", "verdict": "kill", "sharpe": 0.2},
+            {"run_id": "run-001", "verdict": "promote", "sharpe": 2.5},
+        ]
+        prev = {"status": "improving", "best_sharpe_overall": 2.5}
+        # no promotes, best_this=0.3 < 2.375, all kills → stuck
+        status = ResearchJournal.classify_trajectory("run-002", results, prev)
+        assert status == "stuck"
+
+    def test_classify_trajectory_empty_results(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        status = ResearchJournal.classify_trajectory("run-001", [], None)
+        assert status == "stuck"
+
+    def test_exported_from_package(self):
+        from edge_catcher.research import ResearchJournal
+        assert ResearchJournal is not None
