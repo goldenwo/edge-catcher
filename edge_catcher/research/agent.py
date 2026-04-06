@@ -146,9 +146,10 @@ class ResearchAgent:
 
         verdict, verdict_reason = self.evaluator.evaluate(preliminary, self.thresholds)
 
-        # ── Validation pipeline for candidates ──
+        # ── Validation pipeline for candidates and borderline strategies ──
         validation_details = None
-        if verdict == "candidate":
+        preliminary_verdict = verdict
+        if verdict in ("candidate", "validate"):
             try:
                 pipeline = ValidationPipeline(default_gates())
                 context = GateContext(
@@ -160,6 +161,9 @@ class ResearchAgent:
                 verdict, verdict_reason, gate_results = pipeline.validate(
                     preliminary, context,
                 )
+                # Borderline strategies that pass all gates get "review", not "promote"
+                if verdict == "promote" and preliminary_verdict == "validate":
+                    verdict = "review"
                 validation_details = [
                     {"gate_name": g.gate_name, "passed": g.passed,
                      "reason": g.reason, "details": g.details}
@@ -240,8 +244,9 @@ class ResearchAgent:
         if result.verdict == "kill":
             return adjacent
 
-        if result.verdict == "promote":
+        if result.verdict in ("promote", "review"):
             # Discover other (db, series) pairs and try the same winning strategy
+            tag = f"adjacent-{result.verdict}"
             for db_path, series_list in self._discover_all_series().items():
                 for series in series_list:
                     if series == h.series and db_path == h.db_path:
@@ -255,7 +260,7 @@ class ResearchAgent:
                             end_date=h.end_date,
                             fee_pct=h.fee_pct,
                             parent_id=h.id,
-                            tags=h.tags + ["adjacent-promoted"],
+                            tags=h.tags + [tag],
                         )
                     )
 
