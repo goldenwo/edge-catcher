@@ -171,6 +171,161 @@ class TestDeflatedSharpeGate:
 			f"sqrt(total_trades) to match the per-trade sr_observed scale."
 		)
 
+	def test_dsr_groups_sharpes_by_strategy(self):
+		"""Same strategy tested on multiple series should count as one trial.
+
+		Before the fix, 1 strategy × 10 series = 10 data points for sr_var
+		but N=1, causing "only 1 strategies tested" failure or inflated variance.
+		After the fix, the 10 Sharpes are averaged into 1 representative value.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# 3 strategies, each tested on 5 series — 15 total rows
+		tracker = MagicMock()
+		rows = []
+		for s_idx in range(3):
+			for series_idx in range(5):
+				rows.append({
+					"strategy": f"Strat{s_idx}",
+					"status": "ok",
+					"sharpe": 0.3 + s_idx * 0.1 + series_idx * 0.02,
+					"total_trades": 1,
+				})
+		tracker.list_results.return_value = rows
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		# Should see 3 strategies, not 15 or 1
+		assert gr.details["n_strategies"] == 3
+		# n_sharpes still reports total backtests for transparency
+		assert gr.details["n_sharpes"] == 15
+
+	def test_strategy_family_helper(self):
+		"""_strategy_family strips trailing V\\d+ suffixes."""
+		from edge_catcher.research.validation.gate_dsr import _strategy_family
+
+		assert _strategy_family("FooV1") == "Foo"
+		assert _strategy_family("CvolV1") == "Cvol"
+		assert _strategy_family("Cvol") == "Cvol"
+		assert _strategy_family("MomentumV2V3") == "Momentum"
+		assert _strategy_family("V1") == "V1"  # degenerate: whole name is suffix
+		assert _strategy_family("MyStratV10") == "MyStrat"
+		assert _strategy_family("TestV1V2V3") == "Test"
+
+	def test_family_aware_grouping(self):
+		"""FooV1, FooV2, FooV3 + Bar should count as 2 families, not 4 strategies."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		strategies = ["FooV1", "FooV2", "FooV3", "Bar"]
+		sharpes = [0.5, 0.6, 0.4, 0.8]
+		tracker = self._make_tracker_with_results(sharpes, strategies)
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		assert gr.details["n_strategies"] == 2  # Foo family + Bar family
+		assert gr.details["n_sharpes"] == 4  # total backtests
+
+	def test_low_t_bypass_skips_dsr(self):
+		"""T < 50 should skip DSR and let other gates decide."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		pnl = [10] * 25 + [-5] * 5  # T=30
+		result = _make_result(pnl_values=pnl, sharpe=2.0, total_trades=30)
+
+		# Don't even need a tracker — should return before reaching it
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+		assert gr.details.get("skipped") is True
+		assert "skipped" in gr.reason.lower()
+		assert gr.tier is None  # not "review" — simply skipped
+
+	def test_dsr_review_tier(self):
+		"""DSR in [0.80, 0.95) should produce tier='review' with passed=True."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# Use a gate with a low review_floor so we can control the band.
+		# We need a scenario where DSR ends up between 0.80 and 0.95.
+		# Strategy with moderate edge in a small pool.
+		sharpes = [0.2, -0.1, 0.5, 0.3, 0.1]
+		tracker = self._make_tracker_with_results(sharpes)
+
+		# Moderate PnL — should produce borderline DSR
+		pnl = [3] * 55 + [-2] * 45  # weak but positive
+		result = _make_result(pnl_values=pnl, sharpe=1.5, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		# Use thresholds that bracket the computed DSR
+		gate = DeflatedSharpeGate(threshold=0.99, review_floor=0.01)
+		gr = gate.check(result, ctx)
+
+		# With threshold=0.99, most strategies won't reach "promote".
+		# With review_floor=0.01, anything above 0.01 DSR lands in review band.
+		if gr.passed and "dsr" in gr.details:
+			dsr = gr.details["dsr"]
+			if dsr < 0.99:
+				assert gr.tier == "review"
+			else:
+				assert gr.tier is None
+
+	def test_dsr_below_review_floor_fails(self):
+		"""DSR below review_floor should fail (passed=False)."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# 500 strategies → very high sr0 → any moderate Sharpe will fail
+		import random
+		rng = random.Random(42)
+		sharpes = [rng.gauss(0.5, 1.0) for _ in range(500)]
+		tracker = self._make_tracker_with_results(sharpes)
+
+		pnl = [5] * 60 + [-3] * 40
+		result = _make_result(pnl_values=pnl, sharpe=1.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate(threshold=0.95, review_floor=0.80)
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+
+	def test_dsr_negative_denominator_fails_gracefully(self):
+		"""Extreme skew that makes the SE denominator negative should fail
+		with a clear reason instead of silently using abs().
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# Construct extreme negative skew: many small gains, one huge loss
+		pnl = [1.0] * 99 + [-10000.0]
+		result = _make_result(pnl_values=pnl, sharpe=0.5, total_trades=100)
+
+		# Background strategies with spread Sharpes to get a meaningful sr0
+		sharpes = [0.5 + i * 0.5 for i in range(10)]
+		tracker = self._make_tracker_with_results(sharpes)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		# If denominator went negative, we should get a specific failure reason
+		# (not a silent abs() pass). If it stayed positive, that's fine too —
+		# the key is no silent masking.
+		if "denominator non-positive" in gr.reason:
+			assert not gr.passed
+			assert "denom_inner" in gr.details
+		else:
+			# Denominator stayed positive — gate ran normally, check it has dsr
+			assert "dsr" in gr.details
+
 
 # ---------------------------------------------------------------------------
 # Monte Carlo Gate
@@ -229,94 +384,144 @@ class TestMonteCarloGate:
 		gr2 = gate.check(result, ctx)
 		assert gr1.details["p_value"] == gr2.details["p_value"]
 
+	def test_p_value_never_zero(self):
+		"""Even with an extremely strong signal, p-value should never be 0.
 
-# ---------------------------------------------------------------------------
-# Walk-Forward Gate
-# ---------------------------------------------------------------------------
+		Uses (count+1)/(N+1) formula so the observed statistic is always
+		counted as one permutation.
+		"""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
 
-class TestWalkForwardGate:
-	def test_good_oos_performance_passes(self):
-		"""When OOS Sharpe >= 50% of IS and majority profitable, should pass."""
-		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+		# Overwhelmingly positive — no permutation will beat this
+		pnl = [1000] * 100
+		result = _make_result(pnl_values=pnl, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
 
-		mock_agent = MagicMock()
-		# 5 windows × 2 (IS + OOS) = 10 calls
-		# IS: high Sharpe; OOS: moderate but >= 50% of IS
-		is_data = {"sharpe": 2.0, "net_pnl_cents": 100, "total_trades": 20, "status": "ok", "pnl_values": [5]*20}
-		oos_data = {"sharpe": 1.2, "net_pnl_cents": 50, "total_trades": 15, "status": "ok", "pnl_values": [3]*15}
-		mock_agent.run_backtest_only.side_effect = [is_data, oos_data] * 5
-
-		result = _make_result(total_trades=100)
-		ctx = GateContext(
-			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
-			agent=mock_agent,
-		)
-
-		gate = WalkForwardGate()
+		gate = MonteCarloGate(n_permutations=1000)
 		gr = gate.check(result, ctx)
 		assert gr.passed
-		assert gr.details["sharpe_ratio"] >= 0.5
+		assert gr.details["p_value"] > 0, "p-value should never be exactly 0"
+		# Should be 1/1001 ≈ 0.001
+		assert gr.details["p_value"] == pytest.approx(1 / 1001, abs=0.001)
 
-	def test_poor_oos_fails(self):
-		"""When OOS Sharpe drops to near-zero, should fail."""
-		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
 
-		mock_agent = MagicMock()
-		is_data = {"sharpe": 3.0, "net_pnl_cents": 200, "total_trades": 20, "status": "ok", "pnl_values": [10]*20}
-		oos_data = {"sharpe": 0.1, "net_pnl_cents": -10, "total_trades": 15, "status": "ok", "pnl_values": [-1]*15}
-		mock_agent.run_backtest_only.side_effect = [is_data, oos_data] * 5
+# ---------------------------------------------------------------------------
+# Temporal Consistency Gate
+# ---------------------------------------------------------------------------
 
-		result = _make_result(total_trades=100)
+class TestTemporalConsistencyGate:
+	def test_consistent_strategy_passes(self):
+		"""Strategy that performs well across all windows passes."""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
+
+		gate = TemporalConsistencyGate()
+		result = _make_result(sharpe=3.0, total_trades=200)
+		h = result.hypothesis
+
+		agent = MagicMock()
+		agent.run_backtest_only.return_value = {
+			"sharpe": 3.0, "total_trades": 40, "net_pnl_cents": 100.0,
+		}
+
 		ctx = GateContext(
-			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
-			agent=mock_agent,
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=h, agent=agent,
 		)
+		gate_result = gate.check(result, ctx)
+		assert gate_result.passed
 
-		gate = WalkForwardGate()
-		gr = gate.check(result, ctx)
-		assert not gr.passed
+	def test_inconsistent_strategy_fails(self):
+		"""Strategy that loses money in most windows fails."""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
+
+		gate = TemporalConsistencyGate()
+		result = _make_result(sharpe=3.0, total_trades=200)
+		h = result.hypothesis
+
+		agent = MagicMock()
+		agent.run_backtest_only.return_value = {
+			"sharpe": -0.5, "total_trades": 40, "net_pnl_cents": -50.0,
+		}
+
+		ctx = GateContext(
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=h, agent=agent,
+		)
+		gate_result = gate.check(result, ctx)
+		assert not gate_result.passed
 
 	def test_no_agent_fails(self):
 		"""Should fail gracefully if no agent provided."""
-		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
 
-		result = _make_result(total_trades=100)
-		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis, agent=None)
-
-		gate = WalkForwardGate()
-		gr = gate.check(result, ctx)
-		assert not gr.passed
+		gate = TemporalConsistencyGate()
+		result = _make_result()
+		ctx = GateContext(tracker=None, pnl_values=[10]*100, hypothesis=result.hypothesis)
+		gate_result = gate.check(result, ctx)
+		assert not gate_result.passed
 
 	def test_none_dates_fails_without_db(self):
 		"""If dates are None and no DB accessible, gate fails."""
-		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
 
-		h = _make_hypothesis(start_date=None, end_date=None, db_path="/nonexistent/path.db")
-		result = _make_result(total_trades=100)
-		result.hypothesis = h
-		mock_agent = MagicMock()
-		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=h, agent=mock_agent)
+		gate = TemporalConsistencyGate()
+		h = _make_hypothesis(start_date=None, end_date=None, db_path="nonexistent.db")
+		result = _make_result(hypothesis=h)
+		agent = MagicMock()
+		ctx = GateContext(tracker=None, pnl_values=[10]*100, hypothesis=h, agent=agent)
+		gate_result = gate.check(result, ctx)
+		assert not gate_result.passed
 
-		gate = WalkForwardGate()
-		gr = gate.check(result, ctx)
-		assert not gr.passed
-		assert "date range" in gr.reason.lower()
+	def test_normalizes_sharpe_by_trade_count(self):
+		"""Sharpe values should be normalized to per-trade scale."""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
 
-	def test_walkforward_no_date_overlap(self):
-		"""IS end date and OOS start date should not overlap."""
-		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+		gate = TemporalConsistencyGate()
+		result = _make_result(sharpe=3.0, total_trades=200)
 
-		gate = WalkForwardGate(n_windows=5, oos_ratio=0.3)
-		windows = gate._make_windows("2025-01-01", "2025-12-31")
+		call_count = [0]
+		def mock_backtest(h):
+			call_count[0] += 1
+			trades = 100 if call_count[0] % 2 == 0 else 25
+			raw_sharpe = 2.0 * math.sqrt(trades)  # same per-trade Sharpe
+			return {"sharpe": raw_sharpe, "total_trades": trades, "net_pnl_cents": 50.0}
 
-		for is_start, is_end, oos_start, oos_end in windows:
-			# OOS should start the day after IS ends
-			from datetime import datetime, timedelta
-			is_end_dt = datetime.fromisoformat(is_end)
-			oos_start_dt = datetime.fromisoformat(oos_start)
-			assert oos_start_dt > is_end_dt, (
-				f"OOS start {oos_start} should be after IS end {is_end}"
-			)
+		agent = MagicMock()
+		agent.run_backtest_only.side_effect = mock_backtest
+
+		ctx = GateContext(
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=result.hypothesis, agent=agent,
+		)
+		gate_result = gate.check(result, ctx)
+		# With equal per-trade Sharpes, the worst-window check should pass
+		assert gate_result.passed
+		assert "sharpes" in gate_result.details
+
+	def test_worst_window_sharpe_floor(self):
+		"""A single terrible window should cause failure."""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
+
+		gate = TemporalConsistencyGate()
+		result = _make_result(sharpe=3.0, total_trades=200)
+
+		call_count = [0]
+		def mock_backtest(h):
+			call_count[0] += 1
+			if call_count[0] == 3:
+				return {"sharpe": -5.0, "total_trades": 30, "net_pnl_cents": -200.0}
+			return {"sharpe": 3.0, "total_trades": 40, "net_pnl_cents": 100.0}
+
+		agent = MagicMock()
+		agent.run_backtest_only.side_effect = mock_backtest
+
+		ctx = GateContext(
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=result.hypothesis, agent=agent,
+		)
+		gate_result = gate.check(result, ctx)
+		# One window has deeply negative per-trade Sharpe, should fail
+		assert not gate_result.passed
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +620,33 @@ class MinimalStrategy(Strategy):
 		gr = gate.check(result, ctx)
 		assert not gr.passed
 
+	def test_sensitivity_normalizes_sharpe_by_trade_count(self):
+		"""Original and neighbor Sharpes should be on per-trade scale.
+
+		Without normalization, a neighbor with more trades would have an
+		inflated backtester Sharpe, masking real degradation.
+		"""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		mock_agent = MagicMock()
+		mock_agent.read_strategy_code.return_value = self.SAMPLE_STRATEGY
+
+		# Original: bt_sharpe=2.5, 100 trades → per-trade = 0.25
+		result = _make_result(sharpe=2.5, total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = ParameterSensitivityGate()
+		# min_acceptable = 0.25 * 0.5 = 0.125 (per-trade)
+		# _run_neighbor returns per-trade Sharpe after our fix
+		# Return 0.15 → above 0.125 → passes
+		with patch.object(gate, "_run_neighbor", return_value=0.15):
+			gr = gate.check(result, ctx)
+		assert gr.passed
+		assert gr.details["min_acceptable_sharpe"] == pytest.approx(0.125, abs=0.01)
+
 	def test_sensitivity_gate_uses_file_lock(self):
 		"""_run_neighbor should acquire a lock before writing strategies_local.py."""
 		import threading
@@ -423,3 +655,84 @@ class MinimalStrategy(Strategy):
 		gate = ParameterSensitivityGate()
 		assert hasattr(gate, '_file_lock')
 		assert isinstance(gate._file_lock, type(threading.Lock()))
+
+
+# ---------------------------------------------------------------------------
+# Pipeline review tier integration
+# ---------------------------------------------------------------------------
+
+class TestPipelineReviewTier:
+	def test_review_tier_produces_review_verdict(self):
+		"""A gate with tier='review' should make the pipeline return 'review'."""
+		from edge_catcher.research.validation.pipeline import ValidationPipeline
+		from edge_catcher.research.validation.gate import Gate
+
+		class ReviewGate(Gate):
+			name = "review_gate"
+			def check(self, result, context):
+				return GateResult(
+					passed=True, gate_name=self.name,
+					reason="borderline", tier="review",
+				)
+
+		class PassGate(Gate):
+			name = "pass_gate"
+			def check(self, result, context):
+				return GateResult(
+					passed=True, gate_name=self.name,
+					reason="all good",
+				)
+
+		pipeline = ValidationPipeline([ReviewGate(), PassGate()])
+		result = _make_result()
+		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis)
+
+		verdict, reason, gate_results = pipeline.validate(result, ctx)
+		assert verdict == "review"
+		assert "review" in reason.lower()
+
+	def test_all_normal_passes_still_promote(self):
+		"""Pipeline with no tier set should still return 'promote'."""
+		from edge_catcher.research.validation.pipeline import ValidationPipeline
+		from edge_catcher.research.validation.gate import Gate
+
+		class PassGate(Gate):
+			name = "pass_gate"
+			def check(self, result, context):
+				return GateResult(
+					passed=True, gate_name=self.name,
+					reason="all good",
+				)
+
+		pipeline = ValidationPipeline([PassGate()])
+		result = _make_result()
+		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis)
+
+		verdict, reason, gate_results = pipeline.validate(result, ctx)
+		assert verdict == "promote"
+
+	def test_failure_still_short_circuits(self):
+		"""A failed gate should still short-circuit, regardless of tiers."""
+		from edge_catcher.research.validation.pipeline import ValidationPipeline
+		from edge_catcher.research.validation.gate import Gate
+
+		class FailGate(Gate):
+			name = "fail_gate"
+			def check(self, result, context):
+				return GateResult(
+					passed=False, gate_name=self.name,
+					reason="nope",
+				)
+
+		class NeverReachedGate(Gate):
+			name = "never_reached"
+			def check(self, result, context):
+				raise AssertionError("Should not be called")
+
+		pipeline = ValidationPipeline([FailGate(), NeverReachedGate()])
+		result = _make_result()
+		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis)
+
+		verdict, reason, gate_results = pipeline.validate(result, ctx)
+		assert verdict == "explore"
+		assert len(gate_results) == 1

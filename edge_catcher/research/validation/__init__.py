@@ -4,7 +4,7 @@ from .gate import Gate, GateContext, GateResult
 from .gate_dsr import DeflatedSharpeGate
 from .gate_monte_carlo import MonteCarloGate
 from .gate_sensitivity import ParameterSensitivityGate
-from .gate_walkforward import WalkForwardGate
+from .gate_temporal_consistency import TemporalConsistencyGate
 from .pipeline import ValidationPipeline, default_gates
 
 __all__ = [
@@ -16,5 +16,5 @@ __all__ = [
 	"MonteCarloGate",
 	"ParameterSensitivityGate",
 	"ValidationPipeline",
-	"WalkForwardGate",
+	"TemporalConsistencyGate",
 ]
