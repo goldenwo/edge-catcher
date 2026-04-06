@@ -77,10 +77,18 @@ class TestEvaluator:
         self.ev = Evaluator()
         self.th = Thresholds()
 
-    def test_promote(self):
+    def test_candidate_high_sharpe(self):
+        """Sharpe >= 2.0 with >= 100 trades → candidate (needs validation)."""
         r = _make_result(sharpe=2.5, win_rate=0.90, net_pnl_cents=500.0, total_trades=100)
         verdict, reason = self.ev.evaluate(r, self.th)
-        assert verdict == "promote"
+        assert verdict == "candidate"
+
+    def test_explore_insufficient_trades_for_promote(self):
+        """Sharpe >= 2.0 but < 100 trades → explore (not enough for candidate)."""
+        r = _make_result(sharpe=2.5, win_rate=0.90, net_pnl_cents=500.0, total_trades=75)
+        verdict, reason = self.ev.evaluate(r, self.th)
+        assert verdict == "explore"
+        assert "trades" in reason
 
     def test_kill_low_sharpe(self):
         r = _make_result(sharpe=0.5, win_rate=0.90, net_pnl_cents=500.0, total_trades=100)
@@ -123,7 +131,7 @@ class TestEvaluator:
         th = Thresholds(min_sharpe=0.5, promote_sharpe=1.0)
         r = _make_result(sharpe=1.2, win_rate=0.65, net_pnl_cents=100.0, total_trades=100)
         verdict, _ = self.ev.evaluate(r, th)
-        assert verdict == "promote"
+        assert verdict == "candidate"
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +322,7 @@ class TestResearchAgent:
         assert result.total_trades == 100
         assert result.win_rate == 0.90
         assert result.sharpe == 2.5
-        assert result.verdict == "promote"
+        assert result.verdict == "candidate"
 
     def test_run_hypothesis_error_json(self, tmp_path):
         agent = self._make_agent(tmp_path)

@@ -13,6 +13,7 @@ class Thresholds:
     min_trades: int = 50             # too few trades → inconclusive (explore, not kill)
     min_net_pnl_cents: float = 0.0   # must be positive after fees → kill if not
     promote_sharpe: float = 2.0      # above this → promote (requires all promote thresholds)
+    promote_min_trades: int = 100    # need >= this many trades for candidate status
 
 
 class Evaluator:
@@ -21,7 +22,7 @@ class Evaluator:
         result: HypothesisResult,
         thresholds: Thresholds | None = None,
     ) -> tuple[str, str]:
-        """Return (verdict, reason). verdict is 'kill', 'promote', or 'explore'."""
+        """Return (verdict, reason). verdict is 'kill', 'candidate', 'explore', or 'promote'."""
         if thresholds is None:
             thresholds = Thresholds()
 
@@ -46,11 +47,18 @@ class Evaluator:
                 "kill",
                 f"Sharpe {result.sharpe:.2f} < {thresholds.min_sharpe:.2f}",
             )
-        # Promote conditions
+        # Not enough trades for promotion consideration
+        if result.total_trades < thresholds.promote_min_trades:
+            return (
+                "explore",
+                f"only {result.total_trades} trades (need ≥{thresholds.promote_min_trades}) — "
+                f"not enough for promotion validation",
+            )
+        # Candidate for promotion — needs validation pipeline
         if result.sharpe >= thresholds.promote_sharpe:
             return (
-                "promote",
-                f"Sharpe {result.sharpe:.2f} ≥ {thresholds.promote_sharpe:.2f}",
+                "candidate",
+                f"Sharpe {result.sharpe:.2f} ≥ {thresholds.promote_sharpe:.2f} — needs validation",
             )
 
         # Between kill and promote → explore further
