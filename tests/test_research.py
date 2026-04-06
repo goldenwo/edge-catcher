@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from edge_catcher.research.agent import ResearchAgent
 from edge_catcher.research.evaluator import Evaluator, Thresholds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.reporter import Reporter
@@ -460,3 +461,61 @@ class TestResearchAgent:
             results = agent.sweep([], max_runs=50)
 
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# ResearchAgent.run_backtest_only
+# ---------------------------------------------------------------------------
+
+class TestRunBacktestOnly:
+    def test_returns_parsed_json(self, tmp_path):
+        """run_backtest_only should return parsed JSON dict without saving."""
+        import json
+
+        tracker = Tracker(tmp_path / "research.db")
+        agent = ResearchAgent.__new__(ResearchAgent)
+        agent.tracker = tracker
+        agent.evaluator = Evaluator()
+        agent.thresholds = Thresholds()
+        agent.force = False
+
+        h = Hypothesis(
+            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+        )
+
+        fake_output = json.dumps({
+            "status": "ok", "total_trades": 50, "sharpe": 1.5,
+            "pnl_values": [10, -5, 10],
+        })
+        mock_proc = MagicMock(stdout=fake_output, stderr="", returncode=0)
+
+        with patch("subprocess.run", return_value=mock_proc):
+            data = agent.run_backtest_only(h)
+
+        assert data is not None
+        assert data["total_trades"] == 50
+        assert data["pnl_values"] == [10, -5, 10]
+        # Should NOT have saved to tracker
+        assert tracker.list_results() == []
+
+    def test_returns_none_on_timeout(self, tmp_path):
+        """run_backtest_only returns None on subprocess timeout."""
+        import subprocess
+
+        tracker = Tracker(tmp_path / "research.db")
+        agent = ResearchAgent.__new__(ResearchAgent)
+        agent.tracker = tracker
+        agent.evaluator = Evaluator()
+        agent.thresholds = Thresholds()
+        agent.force = False
+
+        h = Hypothesis(
+            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+        )
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 300)):
+            data = agent.run_backtest_only(h)
+
+        assert data is None
