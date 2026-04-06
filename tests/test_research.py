@@ -753,3 +753,428 @@ class TestResearchJournal:
     def test_exported_from_package(self):
         from edge_catcher.research import ResearchJournal
         assert ResearchJournal is not None
+
+
+# ---------------------------------------------------------------------------
+# Helpers for self-performance / loop-integration tests
+# ---------------------------------------------------------------------------
+
+def _make_tagged_result(
+    strategy: str,
+    series: str,
+    verdict: str,
+    sharpe: float,
+    total_trades: int,
+    tags: list[str],
+    tracker: "Tracker",
+    validation_details: list[dict] | None = None,
+) -> "HypothesisResult":
+    """Create a HypothesisResult with specific tags and save it to the tracker."""
+    wins = int(total_trades * 0.6)
+    h = Hypothesis(
+        strategy=strategy, series=series, db_path="data/kalshi.db",
+        start_date="2025-01-01", end_date="2025-12-31",
+        tags=tags,
+    )
+    result = HypothesisResult(
+        hypothesis=h, status="ok", total_trades=total_trades,
+        wins=wins, losses=total_trades - wins,
+        win_rate=0.6, net_pnl_cents=100.0, sharpe=sharpe,
+        max_drawdown_pct=5.0, fees_paid_cents=10.0,
+        avg_win_cents=10.0, avg_loss_cents=-5.0,
+        per_strategy={}, verdict=verdict, verdict_reason="test",
+        raw_json={},
+    )
+    tracker.save_result(result, validation_details=validation_details)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LLMIdeator — self-performance summary tests
+# ---------------------------------------------------------------------------
+
+class TestSelfPerformanceSummary:
+    def _make_ideator(self, tmp_path):
+        from unittest.mock import MagicMock
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        tracker = Tracker(tmp_path / "research.db")
+        return LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock()), tracker
+
+    def test_self_performance_empty_no_llm_history(self, tmp_path):
+        """No LLM-tagged results → _build_self_performance_summary returns ''."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        # Save some plain results (no LLM tags)
+        tracker.save_result(_make_result(strategy="C", verdict="kill", verdict_reason="bad"))
+        result = ideator._build_self_performance_summary()
+        assert result == ""
+
+    def test_self_performance_novel_strategies(self, tmp_path):
+        """Results tagged source:llm_novel_strategy are categorised; adjacent-tagged ones filtered out."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        # A genuine novel result
+        _make_tagged_result("NovelA", "KXBTCD", "promote", 2.5, 100,
+                            ["source:llm_novel_strategy"], tracker)
+        # An adjacent expansion — should be excluded from novel group
+        _make_tagged_result("NovelA_adj", "KXBTCD", "explore", 1.5, 80,
+                            ["source:llm_novel_strategy", "adjacent-promoted"], tracker)
+
+        summary = ideator._build_self_performance_summary()
+        assert "## Your Track Record" in summary
+        assert "Novel Strategy Proposals" in summary
+        # The track record should cover exactly 1 novel result
+        assert "Total proposed: 1" in summary
+
+    def test_self_performance_hit_rate_excludes_errors(self, tmp_path):
+        """Hit rate counts only promote+explore, not errors."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        # 1 promote, 1 explore, 1 kill, 1 error
+        for verdict, strategy in [
+            ("promote", "Nov1"),
+            ("explore", "Nov2"),
+            ("kill", "Nov3"),
+        ]:
+            _make_tagged_result(strategy, "KXBTCD", verdict, 1.5, 100,
+                                ["source:llm_novel_strategy"], tracker)
+        # Add an error result manually
+        h_err = Hypothesis(
+            strategy="Nov4", series="KXBTCD", db_path="data/kalshi.db",
+            start_date="2025-01-01", end_date="2025-12-31",
+            tags=["source:llm_novel_strategy"],
+        )
+        err_result = HypothesisResult.error(h_err, "simulated failure")
+        tracker.save_result(err_result)
+
+        summary = ideator._build_self_performance_summary()
+        # 2 non-kill out of 4 total = 50%
+        assert "Hit rate (non-kill): 50%" in summary
+
+    def test_self_performance_validation_gates(self, tmp_path):
+        """Results with validation_details produce gate stats in the summary."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        gates = [
+            {"gate_name": "deflated_sharpe", "passed": True, "reason": "DSR ok"},
+            {"gate_name": "walk_forward", "passed": False, "reason": "WF failed"},
+        ]
+        _make_tagged_result("NovelB", "KXBTCD", "explore", 1.8, 100,
+                            ["source:llm_novel_strategy"], tracker,
+                            validation_details=gates)
+
+        summary = ideator._build_self_performance_summary()
+        assert "Validation Gate Performance" in summary
+        assert "deflated_sharpe" in summary
+        assert "walk_forward" in summary
+
+    def test_self_performance_steering_trade_bottleneck(self, tmp_path):
+        """More than 50% of novel proposals killed for <50 trades → directive appears."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        # 3 novel results killed with low trade count
+        for i in range(3):
+            _make_tagged_result(f"ThinStrat{i}", "KXBTCD", "kill", 0.5, 10,
+                                ["source:llm_novel_strategy"], tracker)
+        # 1 promote with decent trade count
+        _make_tagged_result("GoodStrat", "KXBTCD", "promote", 2.5, 120,
+                            ["source:llm_novel_strategy"], tracker)
+
+        summary = ideator._build_self_performance_summary()
+        assert "Trade frequency bottleneck" in summary
+
+    def test_self_performance_steering_hardest_gate(self, tmp_path):
+        """A gate with <50% pass rate → directive naming that gate appears."""
+        ideator, tracker = self._make_ideator(tmp_path)
+        # Two candidates; walk_forward fails on both → 0% pass rate
+        for strategy in ["CandA", "CandB"]:
+            gates = [
+                {"gate_name": "deflated_sharpe", "passed": True, "reason": "ok"},
+                {"gate_name": "walk_forward", "passed": False, "reason": "failed"},
+            ]
+            _make_tagged_result(strategy, "KXBTCD", "explore", 1.5, 100,
+                                ["source:llm_novel_strategy"], tracker,
+                                validation_details=gates)
+
+        summary = ideator._build_self_performance_summary()
+        assert "walk_forward" in summary
+        # The directive should cite the hard gate
+        assert "hardest gate" in summary or "0%" in summary
+
+
+# ---------------------------------------------------------------------------
+# Tag helpers
+# ---------------------------------------------------------------------------
+
+class TestTagHelpers:
+    def _row(self, tags) -> dict:
+        return {"tags": tags}
+
+    def test_has_tag_json_string(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(json.dumps(["source:llm_ideated", "foo"]))
+        assert LLMIdeator._has_tag(row, "source:llm_ideated") is True
+        assert LLMIdeator._has_tag(row, "bar") is False
+
+    def test_has_tag_list(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(["source:llm_novel_strategy"])
+        assert LLMIdeator._has_tag(row, "source:llm_novel_strategy") is True
+        assert LLMIdeator._has_tag(row, "other") is False
+
+    def test_has_tag_none(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(None)
+        assert LLMIdeator._has_tag(row, "anything") is False
+
+    def test_has_any_adjacent_tag_promoted(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(["source:llm_novel_strategy", "adjacent-promoted"])
+        assert LLMIdeator._has_any_adjacent_tag(row) is True
+
+    def test_has_any_adjacent_tag_explore(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(json.dumps(["source:llm_novel_strategy", "adjacent-explore"]))
+        assert LLMIdeator._has_any_adjacent_tag(row) is True
+
+    def test_has_any_adjacent_tag_absent(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        row = self._row(["source:llm_novel_strategy"])
+        assert LLMIdeator._has_any_adjacent_tag(row) is False
+
+
+# ---------------------------------------------------------------------------
+# Validation gate analysis helpers
+# ---------------------------------------------------------------------------
+
+class TestGateHelpers:
+    def _make_candidates(self) -> list[dict]:
+        return [
+            {
+                "verdict": "promote",
+                "validation_details": json.dumps([
+                    {"gate_name": "dsr", "passed": True},
+                    {"gate_name": "walk_forward", "passed": True},
+                ]),
+            },
+            {
+                "verdict": "explore",
+                "validation_details": json.dumps([
+                    {"gate_name": "dsr", "passed": True},
+                    {"gate_name": "walk_forward", "passed": False},
+                ]),
+            },
+            {
+                "verdict": "kill",
+                "validation_details": json.dumps([
+                    {"gate_name": "dsr", "passed": False},
+                    {"gate_name": "walk_forward", "passed": False},
+                ]),
+            },
+        ]
+
+    def test_compute_gate_stats_pass_rates(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        candidates = self._make_candidates()
+        stats = LLMIdeator._compute_gate_stats(candidates)
+        # dsr: 2 passed, 1 failed → 66.7%
+        assert stats["dsr"]["passed"] == 2
+        assert stats["dsr"]["failed"] == 1
+        assert abs(stats["dsr"]["pass_rate"] - 2 / 3) < 0.01
+        # walk_forward: 1 passed, 2 failed → 33.3%
+        assert stats["walk_forward"]["passed"] == 1
+        assert stats["walk_forward"]["failed"] == 2
+
+    def test_compute_gate_stats_empty(self):
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        assert LLMIdeator._compute_gate_stats([]) == {}
+
+    def test_summarize_validation_gates_output(self, tmp_path):
+        from unittest.mock import MagicMock
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        tracker = Tracker(tmp_path / "research.db")
+        ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+        candidates = self._make_candidates()
+        summary = ideator._summarize_validation_gates(candidates)
+        assert "Validation Gate Performance" in summary
+        assert "Candidates reaching validation: 3" in summary
+        assert "walk_forward" in summary
+        assert "dsr" in summary
+
+    def test_build_steering_directives_hardest_gate(self, tmp_path):
+        from unittest.mock import MagicMock
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        tracker = Tracker(tmp_path / "research.db")
+        ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+        gate_stats = {
+            "easy_gate": {"passed": 9, "failed": 1, "pass_rate": 0.9},
+            "hard_gate": {"passed": 1, "failed": 9, "pass_rate": 0.1},
+        }
+        directives = ideator._build_steering_directives([], [], gate_stats)
+        assert "hard_gate" in directives
+        assert "10%" in directives
+
+    def test_build_steering_directives_trade_bottleneck(self, tmp_path):
+        from unittest.mock import MagicMock
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        tracker = Tracker(tmp_path / "research.db")
+        ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+        # Build 3 novel results with low trades and kill verdict
+        novel = [
+            {"strategy": f"S{i}", "series": "X", "total_trades": 5,
+             "verdict": "kill", "sharpe": 0.1}
+            for i in range(3)
+        ]
+        directives = ideator._build_steering_directives(novel, [], {})
+        assert "Trade frequency bottleneck" in directives
+
+    def test_build_steering_directives_empty(self, tmp_path):
+        from unittest.mock import MagicMock
+        from edge_catcher.research.llm_ideator import LLMIdeator
+        tracker = Tracker(tmp_path / "research.db")
+        ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+        result = ideator._build_steering_directives([], [], {})
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# LoopOrchestrator — journal integration
+# ---------------------------------------------------------------------------
+
+class TestLoopJournalIntegration:
+    def _make_orch(self, tmp_path):
+        from edge_catcher.research.loop import LoopOrchestrator
+        return LoopOrchestrator(research_db=str(tmp_path / "research.db"))
+
+    def _make_journal(self, tmp_path):
+        from edge_catcher.research.journal import ResearchJournal
+        return ResearchJournal(db_path=str(tmp_path / "research.db"))
+
+    def test_write_phase_outcomes(self, tmp_path):
+        """_write_phase_outcomes writes one outcome entry per strategy."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        results = [
+            _make_result(strategy="Foo", series="KXBTCD", verdict="promote",
+                         verdict_reason="great", sharpe=2.5, total_trades=100),
+            _make_result(strategy="Foo", series="KXETH", verdict="explore",
+                         verdict_reason="mid", sharpe=1.5, total_trades=80),
+            _make_result(strategy="Bar", series="KXBTCD", verdict="kill",
+                         verdict_reason="bad", sharpe=0.5, total_trades=50),
+        ]
+
+        orch._write_phase_outcomes(journal, results, "grid")
+
+        entries = journal.read_recent()
+        # Two strategies → two outcome entries
+        assert len(entries) == 2
+        strategies = {e["content"]["strategy"] for e in entries}
+        assert strategies == {"Foo", "Bar"}
+        phases = {e["content"]["phase"] for e in entries}
+        assert phases == {"grid"}
+
+    def test_write_phase_outcomes_verdict_aggregation(self, tmp_path):
+        """Verdicts for same strategy are summed across series."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        results = [
+            _make_result(strategy="Foo", series="KXBTCD", verdict="promote",
+                         verdict_reason="good", sharpe=2.5, total_trades=100),
+            _make_result(strategy="Foo", series="KXETH", verdict="kill",
+                         verdict_reason="bad", sharpe=0.5, total_trades=50),
+            _make_result(strategy="Foo", series="KXNBA", verdict="kill",
+                         verdict_reason="bad2", sharpe=0.4, total_trades=40),
+        ]
+
+        orch._write_phase_outcomes(journal, results, "grid")
+
+        entries = journal.read_recent()
+        assert len(entries) == 1
+        verdicts = entries[0]["content"]["verdicts"]
+        assert verdicts["promote"] == 1
+        assert verdicts["kill"] == 2
+
+    def test_write_phase_outcomes_empty(self, tmp_path):
+        """Empty results list produces no journal entries."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+        orch._write_phase_outcomes(journal, [], "grid")
+        assert journal.read_recent() == []
+
+    def test_write_journal_summary_trajectory(self, tmp_path):
+        """_write_journal_summary writes a trajectory entry with correct fields."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        results = [
+            _make_result(strategy="X", verdict="promote", verdict_reason="p",
+                         sharpe=3.0, total_trades=100),
+            _make_result(strategy="Y", verdict="kill", verdict_reason="k",
+                         sharpe=0.5, total_trades=50),
+        ]
+
+        orch._write_journal_summary(journal, results)
+
+        entries = journal.read_recent()
+        trajectory_entries = [e for e in entries if e["entry_type"] == "trajectory"]
+        assert len(trajectory_entries) == 1
+        traj = trajectory_entries[0]["content"]
+        assert traj["status"] in {"improving", "plateauing", "stuck"}
+        assert traj["total_runs"] == 1
+        assert traj["new_promotes"] == 1
+        assert traj["new_kills"] == 1
+        assert traj["best_sharpe_this_run"] == pytest.approx(3.0)
+
+    def test_write_journal_summary_observations(self, tmp_path):
+        """Promoted results generate observation entries."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        results = [
+            _make_result(strategy="WinStrat", series="KXBTCD", verdict="promote",
+                         verdict_reason="excellent", sharpe=3.5,
+                         total_trades=120, win_rate=0.75, net_pnl_cents=800.0),
+        ]
+
+        orch._write_journal_summary(journal, results)
+
+        entries = journal.read_recent()
+        observation_entries = [e for e in entries if e["entry_type"] == "observation"]
+        assert len(observation_entries) >= 1
+        patterns = [e["content"]["pattern"] for e in observation_entries]
+        assert any("WinStrat" in p and "PROMOTED" in p for p in patterns)
+
+    def test_write_journal_summary_high_kill_rate_observation(self, tmp_path):
+        """Strategy with >80% kill rate across >=3 series gets an observation entry."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        # LoserStrat: 4 kills out of 4 series
+        results = [
+            _make_result(strategy="LoserStrat", series=f"KXSER{i}", verdict="kill",
+                         verdict_reason="bad", sharpe=0.3, total_trades=30)
+            for i in range(4)
+        ]
+
+        orch._write_journal_summary(journal, results)
+
+        entries = journal.read_recent()
+        observations = [e for e in entries if e["entry_type"] == "observation"]
+        patterns = [e["content"]["pattern"] for e in observations]
+        assert any("LoserStrat" in p for p in patterns)
+
+    def test_write_journal_summary_low_trade_observation(self, tmp_path):
+        """Strategy averaging <50 trades across >=2 series gets an observation entry."""
+        orch = self._make_orch(tmp_path)
+        journal = self._make_journal(tmp_path)
+
+        results = [
+            _make_result(strategy="ThinStrat", series="KXBTCD", verdict="kill",
+                         verdict_reason="few trades", sharpe=0.5, total_trades=10),
+            _make_result(strategy="ThinStrat", series="KXETH", verdict="kill",
+                         verdict_reason="few trades", sharpe=0.4, total_trades=15),
+        ]
+
+        orch._write_journal_summary(journal, results)
+
+        entries = journal.read_recent()
+        observations = [e for e in entries if e["entry_type"] == "observation"]
+        patterns = [e["content"]["pattern"] for e in observations]
+        assert any("ThinStrat" in p for p in patterns)
