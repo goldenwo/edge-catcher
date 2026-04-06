@@ -70,8 +70,8 @@ class ResearchAgent:
                 existing = self.tracker.get_result_by_id(existing_id)
                 if existing:
                     return self._row_to_result(existing, h)
-            # Fallback: re-run (edge case if result row is missing)
-            logger.warning("Existing record %s has no result row — re-running", existing_id)
+                # Fallback: re-run (edge case if result row is missing)
+                logger.warning("Existing record %s has no result row — re-running", existing_id)
 
         logger.info("Running hypothesis: strategy=%s series=%s db=%s [%s → %s] fee=%.2f",
                     h.strategy, h.series, h.db_path, h.start_date, h.end_date, h.fee_pct)
