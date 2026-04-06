@@ -162,3 +162,76 @@ class TestMonteCarloGate:
 		gr1 = gate.check(result, ctx)
 		gr2 = gate.check(result, ctx)
 		assert gr1.details["p_value"] == gr2.details["p_value"]
+
+
+# ---------------------------------------------------------------------------
+# Walk-Forward Gate
+# ---------------------------------------------------------------------------
+
+class TestWalkForwardGate:
+	def test_good_oos_performance_passes(self):
+		"""When OOS Sharpe >= 50% of IS and majority profitable, should pass."""
+		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+
+		mock_agent = MagicMock()
+		# 5 windows × 2 (IS + OOS) = 10 calls
+		# IS: high Sharpe; OOS: moderate but >= 50% of IS
+		is_data = {"sharpe": 2.0, "net_pnl_cents": 100, "total_trades": 20, "status": "ok", "pnl_values": [5]*20}
+		oos_data = {"sharpe": 1.2, "net_pnl_cents": 50, "total_trades": 15, "status": "ok", "pnl_values": [3]*15}
+		mock_agent.run_backtest_only.side_effect = [is_data, oos_data] * 5
+
+		result = _make_result(total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = WalkForwardGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+		assert gr.details["sharpe_ratio"] >= 0.5
+
+	def test_poor_oos_fails(self):
+		"""When OOS Sharpe drops to near-zero, should fail."""
+		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+
+		mock_agent = MagicMock()
+		is_data = {"sharpe": 3.0, "net_pnl_cents": 200, "total_trades": 20, "status": "ok", "pnl_values": [10]*20}
+		oos_data = {"sharpe": 0.1, "net_pnl_cents": -10, "total_trades": 15, "status": "ok", "pnl_values": [-1]*15}
+		mock_agent.run_backtest_only.side_effect = [is_data, oos_data] * 5
+
+		result = _make_result(total_trades=100)
+		ctx = GateContext(
+			tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis,
+			agent=mock_agent,
+		)
+
+		gate = WalkForwardGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+
+	def test_no_agent_fails(self):
+		"""Should fail gracefully if no agent provided."""
+		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+
+		result = _make_result(total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=result.hypothesis, agent=None)
+
+		gate = WalkForwardGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+
+	def test_none_dates_fails_without_db(self):
+		"""If dates are None and no DB accessible, gate fails."""
+		from edge_catcher.research.validation.gate_walkforward import WalkForwardGate
+
+		h = _make_hypothesis(start_date=None, end_date=None, db_path="/nonexistent/path.db")
+		result = _make_result(total_trades=100)
+		result.hypothesis = h
+		mock_agent = MagicMock()
+		ctx = GateContext(tracker=None, pnl_values=[5]*100, hypothesis=h, agent=mock_agent)
+
+		gate = WalkForwardGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+		assert "date range" in gr.reason.lower()
