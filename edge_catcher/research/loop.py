@@ -576,7 +576,7 @@ class LoopOrchestrator:
 			by_strategy[r.hypothesis.strategy].append(r)
 
 		for strategy, strat_results in by_strategy.items():
-			verdicts: dict[str, int] = {"promote": 0, "explore": 0, "kill": 0}
+			verdicts: dict[str, int] = defaultdict(int)
 			series_list = []
 			best_sharpe = 0.0
 			for r in strat_results:
@@ -589,7 +589,7 @@ class LoopOrchestrator:
 				"phase": phase,
 				"strategy": strategy,
 				"series": series_list,
-				"verdicts": verdicts,
+				"verdicts": dict(verdicts),
 				"best_sharpe": best_sharpe,
 				"validation": None,  # TODO: populate from validation_details if available
 			})

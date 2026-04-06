@@ -147,3 +147,28 @@ class TestLoopOrchestratorBudget:
                 grid_only=True,
                 llm_only=True,
             )
+
+
+class TestWritePhaseOutcomes:
+    def test_write_phase_outcomes_handles_unexpected_verdicts(self):
+        """_write_phase_outcomes should not crash on 'candidate' or 'error' verdicts."""
+        loop = LoopOrchestrator.__new__(LoopOrchestrator)
+        loop.run_id = "test-run"
+
+        journal = MagicMock()
+
+        h = Hypothesis(strategy="A", series="X", db_path="d.db",
+                       start_date="2025-01-01", end_date="2025-12-31")
+        error_result = HypothesisResult(
+            hypothesis=h, status="error", total_trades=0, wins=0, losses=0,
+            win_rate=0.0, net_pnl_cents=0.0, sharpe=0.0, max_drawdown_pct=0.0,
+            fees_paid_cents=0.0, avg_win_cents=0.0, avg_loss_cents=0.0,
+            per_strategy={}, verdict="error", verdict_reason="timeout",
+            raw_json={},
+        )
+
+        # Should not raise KeyError
+        loop._write_phase_outcomes(journal, [error_result], "grid")
+        journal.write_entry.assert_called_once()
+        content = journal.write_entry.call_args[0][2]
+        assert content["verdicts"]["error"] == 1
