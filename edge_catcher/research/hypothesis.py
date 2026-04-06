@@ -11,8 +11,8 @@ class Hypothesis:
     strategy: str               # strategy name (e.g. 'Cvol', 'D', 'Cstack')
     series: str                 # series ticker (e.g. 'KXBTCD')
     db_path: str                # path to database
-    start_date: str             # ISO date (e.g. '2025-01-01')
-    end_date: str               # ISO date (e.g. '2025-12-31')
+    start_date: str | None = None   # ISO date (e.g. '2025-01-01'), None = all data
+    end_date: str | None = None     # ISO date (e.g. '2025-12-31'), None = all data
     fee_pct: float = 1.0        # fee multiplier (1.0 = full taker, 0.25 = maker)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     parent_id: str | None = None

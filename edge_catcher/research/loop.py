@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -27,9 +28,9 @@ class LoopOrchestrator:
 	def __init__(
 		self,
 		research_db: str = "data/research.db",
-		start_date: str = "2025-01-01",
-		end_date: str = "2025-12-31",
-		max_runs: int = 100,
+		start_date: str | None = None,
+		end_date: str | None = None,
+		max_runs: int = 0,
 		max_time_minutes: float | None = None,
 		parallel: int = 1,
 		fee_pct: float = 1.0,
@@ -37,6 +38,9 @@ class LoopOrchestrator:
 		grid_only: bool = False,
 		llm_only: bool = False,
 		output_path: str | None = None,
+		force: bool = False,
+		max_refinements: int = 3,
+		refine_only: bool = False,
 	) -> None:
 		if grid_only and llm_only:
 			raise ValueError("Cannot use both --grid-only and --llm-only")
@@ -44,7 +48,7 @@ class LoopOrchestrator:
 		self.research_db = research_db
 		self.start_date = start_date
 		self.end_date = end_date
-		self.max_runs = max_runs
+		self.max_runs = max_runs if max_runs > 0 else sys.maxsize
 		self.max_time_seconds = max_time_minutes * 60 if max_time_minutes else None
 		self.parallel = parallel
 		self.fee_pct = fee_pct
@@ -52,6 +56,9 @@ class LoopOrchestrator:
 		self.grid_only = grid_only
 		self.llm_only = llm_only
 		self.output_path = output_path
+		self.force = force
+		self.max_refinements = max_refinements
+		self.refine_only = refine_only
 
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
@@ -68,7 +75,7 @@ class LoopOrchestrator:
 			result_count=len(self.tracker.list_results()),
 		)
 
-		agent = ResearchAgent(tracker=self.tracker)
+		agent = ResearchAgent(tracker=self.tracker, force=self.force)
 		queue = RunQueue(agent=agent, audit=self.audit, parallel=self.parallel)
 
 		strategies = self._discover_strategies()
@@ -76,9 +83,10 @@ class LoopOrchestrator:
 
 		all_results: list[HypothesisResult] = []
 		runs_used = 0
+		llm_calls_used = 0
 
 		# ── Phase 1: Grid ─────────────────────────────────────────────────
-		if not self.llm_only:
+		if not self.llm_only and not self.refine_only:
 			planner = GridPlanner(tracker=self.tracker)
 			grid_hypotheses = planner.generate(
 				strategies=strategies,
@@ -86,6 +94,7 @@ class LoopOrchestrator:
 				start_date=self.start_date,
 				end_date=self.end_date,
 				fee_pct=self.fee_pct,
+				force=self.force,
 			)
 
 			budget_for_grid = self.max_runs
@@ -114,7 +123,7 @@ class LoopOrchestrator:
 
 		# ── Phase 2: LLM ─────────────────────────────────────────────────
 		llm_results: list[HypothesisResult] = []
-		if not self.grid_only:
+		if not self.grid_only and not self.refine_only:
 			remaining_budget = self.max_runs - runs_used
 			if remaining_budget <= 0:
 				logger.info("No budget remaining for LLM phase")
@@ -130,12 +139,24 @@ class LoopOrchestrator:
 					len(tracker_results),
 				)
 			else:
-				llm_results = self._run_llm_phase(
+				llm_results, llm_calls_used = self._run_llm_phase(
 					agent, queue, strategies, series_map,
 					remaining_budget, start_time,
 				)
 				all_results.extend(llm_results)
 				runs_used += len(llm_results)
+
+		# ── Phase 3: Refinement ──────────────────────────────────────────
+		if not self.grid_only:
+			remaining_budget = self.max_runs - runs_used
+			remaining_llm = self.max_llm_calls - llm_calls_used
+			if remaining_budget > 0 and remaining_llm > 0:
+				refine_results = self._run_refinement_phase(
+					agent, queue, series_map,
+					remaining_budget, remaining_llm, start_time,
+				)
+				all_results.extend(refine_results)
+				runs_used += len(refine_results)
 
 		# ── Report ────────────────────────────────────────────────────────
 		self.audit.record_integrity(
@@ -161,6 +182,7 @@ class LoopOrchestrator:
 				start_date=self.start_date,
 				end_date=self.end_date,
 				fee_pct=self.fee_pct,
+				force=self.force,
 			)
 			grid_remaining = len(remaining_grid)
 
@@ -186,8 +208,8 @@ class LoopOrchestrator:
 		series_map: dict[str, list[str]],
 		budget: int,
 		start_time: float,
-	) -> list[HypothesisResult]:
-		"""Run the LLM ideation phase. Returns results from LLM-proposed hypotheses."""
+	) -> tuple[list[HypothesisResult], int]:
+		"""Run the LLM ideation phase. Returns (results, llm_calls_used)."""
 		results: list[HypothesisResult] = []
 
 		# First drain any pending (unexecuted) hypotheses from previous runs
@@ -216,7 +238,7 @@ class LoopOrchestrator:
 			budget -= len(pending_results)
 
 		if budget <= 0:
-			return results
+			return results, 0
 
 		# Verify integrity before ideation — compare against the most recent
 		# post_grid checkpoint from this run (list is DESC, so last appended = first)
@@ -233,7 +255,7 @@ class LoopOrchestrator:
 		]
 		if post_grid and post_grid[0]["result_hash"] != current_hash:
 			logger.error("Integrity check failed: results modified since grid phase")
-			return results
+			return results, 0
 
 		# Run LLM ideation
 		try:
@@ -252,7 +274,7 @@ class LoopOrchestrator:
 			)
 		except Exception as exc:
 			logger.error("LLM ideation failed: %s", exc)
-			return results
+			return results, 0
 
 		# Process novel strategy proposals (generate code via strategizer)
 		logger.info(
@@ -289,7 +311,387 @@ class LoopOrchestrator:
 		)
 		results.extend(llm_results)
 
+		return results, llm_calls_used
+
+	def _run_refinement_phase(
+		self,
+		agent: ResearchAgent,
+		queue: RunQueue,
+		series_map: dict[str, list[str]],
+		budget: int,
+		llm_budget: int,
+		start_time: float,
+	) -> list[HypothesisResult]:
+		"""Phase 3: iteratively refine 'explore'-verdict LLM-generated strategies."""
+		from edge_catcher.ai.strategizer import _parse_strategy_response
+		from edge_catcher.runner.strategy_parser import (
+			validate_strategy_code, save_strategy, list_strategies,
+			STRATEGIES_LOCAL_PATH, STRATEGIES_LOCAL_MODULE,
+		)
+		from .hypothesis import Hypothesis
+
+		results: list[HypothesisResult] = []
+		llm_calls_used = 0
+
+		# Find refinement candidates: LLM-generated strategies with explore but no promote
+		candidates = self._find_refinement_candidates()
+		if not candidates:
+			logger.info("Refinement phase: no candidates found")
+			return results
+
+		logger.info("Refinement phase: %d candidate strategies", len(candidates))
+
+		try:
+			from edge_catcher.ai.client import LLMClient
+			client = LLMClient()
+		except Exception as exc:
+			logger.error("Failed to create LLM client for refinement: %s", exc)
+			return results
+
+		refiner_system = (
+			Path(__file__).parent.parent / "ai" / "prompts" / "refiner_system.txt"
+		).read_text()
+
+		for strategy_name in candidates:
+			if budget <= 0 or llm_calls_used >= llm_budget:
+				break
+			remaining_time = self._remaining_time(start_time)
+			if remaining_time is not None and remaining_time <= 0:
+				break
+
+			# Determine starting version: check if prior refinement versions exist
+			# (e.g., FooV2 already exists from a prior run → start at iteration 2)
+			existing_version = self._count_existing_refinements(strategy_name)
+			if existing_version >= self.max_refinements:
+				logger.info(
+					"Strategy '%s' already has %d refinement(s), skipping",
+					strategy_name, existing_version,
+				)
+				continue
+
+			current_name = strategy_name
+			# If prior versions exist, start refining from the latest version
+			if existing_version > 0:
+				current_name = f"{strategy_name}V{existing_version + 1}"
+				# Verify the latest version actually exists in code
+				if not agent.read_strategy_code(current_name):
+					current_name = strategy_name
+
+			for iteration in range(existing_version + 1, self.max_refinements + 1):
+				if budget <= 0 or llm_calls_used >= llm_budget:
+					break
+				remaining_time = self._remaining_time(start_time)
+				if remaining_time is not None and remaining_time <= 0:
+					break
+
+				logger.info(
+					"Refining '%s' (iteration %d/%d)",
+					current_name, iteration, self.max_refinements,
+				)
+
+				# Read current strategy source
+				code = agent.read_strategy_code(current_name)
+				if not code:
+					logger.warning("Cannot read source for '%s', skipping", current_name)
+					break
+
+				# Gather results for current version
+				strat_results = self.tracker.list_results_for_strategy(current_name)
+				if not strat_results:
+					logger.warning("No results for '%s', skipping", current_name)
+					break
+
+				# Build refinement prompt
+				user_prompt = self._build_refinement_prompt(
+					code, strat_results, strategy_name, iteration,
+				)
+
+				prompt_hash = hashlib.sha256(
+					("refiner" + refiner_system + user_prompt).encode()
+				).hexdigest()
+
+				try:
+					response = client.complete(
+						refiner_system, user_prompt, task="refiner",
+					)
+				except Exception as exc:
+					logger.warning("Refinement LLM call failed: %s", exc)
+					break
+				llm_calls_used += 1
+
+				model_str = client._resolve_model("refiner") or ""
+				usage = client.last_usage
+				token_count = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+
+				# Parse and validate
+				try:
+					new_code, new_name = _parse_strategy_response(response)
+				except ValueError as exc:
+					logger.warning("Failed to parse refinement response: %s", exc)
+					self.audit.record_decision(
+						prompt_hash=prompt_hash,
+						prompt_text=user_prompt,
+						response_text=response,
+						parsed_output={"error": str(exc), "iteration": iteration},
+						model=model_str,
+						token_count=token_count,
+					)
+					break
+
+				ok, error = validate_strategy_code(new_code)
+				if not ok:
+					logger.warning("Refined strategy failed validation: %s", error)
+					self.audit.record_decision(
+						prompt_hash=prompt_hash,
+						prompt_text=user_prompt,
+						response_text=response,
+						parsed_output={
+							"code": new_code, "strategy_name": new_name,
+							"validation_ok": False, "error": error,
+							"iteration": iteration,
+						},
+						model=model_str,
+						token_count=token_count,
+					)
+					break
+
+				self.audit.record_decision(
+					prompt_hash=prompt_hash,
+					prompt_text=user_prompt,
+					response_text=response,
+					parsed_output={
+						"code": new_code, "strategy_name": new_name,
+						"validation_ok": True, "iteration": iteration,
+						"parent_strategy": strategy_name,
+					},
+					model=model_str,
+					token_count=token_count,
+				)
+
+				# Save and reload
+				result = save_strategy(new_code, new_name, STRATEGIES_LOCAL_PATH)
+				if not result.get("ok"):
+					logger.warning("Failed to save refined strategy: %s", result.get("error"))
+					break
+
+				try:
+					mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
+					importlib.reload(mod)
+				except Exception as exc:
+					logger.warning("Failed to reload strategies_local: %s", exc)
+
+				available = list_strategies(STRATEGIES_LOCAL_PATH)
+				available_names = [s["name"] for s in available]
+				if new_name not in available_names:
+					logger.warning(
+						"Refined strategy '%s' not in strategy map after reload. Available: %s",
+						new_name, available_names,
+					)
+					break
+
+				# Generate hypotheses for same series as original
+				tested_series = [
+					(r["series"], r["db_path"]) for r in strat_results
+				]
+				# Deduplicate while preserving order
+				seen = set()
+				unique_series = []
+				for pair in tested_series:
+					if pair not in seen:
+						seen.add(pair)
+						unique_series.append(pair)
+
+				hypotheses: list[Hypothesis] = []
+				for series, db_path in unique_series:
+					hypotheses.append(Hypothesis(
+						strategy=new_name,
+						series=series,
+						db_path=db_path,
+						start_date=self.start_date,
+						end_date=self.end_date,
+						fee_pct=self.fee_pct,
+						tags=[
+							"source:llm_refinement",
+							f"parent_strategy:{strategy_name}",
+							f"iteration:{iteration}",
+						],
+						notes=f"Refinement iteration {iteration} of {strategy_name}",
+					))
+
+				for h in hypotheses:
+					self.tracker.save_hypothesis(h)
+
+				batch = hypotheses[:budget]
+				remaining_time = self._remaining_time(start_time)
+				refine_results = queue.submit(
+					batch, phase="refinement", max_time_seconds=remaining_time,
+				)
+				results.extend(refine_results)
+				budget -= len(refine_results)
+
+				# Keep/discard decision
+				if self._should_keep_refinement(strat_results, refine_results):
+					logger.info(
+						"Refinement '%s' improved over '%s' — keeping",
+						new_name, current_name,
+					)
+					# Check if any result got promoted — stop refining
+					if any(r.verdict == "promote" for r in refine_results):
+						logger.info("Refined strategy '%s' promoted! Stopping.", new_name)
+						break
+					# Continue refining the new version
+					current_name = new_name
+				else:
+					logger.info(
+						"Refinement '%s' did not improve — discarding, stopping",
+						new_name,
+					)
+					break
+
 		return results
+
+	def _find_refinement_candidates(self) -> list[str]:
+		"""Find LLM-generated strategies with 'explore' verdicts worth refining.
+
+		Excludes strategies that already have refinement children (to avoid
+		re-refining on subsequent loop invocations).
+		"""
+		all_results = self.tracker.list_results()
+
+		# Find strategies tagged as LLM-generated
+		llm_strategies: set[str] = set()
+		# Track which base strategies already have refinement versions
+		already_refined: set[str] = set()
+		for r in all_results:
+			tags = json.loads(r["tags"]) if isinstance(r["tags"], str) else (r["tags"] or [])
+			if "source:llm_novel_strategy" in tags:
+				llm_strategies.add(r["strategy"])
+			for tag in tags:
+				if tag.startswith("parent_strategy:"):
+					already_refined.add(tag.split(":", 1)[1])
+
+		# Filter: has explore, no promotes, and not already refined
+		candidates = []
+		for strat in llm_strategies:
+			if strat in already_refined:
+				continue
+			strat_results = [r for r in all_results if r["strategy"] == strat]
+			verdicts = {r["verdict"] for r in strat_results}
+			if "explore" in verdicts and "promote" not in verdicts:
+				candidates.append(strat)
+
+		return sorted(candidates)
+
+	def _count_existing_refinements(self, base_strategy: str) -> int:
+		"""Count how many refinement iterations already exist for a base strategy."""
+		all_results = self.tracker.list_results()
+		max_iteration = 0
+		for r in all_results:
+			tags = json.loads(r["tags"]) if isinstance(r["tags"], str) else (r["tags"] or [])
+			has_parent = any(
+				tag == f"parent_strategy:{base_strategy}" for tag in tags
+			)
+			if has_parent:
+				for tag in tags:
+					if tag.startswith("iteration:"):
+						try:
+							it = int(tag.split(":", 1)[1])
+							max_iteration = max(max_iteration, it)
+						except ValueError:
+							pass
+		return max_iteration
+
+	@staticmethod
+	def _should_keep_refinement(
+		original_results: list[dict],
+		refined_results: list[HypothesisResult],
+	) -> bool:
+		"""Autoresearch-style keep/discard: keep if metrics improved."""
+		if not refined_results:
+			return False
+
+		# Compare best Sharpe
+		orig_best_sharpe = max(
+			(r["sharpe"] for r in original_results if r.get("status") == "ok"),
+			default=0.0,
+		)
+		refined_best_sharpe = max(
+			(r.sharpe for r in refined_results if r.status == "ok"),
+			default=0.0,
+		)
+		if refined_best_sharpe > orig_best_sharpe:
+			return True
+
+		# Compare number of non-kill verdicts
+		orig_viable = sum(1 for r in original_results if r["verdict"] != "kill")
+		refined_viable = sum(1 for r in refined_results if r.verdict != "kill")
+		if refined_viable > orig_viable:
+			return True
+
+		return False
+
+	@staticmethod
+	def _build_refinement_prompt(
+		code: str,
+		results: list[dict],
+		base_strategy_name: str,
+		iteration: int,
+	) -> str:
+		"""Build the user prompt for strategy refinement."""
+		version_suffix = f"V{iteration + 1}"
+		parts: list[str] = []
+
+		parts.append("## Original Strategy Code")
+		parts.append(f"```python\n{code}\n```")
+
+		parts.append("\n## Backtest Results")
+		for r in results:
+			parts.append(
+				f"- {r['series']} (db: {r['db_path']}): "
+				f"Sharpe={r['sharpe']:.2f}, Trades={r['total_trades']}, "
+				f"PnL={r['net_pnl_cents']:.0f}¢, "
+				f"Drawdown={r['max_drawdown_pct']:.1f}%, "
+				f"WinRate={r['win_rate']:.1%}, "
+				f"Verdict={r['verdict']} ({r['verdict_reason']})"
+			)
+
+		# Diagnose issues
+		issues: list[str] = []
+		for r in results:
+			if r["verdict"] == "kill" and r["sharpe"] < 1.0:
+				issues.append(
+					f"Low Sharpe ({r['sharpe']:.2f}) on {r['series']} — "
+					f"consider tightening entry conditions or adding filters"
+				)
+			if r["total_trades"] < 50:
+				issues.append(
+					f"Too few trades ({r['total_trades']}) on {r['series']} — "
+					f"consider loosening entry thresholds"
+				)
+			if r["max_drawdown_pct"] > 20:
+				issues.append(
+					f"High drawdown ({r['max_drawdown_pct']:.1f}%) on {r['series']} — "
+					f"consider adding a stop-loss or position size limit"
+				)
+			if r["verdict"] == "kill" and r["net_pnl_cents"] <= 0:
+				issues.append(
+					f"Net loss ({r['net_pnl_cents']:.0f}¢) on {r['series']} — "
+					f"review entry/exit logic"
+				)
+
+		if issues:
+			parts.append("\n## Issues to Address")
+			for issue in issues:
+				parts.append(f"- {issue}")
+
+		parts.append("\n## Constraints")
+		parts.append("- Must remain a valid Strategy subclass")
+		parts.append("- Keep the same entry signal family, refine thresholds/filters/exits")
+		parts.append(
+			f"- The refined class MUST use name = \"{base_strategy_name}{version_suffix}\""
+		)
+
+		return "\n".join(parts)
 
 	def _generate_novel_strategy(
 		self,
@@ -436,7 +838,7 @@ class LoopOrchestrator:
 
 	def _discover_series(self) -> dict[str, list[str]]:
 		"""Discover available databases and series."""
-		agent = ResearchAgent(tracker=self.tracker)
+		agent = ResearchAgent(tracker=self.tracker, force=self.force)
 		return agent._discover_all_series()
 
 	def _remaining_time(self, start_time: float) -> float | None:

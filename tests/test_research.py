@@ -88,11 +88,11 @@ class TestEvaluator:
         assert verdict == "kill"
         assert "Sharpe" in reason
 
-    def test_kill_low_win_rate(self):
+    def test_explore_mid_sharpe(self):
+        """Sharpe between kill (1.0) and promote (2.0) → explore, regardless of win rate."""
         r = _make_result(sharpe=1.5, win_rate=0.70, net_pnl_cents=500.0, total_trades=100)
         verdict, reason = self.ev.evaluate(r, self.th)
-        assert verdict == "kill"
-        assert "win rate" in reason
+        assert verdict == "explore"
 
     def test_kill_negative_pnl(self):
         r = _make_result(sharpe=1.5, win_rate=0.90, net_pnl_cents=-100.0, total_trades=100)
@@ -120,7 +120,7 @@ class TestEvaluator:
         assert verdict == "kill"
 
     def test_custom_thresholds(self):
-        th = Thresholds(min_sharpe=0.5, min_win_rate=0.5, promote_sharpe=1.0, promote_win_rate=0.6)
+        th = Thresholds(min_sharpe=0.5, promote_sharpe=1.0)
         r = _make_result(sharpe=1.2, win_rate=0.65, net_pnl_cents=100.0, total_trades=100)
         verdict, _ = self.ev.evaluate(r, th)
         assert verdict == "promote"
@@ -348,6 +348,29 @@ class TestResearchAgent:
         with patch("subprocess.run", return_value=mock_proc) as mock_sub2:
             agent.run_hypothesis(h)
             mock_sub2.assert_not_called()
+
+    def test_force_reruns_despite_existing_result(self, tmp_path):
+        agent = self._make_agent(tmp_path)
+        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+                       start_date="2025-01-01", end_date="2025-12-31")
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = self._mock_backtest_output()
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc):
+            agent.run_hypothesis(h)
+
+        # Without force — should skip (dedup)
+        with patch("subprocess.run", return_value=mock_proc) as mock_sub:
+            agent.run_hypothesis(h)
+            mock_sub.assert_not_called()
+
+        # With force — should re-run
+        agent.force = True
+        with patch("subprocess.run", return_value=mock_proc) as mock_sub:
+            agent.run_hypothesis(h)
+            mock_sub.assert_called_once()
 
     def test_generate_adjacent_killed_returns_empty(self, tmp_path):
         agent = self._make_agent(tmp_path)
