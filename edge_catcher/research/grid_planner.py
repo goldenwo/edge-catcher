@@ -23,6 +23,7 @@ class GridPlanner:
 		start_date: str,
 		end_date: str,
 		fee_pct: float = 1.0,
+		force: bool = False,
 	) -> list[Hypothesis]:
 		"""Generate all strategy × series × db combos, deduped against Tracker.
 
@@ -35,21 +36,22 @@ class GridPlanner:
 		# Load all results once to avoid N+1 queries
 		results = self.tracker.list_results()
 
-		# Build set of already-tested dedup keys
+		# Build set of already-tested dedup keys (skip when force=True)
 		tested_keys: set[tuple] = set()
-		for r in results:
-			tested_keys.add((
-				r["strategy"], r["series"], r["db_path"],
-				r["start_date"], r["end_date"], r["fee_pct"],
-			))
+		if not force:
+			for r in results:
+				tested_keys.add((
+					r["strategy"], r["series"], r["db_path"],
+					r["start_date"], r["end_date"], r["fee_pct"],
+				))
 
-		# Also include hypotheses without results (pending from prior LLM runs)
-		pending = self.tracker.list_pending()
-		for p in pending:
-			tested_keys.add((
-				p["strategy"], p["series"], p["db_path"],
-				p["start_date"], p["end_date"], p["fee_pct"],
-			))
+			# Also include hypotheses without results (pending from prior LLM runs)
+			pending = self.tracker.list_pending()
+			for p in pending:
+				tested_keys.add((
+					p["strategy"], p["series"], p["db_path"],
+					p["start_date"], p["end_date"], p["fee_pct"],
+				))
 
 		# Find warm strategies (those with prior promote/explore results)
 		warm_strategies = {

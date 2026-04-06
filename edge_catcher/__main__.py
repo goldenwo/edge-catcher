@@ -494,7 +494,8 @@ def _cmd_research(args) -> None:
 
     research_db = getattr(args, 'research_db', 'data/research.db')
     tracker = Tracker(research_db)
-    agent = ResearchAgent(tracker=tracker)
+    force = getattr(args, 'force', False)
+    agent = ResearchAgent(tracker=tracker, force=force)
 
     subcmd = getattr(args, 'research_command', None)
 
@@ -623,6 +624,9 @@ def _cmd_research(args) -> None:
             grid_only=args.grid_only,
             llm_only=args.llm_only,
             output_path=args.output,
+            force=force,
+            max_refinements=args.max_refinements,
+            refine_only=args.refine_only,
         )
         exit_code, results = orch.run()
 
@@ -815,6 +819,8 @@ def main() -> None:
     rs_run.add_argument("--end", required=True, help="End date ISO (e.g. 2025-12-31)")
     rs_run.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
                         help="Fee multiplier (default: 1.0)")
+    rs_run.add_argument("--force", action="store_true", default=False,
+                        help="Re-run even if already tested (overwrite existing result)")
 
     rs_sweep = rs_sub.add_parser("sweep", help="Sweep one strategy across all available series/DBs")
     rs_sweep.add_argument("--strategy", required=True, help="Strategy name")
@@ -824,6 +830,8 @@ def main() -> None:
     rs_sweep.add_argument("--max-runs", type=int, default=50, dest="max_runs",
                           help="Maximum hypotheses to run (default: 50)")
     rs_sweep.add_argument("--output", default=None, help="Save report to this base path")
+    rs_sweep.add_argument("--force", action="store_true", default=False,
+                          help="Re-run even if already tested (overwrite existing results)")
 
     rs_sweepall = rs_sub.add_parser("sweep-all", help="Sweep ALL strategies across ALL available data")
     rs_sweepall.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
@@ -832,6 +840,8 @@ def main() -> None:
     rs_sweepall.add_argument("--max-runs", type=int, default=200, dest="max_runs",
                              help="Total maximum hypotheses to run (default: 200)")
     rs_sweepall.add_argument("--output", default=str(RESEARCH_OUTPUT))
+    rs_sweepall.add_argument("--force", action="store_true", default=False,
+                             help="Re-run even if already tested (overwrite existing results)")
 
     rs_status = rs_sub.add_parser("status", help="Show what has been tested")
 
@@ -841,15 +851,15 @@ def main() -> None:
 
     # Loop subcommand
     rs_loop = rs_sub.add_parser("loop", help="Autonomous research loop: grid sweep + LLM ideation")
-    rs_loop.add_argument("--max-runs", type=int, default=100, dest="max_runs",
-                         help="Max total backtests across both phases (default: 100)")
+    rs_loop.add_argument("--max-runs", type=int, default=0, dest="max_runs",
+                         help="Max total backtests across both phases (default: 0 = unlimited)")
     rs_loop.add_argument("--max-time", type=float, default=None, dest="max_time",
                          help="Wall-clock timeout in minutes")
     rs_loop.add_argument("--parallel", type=int, default=1,
                          help="Concurrent backtests (default: 1)")
     rs_loop.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
-    rs_loop.add_argument("--start", default="2025-01-01")
-    rs_loop.add_argument("--end", default="2025-12-31")
+    rs_loop.add_argument("--start", default=None, help="Start date ISO (default: all data)")
+    rs_loop.add_argument("--end", default=None, help="End date ISO (default: all data)")
     rs_loop.add_argument("--max-llm-calls", type=int, default=10, dest="max_llm_calls",
                          help="Cap on LLM API calls in ideation phase (default: 10)")
     rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",
@@ -857,6 +867,12 @@ def main() -> None:
     rs_loop.add_argument("--llm-only", action="store_true", dest="llm_only",
                          help="Skip grid, ideate from existing results")
     rs_loop.add_argument("--output", default=None, help="Save report to this base path")
+    rs_loop.add_argument("--force", action="store_true", default=False,
+                         help="Re-run even if already tested (overwrite existing results)")
+    rs_loop.add_argument("--max-refinements", type=int, default=3, dest="max_refinements",
+                         help="Max refinement iterations per strategy (default: 3)")
+    rs_loop.add_argument("--refine-only", action="store_true", dest="refine_only",
+                         help="Skip grid and LLM phases, only refine existing strategies")
 
     # Audit subcommand
     rs_audit = rs_sub.add_parser("audit", help="Query the research audit log")

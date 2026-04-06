@@ -42,11 +42,13 @@ class ResearchAgent:
         reporter: Reporter | None = None,
         thresholds: Thresholds | None = None,
         research_db: str = "data/research.db",
+        force: bool = False,
     ) -> None:
         self.tracker = tracker or Tracker(research_db)
         self.evaluator = evaluator or Evaluator()
         self.reporter = reporter or Reporter()
         self.thresholds = thresholds or Thresholds()
+        self.force = force
 
     # ------------------------------------------------------------------
     # Core: run a single hypothesis
@@ -55,15 +57,16 @@ class ResearchAgent:
     def run_hypothesis(self, h: Hypothesis) -> HypothesisResult:
         """Run a single hypothesis via CLI subprocess, evaluate, track, return result."""
         # Dedup check: skip if already tested with identical parameters
-        existing_id = self.tracker.is_tested(h)
-        if existing_id:
-            logger.info(
-                "Skipping %s/%s (already tested, id=%s)", h.strategy, h.series, existing_id
-            )
-            # Return a synthetic result pointing at the existing record
-            existing = self.tracker.get_result_by_id(existing_id)
-            if existing:
-                return self._row_to_result(existing, h)
+        if not self.force:
+            existing_id = self.tracker.is_tested(h)
+            if existing_id:
+                logger.info(
+                    "Skipping %s/%s (already tested, id=%s)", h.strategy, h.series, existing_id
+                )
+                # Return a synthetic result pointing at the existing record
+                existing = self.tracker.get_result_by_id(existing_id)
+                if existing:
+                    return self._row_to_result(existing, h)
             # Fallback: re-run (edge case if result row is missing)
             logger.warning("Existing record %s has no result row — re-running", existing_id)
 
@@ -222,6 +225,42 @@ class ResearchAgent:
                 )
 
         return adjacent
+
+    # ------------------------------------------------------------------
+    # Strategy code reading
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def read_strategy_code(strategy_name: str) -> str | None:
+        """Read the source code of a strategy class from strategies_local.py."""
+        import ast
+
+        from edge_catcher.runner.strategy_parser import STRATEGIES_LOCAL_PATH
+
+        if not STRATEGIES_LOCAL_PATH.exists():
+            return None
+        source = STRATEGIES_LOCAL_PATH.read_text()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return None
+        lines = source.splitlines()
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if (
+                    isinstance(item, ast.Assign)
+                    and any(
+                        isinstance(t, ast.Name) and t.id == "name"
+                        for t in item.targets
+                    )
+                    and isinstance(item.value, ast.Constant)
+                    and item.value.value == strategy_name
+                ):
+                    end = node.end_lineno or node.lineno
+                    return "\n".join(lines[node.lineno - 1 : end])
+        return None
 
     # ------------------------------------------------------------------
     # Batch sweep

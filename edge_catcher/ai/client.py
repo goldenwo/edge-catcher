@@ -31,18 +31,21 @@ class LLMClient:
             "interpreter": "claude-haiku-4-5-20251001",
             "strategizer": "claude-sonnet-4-20250514",
             "ideator": "claude-sonnet-4-20250514",
+            "refiner": "claude-sonnet-4-20250514",
         },
         "openai": {
             "formalizer": "gpt-4o",
             "interpreter": "gpt-4o-mini",
             "strategizer": "gpt-4o",
             "ideator": "gpt-4o",
+            "refiner": "gpt-4o",
         },
         "claude-code": {
             "formalizer": "sonnet",
             "interpreter": "haiku",
             "strategizer": "sonnet",
             "ideator": "opus",
+            "refiner": "sonnet",
         },
     }
 
@@ -121,6 +124,7 @@ class LLMClient:
     _CLAUDE_CODE_EFFORT: dict[str, str] = {
         "ideator": "high",
         "strategizer": "high",
+        "refiner": "high",
     }
 
     def _call_claude_code(
