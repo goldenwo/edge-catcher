@@ -158,6 +158,27 @@ class Tracker:
         finally:
             conn.close()
 
+    def list_results_for_strategy(self, strategy: str) -> list[dict]:
+        """Return all results for a given strategy name."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT h.id, h.strategy, h.series, h.db_path,
+                          h.start_date, h.end_date, h.fee_pct, h.tags,
+                          r.status, r.total_trades, r.wins, r.losses, r.win_rate,
+                          r.net_pnl_cents, r.sharpe, r.max_drawdown_pct,
+                          r.fees_paid_cents, r.avg_win_cents, r.avg_loss_cents,
+                          r.verdict, r.verdict_reason, r.completed_at
+                   FROM hypotheses h
+                   JOIN results r ON h.id = r.hypothesis_id
+                   WHERE h.strategy = ?
+                   ORDER BY r.completed_at DESC""",
+                (strategy,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
     def list_results(self) -> list[dict]:
         """Return all results as plain dicts, joined with hypothesis metadata."""
         conn = self._connect()
