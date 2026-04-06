@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import logging
+import math
 import random
 import re
 import threading
@@ -16,6 +17,10 @@ from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from .gate import Gate, GateContext, GateResult
 
 logger = logging.getLogger(__name__)
+
+# Module-level lock shared across all ParameterSensitivityGate instances,
+# protecting concurrent writes to strategies_local.py.
+_FILE_LOCK = threading.Lock()
 
 
 class ParameterSensitivityGate(Gate):
@@ -36,7 +41,7 @@ class ParameterSensitivityGate(Gate):
 		self.max_sharpe_degradation = max_sharpe_degradation
 		self.max_params = max_params
 		self.timeout_seconds = timeout_seconds
-		self._file_lock = threading.Lock()
+		self._file_lock = _FILE_LOCK
 
 	def check(self, result: HypothesisResult, context: GateContext) -> GateResult:
 		if context.agent is None:
@@ -69,7 +74,12 @@ class ParameterSensitivityGate(Gate):
 			rng = random.Random(hash(context.hypothesis.dedup_key()))
 			params = rng.sample(params, self.max_params)
 
-		original_sharpe = result.sharpe
+		# Normalize original Sharpe to per-trade scale so comparison with
+		# neighbors isn't biased by differing trade counts.
+		orig_trades = result.total_trades
+		original_sharpe = (
+			result.sharpe / math.sqrt(orig_trades) if orig_trades >= 1 else 0.0
+		)
 		min_acceptable = original_sharpe * self.max_sharpe_degradation
 		deadline = time.monotonic() + self.timeout_seconds
 
@@ -177,7 +187,10 @@ class ParameterSensitivityGate(Gate):
 
 		if data is None:
 			return None
-		return data.get("sharpe", 0.0)
+		bt_sharpe = data.get("sharpe", 0.0)
+		trades = data.get("total_trades", 0)
+		# Normalize to per-trade Sharpe to match the original's scale.
+		return bt_sharpe / math.sqrt(trades) if trades >= 1 else 0.0
 
 	def _cleanup(self, temp_name: str) -> None:
 		"""Remove temporary strategy from strategies_local.py."""
