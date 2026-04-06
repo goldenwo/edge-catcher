@@ -235,6 +235,7 @@ class BacktestResult:
 	per_strategy: dict[str, dict]
 	per_strategy_curves: dict[str, list[tuple[datetime, float]]]
 	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
+	pnl_values: list[int] = field(default_factory=list)  # all per-trade P&L in cents
 
 	def summary(self) -> str:
 		gross_pnl = self.net_pnl_cents + self.total_fees_paid
@@ -295,6 +296,7 @@ class BacktestResult:
 				}
 				for ct in self.trade_sample  # at most 100 entries (ring buffer)
 			],
+			'pnl_values': self.pnl_values,
 		}
 
 
@@ -475,6 +477,7 @@ class EventBacktester:
 			sharpe=0.0, max_drawdown_pct=0.0, win_rate=0.0,
 			avg_win_cents=0.0, avg_loss_cents=0.0,
 			equity_curve=[], per_strategy={}, per_strategy_curves={}, trade_sample=[],
+			pnl_values=[],
 		)
 
 		if not market_map or _cancelled():
@@ -644,4 +647,5 @@ class EventBacktester:
 			per_strategy=per_strategy,
 			per_strategy_curves=portfolio._per_strategy_curves,
 			trade_sample=portfolio._trade_sample,
+			pnl_values=list(portfolio._pnl_values),
 		)
