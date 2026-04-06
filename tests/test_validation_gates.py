@@ -392,8 +392,8 @@ class TestMonteCarloGate:
 		"""
 		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
 
-		# Overwhelmingly positive — no permutation will beat this
-		pnl = [1000] * 100
+		# Overwhelmingly positive with small variance — no permutation will beat this
+		pnl = [1000 + i * 0.01 for i in range(100)]
 		result = _make_result(pnl_values=pnl, total_trades=100)
 		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
 
@@ -403,6 +403,31 @@ class TestMonteCarloGate:
 		assert gr.details["p_value"] > 0, "p-value should never be exactly 0"
 		# Should be 1/1001 ≈ 0.001
 		assert gr.details["p_value"] == pytest.approx(1 / 1001, abs=0.001)
+
+	def test_sharpe_based_permutation(self):
+		"""Gate should test Sharpe (mean/std), not just mean.
+
+		Symmetric distribution with zero mean → Sharpe ~0 → should fail.
+		"""
+		from edge_catcher.research.validation.gate_monte_carlo import MonteCarloGate
+
+		import random as _random
+		rng = _random.Random(99)
+		# Zero-mean with high variance: Sharpe is ~0
+		pnl = [rng.gauss(0, 100) for _ in range(200)]
+		# Center exactly at zero to ensure Sharpe is truly negligible
+		mean = statistics.mean(pnl)
+		pnl = [v - mean for v in pnl]
+
+		gate = MonteCarloGate(n_permutations=2000)
+		h = _make_hypothesis()
+		result = _make_result(pnl_values=pnl, sharpe=0.0, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=h)
+
+		gate_result = gate.check(result, ctx)
+		# Zero-mean Sharpe should not be significant
+		assert not gate_result.passed
+		assert "observed_sharpe" in gate_result.details
 
 
 # ---------------------------------------------------------------------------
