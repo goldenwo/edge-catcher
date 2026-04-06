@@ -318,7 +318,7 @@ class LLMIdeator:
 		for parent, group in parent_groups.items():
 			sharpes = [r["sharpe"] for r in group if r["sharpe"] is not None]
 			if len(sharpes) >= 2:
-				# Sort by iteration tag to compare first vs last correctly
+				# Compare first vs last in query order (DESC by completed_at)
 				if sharpes[0] > sharpes[-1]:
 					improved += 1
 				else:
