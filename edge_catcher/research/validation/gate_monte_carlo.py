@@ -37,29 +37,33 @@ class MonteCarloGate(Gate):
 				details={"T": T},
 			)
 
-		observed_mean = statistics.mean(pnl)
+		obs_std = statistics.stdev(pnl)
+		observed_sharpe = statistics.mean(pnl) / obs_std if obs_std > 0 else 0.0
 
 		# Seed from dedup_key for reproducibility
 		seed = hash(context.hypothesis.dedup_key())
 		rng = random.Random(seed)
 
 		count_ge = 0
-		permuted_means: list[float] = []
+		permuted_sharpes: list[float] = []
 
 		for _ in range(self.n_permutations):
 			flipped = [v * rng.choice((1, -1)) for v in pnl]
-			m = statistics.mean(flipped)
-			permuted_means.append(m)
-			if m >= observed_mean:
+			std = statistics.stdev(flipped)
+			s = statistics.mean(flipped) / std if std > 0 else 0.0
+			permuted_sharpes.append(s)
+			if s >= observed_sharpe:
 				count_ge += 1
 
-		p_value = count_ge / self.n_permutations
-		null_mean = statistics.mean(permuted_means)
-		null_std = statistics.stdev(permuted_means) if len(permuted_means) >= 2 else 0.0
+		# Standard permutation p-value includes the observed statistic itself
+		# to avoid p=0, which would overstate significance.
+		p_value = (count_ge + 1) / (self.n_permutations + 1)
+		null_mean = statistics.mean(permuted_sharpes)
+		null_std = statistics.stdev(permuted_sharpes) if len(permuted_sharpes) >= 2 else 0.0
 
 		details = {
 			"p_value": round(p_value, 4),
-			"observed_mean": round(observed_mean, 4),
+			"observed_sharpe": round(observed_sharpe, 4),
 			"n_permutations": self.n_permutations,
 			"null_mean": round(null_mean, 4),
 			"null_std": round(null_std, 4),
