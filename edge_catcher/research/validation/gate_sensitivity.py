@@ -7,6 +7,7 @@ import importlib
 import logging
 import random
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class ParameterSensitivityGate(Gate):
 		self.max_sharpe_degradation = max_sharpe_degradation
 		self.max_params = max_params
 		self.timeout_seconds = timeout_seconds
+		self._file_lock = threading.Lock()
 
 	def check(self, result: HypothesisResult, context: GateContext) -> GateResult:
 		if context.agent is None:
@@ -147,30 +149,31 @@ class ParameterSensitivityGate(Gate):
 			logger.warning("Sensitivity neighbor '%s' failed validation: %s", temp_name, error)
 			return None
 
-		result = save_strategy(modified_code, temp_name, STRATEGIES_LOCAL_PATH)
-		if not result.get("ok"):
-			logger.warning("Failed to save sensitivity neighbor '%s': %s", temp_name, result.get("error"))
-			return None
+		with self._file_lock:
+			result = save_strategy(modified_code, temp_name, STRATEGIES_LOCAL_PATH)
+			if not result.get("ok"):
+				logger.warning("Failed to save sensitivity neighbor '%s': %s", temp_name, result.get("error"))
+				return None
 
-		try:
-			mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
-			importlib.reload(mod)
-		except Exception as exc:
-			logger.warning("Failed to reload after saving '%s': %s", temp_name, exc)
+			try:
+				mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
+				importlib.reload(mod)
+			except Exception as exc:
+				logger.warning("Failed to reload after saving '%s': %s", temp_name, exc)
+				self._cleanup(temp_name)
+				return None
+
+			h = Hypothesis(
+				strategy=temp_name,
+				series=context.hypothesis.series,
+				db_path=context.hypothesis.db_path,
+				start_date=context.hypothesis.start_date,
+				end_date=context.hypothesis.end_date,
+				fee_pct=context.hypothesis.fee_pct,
+			)
+
+			data = context.agent.run_backtest_only(h)
 			self._cleanup(temp_name)
-			return None
-
-		h = Hypothesis(
-			strategy=temp_name,
-			series=context.hypothesis.series,
-			db_path=context.hypothesis.db_path,
-			start_date=context.hypothesis.start_date,
-			end_date=context.hypothesis.end_date,
-			fee_pct=context.hypothesis.fee_pct,
-		)
-
-		data = context.agent.run_backtest_only(h)
-		self._cleanup(temp_name)
 
 		if data is None:
 			return None

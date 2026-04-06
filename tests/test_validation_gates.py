@@ -414,3 +414,12 @@ class MinimalStrategy(Strategy):
 		gate = ParameterSensitivityGate()
 		gr = gate.check(result, ctx)
 		assert not gr.passed
+
+	def test_sensitivity_gate_uses_file_lock(self):
+		"""_run_neighbor should acquire a lock before writing strategies_local.py."""
+		import threading
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		gate = ParameterSensitivityGate()
+		assert hasattr(gate, '_file_lock')
+		assert isinstance(gate._file_lock, type(threading.Lock()))
