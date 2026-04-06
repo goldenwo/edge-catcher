@@ -211,6 +211,25 @@ class TestTracker:
         pending = tracker.list_pending()
         assert pending == []
 
+    def test_save_result_with_validation_details(self, tmp_path):
+        tracker = Tracker(tmp_path / "research.db")
+        r = _make_result(verdict="promote", verdict_reason="passed all gates")
+        validation_details = [
+            {"gate_name": "deflated_sharpe", "passed": True, "reason": "DSR 0.97 > 0.95"},
+        ]
+        tracker.save_result(r, validation_details=validation_details)
+
+        rows = tracker.list_results()
+        assert len(rows) == 1
+        # validation_details should be queryable
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "research.db"))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT validation_details FROM results").fetchone()
+        conn.close()
+        import json
+        assert json.loads(row["validation_details"])[0]["gate_name"] == "deflated_sharpe"
+
 
 # ---------------------------------------------------------------------------
 # Reporter
