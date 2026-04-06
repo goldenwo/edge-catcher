@@ -198,9 +198,9 @@ class ResearchJournal:
 def _format_trajectory(c: dict) -> str:
 	status = c.get("status", "unknown").upper()
 	lines = [f"## Research Trajectory: {status}"]
-	total = c.get("total_runs")
+	total = c.get("total_sessions")
 	if total is not None:
-		lines.append(f"- Total runs: {total}")
+		lines.append(f"- Total sessions: {total}")
 	promote_rate = c.get("promote_rate")
 	if promote_rate is not None:
 		prev = c.get("promote_rate_prev")
