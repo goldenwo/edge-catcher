@@ -594,7 +594,6 @@ class LoopOrchestrator:
 				"series": series_list,
 				"verdicts": dict(verdicts),
 				"best_sharpe": best_sharpe,
-				"validation": None,  # TODO: populate from validation_details if available
 			})
 
 	def _write_journal_summary(
