@@ -545,8 +545,9 @@ class LoopOrchestrator:
 				results.extend(refine_results)
 				budget -= len(refine_results)
 
-				# Keep/discard decision
-				if self._should_keep_refinement(strat_results, refine_results):
+				# Keep/discard decision — compare against both current and original baseline
+				base_results = self.tracker.list_results_for_strategy(strategy_name)
+				if self._should_keep_refinement(strat_results, refine_results, baseline_results=base_results):
 					logger.info(
 						"Refinement '%s' improved over '%s' — keeping",
 						new_name, current_name,
@@ -724,30 +725,43 @@ class LoopOrchestrator:
 	def _should_keep_refinement(
 		original_results: list[dict],
 		refined_results: list[HypothesisResult],
+		baseline_results: list[dict] | None = None,
 	) -> bool:
-		"""Autoresearch-style keep/discard: keep if metrics improved."""
+		"""Keep refinement only if it improves over BOTH previous iteration AND original baseline."""
 		if not refined_results:
 			return False
 
-		# Compare best Sharpe
-		orig_best_sharpe = max(
-			(r["sharpe"] for r in original_results if r.get("status") == "ok"),
-			default=0.0,
-		)
 		refined_best_sharpe = max(
 			(r.sharpe for r in refined_results if r.status == "ok"),
 			default=0.0,
 		)
-		if refined_best_sharpe > orig_best_sharpe:
-			return True
-
-		# Compare number of non-kill verdicts
-		orig_viable = sum(1 for r in original_results if r["verdict"] != "kill")
 		refined_viable = sum(1 for r in refined_results if r.verdict != "kill")
-		if refined_viable > orig_viable:
-			return True
 
-		return False
+		# Compare against previous iteration
+		orig_best_sharpe = max(
+			(r["sharpe"] for r in original_results if r.get("status") == "ok"),
+			default=0.0,
+		)
+		orig_viable = sum(1 for r in original_results if r["verdict"] != "kill")
+
+		beats_prev_sharpe = refined_best_sharpe > orig_best_sharpe
+		beats_prev_viable = refined_viable > orig_viable
+
+		if not beats_prev_sharpe and not beats_prev_viable:
+			return False
+
+		# Must also beat the original baseline (if provided)
+		if baseline_results:
+			baseline_best_sharpe = max(
+				(r["sharpe"] for r in baseline_results if r.get("status") == "ok"),
+				default=0.0,
+			)
+			baseline_viable = sum(1 for r in baseline_results if r["verdict"] != "kill")
+
+			if refined_best_sharpe <= baseline_best_sharpe and refined_viable <= baseline_viable:
+				return False
+
+		return True
 
 	@staticmethod
 	def _build_refinement_prompt(
