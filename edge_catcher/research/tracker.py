@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS results (
     verdict         TEXT NOT NULL,
     verdict_reason  TEXT NOT NULL,
     raw_json        TEXT,   -- full backtester output
+    validation_details TEXT,  -- JSON array of gate results
     completed_at    TEXT NOT NULL
 );
 
@@ -68,6 +69,11 @@ class Tracker:
         conn = self._connect()
         try:
             conn.executescript(_SCHEMA)
+            # Migrate existing databases: add columns that may not exist
+            cursor = conn.execute("PRAGMA table_info(results)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "validation_details" not in columns:
+                conn.execute("ALTER TABLE results ADD COLUMN validation_details TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -108,7 +114,7 @@ class Tracker:
         finally:
             conn.close()
 
-    def save_result(self, result: HypothesisResult) -> None:
+    def save_result(self, result: HypothesisResult, validation_details: list[dict] | None = None) -> None:
         """Upsert hypothesis + result records."""
         conn = self._connect()
         try:
@@ -132,8 +138,8 @@ class Tracker:
                    (hypothesis_id, status, total_trades, wins, losses, win_rate,
                     net_pnl_cents, sharpe, max_drawdown_pct, fees_paid_cents,
                     avg_win_cents, avg_loss_cents, per_strategy,
-                    verdict, verdict_reason, raw_json, completed_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    verdict, verdict_reason, raw_json, validation_details, completed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     h.id,
                     result.status,
@@ -151,6 +157,7 @@ class Tracker:
                     result.verdict,
                     result.verdict_reason,
                     json.dumps(result.raw_json),
+                    json.dumps(validation_details) if validation_details is not None else None,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
