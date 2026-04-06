@@ -617,7 +617,7 @@ class LoopOrchestrator:
 		# Write trajectory entry
 		journal.write_entry(self.run_id, "trajectory", {
 			"status": trajectory_status,
-			"total_runs": prev_trajectory.get("total_runs", 0) + 1 if prev_trajectory else 1,
+			"total_sessions": prev_trajectory.get("total_sessions", 0) + 1 if prev_trajectory else 1,
 			"promote_rate": sum(1 for r in all_results if r.verdict == "promote") / max(len(all_results), 1),
 			"promote_rate_prev": prev_trajectory.get("promote_rate") if prev_trajectory else None,
 			"best_sharpe_this_run": max((r.sharpe for r in all_results if r.status == "ok"), default=0.0),
