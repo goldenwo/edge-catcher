@@ -827,3 +827,41 @@ class TestShouldKeepRefinement:
 		refined_h = _make_hypothesis()
 		refined = [_make_result(sharpe=2.5, total_trades=200, verdict="explore", hypothesis=refined_h)]
 		assert not LoopOrchestrator._should_keep_refinement(original, refined)
+
+
+# ---------------------------------------------------------------------------
+# Trajectory classification
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryClassification:
+	def test_single_review_among_many_kills_is_plateauing(self):
+		"""1 review among 50 kills should be 'plateauing', not 'improving'."""
+		from edge_catcher.research.journal import ResearchJournal
+
+		results = [{"run_id": "r1", "verdict": "kill", "sharpe": 0.5}] * 50
+		results.append({"run_id": "r1", "verdict": "review", "sharpe": 1.5})
+		status = ResearchJournal.classify_trajectory("r1", results, None)
+		assert status == "plateauing"
+
+	def test_high_promote_rate_is_improving(self):
+		"""Promote rate > 5% should be 'improving'."""
+		from edge_catcher.research.journal import ResearchJournal
+
+		results = [
+			{"run_id": "r1", "verdict": "promote", "sharpe": 3.0},
+			{"run_id": "r1", "verdict": "promote", "sharpe": 2.5},
+			{"run_id": "r1", "verdict": "kill", "sharpe": 0.3},
+		] * 5
+		status = ResearchJournal.classify_trajectory("r1", results, None)
+		assert status == "improving"
+
+	def test_near_miss_sharpe_is_plateauing_not_improving(self):
+		"""Sharpe within 5% of previous best was 'improving' under old code, now 'plateauing'."""
+		from edge_catcher.research.journal import ResearchJournal
+
+		prev = {"best_sharpe_overall": 3.0, "total_sessions": 5}
+		results = [
+			{"run_id": "r1", "verdict": "explore", "sharpe": 2.9},
+		]
+		status = ResearchJournal.classify_trajectory("r1", results, prev)
+		assert status == "plateauing"

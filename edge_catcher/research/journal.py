@@ -173,22 +173,23 @@ class ResearchJournal:
 		if not this_run:
 			return "stuck"
 
-		promote_rate = sum(1 for r in this_run if r.get("verdict") == "promote") / len(this_run)
+		promote_rate = sum(1 for r in this_run if r.get("verdict") in ("promote", "review")) / len(this_run)
 		best_this_run = max((r.get("sharpe", 0) for r in this_run), default=0)
 
 		prev_best_sharpe: float = 0.0
 		if prev_trajectory is not None:
 			prev_best_sharpe = prev_trajectory.get("best_sharpe_overall", 0.0)
 
-		# On first run (no baseline), only promotes count as improving
-		if promote_rate > 0:
+		# Require meaningful promote rate (> 5%), not just any single promote
+		if promote_rate > 0.05:
 			return "improving"
-		if prev_best_sharpe > 0 and best_this_run > (prev_best_sharpe * 0.95):
+		# New best Sharpe must actually exceed previous (not just within 5%)
+		if prev_best_sharpe > 0 and best_this_run > prev_best_sharpe:
 			return "improving"
-		elif any(r.get("verdict") == "explore" for r in this_run):
+		# Any promotes/explores at all = plateauing
+		if promote_rate > 0 or any(r.get("verdict") == "explore" for r in this_run):
 			return "plateauing"
-		else:
-			return "stuck"
+		return "stuck"
 
 
 # ---------------------------------------------------------------------------
