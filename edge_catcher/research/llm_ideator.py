@@ -121,13 +121,13 @@ class LLMIdeator:
 		for r in killed:
 			kill_by_strategy.setdefault(r["strategy"], []).append(r["verdict_reason"])
 
-		# Coverage: what series/strategy combos exist
-		tested_combos = {(r["strategy"], r["series"]) for r in results}
+		# Coverage: what (strategy, series, db_path) combos exist
+		tested_combos = {(r["strategy"], r["series"], r["db_path"]) for r in results}
 		all_combos = set()
 		for db_path, series_list in series_map.items():
 			for series in series_list:
 				for strat in available_strategies:
-					all_combos.add((strat, series))
+					all_combos.add((strat, series, db_path))
 		untested = all_combos - tested_combos
 
 		parts: list[str] = []
@@ -184,8 +184,8 @@ class LLMIdeator:
 
 		if untested:
 			parts.append(f"\n## Untested Combinations ({len(untested)} remaining)")
-			for strat, series in sorted(untested)[:20]:
-				parts.append(f"  - {strat} × {series}")
+			for strat, series, db_path in sorted(untested)[:20]:
+				parts.append(f"  - {strat} × {series} (db: {db_path})")
 			if len(untested) > 20:
 				parts.append(f"  - ... and {len(untested) - 20} more")
 
