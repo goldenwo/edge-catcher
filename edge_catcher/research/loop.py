@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -553,7 +554,7 @@ class LoopOrchestrator:
 						new_name, current_name,
 					)
 					# Check if any result got promoted — stop refining
-					if any(r.verdict == "promote" for r in refine_results):
+					if any(r.verdict in ("promote", "review") for r in refine_results):
 						logger.info("Refined strategy '%s' promoted! Stopping.", new_name)
 						break
 					# Continue refining the new version
@@ -620,7 +621,7 @@ class LoopOrchestrator:
 		journal.write_entry(self.run_id, "trajectory", {
 			"status": trajectory_status,
 			"total_sessions": prev_trajectory.get("total_sessions", 0) + 1 if prev_trajectory else 1,
-			"promote_rate": sum(1 for r in all_results if r.verdict == "promote") / max(len(all_results), 1),
+			"promote_rate": sum(1 for r in all_results if r.verdict in ("promote", "review")) / max(len(all_results), 1),
 			"promote_rate_prev": prev_trajectory.get("promote_rate") if prev_trajectory else None,
 			"best_sharpe_this_run": max((r.sharpe for r in all_results if r.status == "ok"), default=0.0),
 			"best_sharpe_overall": max(
@@ -628,13 +629,14 @@ class LoopOrchestrator:
 				prev_trajectory.get("best_sharpe_overall", 0.0) if prev_trajectory else 0.0,
 			),
 			"new_promotes": sum(1 for r in all_results if r.verdict == "promote"),
+			"new_reviews": sum(1 for r in all_results if r.verdict == "review"),
 			"new_explores": sum(1 for r in all_results if r.verdict == "explore"),
 			"new_kills": sum(1 for r in all_results if r.verdict == "kill"),
 		})
 
 		# Write observation entries for promoted results
 		for r in all_results:
-			if r.verdict == "promote":
+			if r.verdict in ("promote", "review"):
 				journal.write_entry(self.run_id, "observation", {
 					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}",
 					"evidence": (
@@ -726,38 +728,49 @@ class LoopOrchestrator:
 		refined_results: list[HypothesisResult],
 		baseline_results: list[dict] | None = None,
 	) -> bool:
-		"""Keep refinement only if it improves over BOTH previous iteration AND original baseline."""
+		"""Keep refinement only if it improves over BOTH previous iteration AND original baseline.
+
+		Uses per-trade Sharpe (sharpe / sqrt(trades)) so changing trade frequency
+		doesn't bias the comparison.
+		"""
 		if not refined_results:
 			return False
 
-		refined_best_sharpe = max(
-			(r.sharpe for r in refined_results if r.status == "ok"),
+		def _per_trade_sharpe_from_result(r: HypothesisResult) -> float:
+			if r.status != "ok" or r.total_trades < 1:
+				return 0.0
+			return r.sharpe / math.sqrt(r.total_trades)
+
+		def _per_trade_sharpe_from_row(r: dict) -> float:
+			if r.get("status") != "ok":
+				return 0.0
+			trades = r.get("total_trades", 0)
+			if trades < 1:
+				return 0.0
+			return r["sharpe"] / math.sqrt(trades)
+
+		refined_best = max(
+			(_per_trade_sharpe_from_result(r) for r in refined_results),
 			default=0.0,
 		)
 		refined_viable = sum(1 for r in refined_results if r.verdict != "kill")
 
-		# Compare against previous iteration
-		orig_best_sharpe = max(
-			(r["sharpe"] for r in original_results if r.get("status") == "ok"),
+		orig_best = max(
+			(_per_trade_sharpe_from_row(r) for r in original_results),
 			default=0.0,
 		)
 		orig_viable = sum(1 for r in original_results if r["verdict"] != "kill")
 
-		beats_prev_sharpe = refined_best_sharpe > orig_best_sharpe
-		beats_prev_viable = refined_viable > orig_viable
-
-		if not beats_prev_sharpe and not beats_prev_viable:
+		if not (refined_best > orig_best or refined_viable > orig_viable):
 			return False
 
-		# Must also beat the original baseline (if provided)
 		if baseline_results:
-			baseline_best_sharpe = max(
-				(r["sharpe"] for r in baseline_results if r.get("status") == "ok"),
+			baseline_best = max(
+				(_per_trade_sharpe_from_row(r) for r in baseline_results),
 				default=0.0,
 			)
 			baseline_viable = sum(1 for r in baseline_results if r["verdict"] != "kill")
-
-			if refined_best_sharpe <= baseline_best_sharpe and refined_viable <= baseline_viable:
+			if refined_best <= baseline_best and refined_viable <= baseline_viable:
 				return False
 
 		return True

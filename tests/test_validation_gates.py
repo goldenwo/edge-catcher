@@ -774,3 +774,31 @@ class TestEvaluatorValidateVerdict:
 		result = _make_result(sharpe=2.5, total_trades=150, net_pnl_cents=500.0)
 		verdict, reason = Evaluator().evaluate(result, Thresholds())
 		assert verdict == "candidate"
+
+
+# ---------------------------------------------------------------------------
+# Refinement keep/discard with normalized Sharpe
+# ---------------------------------------------------------------------------
+
+class TestShouldKeepRefinement:
+	def test_higher_per_trade_sharpe_kept_despite_fewer_trades(self):
+		"""Refinement with fewer but higher-quality trades should be kept."""
+		from edge_catcher.research.loop import LoopOrchestrator
+
+		# Original: Sharpe 3.5 with 200 trades -> per-trade = 3.5/sqrt(200) ~ 0.247
+		original = [{"status": "ok", "sharpe": 3.5, "total_trades": 200, "verdict": "explore"}]
+		# Refined: Sharpe 2.5 with 50 trades -> per-trade = 2.5/sqrt(50) ~ 0.354
+		refined_h = _make_hypothesis()
+		refined = [_make_result(sharpe=2.5, total_trades=50, verdict="explore", hypothesis=refined_h)]
+		assert LoopOrchestrator._should_keep_refinement(original, refined)
+
+	def test_lower_per_trade_sharpe_discarded(self):
+		"""Refinement with worse per-trade Sharpe should be discarded."""
+		from edge_catcher.research.loop import LoopOrchestrator
+
+		# Original: Sharpe 2.0 with 50 trades -> per-trade = 2.0/sqrt(50) ~ 0.283
+		original = [{"status": "ok", "sharpe": 2.0, "total_trades": 50, "verdict": "explore"}]
+		# Refined: Sharpe 2.5 with 200 trades -> per-trade = 2.5/sqrt(200) ~ 0.177
+		refined_h = _make_hypothesis()
+		refined = [_make_result(sharpe=2.5, total_trades=200, verdict="explore", hypothesis=refined_h)]
+		assert not LoopOrchestrator._should_keep_refinement(original, refined)
