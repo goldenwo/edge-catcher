@@ -817,6 +817,23 @@ class TestBacktestResult:
 		assert 'trade_log' in d
 		assert 'equity_curve' in d
 
+	def test_to_dict_includes_pnl_values(self):
+		"""BacktestResult.to_dict() should include the full pnl_values list."""
+		from edge_catcher.runner.event_backtest import BacktestResult
+		from datetime import datetime, timezone
+
+		result = BacktestResult(
+			total_trades=3, wins=2, losses=1,
+			net_pnl_cents=15, total_fees_paid=3.0,
+			sharpe=1.5, max_drawdown_pct=2.0, win_rate=0.67,
+			avg_win_cents=10.0, avg_loss_cents=-5.0,
+			equity_curve=[], per_strategy={}, per_strategy_curves={},
+			trade_sample=[], pnl_values=[10, 10, -5],
+		)
+		d = result.to_dict()
+		assert "pnl_values" in d
+		assert d["pnl_values"] == [10, 10, -5]
+
 
 # ---------------------------------------------------------------------------
 # Integration: full backtest on synthetic dataset
