@@ -195,7 +195,7 @@ class Tracker:
                           h.start_date, h.end_date, h.fee_pct, h.tags, h.created_at,
                           r.status, r.total_trades, r.wins, r.losses, r.win_rate,
                           r.net_pnl_cents, r.sharpe, r.max_drawdown_pct, r.fees_paid_cents,
-                          r.verdict, r.verdict_reason, r.completed_at
+                          r.verdict, r.verdict_reason, r.validation_details, r.completed_at
                    FROM hypotheses h
                    JOIN results r ON h.id = r.hypothesis_id
                    ORDER BY r.completed_at DESC"""
