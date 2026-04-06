@@ -150,6 +150,30 @@ class TestLLMIdeatorIdeate:
 			)
 
 
+class TestCoverageTrackingIncludesDbPath:
+	def test_ideation_prompt_coverage_includes_db_path(self):
+		"""Untested combos should distinguish between same series in different DBs."""
+		tracker = MagicMock()
+		tracker.list_results.return_value = [
+			{"strategy": "A", "series": "KXBTCD", "db_path": "data/kalshi.db",
+			 "verdict": "explore", "verdict_reason": "test", "sharpe": 1.2,
+			 "win_rate": 0.55, "net_pnl_cents": 100, "total_trades": 80,
+			 "tags": "[]", "validation_details": None},
+		]
+
+		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+
+		series_map = {
+			"data/kalshi.db": ["KXBTCD"],
+			"data/coinbase.db": ["KXBTCD"],  # same series name, different DB
+		}
+
+		prompt = ideator.build_ideation_prompt(["A"], series_map)
+
+		# Should show 1 untested combo: A × KXBTCD in coinbase.db
+		assert "1 remaining" in prompt or "Untested Combinations (1" in prompt
+
+
 class TestSummarizeRefinements:
 	def test_summarize_refinements_single_sample_is_neutral(self):
 		"""A refinement group with only 1 result should not count as improved."""
