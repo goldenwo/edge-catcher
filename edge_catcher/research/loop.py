@@ -10,6 +10,7 @@ import logging
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from .agent import ResearchAgent
@@ -62,12 +63,16 @@ class LoopOrchestrator:
 
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
+		self.run_id = str(uuid.uuid4())
 
 	def run(self) -> tuple[int, list[HypothesisResult]]:
 		"""Execute the research loop. Returns (exit_code, all_results).
 
 		Exit codes: 0=completed, 1=error, 2=partial (budget exhausted).
 		"""
+		from .journal import ResearchJournal
+		journal = ResearchJournal(db_path=self.research_db)
+
 		start_time = time.monotonic()
 		self.audit.record_integrity(
 			checkpoint="loop_start",
@@ -106,6 +111,7 @@ class LoopOrchestrator:
 			)
 			all_results.extend(grid_results)
 			runs_used += len(grid_results)
+			self._write_phase_outcomes(journal, grid_results, "grid")
 
 			logger.info(
 				"Grid phase: %d/%d hypotheses completed",
@@ -145,6 +151,7 @@ class LoopOrchestrator:
 				)
 				all_results.extend(llm_results)
 				runs_used += len(llm_results)
+				self._write_phase_outcomes(journal, llm_results, "llm")
 
 		# ── Phase 3: Refinement ──────────────────────────────────────────
 		if not self.grid_only:
@@ -157,6 +164,10 @@ class LoopOrchestrator:
 				)
 				all_results.extend(refine_results)
 				runs_used += len(refine_results)
+				self._write_phase_outcomes(journal, refine_results, "refinement")
+
+		# ── Journal summary ───────────────────────────────────────────────
+		self._write_journal_summary(journal, all_results)
 
 		# ── Report ────────────────────────────────────────────────────────
 		self.audit.record_integrity(
@@ -549,6 +560,111 @@ class LoopOrchestrator:
 					break
 
 		return results
+
+	def _write_phase_outcomes(
+		self,
+		journal: "ResearchJournal",
+		results: list[HypothesisResult],
+		phase: str,
+	) -> None:
+		"""Write outcome journal entries — one per strategy, aggregated across series."""
+		from collections import defaultdict
+		by_strategy: dict[str, list[HypothesisResult]] = defaultdict(list)
+		for r in results:
+			by_strategy[r.hypothesis.strategy].append(r)
+
+		for strategy, strat_results in by_strategy.items():
+			verdicts: dict[str, int] = {"promote": 0, "explore": 0, "kill": 0}
+			series_list = []
+			best_sharpe = 0.0
+			for r in strat_results:
+				verdicts[r.verdict] = verdicts.get(r.verdict, 0) + 1
+				series_list.append(r.hypothesis.series)
+				if r.status == "ok":
+					best_sharpe = max(best_sharpe, r.sharpe)
+
+			journal.write_entry(self.run_id, "outcome", {
+				"phase": phase,
+				"strategy": strategy,
+				"series": series_list,
+				"verdicts": verdicts,
+				"best_sharpe": best_sharpe,
+				"validation": None,  # TODO: populate from validation_details if available
+			})
+
+	def _write_journal_summary(
+		self,
+		journal: "ResearchJournal",
+		all_results: list[HypothesisResult],
+	) -> None:
+		"""Write trajectory + observation entries at end of run."""
+		from collections import defaultdict
+		from .journal import ResearchJournal
+
+		# Build result dicts for trajectory classification
+		run_results = [
+			{"run_id": self.run_id, "verdict": r.verdict, "sharpe": r.sharpe}
+			for r in all_results if r.status == "ok"
+		]
+
+		# Compute trajectory
+		prev_trajectory = journal.get_latest_trajectory()
+		trajectory_status = ResearchJournal.classify_trajectory(
+			self.run_id, run_results, prev_trajectory,
+		)
+
+		# Write trajectory entry
+		journal.write_entry(self.run_id, "trajectory", {
+			"status": trajectory_status,
+			"total_runs": prev_trajectory.get("total_runs", 0) + 1 if prev_trajectory else 1,
+			"promote_rate": sum(1 for r in all_results if r.verdict == "promote") / max(len(all_results), 1),
+			"promote_rate_prev": prev_trajectory.get("promote_rate") if prev_trajectory else None,
+			"best_sharpe_this_run": max((r.sharpe for r in all_results if r.status == "ok"), default=0.0),
+			"best_sharpe_overall": max(
+				max((r.sharpe for r in all_results if r.status == "ok"), default=0.0),
+				prev_trajectory.get("best_sharpe_overall", 0.0) if prev_trajectory else 0.0,
+			),
+			"new_promotes": sum(1 for r in all_results if r.verdict == "promote"),
+			"new_explores": sum(1 for r in all_results if r.verdict == "explore"),
+			"new_kills": sum(1 for r in all_results if r.verdict == "kill"),
+		})
+
+		# Write observation entries for promoted results
+		for r in all_results:
+			if r.verdict == "promote":
+				journal.write_entry(self.run_id, "observation", {
+					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}",
+					"evidence": (
+						f"trades={r.total_trades}, win_rate={r.win_rate:.0%}, "
+						f"series={r.hypothesis.series}, pnl={r.net_pnl_cents:.0f}¢"
+					),
+				})
+
+		# Write observation entries for high kill-rate strategies
+		kill_counts: dict[str, dict] = defaultdict(lambda: {"kills": 0, "total": 0})
+		for r in all_results:
+			kill_counts[r.hypothesis.strategy]["total"] += 1
+			if r.verdict == "kill":
+				kill_counts[r.hypothesis.strategy]["kills"] += 1
+		for strategy, counts in kill_counts.items():
+			if counts["total"] >= 3 and counts["kills"] / counts["total"] > 0.8:
+				journal.write_entry(self.run_id, "observation", {
+					"pattern": f"strategy {strategy} killed on {counts['kills']}/{counts['total']} series",
+					"evidence": "high kill rate suggests fundamental issue with strategy logic",
+				})
+
+		# Write observation entries for low trade-count strategies
+		trade_counts: dict[str, list[int]] = defaultdict(list)
+		for r in all_results:
+			if r.status == "ok":
+				trade_counts[r.hypothesis.strategy].append(r.total_trades)
+		for strategy, trades_list in trade_counts.items():
+			if len(trades_list) >= 2 and sum(trades_list) / len(trades_list) < 50:
+				avg = sum(trades_list) / len(trades_list)
+				journal.write_entry(self.run_id, "observation", {
+					"pattern": f"strategy {strategy} averaged {avg:.0f} trades across {len(trades_list)} series",
+					"evidence": "low trade count may indicate overly restrictive entry conditions",
+				})
 
 	def _find_refinement_candidates(self) -> list[str]:
 		"""Find LLM-generated strategies with 'explore' verdicts worth refining.
