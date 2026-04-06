@@ -18,23 +18,32 @@ from .validation.gate import GateContext
 
 logger = logging.getLogger(__name__)
 
-# Related strategy families for adjacent hypothesis generation.
-# Each strategy maps to its "cousins" (filter variants of the same core idea).
-_STRATEGY_FAMILY: dict[str, list[str]] = {
-    "A":      ["Avol", "Amom"],
-    "Avol":   ["A", "Amom"],
-    "Amom":   ["A", "Avol"],
-    "B":      [],
-    "C":      ["Cvol", "Cmom", "Cstack"],
-    "Cvol":   ["C", "Cmom", "Cstack"],
-    "Cmom":   ["C", "Cvol", "Cstack"],
-    "Cstack": ["C", "Cvol", "Cmom"],
-    "D":      ["Dvol"],
-    "Dvol":   ["D"],
-    "TP":     [],
-    "Fflow":  ["Ffvol"],
-    "Ffvol":  ["Fflow"],
-}
+def _build_strategy_families() -> dict[str, list[str]]:
+    """Build strategy family map dynamically from available strategies.
+
+    Strategies sharing a common root (one is a prefix of the other)
+    are treated as cousins for adjacent hypothesis generation.
+    """
+    from edge_catcher.runner.strategy_parser import (
+        list_strategies, STRATEGIES_LOCAL_PATH, STRATEGIES_PUBLIC_PATH,
+    )
+
+    all_names: list[str] = []
+    for path in [STRATEGIES_PUBLIC_PATH, STRATEGIES_LOCAL_PATH]:
+        if path.exists():
+            all_names.extend(s["name"] for s in list_strategies(path))
+
+    families: dict[str, list[str]] = {}
+    for name in all_names:
+        cousins = []
+        for other in all_names:
+            if other == name:
+                continue
+            if name.startswith(other) or other.startswith(name):
+                cousins.append(other)
+        families[name] = cousins
+
+    return families
 
 
 class ResearchAgent:
@@ -266,7 +275,8 @@ class ResearchAgent:
 
         elif result.verdict == "explore":
             # Try related strategies (same core idea, different filters) on same data
-            cousins = _STRATEGY_FAMILY.get(h.strategy, [])
+            families = _build_strategy_families()
+            cousins = families.get(h.strategy, [])
             for cousin in cousins:
                 adjacent.append(
                     Hypothesis(
