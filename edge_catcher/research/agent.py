@@ -18,6 +18,19 @@ from .validation.gate import GateContext
 
 logger = logging.getLogger(__name__)
 
+
+def _build_ohlc_config(series: str) -> str | None:
+    """Build --ohlc-config JSON for a given series, or None if no OHLC data available."""
+    from edge_catcher.research.context_engine import _SERIES_TO_ASSET
+
+    for prefix, (asset, db_file, table) in _SERIES_TO_ASSET.items():
+        if series.startswith(prefix):
+            db_path = str(Path("data") / db_file)
+            if Path(db_path).exists():
+                return json.dumps({asset: [db_path, table]})
+    return None
+
+
 def _build_strategy_families() -> dict[str, list[str]]:
     """Build strategy family map dynamically from available strategies.
 
@@ -97,6 +110,9 @@ class ResearchAgent:
             cmd += ["--start", h.start_date]
         if h.end_date:
             cmd += ["--end", h.end_date]
+        ohlc_config = _build_ohlc_config(h.series)
+        if ohlc_config:
+            cmd.extend(["--ohlc-config", ohlc_config])
 
         try:
             proc = subprocess.run(
@@ -212,6 +228,9 @@ class ResearchAgent:
             cmd += ["--start", h.start_date]
         if h.end_date:
             cmd += ["--end", h.end_date]
+        ohlc_config = _build_ohlc_config(h.series)
+        if ohlc_config:
+            cmd.extend(["--ohlc-config", ohlc_config])
 
         try:
             proc = subprocess.run(
