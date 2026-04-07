@@ -642,6 +642,7 @@ def _cmd_research(args) -> None:
             force=force,
             max_refinements=args.max_refinements,
             refine_only=args.refine_only,
+            max_stuck_runs=args.max_stuck_runs,
         )
         exit_code, results = orch.run()
 
@@ -654,6 +655,8 @@ def _cmd_research(args) -> None:
             print(f"  {v}: {c}")
         if exit_code == 2:
             print("\nBudget exhausted — run again to continue.")
+        if exit_code == 3:
+            print("\nLoop terminated: stuck with no progress. Review kill-registry and data sources.")
         sys.exit(exit_code)
 
     elif subcmd == 'audit':
@@ -911,6 +914,8 @@ def main() -> None:
                          help="Max refinement iterations per strategy (default: 3)")
     rs_loop.add_argument("--refine-only", action="store_true", dest="refine_only",
                          help="Skip grid and LLM phases, only refine existing strategies")
+    rs_loop.add_argument("--max-stuck-runs", type=int, default=3, dest="max_stuck_runs",
+                         help="Auto-terminate after N stuck runs post budget-shift (0=disable, default: 3)")
 
     # Audit subcommand
     rs_audit = rs_sub.add_parser("audit", help="Query the research audit log")

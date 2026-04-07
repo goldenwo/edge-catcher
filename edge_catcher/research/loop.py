@@ -44,6 +44,7 @@ class LoopOrchestrator:
 		force: bool = False,
 		max_refinements: int = 3,
 		refine_only: bool = False,
+		max_stuck_runs: int = 3,
 	) -> None:
 		if grid_only and llm_only:
 			raise ValueError("Cannot use both --grid-only and --llm-only")
@@ -62,6 +63,7 @@ class LoopOrchestrator:
 		self.force = force
 		self.max_refinements = max_refinements
 		self.refine_only = refine_only
+		self.max_stuck_runs = max_stuck_runs
 
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
@@ -73,6 +75,39 @@ class LoopOrchestrator:
 		if self._cached_results is None or refresh:
 			self._cached_results = self.tracker.list_results()
 		return self._cached_results
+
+	@staticmethod
+	def _compute_consecutive_stuck(
+		trajectory_status: str,
+		prev_trajectory: dict | None,
+	) -> int:
+		"""Compute consecutive stuck counter from current status and previous trajectory."""
+		prev_count = (prev_trajectory or {}).get("consecutive_stuck", 0)
+		if trajectory_status == "improving":
+			return 0
+		return prev_count + 1
+
+	@staticmethod
+	def _compute_budgets(
+		max_runs: int,
+		grid_only: bool,
+		consecutive_stuck: int = 0,
+	) -> dict[str, int]:
+		"""Compute phase budgets, shifting toward ideation when stuck."""
+		if grid_only:
+			return {"ideate": 0, "expand": max_runs, "refine": 0}
+
+		if consecutive_stuck >= 2:
+			# Shift: 60% ideate, 20% expand, 20% refine
+			budget_ideate = max(1, int(max_runs * 0.6))
+			budget_expand = max(1, int(max_runs * 0.2))
+		else:
+			# Normal: 40% ideate, 40% expand, 20% refine
+			budget_ideate = max(1, int(max_runs * 0.4))
+			budget_expand = max(1, int(max_runs * 0.4))
+
+		budget_refine = max_runs - budget_ideate - budget_expand
+		return {"ideate": budget_ideate, "expand": budget_expand, "refine": budget_refine}
 
 	def run(self) -> tuple[int, list[HypothesisResult]]:
 		"""Execute the research loop. Returns (exit_code, all_results).
@@ -100,10 +135,22 @@ class LoopOrchestrator:
 		runs_used = 0
 		llm_calls_used = 0
 
+		# ── Read previous trajectory for stuck detection ──────────────────
+		prev_trajectory = journal.get_latest_trajectory()
+		prev_content = prev_trajectory  # already a dict or None
+		self._consecutive_stuck = (prev_content or {}).get("consecutive_stuck", 0)
+
 		# ── Budget allocation ────────────────────────────────────────────
-		budget_ideate = max(1, int(self.max_runs * 0.4)) if not self.grid_only else 0
-		budget_expand = max(1, int(self.max_runs * 0.4)) if not self.grid_only else self.max_runs
-		budget_refine = self.max_runs - budget_ideate - budget_expand
+		budgets = self._compute_budgets(self.max_runs, self.grid_only, self._consecutive_stuck)
+		budget_ideate = budgets["ideate"]
+		budget_expand = budgets["expand"]
+		budget_refine = budgets["refine"]
+
+		if self._consecutive_stuck >= 2:
+			logger.info(
+				"Stuck detected (%d consecutive) — shifting to exploration-heavy budget",
+				self._consecutive_stuck,
+			)
 
 		# ── Phase 1: Context + Ideate (or Grid if grid_only) ─────────
 		if self.grid_only:
@@ -174,7 +221,18 @@ class LoopOrchestrator:
 				self._update_kill_registry()
 
 		# ── Journal summary ───────────────────────────────────────────────
-		self._write_journal_summary(journal, all_results)
+		trajectory_status = self._write_journal_summary(journal, all_results, prev_content)
+
+		# ── Circuit breaker: terminate if stuck too long ──────────────────
+		new_stuck_count = self._compute_consecutive_stuck(trajectory_status, prev_content)
+		if self.max_stuck_runs > 0 and new_stuck_count >= self.max_stuck_runs + 2:
+			# +2 because the budget shift kicks in at 2, then we allow max_stuck_runs more
+			logger.error(
+				"Loop terminated: stuck for %d consecutive runs with no promotes. "
+				"Review kill registry and consider new data sources or manual reset.",
+				new_stuck_count,
+			)
+			return 3, all_results
 
 		# ── Report ────────────────────────────────────────────────────────
 		end_results = self._list_results(refresh=True)
@@ -722,8 +780,9 @@ class LoopOrchestrator:
 		self,
 		journal: "ResearchJournal",
 		all_results: list[HypothesisResult],
-	) -> None:
-		"""Write trajectory + observation entries at end of run."""
+		prev_content: dict | None = None,
+	) -> str:
+		"""Write trajectory + observation entries at end of run. Returns trajectory_status."""
 		from .journal import ResearchJournal
 
 		# Build result dicts for trajectory classification
@@ -732,8 +791,8 @@ class LoopOrchestrator:
 			for r in all_results if r.status == "ok"
 		]
 
-		# Compute trajectory
-		prev_trajectory = journal.get_latest_trajectory()
+		# Compute trajectory using the provided prev_content (avoid duplicate DB read)
+		prev_trajectory = prev_content
 		trajectory_status = ResearchJournal.classify_trajectory(
 			self.run_id, run_results, prev_trajectory,
 		)
@@ -753,6 +812,7 @@ class LoopOrchestrator:
 			"new_reviews": sum(1 for r in all_results if r.verdict == "review"),
 			"new_explores": sum(1 for r in all_results if r.verdict == "explore"),
 			"new_kills": sum(1 for r in all_results if r.verdict == "kill"),
+			"consecutive_stuck": self._compute_consecutive_stuck(trajectory_status, prev_content),
 		})
 
 		# Write observation entries for promoted results
@@ -791,6 +851,8 @@ class LoopOrchestrator:
 					"pattern": f"strategy {strategy} averaged {avg:.0f} trades across {len(trades_list)} series",
 					"evidence": "low trade count may indicate overly restrictive entry conditions",
 				})
+
+		return trajectory_status
 
 	def _find_refinement_candidates(self, all_results: list[dict] | None = None) -> list[str]:
 		"""Find strategies with 'explore' verdicts worth refining.
