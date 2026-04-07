@@ -119,6 +119,55 @@ class TestKillRegistryUpdate:
 		assert tracker.list_kill_registry() == []
 
 
+class TestKillRegistryPrompt:
+	def test_kill_registry_block_replaces_top10(self, tracker):
+		"""Kill registry entries should appear in the ideation prompt."""
+		from edge_catcher.research.llm_ideator import LLMIdeator
+		from unittest.mock import MagicMock
+
+		# Add entries to kill registry
+		for i in range(15):
+			tracker.upsert_kill_registry(
+				f"Dead{i}", kill_count=10+i, series_tested=12+i,
+				kill_rate=0.8+i*0.01, reason_summary=f'["reason {i}"]',
+			)
+
+		ideator = LLMIdeator(
+			tracker=tracker, audit=MagicMock(), client=MagicMock(),
+		)
+		prompt = ideator.build_ideation_prompt(
+			available_strategies=["StratA"],
+			series_map={"data/test.db": ["SER1"]},
+		)
+
+		# All 15 should appear (under cap of 50)
+		assert "Dead14" in prompt
+		assert "Dead0" in prompt
+		# Should use "Kill Registry" heading, not old "Kill Patterns"
+		assert "Kill Registry" in prompt
+
+	def test_kill_registry_cap_at_50(self, tracker):
+		"""Registry block caps at 50 entries."""
+		from edge_catcher.research.llm_ideator import LLMIdeator
+		from unittest.mock import MagicMock
+
+		for i in range(60):
+			tracker.upsert_kill_registry(
+				f"Dead{i:03d}", kill_count=10, series_tested=12,
+				kill_rate=0.83, reason_summary='["reason"]',
+			)
+
+		ideator = LLMIdeator(
+			tracker=tracker, audit=MagicMock(), client=MagicMock(),
+		)
+		prompt = ideator.build_ideation_prompt(
+			available_strategies=["StratA"],
+			series_map={"data/test.db": ["SER1"]},
+		)
+
+		assert "... and 10 more killed strategies" in prompt
+
+
 def _save_result(tracker, strategy, series, verdict, reason):
 	"""Helper: save a hypothesis + result pair via HypothesisResult."""
 	import uuid
