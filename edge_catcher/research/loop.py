@@ -986,12 +986,18 @@ class LoopOrchestrator:
 			if r.get("status") == "ok":
 				by_strategy[r["strategy"]].add(r["verdict"])
 
+		# Only include strategies whose source is readable (LLM-generated
+		# strategies in strategies_local.py).  Grid/dynamic strategies have
+		# no editable source and cannot be refined by the LLM.
+		from .agent import ResearchAgent
+
 		candidates = []
 		for strat, verdicts in by_strategy.items():
 			if strat in already_refined:
 				continue
 			if "explore" in verdicts and "promote" not in verdicts:
-				candidates.append(strat)
+				if ResearchAgent.read_strategy_code(strat):
+					candidates.append(strat)
 
 		return sorted(candidates)
 

@@ -20,6 +20,7 @@ class GateResult:
 	gate_name: str
 	reason: str
 	details: dict = field(default_factory=dict)
+	tier: str | None = None  # None = normal pass/fail; "review" = soft pass
 
 
 @dataclass

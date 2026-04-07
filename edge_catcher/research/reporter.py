@@ -20,6 +20,11 @@ class Reporter:
             key=lambda r: r.sharpe,
             reverse=True,
         )
+        reviewed = sorted(
+            [r for r in results if r.verdict == "review"],
+            key=lambda r: r.sharpe,
+            reverse=True,
+        )
         explore = sorted(
             [r for r in results if r.verdict == "explore"],
             key=lambda r: r.sharpe,
@@ -28,20 +33,23 @@ class Reporter:
         killed = [r for r in results if r.verdict == "kill"]
         errors = [r for r in results if r.status == "error"]
 
+        top_group = promoted or reviewed  # best_sharpe from promoted first, then reviewed
         total = len(results)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "summary": {
                 "total": total,
                 "promoted": len(promoted),
+                "reviewed": len(reviewed),
                 "explore": len(explore),
                 "killed": len(killed),
                 "errors": len(errors),
-                "best_sharpe": promoted[0].sharpe if promoted else None,
-                "best_win_rate": max((r.win_rate for r in promoted), default=None),
+                "best_sharpe": top_group[0].sharpe if top_group else None,
+                "best_win_rate": max((r.win_rate for r in top_group), default=None),
                 "total_pnl_cents": sum(r.net_pnl_cents for r in results),
             },
             "promoted": [self._result_to_dict(r) for r in promoted],
+            "reviewed": [self._result_to_dict(r) for r in reviewed],
             "explore": [self._result_to_dict(r) for r in explore],
             "killed": [self._result_to_dict(r) for r in killed],
         }
@@ -59,6 +67,7 @@ class Reporter:
         lines.append(f"|--------|-------|")
         lines.append(f"| Total hypotheses tested | {s['total']} |")
         lines.append(f"| Promoted | {s['promoted']} |")
+        lines.append(f"| Reviewed | {s['reviewed']} |")
         lines.append(f"| Explore | {s['explore']} |")
         lines.append(f"| Killed | {s['killed']} |")
         lines.append(f"| Errors | {s['errors']} |")
@@ -95,6 +104,18 @@ class Reporter:
                 if r.get("parent_id"):
                     lines.append(f"- **Parent Hypothesis:** `{r['parent_id']}`")
                 lines.append("")
+
+        if report.get("reviewed"):
+            lines.append("\n## Reviewed (passed all gates, DSR borderline)\n")
+            lines.append("| Strategy | Series | DB | Trades | Win Rate | Sharpe | PnL (¢) | Reason |")
+            lines.append("|----------|--------|----|--------|----------|--------|---------|--------|")
+            for r in report["reviewed"]:
+                reason_short = r["verdict_reason"][:60] + "…" if len(r["verdict_reason"]) > 60 else r["verdict_reason"]
+                lines.append(
+                    f"| {r['strategy']} | {r['series']} | {Path(r['db_path']).name} "
+                    f"| {r['total_trades']} | {r['win_rate']:.1%} | {r['sharpe']:.2f} "
+                    f"| {r['net_pnl_cents']:.0f} | {reason_short} |"
+                )
 
         if report["explore"]:
             lines.append("\n## Explore (worth investigating further)\n")
