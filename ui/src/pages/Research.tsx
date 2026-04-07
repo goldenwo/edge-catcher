@@ -192,6 +192,7 @@ function LoopConfigPanel({ onStart, onCancel }: {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [maxLlm, setMaxLlm] = useState<number | undefined>()
+  const [force, setForce] = useState(false)
 
   const modes = ['full', 'grid_only', 'llm_only', 'refine_only']
   const modeLabels: Record<string, string> = {
@@ -235,7 +236,7 @@ function LoopConfigPanel({ onStart, onCancel }: {
       </div>
       <div className="mt-3 pt-3 border-t border-gray-800">
         <button onClick={() => setShowAdvanced(!showAdvanced)} className="text-xs text-gray-500 hover:text-gray-300">
-          {showAdvanced ? '▾' : '▸'} Advanced (fee, dates, LLM calls)
+          {showAdvanced ? '▾' : '▸'} Advanced
         </button>
         {showAdvanced && (
           <div className="flex flex-wrap gap-6 mt-3">
@@ -259,6 +260,13 @@ function LoopConfigPanel({ onStart, onCancel }: {
               <input type="number" value={maxLlm ?? ''} onChange={e => setMaxLlm(e.target.value ? +e.target.value : undefined)}
                 placeholder="10" className="w-20 bg-gray-950 border border-gray-700 rounded px-2 py-1 text-sm text-white font-mono" />
             </div>
+            <div className="flex items-end">
+              <label className="flex items-center gap-2 cursor-pointer py-1">
+                <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)}
+                  className="accent-indigo-500" />
+                <span className="text-xs text-gray-400">Force re-run</span>
+              </label>
+            </div>
           </div>
         )}
       </div>
@@ -270,6 +278,7 @@ function LoopConfigPanel({ onStart, onCancel }: {
             ...(startDate && { start: startDate }),
             ...(endDate && { end: endDate }),
             ...(maxLlm != null && { max_llm_calls: maxLlm }),
+            ...(force && { force: true }),
           })}
           className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
         >

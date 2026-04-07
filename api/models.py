@@ -245,6 +245,7 @@ class ResearchLoopStartRequest(BaseModel):
     start: str | None = None
     end: str | None = None
     max_llm_calls: int | None = None
+    force: bool = False
 
 
 class ReviewRejectRequest(BaseModel):

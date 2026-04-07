@@ -1200,6 +1200,7 @@ def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
             refine_only=(body.mode == "refine_only"),
             start_date=body.start,
             end_date=body.end,
+            force=body.force,
             cancel_event=cancel_event,
             on_progress=on_progress,
         )
