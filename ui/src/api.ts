@@ -227,6 +227,7 @@ export interface ResearchLoopStartRequest {
   start?: string
   end?: string
   max_llm_calls?: number
+  force?: boolean
 }
 
 export interface VerdictCounts {
