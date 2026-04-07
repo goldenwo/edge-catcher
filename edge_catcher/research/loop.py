@@ -895,8 +895,36 @@ class LoopOrchestrator:
 		# Write observation entries for promoted results
 		for r in all_results:
 			if r.verdict in ("promote", "review"):
+				# Fetch gate margins for richer observations
+				gate_summary = ""
+				tracker_result = self.tracker.get_result_by_id(r.hypothesis.id)
+				if tracker_result and tracker_result.get("validation_details"):
+					try:
+						gates = json.loads(tracker_result["validation_details"])
+						gate_parts = []
+						for g in gates:
+							if g.get("passed"):
+								d = g.get("details", {})
+								name = g["gate"]
+								if name == "monte_carlo" and "p_value" in d:
+									gate_parts.append(f"mc_p={d['p_value']:.2f}")
+								elif name == "deflated_sharpe" and "dsr_margin" in d:
+									gate_parts.append(f"dsr={d['dsr_margin']:.2f}")
+								elif name == "temporal_consistency":
+									pw = d.get("profitable_windows", "?")
+									tw = d.get("total_windows", "?")
+									gate_parts.append(f"temporal={pw}/{tw}")
+								elif name == "param_sensitivity":
+									np_ = d.get("neighbors_passing", "?")
+									nt = d.get("neighbors_tested", "?")
+									gate_parts.append(f"sensitivity={np_}/{nt}")
+						if gate_parts:
+							gate_summary = f" [{', '.join(gate_parts)}]"
+					except (json.JSONDecodeError, KeyError):
+						pass
+
 				journal.write_entry(self.run_id, "observation", {
-					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}",
+					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}{gate_summary}",
 					"evidence": (
 						f"trades={r.total_trades}, win_rate={r.win_rate:.0%}, "
 						f"series={r.hypothesis.series}, pnl={r.net_pnl_cents:.0f}¢"

@@ -75,3 +75,45 @@ class TestNearMissObservations:
 			if c[0][1] == "observation" and "NEAR-MISS" in c[0][2].get("pattern", "")
 		]
 		assert len(near_miss_calls) == 0
+
+
+class TestGateMarginAnnotations:
+	def test_promote_observation_includes_gate_margins(self):
+		"""Promoted strategy observations should include gate pass details."""
+		from edge_catcher.research.loop import LoopOrchestrator
+
+		orch = LoopOrchestrator.__new__(LoopOrchestrator)
+		orch.tracker = MagicMock()
+		orch.run_id = "test-run"
+		orch.tracker.get_result_by_id.return_value = {
+			"validation_details": json.dumps([
+				{"gate": "monte_carlo", "passed": True, "details": {"p_value": 0.02}},
+				{"gate": "deflated_sharpe", "passed": True, "details": {"dsr_margin": 0.3}},
+				{"gate": "temporal_consistency", "passed": True, "details": {"profitable_windows": 4, "total_windows": 5}},
+				{"gate": "param_sensitivity", "passed": True, "details": {"neighbors_passing": 3, "neighbors_tested": 4}},
+			]),
+		}
+
+		journal = MagicMock()
+		results = [_make_result("GoodStrat", "S1", "promote", 1.5)]
+
+		# Call _write_journal_summary since that's where promote observations live
+		# We need to set up the method properly
+		orch._consecutive_stuck = 0
+
+		# Actually, promote observations are in _write_journal_summary
+		# We need to mock the journal and classify_trajectory
+		from edge_catcher.research.journal import ResearchJournal
+		with patch.object(ResearchJournal, 'classify_trajectory', return_value='improving'):
+			orch._write_journal_summary(journal, results, prev_content=None)
+
+		calls = journal.write_entry.call_args_list
+		# Find the promote observation
+		promote_obs = [
+			c for c in calls
+			if c[0][1] == "observation" and "PROMOTED" in c[0][2].get("pattern", "")
+		]
+		assert len(promote_obs) >= 1
+		pattern = promote_obs[0][0][2]["pattern"]
+		# Should contain gate margin details
+		assert "mc_p=" in pattern or "dsr=" in pattern or "temporal=" in pattern
