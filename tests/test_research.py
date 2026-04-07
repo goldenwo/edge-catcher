@@ -1183,3 +1183,54 @@ class TestLoopJournalIntegration:
         observations = [e for e in entries if e["entry_type"] == "observation"]
         patterns = [e["content"]["pattern"] for e in observations]
         assert any("ThinStrat" in p for p in patterns)
+
+
+# ---------------------------------------------------------------------------
+# Tracker extensions
+# ---------------------------------------------------------------------------
+
+class TestTrackerExtensions:
+    def test_list_results_with_limit(self, tmp_path):
+        db = str(tmp_path / "research.db")
+        tracker = Tracker(db)
+        for i in range(5):
+            result = _make_result(strategy=f"S{i}", verdict="kill")
+            tracker.save_hypothesis(result.hypothesis)
+            tracker.save_result(result)
+        results = tracker.list_results(limit=3)
+        assert len(results) == 3
+
+    def test_list_results_with_offset(self, tmp_path):
+        db = str(tmp_path / "research.db")
+        tracker = Tracker(db)
+        for i in range(5):
+            result = _make_result(strategy=f"S{i}", verdict="kill")
+            tracker.save_hypothesis(result.hypothesis)
+            tracker.save_result(result)
+        all_results = tracker.list_results()
+        offset_results = tracker.list_results(limit=3, offset=2)
+        assert len(offset_results) == 3
+        assert offset_results[0]["strategy"] == all_results[2]["strategy"]
+
+    def test_count_by_verdict(self, tmp_path):
+        db = str(tmp_path / "research.db")
+        tracker = Tracker(db)
+        for verdict, count in [("promote", 2), ("kill", 3), ("review", 1)]:
+            for i in range(count):
+                result = _make_result(strategy=f"{verdict}_{i}", verdict=verdict)
+                tracker.save_hypothesis(result.hypothesis)
+                tracker.save_result(result)
+        counts = tracker.count_by_verdict()
+        assert counts["promote"] == 2
+        assert counts["kill"] == 3
+        assert counts["review"] == 1
+
+    def test_update_verdict(self, tmp_path):
+        db = str(tmp_path / "research.db")
+        tracker = Tracker(db)
+        result = _make_result(strategy="S1", verdict="promote")
+        tracker.save_hypothesis(result.hypothesis)
+        tracker.save_result(result)
+        tracker.update_verdict(result.hypothesis.id, "accepted")
+        updated = tracker.get_result_by_id(result.hypothesis.id)
+        assert updated["verdict"] == "accepted"
