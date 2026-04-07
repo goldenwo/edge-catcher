@@ -59,12 +59,35 @@ class MyMomentum(MomentumMixin, MyBase):
         # ... normal logic
 ```
 
+## External Price Data (OHLC)
+
+Strategies may access external asset prices via `self.ohlc` (an OHLCProvider instance, or None if no external data is available for the series being backtested). Always check `if self.ohlc:` before using it.
+
+Available methods:
+- `self.ohlc.get_price(asset, timestamp) -> float | None` — latest close at or before timestamp
+- `self.ohlc.get_candle(asset, timestamp) -> OHLC | None` — full OHLC candle
+- `self.ohlc.get_recent(asset, timestamp, n_candles=10) -> list[OHLC]` — last N candles in chronological order
+
+Asset names: "btc", "xrp", "eth", "sol", "doge"
+
+Example usage:
+```python
+def on_trade(self, trade, market, portfolio):
+    if self.ohlc:
+        spot = self.ohlc.get_price("xrp", trade.created_time)
+        recent = self.ohlc.get_recent("xrp", trade.created_time, 5)
+        if spot and recent:
+            # Compare contract price to spot price movement...
+```
+
+**Important:** Not all series have OHLC data. Crypto series (KXBTC*, KXXRP*, KXETH*, KXSOL*, KXDOGE*) do. Sports, entertainment, weather, and politics series do not — for those, `self.ohlc` will be None. Design strategies accordingly.
+
 ## Rules
 
 1. Return a single ```python code block containing the complete strategy class.
 2. The class MUST have a `name` class attribute (string literal).
 3. The class MUST subclass `Strategy` (or `Strategy` with a mixin).
-4. Import only from: `edge_catcher.runner.strategies`, `edge_catcher.storage.models`.
+4. Import only from: `edge_catcher.runner.strategies`, `edge_catcher.storage.models`, `edge_catcher.research.ohlc_provider`.
 5. The strategy should be self-contained — no external API calls or file I/O.
 6. Use constructor parameters for configurable thresholds (with sensible defaults).
 7. Always check `portfolio.has_position(trade.ticker, self.name)` before buying to avoid duplicate positions.
