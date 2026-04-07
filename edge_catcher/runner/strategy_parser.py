@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -119,6 +120,63 @@ def validate_strategy_code(code: str) -> tuple[bool, Optional[str]]:
         return False, "No class definition found in code"
 
     return True, None
+
+
+def compute_code_hash(code: str) -> str:
+	"""SHA256 of code with class names normalized out. Catches exact renamed duplicates."""
+	try:
+		tree = ast.parse(code)
+	except SyntaxError:
+		return hashlib.sha256(code.encode()).hexdigest()
+
+	# Replace class names with a constant
+	normalized = code
+	for node in tree.body:
+		if isinstance(node, ast.ClassDef):
+			normalized = normalized.replace(f"class {node.name}", "class _STRATEGY_", 1)
+	# Also normalize the name attribute
+	for node in ast.walk(tree):
+		if (isinstance(node, ast.Assign)
+			and len(node.targets) == 1
+			and isinstance(node.targets[0], ast.Name)
+			and node.targets[0].id == "name"
+			and isinstance(node.value, ast.Constant)
+			and isinstance(node.value.value, str)):
+			old_val = node.value.value
+			normalized = normalized.replace(f'"{old_val}"', '"_STRATEGY_NAME_"', 1)
+			normalized = normalized.replace(f"'{old_val}'", '"_STRATEGY_NAME_"', 1)
+
+	return hashlib.sha256(normalized.strip().encode()).hexdigest()
+
+
+def compute_ast_fingerprint(code: str) -> Optional[str]:
+	"""Structural AST fingerprint. Catches same logic with different names/comments.
+
+	Returns SHA256 hex string, or None if code is unparseable.
+	"""
+	try:
+		tree = ast.parse(code)
+	except SyntaxError:
+		return None
+
+	signature: list[str] = []
+
+	for node in ast.walk(tree):
+		if isinstance(node, ast.FunctionDef):
+			signature.append(f"method:{node.name}:args={len(node.args.args)}")
+		elif isinstance(node, ast.If):
+			signature.append("ctrl:if")
+		elif isinstance(node, ast.For):
+			signature.append("ctrl:for")
+		elif isinstance(node, ast.While):
+			signature.append("ctrl:while")
+		elif isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+			signature.append(f"num:{node.value}")
+		elif isinstance(node, ast.Attribute):
+			signature.append(f"attr:{node.attr}")
+
+	fingerprint_str = "|".join(sorted(signature))
+	return hashlib.sha256(fingerprint_str.encode()).hexdigest()
 
 
 def save_strategy(
