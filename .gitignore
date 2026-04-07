@@ -75,3 +75,5 @@ scripts/
 
 # Flow strategy tests (reveals strategy logic)
 tests/test_flow_strategy.py
+
+.superpowers/
