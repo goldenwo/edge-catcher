@@ -205,14 +205,17 @@ class ParameterSensitivityGate(Gate):
 		try:
 			tree = ast.parse(source)
 		except SyntaxError:
+			# File has a syntax error; try to remove by text matching as fallback
+			lines = source.splitlines()
+			cleaned = [l for l in lines if temp_name not in l]
+			if len(cleaned) < len(lines):
+				STRATEGIES_LOCAL_PATH.write_text("\n".join(cleaned) + "\n")
 			return
 
 		lines = source.splitlines()
-		# Find and remove the temp class
 		for node in tree.body:
 			if not isinstance(node, ast.ClassDef):
 				continue
-			# Check if this class has name = temp_name
 			for item in node.body:
 				if (
 					isinstance(item, ast.Assign)
@@ -223,8 +226,8 @@ class ParameterSensitivityGate(Gate):
 					start_line = node.lineno - 1
 					end_line = node.end_lineno or node.lineno
 					lines[start_line:end_line] = []
-					STRATEGIES_LOCAL_PATH.write_text("\n".join(lines) + "\n")
 					try:
+						STRATEGIES_LOCAL_PATH.write_text("\n".join(lines) + "\n")
 						mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
 						importlib.reload(mod)
 					except Exception:
