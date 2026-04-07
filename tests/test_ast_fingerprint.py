@@ -88,3 +88,23 @@ class TestASTFingerprint:
 
 	def test_invalid_code_returns_none(self):
 		assert compute_ast_fingerprint("this is not python{{{") is None
+
+
+from edge_catcher.research.tracker import Tracker
+
+
+@pytest.fixture
+def tracker(tmp_path):
+	return Tracker(str(tmp_path / "test.db"))
+
+
+class TestFingerprintStorage:
+	def test_save_and_check_fingerprint(self, tracker):
+		tracker.save_fingerprint("abc123", "StratA", "hash1")
+		assert tracker.check_fingerprint("abc123") == "StratA"
+		assert tracker.check_fingerprint("nonexistent") is None
+
+	def test_check_code_hash(self, tracker):
+		tracker.save_fingerprint("abc123", "StratA", "hash1")
+		assert tracker.check_code_hash("hash1") == "StratA"
+		assert tracker.check_code_hash("nonexistent") is None
