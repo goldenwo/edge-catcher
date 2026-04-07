@@ -160,6 +160,7 @@ class LoopOrchestrator:
 
 		# ── Phase 1: Context + Ideate (or Grid if grid_only) ─────────
 		if self._cancelled():
+			logger.info("Loop cancelled by external request before phase 1")
 			return 2, all_results
 		if self.grid_only:
 			# Legacy: full grid sweep
@@ -205,6 +206,7 @@ class LoopOrchestrator:
 
 		# ── Phase 2: Expand Winners ──────────────────────────────────
 		if self._cancelled():
+			logger.info("Loop cancelled by external request before phase 2")
 			return 2, all_results
 		if not self.grid_only and not self.refine_only and not self.llm_only:
 			remaining_budget = min(budget_expand, self.max_runs - runs_used)
@@ -221,6 +223,7 @@ class LoopOrchestrator:
 
 		# ── Phase 3: Refine ──────────────────────────────────────────
 		if self._cancelled():
+			logger.info("Loop cancelled by external request before phase 3")
 			return 2, all_results
 		if not self.grid_only:
 			remaining_budget = min(budget_refine, self.max_runs - runs_used)
@@ -1337,4 +1340,7 @@ class LoopOrchestrator:
 
 	def _report_progress(self, phase: str, completed: int, total: int) -> None:
 		if self.on_progress:
-			self.on_progress(phase, completed, total)
+			try:
+				self.on_progress(phase, completed, total)
+			except Exception:
+				logger.warning("on_progress callback failed", exc_info=True)
