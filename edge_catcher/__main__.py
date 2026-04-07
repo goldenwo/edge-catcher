@@ -681,8 +681,28 @@ def _cmd_research(args) -> None:
             else:
                 print(f"  No audit records for hypothesis {trace_id}")
 
+    elif subcmd == 'kill-registry':
+        action = getattr(args, 'kill_registry_action', None)
+        if action == 'list':
+            entries = tracker.list_kill_registry()
+            if not entries:
+                print("Kill registry is empty.")
+            else:
+                print(f"\nKill Registry ({len(entries)} entries):")
+                for e in entries:
+                    perm = "PERMANENT" if e["permanent"] else "reset"
+                    print(f"  {e['strategy']:30s} kill_rate={e['kill_rate']:.0%} "
+                          f"({e['kill_count']}/{e['series_tested']}) [{perm}] {e['reason_summary']}")
+        elif action == 'reset':
+            name = getattr(args, 'kill_registry_strategy', None)
+            if not name:
+                print("Usage: research kill-registry reset --strategy <name>")
+                sys.exit(1)
+            tracker.reset_kill_registry(name)
+            print(f"Reset '{name}' — it can now be re-proposed by the ideator.")
+
     else:
-        print("Usage: python -m edge_catcher research {run|sweep|sweep-all|status|report|loop|audit}")
+        print("Usage: python -m edge_catcher research {run|sweep|sweep-all|status|report|loop|audit|kill-registry}")
         sys.exit(1)
 
 
@@ -898,6 +918,13 @@ def main() -> None:
                           help="What to query")
     rs_audit.add_argument("--id", default=None, dest="trace_id",
                           help="Hypothesis ID for trace queries")
+
+    # Kill registry subcommand
+    rs_killreg = rs_sub.add_parser("kill-registry", help="Manage the persistent kill registry")
+    rs_killreg.add_argument("kill_registry_action", choices=["list", "reset"],
+                             help="Action: list all entries or reset a strategy")
+    rs_killreg.add_argument("--strategy", default=None, dest="kill_registry_strategy",
+                             help="Strategy name (required for reset)")
 
     pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
     pt.add_argument("--db", default="data/paper_trades.db")
