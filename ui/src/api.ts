@@ -208,14 +208,92 @@ export const api = {
 
 // ── Research Dashboard ──────────────────────────────────────────────────────
 
-export function getResearchProfiles() {
-  return cachedReq<{ profiles: unknown[]; count: number }>('/api/research/profiles', 120_000)
+export interface ResearchLoopStatus {
+  running: boolean
+  phase: string
+  runs_completed: number
+  runs_total: number
+  elapsed_seconds: number
+  task_id: string | null
+  error: string | null
 }
 
-export function getLoopStatus() {
-  return cachedReq<{ phase: string; recent_activity: Array<{ decision: string; created_at: string }>; latest_checkpoint: { checkpoint: string; created_at: string } | null }>('/api/research/loop-status', 30_000)
+export interface ResearchLoopStartRequest {
+  mode: string
+  max_runs: number
+  max_time: number
+  parallel: number
+  fee_pct?: number
+  start?: string
+  end?: string
+  max_llm_calls?: number
 }
 
-export function getReviewQueue() {
-  return cachedReq<{ strategies: unknown[]; count: number }>('/api/research/review-queue', 60_000)
+export interface VerdictCounts {
+  promote: number
+  review: number
+  explore: number
+  kill: number
+}
+
+export interface ResearchResult {
+  id: string
+  strategy: string
+  series: string
+  db_path: string
+  verdict: string
+  verdict_reason: string
+  validation_details: unknown
+  total_trades: number
+  wins: number
+  losses: number
+  win_rate: number
+  net_pnl_cents: number
+  sharpe: number
+  max_drawdown_pct: number
+  fees_paid_cents: number
+  completed_at: string
+}
+
+export interface AuditExecution {
+  id: number
+  hypothesis_id: string
+  phase: string
+  verdict: string
+  status: string
+  completed_at: string
+}
+
+export interface AuditDecision {
+  id: number
+  prompt_text: string
+  response_text: string
+  model: string
+  token_count: number
+  created_at: string
+}
+
+export const research = {
+  loopStatus: () => req<ResearchLoopStatus>('/api/research/loop/status'),
+  startLoop: (config: ResearchLoopStartRequest) =>
+    req<{ task_id: string }>('/api/research/loop/start', json(config)),
+  stopLoop: () =>
+    req<{ ok: boolean }>('/api/research/loop/stop', { method: 'POST' }),
+  verdictCounts: () => req<VerdictCounts>('/api/research/verdict-counts'),
+  results: (limit = 50, offset = 0, sort = 'completed_at') =>
+    req<{ results: ResearchResult[]; total: number }>(
+      `/api/research/results?limit=${limit}&offset=${offset}&sort=${sort}`
+    ),
+  reviewQueue: () =>
+    req<{ strategies: ResearchResult[]; count: number }>('/api/research/review-queue'),
+  approve: (id: string) =>
+    req<{ ok: boolean }>(`/api/research/review/${id}/approve`, { method: 'POST' }),
+  reject: (id: string, reason?: string) =>
+    req<{ ok: boolean }>(`/api/research/review/${id}/reject`, json({ reason })),
+  profiles: () =>
+    cachedReq<{ profiles: unknown[]; count: number }>('/api/research/profiles', 120_000),
+  auditExecutions: (limit = 100) =>
+    req<AuditExecution[]>(`/api/research/audit/executions?limit=${limit}`),
+  auditDecisions: (limit = 100) =>
+    req<AuditDecision[]>(`/api/research/audit/decisions?limit=${limit}`),
 }
