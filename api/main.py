@@ -1168,7 +1168,6 @@ async def backtest_result(task_id: str) -> dict:
 
 def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
     """Background thread: runs the research loop."""
-    import threading
     import time as _time
     from edge_catcher.research.loop import LoopOrchestrator
 
@@ -1178,23 +1177,24 @@ def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
     state.runs_total = body.max_runs
 
     cancel_event = threading.Event()
+    start = _time.monotonic()
 
     def on_progress(phase: str, completed: int, total: int) -> None:
         state.phase = phase
         state.runs_completed = completed
         state.runs_total = total
+        state.elapsed_seconds = _time.monotonic() - start
         if state.cancel_requested:
             cancel_event.set()
 
-    start = _time.monotonic()
     try:
         orch = LoopOrchestrator(
             research_db=str(_research_db_path()),
             max_runs=body.max_runs,
             max_time_minutes=float(body.max_time),
             parallel=body.parallel,
-            fee_pct=body.fee_pct or 1.0,
-            max_llm_calls=body.max_llm_calls or 10,
+            fee_pct=body.fee_pct if body.fee_pct is not None else 1.0,
+            max_llm_calls=body.max_llm_calls if body.max_llm_calls is not None else 10,
             grid_only=(body.mode == "grid_only"),
             llm_only=(body.mode == "llm_only"),
             refine_only=(body.mode == "refine_only"),
@@ -1244,6 +1244,10 @@ def research_loop_start(
 ) -> dict:
     if is_research_loop_running():
         raise HTTPException(status_code=409, detail="A research loop is already running")
+    # Clear completed/errored state entries so status returns to idle
+    stale = [k for k, v in research_loop_state.items() if not v.running]
+    for k in stale:
+        del research_loop_state[k]
     task_id = str(uuid.uuid4())
     research_loop_state[task_id] = ResearchLoopState(task_id=task_id)
     threading.Thread(target=_run_research_loop, args=(task_id, body), daemon=True).start()

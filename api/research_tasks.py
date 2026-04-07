@@ -16,7 +16,6 @@ class ResearchLoopState:
 	runs_completed: int = 0
 	runs_total: int = 0
 	elapsed_seconds: float = 0.0
-	progress: str = ""
 	error: Optional[str] = None
 	cancel_requested: bool = False
 
