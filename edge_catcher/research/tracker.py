@@ -224,6 +224,8 @@ class Tracker:
             if limit is not None:
                 query += f" LIMIT {int(limit)}"
             if offset is not None:
+                if limit is None:
+                    query += " LIMIT -1"
                 query += f" OFFSET {int(offset)}"
             rows = conn.execute(query).fetchall()
             return [dict(r) for r in rows]
