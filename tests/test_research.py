@@ -1062,11 +1062,12 @@ class TestLoopJournalIntegration:
         orch._write_phase_outcomes(journal, results, "grid")
 
         entries = journal.read_recent()
-        # Two strategies → two outcome entries
-        assert len(entries) == 2
-        strategies = {e["content"]["strategy"] for e in entries}
+        # Two strategies → two outcome entries (plus one near-miss observation)
+        outcome_entries = [e for e in entries if e["entry_type"] == "outcome"]
+        assert len(outcome_entries) == 2
+        strategies = {e["content"]["strategy"] for e in outcome_entries}
         assert strategies == {"Foo", "Bar"}
-        phases = {e["content"]["phase"] for e in entries}
+        phases = {e["content"]["phase"] for e in outcome_entries}
         assert phases == {"grid"}
 
     def test_write_phase_outcomes_verdict_aggregation(self, tmp_path):
@@ -1086,8 +1087,10 @@ class TestLoopJournalIntegration:
         orch._write_phase_outcomes(journal, results, "grid")
 
         entries = journal.read_recent()
-        assert len(entries) == 1
-        verdicts = entries[0]["content"]["verdicts"]
+        # One strategy → one outcome entry (plus one near-miss observation)
+        outcome_entries = [e for e in entries if e["entry_type"] == "outcome"]
+        assert len(outcome_entries) == 1
+        verdicts = outcome_entries[0]["content"]["verdicts"]
         assert verdicts["promote"] == 1
         assert verdicts["kill"] == 2
 

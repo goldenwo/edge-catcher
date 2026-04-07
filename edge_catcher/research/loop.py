@@ -744,6 +744,31 @@ class LoopOrchestrator:
 				"best_sharpe": best_sharpe,
 			})
 
+		# Near-miss observation: highest-Sharpe killed strategy
+		all_kills = [r for r in results if r.verdict == "kill" and r.status == "ok"]
+		if all_kills:
+			best_kill = max(all_kills, key=lambda r: r.sharpe)
+			# Fetch validation details from tracker
+			val_details_str = ""
+			tracker_result = self.tracker.get_result_by_id(best_kill.hypothesis.id)
+			if tracker_result and tracker_result.get("validation_details"):
+				try:
+					gates = json.loads(tracker_result["validation_details"])
+					failed_gates = [g for g in gates if not g.get("passed", True)]
+					if failed_gates:
+						gate = failed_gates[0]
+						val_details_str = f" failed {gate['gate']}: {json.dumps(gate.get('details', {}))}"
+				except (json.JSONDecodeError, KeyError):
+					pass
+
+			journal.write_entry(self.run_id, "observation", {
+				"pattern": f"NEAR-MISS: {best_kill.hypothesis.strategy} scored Sharpe {best_kill.sharpe:.2f} but was killed{val_details_str}",
+				"evidence": (
+					f"series={best_kill.hypothesis.series}, trades={best_kill.total_trades}, "
+					f"verdict_reason={best_kill.verdict_reason}"
+				),
+			})
+
 	def _update_kill_registry(self) -> None:
 		"""Upsert strategies with kill_rate >= 0.8 across >= 3 series into the kill registry.
 
