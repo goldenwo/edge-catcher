@@ -223,16 +223,12 @@ class LoopOrchestrator:
 		# ── Journal summary ───────────────────────────────────────────────
 		trajectory_status = self._write_journal_summary(journal, all_results, prev_content)
 
-		# ── Circuit breaker: terminate if stuck too long ──────────────────
+		# ── Circuit breaker check ────────────────────────────────────────
 		new_stuck_count = self._compute_consecutive_stuck(trajectory_status, prev_content)
-		if self.max_stuck_runs > 0 and new_stuck_count >= self.max_stuck_runs + 2:
-			# +2 because the budget shift kicks in at 2, then we allow max_stuck_runs more
-			logger.error(
-				"Loop terminated: stuck for %d consecutive runs with no promotes. "
-				"Review kill registry and consider new data sources or manual reset.",
-				new_stuck_count,
-			)
-			return 3, all_results
+		circuit_breaker_tripped = (
+			self.max_stuck_runs > 0
+			and new_stuck_count >= self.max_stuck_runs + 2
+		)
 
 		# ── Report ────────────────────────────────────────────────────────
 		end_results = self._list_results(refresh=True)
@@ -250,6 +246,15 @@ class LoopOrchestrator:
 		# Dead code cleanup
 		if not self.grid_only:
 			self._cleanup_dead_strategies()
+
+		if circuit_breaker_tripped:
+			# +2 because the budget shift kicks in at 2, then we allow max_stuck_runs more
+			logger.error(
+				"Loop terminated: stuck for %d consecutive runs with no promotes. "
+				"Review kill registry and consider new data sources or manual reset.",
+				new_stuck_count,
+			)
+			return 3, all_results
 
 		# Determine exit code
 		grid_remaining = 0
@@ -789,7 +794,7 @@ class LoopOrchestrator:
 				continue
 
 			kill_count = verdicts.count("kill")
-			kill_rate = kill_count / series_tested
+			kill_rate = kill_count / len(strat_results)
 			if kill_rate < 0.8:
 				continue
 

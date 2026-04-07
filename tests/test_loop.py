@@ -190,6 +190,7 @@ class TestRefinementResumeWalkBackwards:
         loop.end_date = "2025-12-31"
         loop.fee_pct = 1.0
         loop.run_id = "test"
+        loop._cached_results = None
 
         # Simulate: Foo has 2 prior iterations, but only FooV2 code exists (FooV3 save failed)
         loop.tracker = MagicMock()
@@ -241,12 +242,12 @@ class TestShouldKeepRefinementBaseline:
         """Refinement should be compared against the original baseline, not just previous iteration."""
         # Original baseline: Sharpe 2.0
         baseline_results = [
-            {"status": "ok", "sharpe": 2.0, "verdict": "explore"},
+            {"status": "ok", "sharpe": 2.0, "verdict": "explore", "total_trades": 100},
         ]
 
         # Previous iteration (V2): regressed to Sharpe 1.2
         prev_results = [
-            {"status": "ok", "sharpe": 1.2, "verdict": "explore"},
+            {"status": "ok", "sharpe": 1.2, "verdict": "explore", "total_trades": 100},
         ]
 
         # New iteration (V3): Sharpe 1.5 — better than V2 but worse than original
