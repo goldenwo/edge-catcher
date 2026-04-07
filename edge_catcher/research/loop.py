@@ -1,5 +1,5 @@
 # edge_catcher/research/loop.py
-"""LoopOrchestrator: sequences grid and LLM phases with budget controls."""
+"""LoopOrchestrator: sequences ideate, expand, and refine phases with budget controls."""
 
 from __future__ import annotations
 
@@ -100,8 +100,14 @@ class LoopOrchestrator:
 		runs_used = 0
 		llm_calls_used = 0
 
-		# ── Phase 1: Grid ─────────────────────────────────────────────────
-		if not self.llm_only and not self.refine_only:
+		# ── Budget allocation ────────────────────────────────────────────
+		budget_ideate = max(1, int(self.max_runs * 0.4)) if not self.grid_only else 0
+		budget_expand = max(1, int(self.max_runs * 0.4)) if not self.grid_only else self.max_runs
+		budget_refine = self.max_runs - budget_ideate - budget_expand
+
+		# ── Phase 1: Context + Ideate (or Grid if grid_only) ─────────
+		if self.grid_only:
+			# Legacy: full grid sweep
 			planner = GridPlanner(tracker=self.tracker)
 			grid_hypotheses = planner.generate(
 				strategies=strategies,
@@ -111,14 +117,7 @@ class LoopOrchestrator:
 				fee_pct=self.fee_pct,
 				force=self.force,
 			)
-
-			# Reserve at least 20% of budget for LLM + refinement phases
-			if self.grid_only:
-				budget_for_grid = self.max_runs
-			else:
-				budget_for_grid = max(1, int(self.max_runs * 0.8))
-			grid_batch = grid_hypotheses[:budget_for_grid]
-
+			grid_batch = grid_hypotheses[:budget_expand]
 			remaining_time = self._remaining_time(start_time)
 			grid_results = queue.submit(
 				grid_batch, phase="grid", max_time_seconds=remaining_time,
@@ -126,50 +125,39 @@ class LoopOrchestrator:
 			all_results.extend(grid_results)
 			runs_used += len(grid_results)
 			self._write_phase_outcomes(journal, grid_results, "grid")
-
-			logger.info(
-				"Grid phase: %d/%d hypotheses completed",
-				len(grid_results), len(grid_hypotheses),
+		elif not self.refine_only:
+			ideate_results, llm_calls_used = self._run_ideate_phase(
+				agent, queue, strategies, series_map,
+				budget_ideate, start_time,
 			)
+			all_results.extend(ideate_results)
+			runs_used += len(ideate_results)
+			self._write_phase_outcomes(journal, ideate_results, "ideate")
 
-		# ── Integrity Checkpoint ──────────────────────────────────────────
+		# ── Integrity Checkpoint ─────────────────────────────────────
 		tracker_results = self._list_results(refresh=True)
 		result_hash = self.audit.compute_result_hash(tracker_results)
 		self.audit.record_integrity(
-			checkpoint="post_grid",
+			checkpoint="post_ideate",
 			result_hash=result_hash,
 			result_count=len(tracker_results),
 		)
 
-		# ── Phase 2: LLM ─────────────────────────────────────────────────
-		llm_results: list[HypothesisResult] = []
-		if not self.grid_only and not self.refine_only:
-			remaining_budget = self.max_runs - runs_used
-			if remaining_budget <= 0:
-				logger.info("No budget remaining for LLM phase")
-			elif len(tracker_results) < 10:
-				if self.llm_only:
-					logger.error(
-						"Not enough data for LLM ideation (%d results, need >=10)",
-						len(tracker_results),
-					)
-					return 1, all_results
-				logger.info(
-					"Skipping LLM phase: only %d results (need >=10)",
-					len(tracker_results),
-				)
-			else:
-				llm_results, llm_calls_used = self._run_llm_phase(
-					agent, queue, strategies, series_map,
+		# ── Phase 2: Expand Winners ──────────────────────────────────
+		if not self.grid_only and not self.refine_only and not self.llm_only:
+			remaining_budget = min(budget_expand, self.max_runs - runs_used)
+			if remaining_budget > 0:
+				expand_results = self._run_expand_phase(
+					agent, queue, all_results, series_map,
 					remaining_budget, start_time,
 				)
-				all_results.extend(llm_results)
-				runs_used += len(llm_results)
-				self._write_phase_outcomes(journal, llm_results, "llm")
+				all_results.extend(expand_results)
+				runs_used += len(expand_results)
+				self._write_phase_outcomes(journal, expand_results, "expand")
 
-		# ── Phase 3: Refinement ──────────────────────────────────────────
+		# ── Phase 3: Refine ──────────────────────────────────────────
 		if not self.grid_only:
-			remaining_budget = self.max_runs - runs_used
+			remaining_budget = min(budget_refine, self.max_runs - runs_used)
 			remaining_llm = self.max_llm_calls - llm_calls_used
 			if remaining_budget > 0 and remaining_llm > 0:
 				refine_results = self._run_refinement_phase(
@@ -178,7 +166,7 @@ class LoopOrchestrator:
 				)
 				all_results.extend(refine_results)
 				runs_used += len(refine_results)
-				self._write_phase_outcomes(journal, refine_results, "refinement")
+				self._write_phase_outcomes(journal, refine_results, "refine")
 
 		# ── Journal summary ───────────────────────────────────────────────
 		self._write_journal_summary(journal, all_results)
@@ -198,7 +186,7 @@ class LoopOrchestrator:
 
 		# Determine exit code
 		grid_remaining = 0
-		if not self.llm_only:
+		if self.grid_only:
 			planner = GridPlanner(tracker=self.tracker)
 			remaining_grid = planner.generate(
 				strategies=strategies,
@@ -224,7 +212,7 @@ class LoopOrchestrator:
 		)
 		return exit_code, all_results
 
-	def _run_llm_phase(
+	def _run_ideate_phase(
 		self,
 		agent: ResearchAgent,
 		queue: RunQueue,
@@ -233,8 +221,16 @@ class LoopOrchestrator:
 		budget: int,
 		start_time: float,
 	) -> tuple[list[HypothesisResult], int]:
-		"""Run the LLM ideation phase. Returns (results, llm_calls_used)."""
+		"""Run the LLM ideation phase with context engine. Returns (results, llm_calls_used)."""
+		from .context_engine import ContextEngine
 		results: list[HypothesisResult] = []
+
+		# Build market context from the same DB paths the loop already knows about
+		db_paths = list(series_map.keys())
+		data_dir = str(Path(db_paths[0]).parent) if db_paths else "data"
+		engine = ContextEngine(data_dir=data_dir)
+		profiles = engine.profile_all(db_paths)
+		context_block = engine.build_context_block(profiles)
 
 		# First drain any pending (unexecuted) hypotheses from previous runs
 		pending = self.tracker.list_pending()
@@ -265,19 +261,19 @@ class LoopOrchestrator:
 			return results, 0
 
 		# Verify integrity before ideation — compare against the most recent
-		# post_grid checkpoint from this run (list is DESC, so last appended = first)
+		# post_ideate checkpoint from this run (list is DESC, so last appended = first)
 		current_results = self._list_results(refresh=True)
 		current_hash = self.audit.compute_result_hash(current_results)
 		integrity_checks = self.audit.list_integrity_checks()
-		# Find the post_grid checkpoint that was recorded AFTER the most recent
+		# Find the post_ideate checkpoint that was recorded AFTER the most recent
 		# loop_start (i.e., from this invocation, not a prior one)
 		loop_starts = [c for c in integrity_checks if c["checkpoint"] == "loop_start"]
 		this_run_start = loop_starts[0]["created_at"] if loop_starts else ""
-		post_grid = [
+		post_ideate = [
 			c for c in integrity_checks
-			if c["checkpoint"] == "post_grid" and c["created_at"] >= this_run_start
+			if c["checkpoint"] == "post_ideate" and c["created_at"] >= this_run_start
 		]
-		if post_grid and post_grid[0]["result_hash"] != current_hash:
+		if post_ideate and post_ideate[0]["result_hash"] != current_hash:
 			logger.error("Integrity check failed: results modified since grid phase")
 			return results, 0
 
@@ -296,6 +292,8 @@ class LoopOrchestrator:
 				start_date=self.start_date,
 				end_date=self.end_date,
 				fee_pct=self.fee_pct,
+				context_block=context_block,
+				profiles=profiles,
 			)
 		except Exception as exc:
 			logger.error("LLM ideation failed: %s", exc)
@@ -324,6 +322,25 @@ class LoopOrchestrator:
 			except Exception as exc:
 				logger.warning("Novel strategy generation failed: %s", exc)
 
+			# Add hypotheses for target_series specified in novel proposals
+			for proposal in novel_proposals:
+				target_series = proposal.get("target_series", [])
+				if target_series:
+					from .hypothesis import Hypothesis as _H
+					for series in target_series:
+						for db_path, series_list in series_map.items():
+							if series in series_list:
+								hypotheses.append(_H(
+									strategy=proposal["name"],
+									series=series,
+									db_path=db_path,
+									start_date=self.start_date,
+									end_date=self.end_date,
+									fee_pct=self.fee_pct,
+									tags=["source:llm_novel_strategy"],
+								))
+								break
+
 		# Persist all LLM hypotheses so they can be resumed
 		for h in hypotheses:
 			self.tracker.save_hypothesis(h)
@@ -337,6 +354,58 @@ class LoopOrchestrator:
 		results.extend(llm_results)
 
 		return results, llm_calls_used
+
+	def _run_expand_phase(
+		self,
+		agent: ResearchAgent,
+		queue: RunQueue,
+		phase_results: list[HypothesisResult],
+		series_map: dict[str, list[str]],
+		budget: int,
+		start_time: float,
+	) -> list[HypothesisResult]:
+		"""Expand promoted/reviewed strategies to structurally related series."""
+		from .context_engine import ContextEngine
+		from .hypothesis import Hypothesis
+
+		winners = [r for r in phase_results if r.verdict in ("promote", "review")]
+		if not winners:
+			logger.info("No winners to expand")
+			return []
+
+		db_paths = list(series_map.keys())
+		data_dir = str(Path(db_paths[0]).parent) if db_paths else "data"
+		engine = ContextEngine(data_dir=data_dir)
+		profiles = engine.profile_all(db_paths)
+
+		expansion_hypotheses: list[Hypothesis] = []
+		for winner in winners:
+			related = engine.find_related_series(
+				winner.hypothesis.series, profiles,
+				same_asset_class=True,
+				same_settlement_freq=False,
+			)
+			for series, db_path in related:
+				h = Hypothesis(
+					strategy=winner.hypothesis.strategy,
+					series=series,
+					db_path=db_path,
+					start_date=self.start_date,
+					end_date=self.end_date,
+					fee_pct=self.fee_pct,
+					tags=["source:expansion", f"parent_strategy:{winner.hypothesis.strategy}"],
+				)
+				if not self.tracker.is_tested(h):
+					expansion_hypotheses.append(h)
+
+		batch = expansion_hypotheses[:budget]
+		if not batch:
+			logger.info("No untested expansion hypotheses")
+			return []
+
+		logger.info("Expanding %d winners to %d related series", len(winners), len(batch))
+		remaining_time = self._remaining_time(start_time)
+		return queue.submit(batch, phase="expand", max_time_seconds=remaining_time)
 
 	def _run_refinement_phase(
 		self,

@@ -883,7 +883,7 @@ def main() -> None:
     rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",
                          help="Skip LLM phase")
     rs_loop.add_argument("--llm-only", action="store_true", dest="llm_only",
-                         help="Skip grid, ideate from existing results")
+                         help="Skip grid/expansion, ideate from context + existing results only")
     rs_loop.add_argument("--output", default=None, help="Save report to this base path")
     rs_loop.add_argument("--force", action="store_true", default=False,
                          help="Re-run even if already tested (overwrite existing results)")
