@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 def _build_ohlc_config(series: str) -> str | None:
     """Build --ohlc-config JSON for a given series, or None if no OHLC data available."""
-    from edge_catcher.research.context_engine import _SERIES_TO_ASSET
+    from edge_catcher.research.context_engine import get_series_to_asset
 
-    for prefix, (asset, db_file, table) in _SERIES_TO_ASSET.items():
+    for prefix, (asset, db_file, table) in get_series_to_asset().items():
         if series.startswith(prefix):
             db_path = str(Path("data") / db_file)
             if Path(db_path).exists():

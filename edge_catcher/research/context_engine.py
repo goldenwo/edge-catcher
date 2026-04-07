@@ -12,27 +12,50 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Series prefix → (asset_name, db_filename, table_name)
-_SERIES_TO_ASSET: dict[str, tuple[str, str, str]] = {
-	"KXBTC": ("btc", "kalshi.db", "btc_ohlc"),
-	"KXXRP": ("xrp", "ohlc.db", "xrp_ohlc"),
-	"KXETH": ("eth", "ohlc.db", "eth_ohlc"),
-	"KXSOL": ("sol", "ohlc.db", "sol_ohlc"),
-	"KXDOGE": ("doge", "ohlc.db", "doge_ohlc"),
-}
+_CONFIG_PATH = Path("config.local/series_mapping.yaml")
 
-# DB filename → asset class
-_DB_TO_ASSET_CLASS: dict[str, str] = {
-	"kalshi.db": "Crypto",
-	"btc.db": "Crypto",
-	"kalshi-altcrypto.db": "Crypto",
-	"kalshi-financials.db": "Financials",
-	"kalshi_sports.db": "Sports",
-	"kalshi-entertainment.db": "Entertainment",
-	"kalshi-weather.db": "Weather",
-	"kalshi-esports.db": "Esports",
-	"kalshi-politics.db": "Politics",
-}
+# Lazy-loaded caches (populated on first access via helpers below)
+_series_to_asset_cache: dict[str, tuple[str, str, str]] | None = None
+_db_to_asset_class_cache: dict[str, str] | None = None
+
+
+def _load_series_mapping() -> tuple[dict[str, tuple[str, str, str]], dict[str, str]]:
+	"""Load series mapping from config.local/series_mapping.yaml.
+
+	Returns (series_to_asset, db_to_asset_class).  Falls back to empty dicts
+	if the config file is missing (no hardcoded secrets in source).
+	"""
+	try:
+		import yaml
+		with open(_CONFIG_PATH) as f:
+			data = yaml.safe_load(f) or {}
+	except (FileNotFoundError, ImportError):
+		logger.warning("Series mapping not found at %s — OHLC matching disabled", _CONFIG_PATH)
+		return {}, {}
+
+	s2a: dict[str, tuple[str, str, str]] = {}
+	for prefix, vals in (data.get("series_to_asset") or {}).items():
+		if isinstance(vals, list) and len(vals) == 3:
+			s2a[prefix] = (vals[0], vals[1], vals[2])
+
+	d2a: dict[str, str] = data.get("db_to_asset_class") or {}
+	return s2a, d2a
+
+
+def get_series_to_asset() -> dict[str, tuple[str, str, str]]:
+	"""Return series prefix → (asset, db_file, table) mapping (cached)."""
+	global _series_to_asset_cache
+	if _series_to_asset_cache is None:
+		_series_to_asset_cache, _ = _load_series_mapping()
+	return _series_to_asset_cache
+
+
+def get_db_to_asset_class() -> dict[str, str]:
+	"""Return db filename → asset class mapping (cached)."""
+	global _db_to_asset_class_cache
+	if _db_to_asset_class_cache is None:
+		_, _db_to_asset_class_cache = _load_series_mapping()
+	return _db_to_asset_class_cache
 
 
 @dataclass
@@ -94,7 +117,7 @@ class ContextEngine:
 			).fetchall()
 
 			db_name = Path(db_path).name
-			asset_class = _DB_TO_ASSET_CLASS.get(db_name, "Unknown")
+			asset_class = get_db_to_asset_class().get(db_name, "Unknown")
 
 			profiles = []
 			for row in series_rows:
@@ -177,7 +200,7 @@ class ContextEngine:
 		price_level = None
 		correlation_note = None
 
-		for prefix, (asset, ohlc_db, table) in _SERIES_TO_ASSET.items():
+		for prefix, (asset, ohlc_db, table) in get_series_to_asset().items():
 			if ticker.startswith(prefix):
 				external_asset = asset
 				ohlc_db_full = str(self.data_dir / ohlc_db)
