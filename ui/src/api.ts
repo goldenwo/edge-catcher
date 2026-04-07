@@ -281,9 +281,9 @@ export const research = {
   stopLoop: () =>
     req<{ ok: boolean }>('/api/research/loop/stop', { method: 'POST' }),
   verdictCounts: () => req<VerdictCounts>('/api/research/verdict-counts'),
-  results: (limit = 50, offset = 0, sort = 'completed_at') =>
+  results: (limit = 50, offset = 0, sort = 'completed_at', verdict?: string) =>
     req<{ results: ResearchResult[]; total: number }>(
-      `/api/research/results?limit=${limit}&offset=${offset}&sort=${sort}`
+      `/api/research/results?limit=${limit}&offset=${offset}&sort=${sort}${verdict ? `&verdict=${verdict}` : ''}`
     ),
   reviewQueue: () =>
     req<{ strategies: ResearchResult[]; count: number }>('/api/research/review-queue'),

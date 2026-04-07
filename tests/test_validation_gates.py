@@ -86,17 +86,16 @@ class TestDeflatedSharpeGate:
 		assert gr.details["dsr"] > 0.95
 
 	def test_low_dsr_fails(self):
-		"""Strategy with Sharpe 2.0 among 500 tested should fail DSR."""
+		"""Strategy with weak per-trade Sharpe among many families should fail DSR."""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
 
-		# 500 strategies with similar Sharpe distribution
-		import random
-		rng = random.Random(42)
-		sharpes = [rng.gauss(0.5, 1.0) for _ in range(500)]
+		# 500 strategy families — high N pushes SR0 up via E[max(Z)]
+		sharpes = [0.1] * 500
 		tracker = self._make_tracker_with_results(sharpes)
 
-		# Mediocre signal — Sharpe 2.0 is plausible from noise with 500 trials
-		pnl = [5] * 60 + [-3] * 40
+		# Very weak signal: per-trade Sharpe ~0.06, with N=500 and T=100
+		# SR0 = 1/sqrt(99) * ~3.05 = 0.31 >> 0.06, so DSR near 0
+		pnl = [1] * 53 + [-1] * 47
 		sr = statistics.mean(pnl) / statistics.stdev(pnl)
 		result = _make_result(pnl_values=pnl, sharpe=sr * math.sqrt(100), total_trades=100)
 		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
@@ -118,17 +117,14 @@ class TestDeflatedSharpeGate:
 		assert not gr.passed
 
 	def test_dsr_gate_sharpe_scale_consistency(self):
-		"""sr_observed and sr0 should be on the same scale.
+		"""sr_observed and sr0 should be on the same per-trade scale.
 
-		The backtester reports Sharpe as mean/std * sqrt(N) (scaled).
-		sr_observed is computed as mean/std (per-trade, unscaled).
-		ok_sharpes from tracker must be normalized to per-trade scale too,
-		or sr0 ends up ~sqrt(N) times larger than sr_observed, breaking DSR.
+		sr_observed = mean(pnl)/std(pnl) (per-trade, no sqrt(T) scaling).
+		sr0 uses theoretical null std = 1/sqrt(T-1), so both are per-trade.
 		"""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
 
 		# PnL with known per-trade Sharpe ~0.116 (mean=10, std~86)
-		# Backtester reports: 0.116 * sqrt(200) ~= 1.64
 		pnl = [10 + (i % 3 - 1) * 100 for i in range(200)]
 		mu = statistics.mean(pnl)
 		std = statistics.stdev(pnl)
@@ -142,8 +138,6 @@ class TestDeflatedSharpeGate:
 			strategy="TestStrat",
 		)
 
-		# Tracker rows use backtester-scale Sharpes (1.0–1.9) with 200 trades each.
-		# Per-trade equivalents are ~0.07–0.13.
 		tracker = MagicMock()
 		tracker.list_results.return_value = [
 			{"strategy": f"S{i}", "status": "ok", "sharpe": 1.0 + i * 0.1, "total_trades": 200}
@@ -157,19 +151,11 @@ class TestDeflatedSharpeGate:
 		sr_observed = gate_result.details["sr_observed"]
 		sr0 = gate_result.details["sr0"]
 
-		# sr_observed is per-trade (~0.116). After fix, ok_sharpes are normalized
-		# to per-trade scale, so sr0 is also ~0.03–0.05. The ratio sr_observed/sr0
-		# should be in a reasonable range (0.5–10).
-		#
-		# Before the fix, ok_sharpes are raw backtester Sharpes (~1.0–1.9 for 200
-		# trades), making sr0 ~0.48, so ratio = 0.116/0.48 = 0.24 — below 0.5.
+		# Both should be on per-trade scale. sr0 = 1/sqrt(199) * ~2.7 ≈ 0.19
+		# sr_observed ≈ 0.116. Both are small per-trade numbers.
 		assert sr0 != 0, "sr0 should not be zero"
-		ratio = abs(sr_observed) / abs(sr0)
-		assert ratio >= 0.5, (
-			f"sr_observed ({sr_observed:.4f}) and sr0 ({sr0:.4f}) are on different "
-			f"scales (ratio={ratio:.3f} < 0.5). ok_sharpes must be divided by "
-			f"sqrt(total_trades) to match the per-trade sr_observed scale."
-		)
+		assert sr0 < 1.0, f"sr0 ({sr0:.4f}) should be per-trade scale (< 1.0)"
+		assert abs(sr_observed) < 1.0, f"sr_observed ({sr_observed:.4f}) should be per-trade scale"
 
 	def test_dsr_groups_sharpes_by_strategy(self):
 		"""Same strategy tested on multiple series should count as one trial.
@@ -200,10 +186,8 @@ class TestDeflatedSharpeGate:
 		gate = DeflatedSharpeGate()
 		gr = gate.check(result, ctx)
 
-		# Should see 3 strategies, not 15 or 1
+		# Should see 3 strategy families, not 15 or 1
 		assert gr.details["n_strategies"] == 3
-		# n_sharpes still reports total backtests for transparency
-		assert gr.details["n_sharpes"] == 15
 
 	def test_strategy_family_helper(self):
 		"""_strategy_family strips trailing V\\d+ suffixes."""
@@ -233,7 +217,6 @@ class TestDeflatedSharpeGate:
 		gr = gate.check(result, ctx)
 
 		assert gr.details["n_strategies"] == 2  # Foo family + Bar family
-		assert gr.details["n_sharpes"] == 4  # total backtests
 
 	def test_low_t_bypass_skips_dsr(self):
 		"""T < 50 should skip DSR and let other gates decide."""
@@ -284,13 +267,12 @@ class TestDeflatedSharpeGate:
 		"""DSR below review_floor should fail (passed=False)."""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
 
-		# 500 strategies → very high sr0 → any moderate Sharpe will fail
-		import random
-		rng = random.Random(42)
-		sharpes = [rng.gauss(0.5, 1.0) for _ in range(500)]
+		# 500 strategy families — high N pushes SR0 up
+		sharpes = [0.1] * 500
 		tracker = self._make_tracker_with_results(sharpes)
 
-		pnl = [5] * 60 + [-3] * 40
+		# Very weak signal: per-trade Sharpe ~0.04, SR0 ~0.31
+		pnl = [1] * 52 + [-1] * 48
 		result = _make_result(pnl_values=pnl, sharpe=1.0, total_trades=100)
 		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
 

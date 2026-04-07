@@ -1322,6 +1322,7 @@ def research_review_queue(_: None = Depends(check_auth)):
 @app.get("/api/research/results")
 def research_results(
     limit: int = 50, offset: int = 0, sort: str = "completed_at",
+    verdict: str | None = None,
     _: None = Depends(check_auth),
 ) -> dict:
     from edge_catcher.research.tracker import Tracker
@@ -1329,7 +1330,7 @@ def research_results(
     if not Path(research_db).exists():
         return {"results": [], "total": 0}
     tracker = Tracker(research_db)
-    results = tracker.list_results(limit=limit, offset=offset, sort=sort)
+    results = tracker.list_results(limit=limit, offset=offset, sort=sort, verdict=verdict)
     counts = tracker.count_by_verdict()
     total = sum(counts.values())
     for r in results:
