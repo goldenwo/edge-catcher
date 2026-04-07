@@ -970,6 +970,7 @@ class LoopOrchestrator:
 		from edge_catcher.ai.strategizer import _parse_strategy_response
 		from edge_catcher.runner.strategy_parser import (
 			validate_strategy_code, save_strategy, list_strategies,
+			compute_code_hash, compute_ast_fingerprint,
 			STRATEGIES_LOCAL_PATH, STRATEGIES_LOCAL_MODULE,
 		)
 		from .hypothesis import Hypothesis
@@ -1048,6 +1049,30 @@ class LoopOrchestrator:
 			model=model_str,
 			token_count=token_count,
 		)
+
+		# AST fingerprint dedup check
+		code_hash = compute_code_hash(code)
+		existing_by_hash = self.tracker.check_code_hash(code_hash)
+		if existing_by_hash:
+			logger.warning(
+				"Novel strategy '%s' is a code-level duplicate of '%s' — skipping",
+				strategy_name, existing_by_hash,
+			)
+			return []
+
+		ast_fp = compute_ast_fingerprint(code)
+		if ast_fp:
+			existing_by_ast = self.tracker.check_fingerprint(ast_fp)
+			if existing_by_ast:
+				logger.warning(
+					"Novel strategy '%s' is structurally identical to '%s' — skipping",
+					strategy_name, existing_by_ast,
+				)
+				return []
+
+		# Save fingerprint for future dedup
+		if ast_fp:
+			self.tracker.save_fingerprint(ast_fp, strategy_name, code_hash)
 
 		# Save to strategies_local.py
 		result = save_strategy(code, strategy_name, STRATEGIES_LOCAL_PATH)
