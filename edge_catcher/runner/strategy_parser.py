@@ -179,6 +179,49 @@ def compute_ast_fingerprint(code: str) -> Optional[str]:
 	return hashlib.sha256(fingerprint_str.encode()).hexdigest()
 
 
+def cleanup_dead_strategies(file_path: Path, dead_names: list[str]) -> list[str]:
+	"""Remove class definitions for dead strategies from a file.
+
+	Returns list of strategy class names that were actually removed.
+	"""
+	if not dead_names or not file_path.exists():
+		return []
+
+	content = file_path.read_text(encoding="utf-8")
+	try:
+		tree = ast.parse(content)
+	except SyntaxError:
+		return []
+
+	dead_set = set(dead_names)
+	# Find class nodes to remove, sorted by line number descending (remove from bottom up)
+	to_remove = []
+	for node in tree.body:
+		if isinstance(node, ast.ClassDef) and node.name in dead_set:
+			to_remove.append(node)
+
+	if not to_remove:
+		return []
+
+	lines = content.splitlines(keepends=True)
+	removed_names = []
+
+	# Remove from bottom to top so line numbers stay valid
+	for node in sorted(to_remove, key=lambda n: n.lineno, reverse=True):
+		start = node.lineno - 1  # 0-indexed
+		end = node.end_lineno     # exclusive
+		# Also remove blank lines after the class (up to 2)
+		while end < len(lines) and lines[end].strip() == "":
+			end += 1
+			if end - node.end_lineno >= 2:
+				break
+		del lines[start:end]
+		removed_names.append(node.name)
+
+	file_path.write_text("".join(lines), encoding="utf-8")
+	return removed_names
+
+
 def save_strategy(
     code: str,
     strategy_name: str,
