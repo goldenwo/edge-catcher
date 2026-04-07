@@ -63,3 +63,83 @@ class TestKillRegistry:
 
 	def test_empty_registry(self, tracker):
 		assert tracker.list_kill_registry() == []
+
+
+class TestKillRegistryUpdate:
+	"""Test the loop's _update_kill_registry logic."""
+
+	def test_strategy_with_high_kill_rate_enters_registry(self, tracker):
+		"""Strategy killed on 4/5 series (80%) should enter the registry."""
+		from edge_catcher.research.loop import LoopOrchestrator
+		orch = LoopOrchestrator.__new__(LoopOrchestrator)
+		orch.tracker = tracker
+		orch._cached_results = None
+
+		# Simulate: strategy killed on 4 series, explore on 1
+		# But has NO promote/review verdicts
+		_save_result(tracker, "KillMe", "S1", "kill", "low sharpe")
+		_save_result(tracker, "KillMe", "S2", "kill", "low sharpe")
+		_save_result(tracker, "KillMe", "S3", "kill", "negative pnl")
+		_save_result(tracker, "KillMe", "S4", "kill", "low sharpe")
+		_save_result(tracker, "KillMe", "S5", "explore", "borderline")
+
+		orch._update_kill_registry()
+
+		entries = tracker.list_kill_registry()
+		assert len(entries) == 1
+		assert entries[0]["strategy"] == "KillMe"
+		assert entries[0]["kill_rate"] == 0.8
+
+	def test_strategy_with_promote_excluded(self, tracker):
+		"""Strategy with any promote verdict should NOT enter the registry."""
+		from edge_catcher.research.loop import LoopOrchestrator
+		orch = LoopOrchestrator.__new__(LoopOrchestrator)
+		orch.tracker = tracker
+		orch._cached_results = None
+
+		_save_result(tracker, "MixedStrat", "S1", "kill", "low sharpe")
+		_save_result(tracker, "MixedStrat", "S2", "kill", "low sharpe")
+		_save_result(tracker, "MixedStrat", "S3", "kill", "low sharpe")
+		_save_result(tracker, "MixedStrat", "S4", "promote", "good")
+
+		orch._update_kill_registry()
+		assert tracker.list_kill_registry() == []
+
+	def test_strategy_below_threshold_excluded(self, tracker):
+		"""Strategy with <3 series tested should not enter."""
+		from edge_catcher.research.loop import LoopOrchestrator
+		orch = LoopOrchestrator.__new__(LoopOrchestrator)
+		orch.tracker = tracker
+		orch._cached_results = None
+
+		_save_result(tracker, "FewTests", "S1", "kill", "low sharpe")
+		_save_result(tracker, "FewTests", "S2", "kill", "low sharpe")
+
+		orch._update_kill_registry()
+		assert tracker.list_kill_registry() == []
+
+
+def _save_result(tracker, strategy, series, verdict, reason):
+	"""Helper: save a hypothesis + result pair via HypothesisResult."""
+	import uuid
+	from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
+
+	h = Hypothesis(
+		id=str(uuid.uuid4()),
+		strategy=strategy,
+		series=series,
+		db_path="data/test.db",
+		start_date="",
+		end_date="",
+		fee_pct=1.0,
+	)
+	result = HypothesisResult(
+		hypothesis=h, status="ok",
+		total_trades=10, wins=3, losses=7,
+		win_rate=0.3, net_pnl_cents=-50, sharpe=-0.5,
+		max_drawdown_pct=10, fees_paid_cents=5,
+		avg_win_cents=10, avg_loss_cents=-10,
+		per_strategy={}, raw_json={},
+		verdict=verdict, verdict_reason=reason,
+	)
+	tracker.save_result(result)
