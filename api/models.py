@@ -234,3 +234,18 @@ class FeeInfoResponse(BaseModel):
     name: str
     description: str
     formula: str
+
+
+class ResearchLoopStartRequest(BaseModel):
+    mode: str = "full"  # full, grid_only, llm_only, refine_only
+    max_runs: int = 100
+    max_time: int = 60
+    parallel: int = 4
+    fee_pct: float | None = None
+    start: str | None = None
+    end: str | None = None
+    max_llm_calls: int | None = None
+
+
+class ReviewRejectRequest(BaseModel):
+    reason: str | None = None
