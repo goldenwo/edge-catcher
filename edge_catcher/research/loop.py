@@ -12,7 +12,7 @@ import re
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from .agent import ResearchAgent
@@ -44,6 +44,7 @@ class LoopOrchestrator:
 		force: bool = False,
 		max_refinements: int = 3,
 		refine_only: bool = False,
+		max_stuck_runs: int = 3,
 	) -> None:
 		if grid_only and llm_only:
 			raise ValueError("Cannot use both --grid-only and --llm-only")
@@ -62,6 +63,7 @@ class LoopOrchestrator:
 		self.force = force
 		self.max_refinements = max_refinements
 		self.refine_only = refine_only
+		self.max_stuck_runs = max_stuck_runs
 
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
@@ -73,6 +75,39 @@ class LoopOrchestrator:
 		if self._cached_results is None or refresh:
 			self._cached_results = self.tracker.list_results()
 		return self._cached_results
+
+	@staticmethod
+	def _compute_consecutive_stuck(
+		trajectory_status: str,
+		prev_trajectory: dict | None,
+	) -> int:
+		"""Compute consecutive stuck counter from current status and previous trajectory."""
+		prev_count = (prev_trajectory or {}).get("consecutive_stuck", 0)
+		if trajectory_status == "improving":
+			return 0
+		return prev_count + 1
+
+	@staticmethod
+	def _compute_budgets(
+		max_runs: int,
+		grid_only: bool,
+		consecutive_stuck: int = 0,
+	) -> dict[str, int]:
+		"""Compute phase budgets, shifting toward ideation when stuck."""
+		if grid_only:
+			return {"ideate": 0, "expand": max_runs, "refine": 0}
+
+		if consecutive_stuck >= 2:
+			# Shift: 60% ideate, 20% expand, 20% refine
+			budget_ideate = max(1, int(max_runs * 0.6))
+			budget_expand = max(1, int(max_runs * 0.2))
+		else:
+			# Normal: 40% ideate, 40% expand, 20% refine
+			budget_ideate = max(1, int(max_runs * 0.4))
+			budget_expand = max(1, int(max_runs * 0.4))
+
+		budget_refine = max_runs - budget_ideate - budget_expand
+		return {"ideate": budget_ideate, "expand": budget_expand, "refine": budget_refine}
 
 	def run(self) -> tuple[int, list[HypothesisResult]]:
 		"""Execute the research loop. Returns (exit_code, all_results).
@@ -100,10 +135,22 @@ class LoopOrchestrator:
 		runs_used = 0
 		llm_calls_used = 0
 
+		# ── Read previous trajectory for stuck detection ──────────────────
+		prev_trajectory = journal.get_latest_trajectory()
+		prev_content = prev_trajectory  # already a dict or None
+		self._consecutive_stuck = (prev_content or {}).get("consecutive_stuck", 0)
+
 		# ── Budget allocation ────────────────────────────────────────────
-		budget_ideate = max(1, int(self.max_runs * 0.4)) if not self.grid_only else 0
-		budget_expand = max(1, int(self.max_runs * 0.4)) if not self.grid_only else self.max_runs
-		budget_refine = self.max_runs - budget_ideate - budget_expand
+		budgets = self._compute_budgets(self.max_runs, self.grid_only, self._consecutive_stuck)
+		budget_ideate = budgets["ideate"]
+		budget_expand = budgets["expand"]
+		budget_refine = budgets["refine"]
+
+		if self._consecutive_stuck >= 2:
+			logger.info(
+				"Stuck detected (%d consecutive) — shifting to exploration-heavy budget",
+				self._consecutive_stuck,
+			)
 
 		# ── Phase 1: Context + Ideate (or Grid if grid_only) ─────────
 		if self.grid_only:
@@ -125,6 +172,7 @@ class LoopOrchestrator:
 			all_results.extend(grid_results)
 			runs_used += len(grid_results)
 			self._write_phase_outcomes(journal, grid_results, "grid")
+			self._update_kill_registry()
 		elif not self.refine_only:
 			ideate_results, llm_calls_used = self._run_ideate_phase(
 				agent, queue, strategies, series_map,
@@ -133,6 +181,7 @@ class LoopOrchestrator:
 			all_results.extend(ideate_results)
 			runs_used += len(ideate_results)
 			self._write_phase_outcomes(journal, ideate_results, "ideate")
+			self._update_kill_registry()
 
 		# ── Integrity Checkpoint ─────────────────────────────────────
 		tracker_results = self._list_results(refresh=True)
@@ -155,6 +204,7 @@ class LoopOrchestrator:
 				all_results.extend(expand_results)
 				runs_used += len(expand_results)
 				self._write_phase_outcomes(journal, expand_results, "expand")
+				self._update_kill_registry()
 
 		# ── Phase 3: Refine ──────────────────────────────────────────
 		if not self.grid_only:
@@ -168,9 +218,17 @@ class LoopOrchestrator:
 				all_results.extend(refine_results)
 				runs_used += len(refine_results)
 				self._write_phase_outcomes(journal, refine_results, "refine")
+				self._update_kill_registry()
 
 		# ── Journal summary ───────────────────────────────────────────────
-		self._write_journal_summary(journal, all_results)
+		trajectory_status = self._write_journal_summary(journal, all_results, prev_content)
+
+		# ── Circuit breaker check ────────────────────────────────────────
+		new_stuck_count = self._compute_consecutive_stuck(trajectory_status, prev_content)
+		circuit_breaker_tripped = (
+			self.max_stuck_runs > 0
+			and new_stuck_count >= self.max_stuck_runs + 2
+		)
 
 		# ── Report ────────────────────────────────────────────────────────
 		end_results = self._list_results(refresh=True)
@@ -184,6 +242,19 @@ class LoopOrchestrator:
 			reporter = Reporter()
 			report = reporter.generate_report(all_results)
 			reporter.save(report, self.output_path)
+
+		# Dead code cleanup
+		if not self.grid_only:
+			self._cleanup_dead_strategies()
+
+		if circuit_breaker_tripped:
+			# +2 because the budget shift kicks in at 2, then we allow max_stuck_runs more
+			logger.error(
+				"Loop terminated: stuck for %d consecutive runs with no promotes. "
+				"Review kill registry and consider new data sources or manual reset.",
+				new_stuck_count,
+			)
+			return 3, all_results
 
 		# Determine exit code
 		grid_remaining = 0
@@ -678,12 +749,122 @@ class LoopOrchestrator:
 				"best_sharpe": best_sharpe,
 			})
 
+		# Near-miss observation: highest-Sharpe killed strategy
+		all_kills = [r for r in results if r.verdict == "kill" and r.status == "ok"]
+		if all_kills:
+			best_kill = max(all_kills, key=lambda r: r.sharpe)
+			# Fetch validation details from tracker
+			val_details_str = ""
+			tracker_result = self.tracker.get_result_by_id(best_kill.hypothesis.id)
+			if tracker_result and tracker_result.get("validation_details"):
+				try:
+					gates = json.loads(tracker_result["validation_details"])
+					failed_gates = [g for g in gates if not g.get("passed", True)]
+					if failed_gates:
+						gate = failed_gates[0]
+						val_details_str = f" failed {gate['gate']}: {json.dumps(gate.get('details', {}))}"
+				except (json.JSONDecodeError, KeyError):
+					pass
+
+			journal.write_entry(self.run_id, "observation", {
+				"pattern": f"NEAR-MISS: {best_kill.hypothesis.strategy} scored Sharpe {best_kill.sharpe:.2f} but was killed{val_details_str}",
+				"evidence": (
+					f"series={best_kill.hypothesis.series}, trades={best_kill.total_trades}, "
+					f"verdict_reason={best_kill.verdict_reason}"
+				),
+			})
+
+	def _update_kill_registry(self) -> None:
+		"""Upsert strategies with kill_rate >= 0.8 across >= 3 series into the kill registry.
+
+		Excludes strategies with any promote or review verdict.
+		"""
+		results = self._list_results(refresh=True)
+		by_strategy: dict[str, list[dict]] = defaultdict(list)
+		for r in results:
+			by_strategy[r["strategy"]].append(r)
+
+		for strategy, strat_results in by_strategy.items():
+			verdicts = [r["verdict"] for r in strat_results]
+			if "promote" in verdicts or "review" in verdicts:
+				continue
+
+			series_tested = len(set(r["series"] for r in strat_results))
+			if series_tested < 3:
+				continue
+
+			kill_count = verdicts.count("kill")
+			kill_rate = kill_count / len(strat_results)
+			if kill_rate < 0.8:
+				continue
+
+			reasons = [r["verdict_reason"] for r in strat_results if r["verdict"] == "kill"]
+			reason_counts = Counter(reasons).most_common(5)
+			reason_summary = json.dumps([f"{reason}: {count}x" for reason, count in reason_counts])
+
+			self.tracker.upsert_kill_registry(
+				strategy=strategy,
+				kill_count=kill_count,
+				series_tested=series_tested,
+				kill_rate=kill_rate,
+				reason_summary=reason_summary,
+			)
+
+	def _cleanup_dead_strategies(self) -> None:
+		"""Remove dead strategy code from strategies_local.py."""
+		from edge_catcher.runner.strategy_parser import (
+			cleanup_dead_strategies, STRATEGIES_LOCAL_PATH, list_strategies,
+		)
+
+		registry = self.tracker.list_kill_registry(permanent_only=True)
+		if not registry:
+			return
+
+		# Safety check: exclude strategies with any promote/review verdict
+		results = self._list_results()
+		has_good_verdict = set()
+		for r in results:
+			if r["verdict"] in ("promote", "review"):
+				has_good_verdict.add(r["strategy"])
+
+		# Also exclude parents of active refinement chains
+		for r in results:
+			strategy = r["strategy"]
+			if r["verdict"] != "kill":
+				# Check if this is a refinement (e.g., StratV2 → parent is Strat)
+				for suffix in ("V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10"):
+					if strategy.endswith(suffix):
+						parent = strategy[:-len(suffix)]
+						has_good_verdict.add(parent)
+
+		dead_strategy_names = [
+			e["strategy"] for e in registry
+			if e["strategy"] not in has_good_verdict
+		]
+
+		if not dead_strategy_names:
+			return
+
+		# Map strategy names (snake_case) to class names (CamelCase)
+		known = list_strategies(file_path=STRATEGIES_LOCAL_PATH)
+		name_to_class = {s["name"]: s["class_name"] for s in known}
+		dead_class_names = [
+			name_to_class[n] for n in dead_strategy_names
+			if n in name_to_class
+		]
+
+		if dead_class_names:
+			removed = cleanup_dead_strategies(STRATEGIES_LOCAL_PATH, dead_class_names)
+			if removed:
+				logger.info("Cleaned up %d dead strategies from strategies_local.py: %s", len(removed), removed)
+
 	def _write_journal_summary(
 		self,
 		journal: "ResearchJournal",
 		all_results: list[HypothesisResult],
-	) -> None:
-		"""Write trajectory + observation entries at end of run."""
+		prev_content: dict | None = None,
+	) -> str:
+		"""Write trajectory + observation entries at end of run. Returns trajectory_status."""
 		from .journal import ResearchJournal
 
 		# Build result dicts for trajectory classification
@@ -692,8 +873,8 @@ class LoopOrchestrator:
 			for r in all_results if r.status == "ok"
 		]
 
-		# Compute trajectory
-		prev_trajectory = journal.get_latest_trajectory()
+		# Compute trajectory using the provided prev_content (avoid duplicate DB read)
+		prev_trajectory = prev_content
 		trajectory_status = ResearchJournal.classify_trajectory(
 			self.run_id, run_results, prev_trajectory,
 		)
@@ -713,13 +894,42 @@ class LoopOrchestrator:
 			"new_reviews": sum(1 for r in all_results if r.verdict == "review"),
 			"new_explores": sum(1 for r in all_results if r.verdict == "explore"),
 			"new_kills": sum(1 for r in all_results if r.verdict == "kill"),
+			"consecutive_stuck": self._compute_consecutive_stuck(trajectory_status, prev_content),
 		})
 
 		# Write observation entries for promoted results
 		for r in all_results:
 			if r.verdict in ("promote", "review"):
+				# Fetch gate margins for richer observations
+				gate_summary = ""
+				tracker_result = self.tracker.get_result_by_id(r.hypothesis.id)
+				if tracker_result and tracker_result.get("validation_details"):
+					try:
+						gates = json.loads(tracker_result["validation_details"])
+						gate_parts = []
+						for g in gates:
+							if g.get("passed"):
+								d = g.get("details", {})
+								name = g["gate"]
+								if name == "monte_carlo" and "p_value" in d:
+									gate_parts.append(f"mc_p={d['p_value']:.2f}")
+								elif name == "deflated_sharpe" and "dsr_margin" in d:
+									gate_parts.append(f"dsr={d['dsr_margin']:.2f}")
+								elif name == "temporal_consistency":
+									pw = d.get("profitable_windows", "?")
+									tw = d.get("total_windows", "?")
+									gate_parts.append(f"temporal={pw}/{tw}")
+								elif name == "param_sensitivity":
+									np_ = d.get("neighbors_passing", "?")
+									nt = d.get("neighbors_tested", "?")
+									gate_parts.append(f"sensitivity={np_}/{nt}")
+						if gate_parts:
+							gate_summary = f" [{', '.join(gate_parts)}]"
+					except (json.JSONDecodeError, KeyError):
+						pass
+
 				journal.write_entry(self.run_id, "observation", {
-					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}",
+					"pattern": f"PROMOTED: {r.hypothesis.strategy} succeeds with Sharpe {r.sharpe:.2f}{gate_summary}",
 					"evidence": (
 						f"trades={r.total_trades}, win_rate={r.win_rate:.0%}, "
 						f"series={r.hypothesis.series}, pnl={r.net_pnl_cents:.0f}¢"
@@ -751,6 +961,8 @@ class LoopOrchestrator:
 					"pattern": f"strategy {strategy} averaged {avg:.0f} trades across {len(trades_list)} series",
 					"evidence": "low trade count may indicate overly restrictive entry conditions",
 				})
+
+		return trajectory_status
 
 	def _find_refinement_candidates(self, all_results: list[dict] | None = None) -> list[str]:
 		"""Find strategies with 'explore' verdicts worth refining.
@@ -930,6 +1142,7 @@ class LoopOrchestrator:
 		from edge_catcher.ai.strategizer import _parse_strategy_response
 		from edge_catcher.runner.strategy_parser import (
 			validate_strategy_code, save_strategy, list_strategies,
+			compute_code_hash, compute_ast_fingerprint,
 			STRATEGIES_LOCAL_PATH, STRATEGIES_LOCAL_MODULE,
 		)
 		from .hypothesis import Hypothesis
@@ -1008,6 +1221,30 @@ class LoopOrchestrator:
 			model=model_str,
 			token_count=token_count,
 		)
+
+		# AST fingerprint dedup check
+		code_hash = compute_code_hash(code)
+		existing_by_hash = self.tracker.check_code_hash(code_hash)
+		if existing_by_hash:
+			logger.warning(
+				"Novel strategy '%s' is a code-level duplicate of '%s' — skipping",
+				strategy_name, existing_by_hash,
+			)
+			return []
+
+		ast_fp = compute_ast_fingerprint(code)
+		if ast_fp:
+			existing_by_ast = self.tracker.check_fingerprint(ast_fp)
+			if existing_by_ast:
+				logger.warning(
+					"Novel strategy '%s' is structurally identical to '%s' — skipping",
+					strategy_name, existing_by_ast,
+				)
+				return []
+
+		# Save fingerprint for future dedup
+		if ast_fp:
+			self.tracker.save_fingerprint(ast_fp, strategy_name, code_hash)
 
 		# Save to strategies_local.py
 		result = save_strategy(code, strategy_name, STRATEGIES_LOCAL_PATH)
