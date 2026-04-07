@@ -97,12 +97,13 @@ class AuditLog:
 		finally:
 			conn.close()
 
-	def list_decisions(self) -> list[dict]:
+	def list_decisions(self, limit: int | None = None) -> list[dict]:
 		conn = self._connect()
 		try:
-			rows = conn.execute(
-				"SELECT * FROM audit_decisions ORDER BY created_at DESC"
-			).fetchall()
+			query = "SELECT * FROM audit_decisions ORDER BY created_at DESC"
+			if limit is not None:
+				query += f" LIMIT {int(limit)}"
+			rows = conn.execute(query).fetchall()
 			return [dict(r) for r in rows]
 		finally:
 			conn.close()
