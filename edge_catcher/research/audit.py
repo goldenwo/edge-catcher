@@ -142,12 +142,13 @@ class AuditLog:
 		finally:
 			conn.close()
 
-	def list_executions(self) -> list[dict]:
+	def list_executions(self, limit: int | None = None) -> list[dict]:
 		conn = self._connect()
 		try:
-			rows = conn.execute(
-				"SELECT * FROM audit_executions ORDER BY completed_at DESC"
-			).fetchall()
+			query = "SELECT * FROM audit_executions ORDER BY completed_at DESC"
+			if limit is not None:
+				query += f" LIMIT {int(limit)}"
+			rows = conn.execute(query).fetchall()
 			return [dict(r) for r in rows]
 		finally:
 			conn.close()

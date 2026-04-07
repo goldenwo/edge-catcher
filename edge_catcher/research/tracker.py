@@ -204,21 +204,50 @@ class Tracker:
         finally:
             conn.close()
 
-    def list_results(self) -> list[dict]:
+    def list_results(self, limit: int | None = None, offset: int | None = None, sort: str = "completed_at") -> list[dict]:
         """Return all results as plain dicts, joined with hypothesis metadata."""
         conn = self._connect()
         try:
-            rows = conn.execute(
-                """SELECT h.id, h.strategy, h.series, h.db_path,
+            allowed_sorts = {"completed_at", "sharpe", "win_rate", "net_pnl_cents", "total_trades"}
+            if sort not in allowed_sorts:
+                sort = "completed_at"
+            query = f"""
+                SELECT h.id, h.strategy, h.series, h.db_path,
                           h.start_date, h.end_date, h.fee_pct, h.tags, h.created_at,
                           r.status, r.total_trades, r.wins, r.losses, r.win_rate,
                           r.net_pnl_cents, r.sharpe, r.max_drawdown_pct, r.fees_paid_cents,
                           r.verdict, r.verdict_reason, r.validation_details, r.completed_at
-                   FROM hypotheses h
-                   JOIN results r ON h.id = r.hypothesis_id
-                   ORDER BY r.completed_at DESC"""
-            ).fetchall()
+               FROM hypotheses h
+               JOIN results r ON h.id = r.hypothesis_id
+               ORDER BY r.{sort} DESC
+        """
+            if limit is not None:
+                query += f" LIMIT {int(limit)}"
+            if offset is not None:
+                query += f" OFFSET {int(offset)}"
+            rows = conn.execute(query).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def count_by_verdict(self) -> dict[str, int]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT verdict, COUNT(*) as cnt FROM results GROUP BY verdict"
+            ).fetchall()
+            return {r["verdict"]: r["cnt"] for r in rows}
+        finally:
+            conn.close()
+
+    def update_verdict(self, hypothesis_id: str, verdict: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE results SET verdict = ? WHERE hypothesis_id = ?",
+                (verdict, hypothesis_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
