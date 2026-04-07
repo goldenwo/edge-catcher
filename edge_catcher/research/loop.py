@@ -10,10 +10,12 @@ import logging
 import math
 import re
 import sys
+import threading
 import time
 import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Callable
 
 from .agent import ResearchAgent
 from .audit import AuditLog
@@ -45,6 +47,8 @@ class LoopOrchestrator:
 		max_refinements: int = 3,
 		refine_only: bool = False,
 		max_stuck_runs: int = 3,
+		cancel_event: threading.Event | None = None,
+		on_progress: Callable[[str, int, int], None] | None = None,
 	) -> None:
 		if grid_only and llm_only:
 			raise ValueError("Cannot use both --grid-only and --llm-only")
@@ -64,6 +68,8 @@ class LoopOrchestrator:
 		self.max_refinements = max_refinements
 		self.refine_only = refine_only
 		self.max_stuck_runs = max_stuck_runs
+		self.cancel_event = cancel_event
+		self.on_progress = on_progress
 
 		self.tracker = Tracker(research_db)
 		self.audit = AuditLog(research_db)
@@ -153,6 +159,8 @@ class LoopOrchestrator:
 			)
 
 		# ── Phase 1: Context + Ideate (or Grid if grid_only) ─────────
+		if self._cancelled():
+			return 2, all_results
 		if self.grid_only:
 			# Legacy: full grid sweep
 			planner = GridPlanner(tracker=self.tracker)
@@ -173,6 +181,7 @@ class LoopOrchestrator:
 			runs_used += len(grid_results)
 			self._write_phase_outcomes(journal, grid_results, "grid")
 			self._update_kill_registry()
+			self._report_progress("grid", len(all_results), self.max_runs)
 		elif not self.refine_only:
 			ideate_results, llm_calls_used = self._run_ideate_phase(
 				agent, queue, strategies, series_map,
@@ -182,6 +191,7 @@ class LoopOrchestrator:
 			runs_used += len(ideate_results)
 			self._write_phase_outcomes(journal, ideate_results, "ideate")
 			self._update_kill_registry()
+			self._report_progress("ideate", len(all_results), self.max_runs)
 
 		# ── Integrity Checkpoint ─────────────────────────────────────
 		tracker_results = self._list_results(refresh=True)
@@ -194,6 +204,8 @@ class LoopOrchestrator:
 		)
 
 		# ── Phase 2: Expand Winners ──────────────────────────────────
+		if self._cancelled():
+			return 2, all_results
 		if not self.grid_only and not self.refine_only and not self.llm_only:
 			remaining_budget = min(budget_expand, self.max_runs - runs_used)
 			if remaining_budget > 0:
@@ -205,8 +217,11 @@ class LoopOrchestrator:
 				runs_used += len(expand_results)
 				self._write_phase_outcomes(journal, expand_results, "expand")
 				self._update_kill_registry()
+				self._report_progress("expand", len(all_results), self.max_runs)
 
 		# ── Phase 3: Refine ──────────────────────────────────────────
+		if self._cancelled():
+			return 2, all_results
 		if not self.grid_only:
 			remaining_budget = min(budget_refine, self.max_runs - runs_used)
 			remaining_llm = self.max_llm_calls - llm_calls_used
@@ -219,6 +234,7 @@ class LoopOrchestrator:
 				runs_used += len(refine_results)
 				self._write_phase_outcomes(journal, refine_results, "refine")
 				self._update_kill_registry()
+				self._report_progress("refine", len(all_results), self.max_runs)
 
 		# ── Journal summary ───────────────────────────────────────────────
 		trajectory_status = self._write_journal_summary(journal, all_results, prev_content)
@@ -1315,3 +1331,10 @@ class LoopOrchestrator:
 			return None
 		elapsed = time.monotonic() - start_time
 		return max(0.0, self.max_time_seconds - elapsed)
+
+	def _cancelled(self) -> bool:
+		return self.cancel_event is not None and self.cancel_event.is_set()
+
+	def _report_progress(self, phase: str, completed: int, total: int) -> None:
+		if self.on_progress:
+			self.on_progress(phase, completed, total)

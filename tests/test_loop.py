@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -271,3 +272,50 @@ class TestShouldKeepRefinementBaseline:
         assert LoopOrchestrator._should_keep_refinement(
             prev_results, refined, baseline_results=None
         )
+
+
+class TestLoopOrchestratorCancel:
+    def test_cancel_stops_loop_early(self, tmp_path):
+        """Loop exits when cancel_event is set."""
+        db = str(tmp_path / "research.db")
+        cancel = threading.Event()
+        orch = LoopOrchestrator(
+            research_db=db, max_runs=100, grid_only=True,
+            cancel_event=cancel,
+        )
+        # Set cancel before any work happens
+        cancel.set()
+        with patch.object(orch, "_discover_strategies", return_value=["A"]), \
+             patch.object(orch, "_discover_series", return_value={"data/k.db": ["SER1"]}), \
+             patch("edge_catcher.research.loop.ResearchAgent") as MockAgent:
+            MockAgent.return_value.sweep.return_value = []
+            exit_code, results = orch.run()
+        # Should exit early with code 2 (partial)
+        assert exit_code == 2
+        assert results == []
+
+
+class TestLoopOrchestratorProgress:
+    def test_progress_callback_called(self, tmp_path):
+        """on_progress is called with phase and run counts."""
+        db = str(tmp_path / "research.db")
+        progress_calls = []
+
+        def on_progress(phase: str, runs_completed: int, runs_total: int):
+            progress_calls.append((phase, runs_completed, runs_total))
+
+        orch = LoopOrchestrator(
+            research_db=db, max_runs=5, grid_only=True,
+            on_progress=on_progress,
+        )
+        h = Hypothesis(strategy="A", series="SER1", db_path="data/k.db",
+                       start_date="2025-01-01", end_date="2025-12-31",
+                       tags=["source:grid"])
+        mock_result = _make_result(h, verdict="kill")
+        with patch.object(orch, "_discover_strategies", return_value=["A"]), \
+             patch.object(orch, "_discover_series", return_value={"data/k.db": ["SER1"]}), \
+             patch("edge_catcher.research.loop.ResearchAgent") as MockAgent:
+            MockAgent.return_value.run_hypothesis.return_value = mock_result
+            orch.run()
+        assert len(progress_calls) > 0
+        assert progress_calls[0][0] in ("ideate", "expand", "refine", "grid")
