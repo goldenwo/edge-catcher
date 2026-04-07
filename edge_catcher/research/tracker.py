@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS kill_registry (
     permanent INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS strategy_fingerprints (
+    fingerprint TEXT PRIMARY KEY,
+    strategy_name TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hypothesis_dedup
     ON hypotheses(strategy, series, db_path, start_date, end_date, fee_pct);
 """
@@ -308,5 +315,41 @@ class Tracker:
             query += " ORDER BY kill_rate DESC, kill_count DESC"
             rows = conn.execute(query).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def save_fingerprint(self, fingerprint: str, strategy_name: str, code_hash: str) -> None:
+        """Record a strategy's AST fingerprint."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO strategy_fingerprints (fingerprint, strategy_name, code_hash) VALUES (?, ?, ?)",
+                (fingerprint, strategy_name, code_hash),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def check_fingerprint(self, fingerprint: str) -> Optional[str]:
+        """Return strategy name if fingerprint exists, else None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT strategy_name FROM strategy_fingerprints WHERE fingerprint=?",
+                (fingerprint,),
+            ).fetchone()
+            return row["strategy_name"] if row else None
+        finally:
+            conn.close()
+
+    def check_code_hash(self, code_hash: str) -> Optional[str]:
+        """Return strategy name if code hash exists, else None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT strategy_name FROM strategy_fingerprints WHERE code_hash=?",
+                (code_hash,),
+            ).fetchone()
+            return row["strategy_name"] if row else None
         finally:
             conn.close()
