@@ -468,16 +468,24 @@ function ReviewQueueTab({ onCountChange }: { onCountChange: (n: number) => void 
   useEffect(() => { load() }, [load])
 
   const handleApprove = async (id: string) => {
-    await research.approve(id)
-    setQueue(q => q.filter(r => r.id !== id))
-    onCountChange(queue.length - 1)
+    try {
+      await research.approve(id)
+      setQueue(q => q.filter(r => r.id !== id))
+      onCountChange(queue.length - 1)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    }
   }
 
   const handleReject = async (id: string) => {
-    await research.reject(id, 'Manually rejected from dashboard')
-    setQueue(q => q.filter(r => r.id !== id))
-    setConfirmReject(null)
-    onCountChange(queue.length - 1)
+    try {
+      await research.reject(id, 'Manually rejected from dashboard')
+      setQueue(q => q.filter(r => r.id !== id))
+      setConfirmReject(null)
+      onCountChange(queue.length - 1)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    }
   }
 
   if (loading) return <div className="text-gray-500 text-sm">Loading...</div>
