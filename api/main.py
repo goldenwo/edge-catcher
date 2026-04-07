@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -46,8 +47,13 @@ from api.models import (
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
     FeeInfoResponse,
     ModelOption, ModelSettingsResponse, ModelOverrideRequest,
+    ResearchLoopStartRequest, ReviewRejectRequest,
 )
 from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
+from api.research_tasks import (
+    ResearchLoopState, research_loop_state,
+    get_research_loop_state, is_research_loop_running,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1160,6 +1166,53 @@ async def backtest_result(task_id: str) -> dict:
 # ── Research Dashboard ───────────────────────────────────────────────────────
 
 
+def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
+    """Background thread: runs the research loop."""
+    import threading
+    import time as _time
+    from edge_catcher.research.loop import LoopOrchestrator
+
+    state = research_loop_state[task_id]
+    state.running = True
+    state.phase = "starting"
+    state.runs_total = body.max_runs
+
+    cancel_event = threading.Event()
+
+    def on_progress(phase: str, completed: int, total: int) -> None:
+        state.phase = phase
+        state.runs_completed = completed
+        state.runs_total = total
+        if state.cancel_requested:
+            cancel_event.set()
+
+    start = _time.monotonic()
+    try:
+        orch = LoopOrchestrator(
+            research_db=str(_research_db_path()),
+            max_runs=body.max_runs,
+            max_time_minutes=float(body.max_time),
+            parallel=body.parallel,
+            fee_pct=body.fee_pct or 1.0,
+            max_llm_calls=body.max_llm_calls or 10,
+            grid_only=(body.mode == "grid_only"),
+            llm_only=(body.mode == "llm_only"),
+            refine_only=(body.mode == "refine_only"),
+            start_date=body.start,
+            end_date=body.end,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+        )
+        exit_code, results = orch.run()
+        state.phase = "completed" if exit_code == 0 else "stopped"
+    except Exception as exc:
+        state.error = str(exc)
+        state.phase = "error"
+    finally:
+        state.running = False
+        state.elapsed_seconds = _time.monotonic() - start
+
+
 def _research_db_path() -> Path:
     return Path(os.getenv("RESEARCH_DB", "data/research.db"))
 
@@ -1182,34 +1235,47 @@ def research_profiles(_: None = Depends(check_auth)):
     }
 
 
-@app.get("/api/research/loop-status")
-def research_loop_status(_: None = Depends(check_auth)):
-    """Return current loop phase, budget usage, and recent activity."""
-    from edge_catcher.research.audit import AuditLog
+# ── research loop control ────────────────────────────────────────────────────
 
-    research_db = str(_research_db_path())
-    if not Path(research_db).exists():
-        return {"phase": "idle", "recent_activity": [], "latest_checkpoint": None}
+@app.post("/api/research/loop/start")
+def research_loop_start(
+    body: ResearchLoopStartRequest,
+    _: None = Depends(check_auth),
+) -> dict:
+    if is_research_loop_running():
+        raise HTTPException(status_code=409, detail="A research loop is already running")
+    task_id = str(uuid.uuid4())
+    research_loop_state[task_id] = ResearchLoopState(task_id=task_id)
+    threading.Thread(target=_run_research_loop, args=(task_id, body), daemon=True).start()
+    return {"task_id": task_id}
 
-    audit = AuditLog(research_db)
-    recent = audit.list_decisions(limit=20)
-    integrity = audit.list_integrity_checks()
 
-    # Determine current phase from most recent integrity checkpoint
-    phase = "idle"
-    if integrity:
-        latest = integrity[0]["checkpoint"]
-        if latest == "loop_start":
-            phase = "running"
-        elif latest == "post_ideate":
-            phase = "expanding"
-        elif latest == "post_expand":
-            phase = "refining"
+@app.post("/api/research/loop/stop")
+def research_loop_stop(_: None = Depends(check_auth)) -> dict:
+    for state in research_loop_state.values():
+        if state.running:
+            state.cancel_requested = True
+            return {"ok": True}
+    raise HTTPException(status_code=409, detail="No research loop is running")
 
+
+@app.get("/api/research/loop/status")
+def research_loop_status_endpoint(_: None = Depends(check_auth)) -> dict:
+    for state in research_loop_state.values():
+        if state.running or state.phase != "idle":
+            return {
+                "running": state.running,
+                "phase": state.phase,
+                "runs_completed": state.runs_completed,
+                "runs_total": state.runs_total,
+                "elapsed_seconds": state.elapsed_seconds,
+                "task_id": state.task_id,
+                "error": state.error,
+            }
     return {
-        "phase": phase,
-        "recent_activity": recent,
-        "latest_checkpoint": integrity[0] if integrity else None,
+        "running": False, "phase": "idle",
+        "runs_completed": 0, "runs_total": 0,
+        "elapsed_seconds": 0, "task_id": None, "error": None,
     }
 
 
@@ -1233,10 +1299,134 @@ def research_review_queue(_: None = Depends(check_auth)):
     # Sort by Sharpe descending
     review_queue.sort(key=lambda r: r.get("sharpe", 0), reverse=True)
 
+    for r in review_queue:
+        if r.get("validation_details") and isinstance(r["validation_details"], str):
+            try:
+                r["validation_details"] = json.loads(r["validation_details"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
     return {
         "strategies": review_queue,
         "count": len(review_queue),
     }
+
+
+# ── research results ─────────────────────────────────────────────────────────
+
+@app.get("/api/research/results")
+def research_results(
+    limit: int = 50, offset: int = 0, sort: str = "completed_at",
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.research.tracker import Tracker
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        return {"results": [], "total": 0}
+    tracker = Tracker(research_db)
+    results = tracker.list_results(limit=limit, offset=offset, sort=sort)
+    counts = tracker.count_by_verdict()
+    total = sum(counts.values())
+    for r in results:
+        if r.get("validation_details") and isinstance(r["validation_details"], str):
+            try:
+                r["validation_details"] = json.loads(r["validation_details"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return {"results": results, "total": total}
+
+
+@app.get("/api/research/verdict-counts")
+def research_verdict_counts(_: None = Depends(check_auth)) -> dict:
+    from edge_catcher.research.tracker import Tracker
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        return {"promote": 0, "review": 0, "explore": 0, "kill": 0}
+    tracker = Tracker(research_db)
+    counts = tracker.count_by_verdict()
+    return {
+        "promote": counts.get("promote", 0),
+        "review": counts.get("review", 0),
+        "explore": counts.get("explore", 0),
+        "kill": counts.get("kill", 0),
+    }
+
+
+# ── research review actions ──────────────────────────────────────────────────
+
+@app.post("/api/research/review/{hypothesis_id}/approve")
+def research_review_approve(
+    hypothesis_id: str,
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.research.tracker import Tracker
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        raise HTTPException(status_code=404, detail="Research database not found")
+    tracker = Tracker(research_db)
+    result = tracker.get_result_by_id(hypothesis_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Hypothesis {hypothesis_id!r} not found")
+    tracker.update_verdict(hypothesis_id, "accepted")
+    return {"ok": True}
+
+
+@app.post("/api/research/review/{hypothesis_id}/reject")
+def research_review_reject(
+    hypothesis_id: str,
+    body: ReviewRejectRequest,
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.research.tracker import Tracker
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        raise HTTPException(status_code=404, detail="Research database not found")
+    tracker = Tracker(research_db)
+    result = tracker.get_result_by_id(hypothesis_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Hypothesis {hypothesis_id!r} not found")
+    strategy = result["strategy"]
+    all_strategy_results = tracker.list_results_for_strategy(strategy)
+    kill_count = sum(1 for r in all_strategy_results if r.get("verdict") == "kill")
+    series_tested = len(set(r["series"] for r in all_strategy_results))
+    kill_rate = (kill_count + 1) / len(all_strategy_results) if all_strategy_results else 1.0
+    tracker.update_verdict(hypothesis_id, "kill")
+    tracker.upsert_kill_registry(
+        strategy=strategy,
+        kill_count=kill_count + 1,
+        series_tested=series_tested,
+        kill_rate=kill_rate,
+        reason_summary=body.reason or "Manually rejected from dashboard",
+    )
+    return {"ok": True}
+
+
+# ── research audit ───────────────────────────────────────────────────────────
+
+@app.get("/api/research/audit/executions")
+def research_audit_executions(
+    limit: int = 100,
+    _: None = Depends(check_auth),
+) -> list:
+    from edge_catcher.research.audit import AuditLog
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        return []
+    audit = AuditLog(research_db)
+    return audit.list_executions(limit=limit)
+
+
+@app.get("/api/research/audit/decisions")
+def research_audit_decisions(
+    limit: int = 100,
+    _: None = Depends(check_auth),
+) -> list:
+    from edge_catcher.research.audit import AuditLog
+    research_db = str(_research_db_path())
+    if not Path(research_db).exists():
+        return []
+    audit = AuditLog(research_db)
+    return audit.list_decisions(limit=limit)
 
 
 # ── static UI (production) ────────────────────────────────────────────────────
