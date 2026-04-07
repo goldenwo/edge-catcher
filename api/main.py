@@ -1157,6 +1157,84 @@ async def backtest_result(task_id: str) -> dict:
     return state.result
 
 
+# ── Research Dashboard ───────────────────────────────────────────────────────
+
+
+@app.get("/api/research/profiles")
+async def research_profiles():
+    """Return series profiles from the Context Engine."""
+    from edge_catcher.research.context_engine import ContextEngine
+    import dataclasses
+
+    data_dir = Path("data")
+    db_paths = [str(p) for p in sorted(data_dir.glob("*.db")) if p.name != "research.db"]
+
+    engine = ContextEngine(data_dir=str(data_dir))
+    profiles = engine.profile_all(db_paths)
+
+    return {
+        "profiles": [dataclasses.asdict(p) for p in profiles],
+        "count": len(profiles),
+    }
+
+
+@app.get("/api/research/loop-status")
+async def research_loop_status():
+    """Return current loop phase, budget usage, and recent activity."""
+    from edge_catcher.research.audit import AuditLog
+
+    research_db = "data/research.db"
+    if not Path(research_db).exists():
+        return {"phase": "idle", "recent_activity": [], "latest_checkpoint": None}
+
+    audit = AuditLog(research_db)
+    recent = audit.list_decisions(limit=20)
+    integrity = audit.list_integrity_checks()
+
+    # Determine current phase from most recent integrity checkpoint
+    phase = "idle"
+    if integrity:
+        latest = integrity[0]["checkpoint"]
+        if latest == "loop_start":
+            phase = "running"
+        elif latest == "post_ideate":
+            phase = "expanding"
+        elif latest == "post_expand":
+            phase = "refining"
+
+    return {
+        "phase": phase,
+        "recent_activity": recent,
+        "latest_checkpoint": integrity[0] if integrity else None,
+    }
+
+
+@app.get("/api/research/review-queue")
+async def research_review_queue():
+    """Return strategies with promote/review verdicts for human review."""
+    from edge_catcher.research.tracker import Tracker
+
+    research_db = "data/research.db"
+    if not Path(research_db).exists():
+        return {"strategies": [], "count": 0}
+
+    tracker = Tracker(research_db)
+    results = tracker.list_results()
+
+    review_queue = [
+        r for r in results
+        if r.get("verdict") in ("promote", "review")
+    ]
+
+    # Sort by Sharpe descending
+    review_queue.sort(key=lambda r: r.get("sharpe", 0), reverse=True)
+
+    return {
+        "strategies": review_queue,
+        "count": len(review_queue),
+    }
+
+
 # ── static UI (production) ────────────────────────────────────────────────────
 
 _ui_dist = Path(__file__).parent.parent / "ui" / "dist"
