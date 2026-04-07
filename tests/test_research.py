@@ -97,11 +97,11 @@ class TestEvaluator:
         assert verdict == "kill"
         assert "Sharpe" in reason
 
-    def test_explore_mid_sharpe(self):
-        """Sharpe between kill (1.0) and promote (2.0) → explore, regardless of win rate."""
+    def test_validate_mid_sharpe(self):
+        """Sharpe between kill (1.0) and promote (2.0) with enough trades → validate."""
         r = _make_result(sharpe=1.5, win_rate=0.70, net_pnl_cents=500.0, total_trades=100)
         verdict, reason = self.ev.evaluate(r, self.th)
-        assert verdict == "explore"
+        assert verdict == "validate"
 
     def test_kill_negative_pnl(self):
         r = _make_result(sharpe=1.5, win_rate=0.90, net_pnl_cents=-100.0, total_trades=100)
@@ -115,11 +115,11 @@ class TestEvaluator:
         assert verdict == "explore"
         assert "trades" in reason
 
-    def test_explore_between_thresholds(self):
+    def test_validate_between_thresholds(self):
         # Sharpe between 1.0 and 2.0, win rate between 0.85 and 0.87
         r = _make_result(sharpe=1.5, win_rate=0.86, net_pnl_cents=200.0, total_trades=100)
         verdict, reason = self.ev.evaluate(r, self.th)
-        assert verdict == "explore"
+        assert verdict == "validate"
 
     def test_error_result_is_killed(self):
         h = Hypothesis(strategy="C", series="KXBTCD", db_path="x.db",
@@ -414,7 +414,9 @@ class TestResearchAgent:
     def test_generate_adjacent_explore_returns_cousins(self, tmp_path):
         agent = self._make_agent(tmp_path)
         r = _make_result(strategy="C", verdict="explore", verdict_reason="borderline")
-        adjacent = agent.generate_adjacent(r)
+        mock_families = {"C": ["Cvol", "Cmom", "Cstack"]}
+        with patch("edge_catcher.research.agent._build_strategy_families", return_value=mock_families):
+            adjacent = agent.generate_adjacent(r)
         strategies = [h.strategy for h in adjacent]
         assert set(strategies) == {"Cvol", "Cmom", "Cstack"}
         for h in adjacent:
@@ -710,14 +712,14 @@ class TestResearchJournal:
         status = ResearchJournal.classify_trajectory("run-001", results, None)
         assert status == "improving"
 
-    def test_classify_trajectory_improving_near_prev_best(self, tmp_path):
+    def test_classify_trajectory_improving_exceeds_prev_best(self, tmp_path):
         from edge_catcher.research.journal import ResearchJournal
         results = [
-            {"run_id": "run-002", "verdict": "explore", "sharpe": 2.4},
+            {"run_id": "run-002", "verdict": "explore", "sharpe": 2.6},
             {"run_id": "run-001", "verdict": "promote", "sharpe": 2.5},
         ]
         prev = {"status": "improving", "best_sharpe_overall": 2.5}
-        # 2.4 >= 2.5 * 0.95 = 2.375 → improving
+        # 2.6 > 2.5 → improving (new best Sharpe exceeds previous)
         status = ResearchJournal.classify_trajectory("run-002", results, prev)
         assert status == "improving"
 
