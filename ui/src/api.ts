@@ -15,6 +15,26 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
+// ── Simple TTL cache for GET endpoints ─────────────────────────────────────
+
+const _cache = new Map<string, { data: unknown; ts: number; inflight?: Promise<unknown> }>()
+
+function cachedReq<T>(path: string, ttlMs: number): Promise<T> {
+  const entry = _cache.get(path)
+  const now = Date.now()
+  if (entry && now - entry.ts < ttlMs) return Promise.resolve(entry.data as T)
+  if (entry?.inflight) return entry.inflight as Promise<T>
+  const p = req<T>(path).then(data => {
+    _cache.set(path, { data, ts: Date.now() })
+    return data
+  }).catch(err => {
+    _cache.delete(path)
+    throw err
+  })
+  _cache.set(path, { data: null, ts: 0, inflight: p })
+  return p
+}
+
 const json = (body: unknown) => ({
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -148,13 +168,13 @@ export interface FeeInfo {
 }
 
 export const api = {
-  status: () => req<Status>('/api/status'),
+  status: () => cachedReq<Status>('/api/status', 30_000),
   startDownload: () => req<{ task_id: string }>('/api/download', { method: 'POST' }),
   downloadStatus: () => req<DownloadStatus>('/api/download/status'),
   hypotheses: () => req<Hypothesis[]>('/api/hypotheses'),
   analyze: (hypothesis_id: string | null) =>
     req<Record<string, unknown>>('/api/analyze', json({ hypothesis_id })),
-  results: () => req<ResultSummary[]>('/api/results'),
+  results: () => cachedReq<ResultSummary[]>('/api/results', 30_000),
   result: (run_id: string) => req<ResultDetail>(`/api/results/${run_id}`),
   formalize: (description: string, provider: string | null) =>
     req<FormalizeResponse>('/api/formalize', json({ description, provider })),
@@ -166,9 +186,9 @@ export const api = {
   aiModels: () => req<ModelSettings>('/api/settings/ai/models'),
   saveAiModel: (model: string | null) =>
     req<{ ok: boolean }>('/api/settings/ai/model', json({ model })),
-  pipelineStatus: () => req<PipelineStatus>('/api/pipeline/status'),
+  pipelineStatus: () => cachedReq<PipelineStatus>('/api/pipeline/status', 30_000),
   series: () => req<string[]>('/api/series'),
-  strategies: () => req<StrategyInfo[]>('/api/strategies'),
+  strategies: () => cachedReq<StrategyInfo[]>('/api/strategies', 60_000),
   strategize: (hypothesis_id: string, run_id: string | null, provider: string | null) =>
     req<StrategizeResponse>('/api/strategize', json({ hypothesis_id, run_id, provider })),
   saveStrategy: (code: string, strategy_name: string) =>
@@ -182,20 +202,20 @@ export const api = {
   backtestStatus: (taskId: string) => req<BacktestStatusResp>(`/api/backtest/${taskId}/status`),
   stopBacktest: (taskId: string) => req<{ ok: boolean }>(`/api/backtest/${taskId}/stop`, { method: 'POST' }),
   backtestResult: (taskId: string) => req<Record<string, unknown>>(`/api/backtest/${taskId}/result`),
-  backtestHistory: () => req<BacktestHistoryItem[]>('/api/backtest/history'),
+  backtestHistory: () => cachedReq<BacktestHistoryItem[]>('/api/backtest/history', 30_000),
   feeInfo: (series: string) => req<FeeInfo>(`/api/series/${encodeURIComponent(series)}/fee-info`),
 }
 
 // ── Research Dashboard ──────────────────────────────────────────────────────
 
 export function getResearchProfiles() {
-  return req<{ profiles: unknown[]; count: number }>('/api/research/profiles')
+  return cachedReq<{ profiles: unknown[]; count: number }>('/api/research/profiles', 120_000)
 }
 
 export function getLoopStatus() {
-  return req<{ phase: string; recent_activity: Array<{ decision: string; created_at: string }>; latest_checkpoint: { checkpoint: string; created_at: string } | null }>('/api/research/loop-status')
+  return cachedReq<{ phase: string; recent_activity: Array<{ decision: string; created_at: string }>; latest_checkpoint: { checkpoint: string; created_at: string } | null }>('/api/research/loop-status', 30_000)
 }
 
 export function getReviewQueue() {
-  return req<{ strategies: unknown[]; count: number }>('/api/research/review-queue')
+  return cachedReq<{ strategies: unknown[]; count: number }>('/api/research/review-queue', 60_000)
 }
