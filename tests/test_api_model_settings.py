@@ -5,6 +5,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("fastapi", reason="fastapi not installed")
 from fastapi.testclient import TestClient
 
 from api.main import app

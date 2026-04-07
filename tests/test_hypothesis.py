@@ -150,6 +150,7 @@ def test_empty_db_has_no_markets(tmp_db_path):
 
 def test_proportions_z_stat_negative_edge():
     """Verify z-stat is negative when actual win rate < implied probability."""
+    statsmodels = pytest.importorskip("statsmodels")
     from statsmodels.stats.proportion import proportions_ztest
     n = 100
     wins = 30
@@ -160,6 +161,7 @@ def test_proportions_z_stat_negative_edge():
 
 def test_proportions_z_stat_near_zero_for_fair_market():
     """Verify z-stat is near zero when actual win rate ≈ implied probability."""
+    pytest.importorskip("statsmodels")
     from statsmodels.stats.proportion import proportions_ztest
     n = 1000
     wins = 499  # ~50% ≈ implied 50%
