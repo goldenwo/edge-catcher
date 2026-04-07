@@ -170,7 +170,7 @@ export default function Research() {
 
       {/* Tab Content */}
       {tab === 'overview' && <OverviewTab running={loopStatus.running} />}
-      {tab === 'review' && <ReviewQueueTab onCountChange={setReviewCount} />}
+      {tab === 'review' && <ReviewQueueTab running={loopStatus.running} onCountChange={setReviewCount} />}
       {tab === 'activity' && <ActivityTab />}
       {tab === 'series' && <SeriesTab />}
     </div>
@@ -341,13 +341,13 @@ function OverviewTab({ running }: { running: boolean }) {
   ]
 
   const columns = [
-    { key: 'strategy', label: 'Strategy' },
-    { key: 'series', label: 'Series' },
-    { key: 'verdict', label: 'Verdict' },
-    { key: 'sharpe', label: 'Sharpe', right: true },
-    { key: 'win_rate', label: 'Win Rate', right: true },
-    { key: 'net_pnl_cents', label: 'PnL', right: true },
-    { key: 'total_trades', label: 'Trades', right: true },
+    { key: 'strategy', label: 'Strategy', sortable: false },
+    { key: 'series', label: 'Series', sortable: false },
+    { key: 'verdict', label: 'Verdict', sortable: false },
+    { key: 'sharpe', label: 'Sharpe', right: true, sortable: true },
+    { key: 'win_rate', label: 'Win Rate', right: true, sortable: true },
+    { key: 'net_pnl_cents', label: 'PnL', right: true, sortable: true },
+    { key: 'total_trades', label: 'Trades', right: true, sortable: true },
   ]
 
   return (
@@ -406,9 +406,10 @@ function OverviewTab({ running }: { running: boolean }) {
               {columns.map(col => (
                 <th
                   key={col.key}
-                  onClick={() => setSortCol(col.key)}
-                  className={`py-2 px-3 text-xs text-gray-400 font-medium cursor-pointer hover:text-white ${
-                    col.right ? 'text-right' : 'text-left'
+                  onClick={col.sortable ? () => setSortCol(col.key) : undefined}
+                  className={`py-2 px-3 text-xs text-gray-400 font-medium ${
+                    col.sortable ? 'cursor-pointer hover:text-white' : ''
+                  } ${col.right ? 'text-right' : 'text-left'
                   } ${sortCol === col.key ? 'text-indigo-400' : ''}`}
                 >
                   {col.label}
@@ -450,7 +451,7 @@ function OverviewTab({ running }: { running: boolean }) {
 
 // ── Review Queue Tab ────────────────────────────────────────────────────────
 
-function ReviewQueueTab({ onCountChange }: { onCountChange: (n: number) => void }) {
+function ReviewQueueTab({ running, onCountChange }: { running: boolean; onCountChange: (n: number) => void }) {
   const [queue, setQueue] = useState<ResearchResult[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -465,13 +466,21 @@ function ReviewQueueTab({ onCountChange }: { onCountChange: (n: number) => void 
     finally { setLoading(false) }
   }, [onCountChange])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+    if (!running) return
+    const id = setInterval(load, 5000)
+    return () => clearInterval(id)
+  }, [load, running])
 
   const handleApprove = async (id: string) => {
     try {
       await research.approve(id)
-      setQueue(q => q.filter(r => r.id !== id))
-      onCountChange(queue.length - 1)
+      setQueue(q => {
+        const next = q.filter(r => r.id !== id)
+        onCountChange(next.length)
+        return next
+      })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     }
@@ -480,9 +489,12 @@ function ReviewQueueTab({ onCountChange }: { onCountChange: (n: number) => void 
   const handleReject = async (id: string) => {
     try {
       await research.reject(id, 'Manually rejected from dashboard')
-      setQueue(q => q.filter(r => r.id !== id))
       setConfirmReject(null)
-      onCountChange(queue.length - 1)
+      setQueue(q => {
+        const next = q.filter(r => r.id !== id)
+        onCountChange(next.length)
+        return next
+      })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     }

@@ -1371,6 +1371,8 @@ def research_review_approve(
     result = tracker.get_result_by_id(hypothesis_id)
     if not result:
         raise HTTPException(status_code=404, detail=f"Hypothesis {hypothesis_id!r} not found")
+    if result.get("verdict") == "accepted":
+        return {"ok": True}
     tracker.update_verdict(hypothesis_id, "accepted")
     return {"ok": True}
 
@@ -1389,6 +1391,8 @@ def research_review_reject(
     result = tracker.get_result_by_id(hypothesis_id)
     if not result:
         raise HTTPException(status_code=404, detail=f"Hypothesis {hypothesis_id!r} not found")
+    if result.get("verdict") == "kill":
+        return {"ok": True}
     strategy = result["strategy"]
     all_strategy_results = tracker.list_results_for_strategy(strategy)
     kill_count = sum(1 for r in all_strategy_results if r.get("verdict") == "kill")
