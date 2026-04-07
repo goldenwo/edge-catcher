@@ -113,6 +113,7 @@ class LLMIdeator:
 		results = self.tracker.list_results()
 
 		promoted = [r for r in results if r["verdict"] == "promote"]
+		reviewed = [r for r in results if r["verdict"] == "review"]
 		explored = [r for r in results if r["verdict"] == "explore"]
 		killed = [r for r in results if r["verdict"] == "kill"]
 
@@ -133,11 +134,20 @@ class LLMIdeator:
 		parts: list[str] = []
 		parts.append("## Summary")
 		parts.append(f"Total backtests: {len(results)}")
-		parts.append(f"Promoted: {len(promoted)}, Explore: {len(explored)}, Killed: {len(killed)}")
+		parts.append(f"Promoted: {len(promoted)}, Review: {len(reviewed)}, Explore: {len(explored)}, Killed: {len(killed)}")
 
 		if promoted:
 			parts.append("\n## Promoted Strategies (strong edge)")
 			for r in promoted:
+				parts.append(
+					f"- {r['strategy']} × {r['series']} (db: {r['db_path']}): "
+					f"Sharpe={r['sharpe']:.2f}, WinRate={r['win_rate']:.1%}, "
+					f"PnL={r['net_pnl_cents']:.0f}¢, Trades={r['total_trades']}"
+				)
+
+		if reviewed:
+			parts.append("\n## Reviewed Strategies (passed all gates, DSR borderline)")
+			for r in reviewed:
 				parts.append(
 					f"- {r['strategy']} × {r['series']} (db: {r['db_path']}): "
 					f"Sharpe={r['sharpe']:.2f}, WinRate={r['win_rate']:.1%}, "
@@ -352,7 +362,9 @@ class LLMIdeator:
 			f"- Passed all gates: {passed_all} ({passed_all / total:.0%})",
 		]
 
-		# Most common failure gate
+		# Most common failure gate (note: pipeline short-circuits on first failure,
+		# so later gates have artificially inflated pass rates — they only see
+		# pre-filtered candidates)
 		failure_counts = {g: s["failed"] for g, s in gate_stats.items() if s["failed"] > 0}
 		if failure_counts:
 			worst_gate = max(failure_counts, key=lambda g: failure_counts[g])
