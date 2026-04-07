@@ -83,7 +83,7 @@ def _markets_yaml() -> Path:
 # ── status ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/status", response_model=StatusResponse)
-async def get_status(_: None = Depends(check_auth)) -> StatusResponse:
+def get_status(_: None = Depends(check_auth)) -> StatusResponse:
     from edge_catcher.storage.db import get_connection, get_db_stats
 
     db = _db_path()
@@ -198,7 +198,7 @@ async def get_download_status(_: None = Depends(check_auth)) -> DownloadStatusRe
 # ── hypotheses ────────────────────────────────────────────────────────────────
 
 @app.get("/api/hypotheses", response_model=list[HypothesisItem])
-async def get_hypotheses(_: None = Depends(check_auth)) -> list[HypothesisItem]:
+def get_hypotheses(_: None = Depends(check_auth)) -> list[HypothesisItem]:
     import yaml
 
     # Merge hypotheses from config/ and config.local/ (local overrides public)
@@ -222,7 +222,7 @@ async def get_hypotheses(_: None = Depends(check_auth)) -> list[HypothesisItem]:
 
 
 @app.post("/api/analyze")
-async def analyze(
+def analyze(
     body: AnalyzeRequest,
     _: None = Depends(check_auth),
 ) -> dict:
@@ -244,7 +244,7 @@ async def analyze(
 # ── results ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/results", response_model=list[ResultSummary])
-async def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
+def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
     from edge_catcher.storage.db import get_connection
 
     db = _db_path()
@@ -275,7 +275,7 @@ async def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
 
 
 @app.get("/api/results/{run_id}", response_model=ResultDetail)
-async def get_result(
+def get_result(
     run_id: str,
     _: None = Depends(check_auth),
 ) -> ResultDetail:
@@ -308,7 +308,7 @@ async def get_result(
 # ── AI ────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/formalize", response_model=FormalizeResponse)
-async def formalize_hypothesis(
+def formalize_hypothesis(
     body: FormalizeRequest,
     _: None = Depends(check_auth),
 ) -> FormalizeResponse:
@@ -338,7 +338,7 @@ async def formalize_hypothesis(
 
 
 @app.post("/api/interpret", response_model=InterpretResponse)
-async def interpret_result(
+def interpret_result(
     body: InterpretRequest,
     _: None = Depends(check_auth),
 ) -> InterpretResponse:
@@ -563,7 +563,7 @@ def _adapter_has_data(meta) -> bool:
 
 
 @app.get("/adapters", response_model=list[AdapterInfo])
-async def list_adapters() -> list[AdapterInfo]:
+def list_adapters() -> list[AdapterInfo]:
     result = []
     for meta in ADAPTERS:
         state = get_adapter_state(meta.id)
@@ -755,7 +755,7 @@ async def save_ai_model(body: ModelOverrideRequest) -> dict:
 # ── pipeline status ───────────────────────────────────────────────────────────
 
 @app.get("/api/pipeline/status", response_model=PipelineStatusResponse)
-async def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
+def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
     import yaml as _yaml
     from edge_catcher.runner.strategy_parser import list_strategies
 
@@ -823,7 +823,7 @@ async def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusRespon
 # ── series list ───────────────────────────────────────────────────────────────
 
 @app.get("/api/series")
-async def get_series(_: None = Depends(check_auth)) -> list[str]:
+def get_series(_: None = Depends(check_auth)) -> list[str]:
     db = _db_path()
     if not db.exists():
         return []
@@ -837,7 +837,7 @@ async def get_series(_: None = Depends(check_auth)) -> list[str]:
 
 
 @app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
-async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
+def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
     from api.adapter_registry import get_fee_model_for_db
     from edge_catcher.storage.db import get_connection
     db = _db_path()
@@ -863,7 +863,7 @@ async def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfo
 # ── strategies ────────────────────────────────────────────────────────────────
 
 @app.get("/api/strategies", response_model=list[StrategyInfo])
-async def get_strategies(_: None = Depends(check_auth)) -> list[StrategyInfo]:
+def get_strategies(_: None = Depends(check_auth)) -> list[StrategyInfo]:
     from edge_catcher.runner.strategy_parser import list_strategies, STRATEGIES_PUBLIC_PATH, STRATEGIES_LOCAL_PATH
     pub = list_strategies(file_path=STRATEGIES_PUBLIC_PATH)
     local = list_strategies(file_path=STRATEGIES_LOCAL_PATH)
@@ -873,7 +873,7 @@ async def get_strategies(_: None = Depends(check_auth)) -> list[StrategyInfo]:
 # ── strategize (AI) ───────────────────────────────────────────────────────────
 
 @app.post("/api/strategize", response_model=StrategizeResponse)
-async def strategize_endpoint(
+def strategize_endpoint(
     body: StrategizeRequest,
     _: None = Depends(check_auth),
 ) -> StrategizeResponse:
@@ -892,7 +892,7 @@ async def strategize_endpoint(
 # ── strategy save ─────────────────────────────────────────────────────────────
 
 @app.post("/api/strategies/save", response_model=StrategySaveResponse)
-async def save_strategy_endpoint(
+def save_strategy_endpoint(
     body: StrategySaveRequest,
     _: None = Depends(check_auth),
 ) -> StrategySaveResponse:
@@ -1084,7 +1084,7 @@ async def stop_backtest(task_id: str, _: None = Depends(check_auth)) -> dict:
 
 
 @app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
-async def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
+def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
     import json
     db = _db_path()
     if not db.exists():
@@ -1160,13 +1160,17 @@ async def backtest_result(task_id: str) -> dict:
 # ── Research Dashboard ───────────────────────────────────────────────────────
 
 
+def _research_db_path() -> Path:
+    return Path(os.getenv("RESEARCH_DB", "data/research.db"))
+
+
 @app.get("/api/research/profiles")
-async def research_profiles():
+def research_profiles(_: None = Depends(check_auth)):
     """Return series profiles from the Context Engine."""
     from edge_catcher.research.context_engine import ContextEngine
     import dataclasses
 
-    data_dir = Path("data")
+    data_dir = Path(os.getenv("DATA_DIR", "data"))
     db_paths = [str(p) for p in sorted(data_dir.glob("*.db")) if p.name != "research.db"]
 
     engine = ContextEngine(data_dir=str(data_dir))
@@ -1179,11 +1183,11 @@ async def research_profiles():
 
 
 @app.get("/api/research/loop-status")
-async def research_loop_status():
+def research_loop_status(_: None = Depends(check_auth)):
     """Return current loop phase, budget usage, and recent activity."""
     from edge_catcher.research.audit import AuditLog
 
-    research_db = "data/research.db"
+    research_db = str(_research_db_path())
     if not Path(research_db).exists():
         return {"phase": "idle", "recent_activity": [], "latest_checkpoint": None}
 
@@ -1210,11 +1214,11 @@ async def research_loop_status():
 
 
 @app.get("/api/research/review-queue")
-async def research_review_queue():
+def research_review_queue(_: None = Depends(check_auth)):
     """Return strategies with promote/review verdicts for human review."""
     from edge_catcher.research.tracker import Tracker
 
-    research_db = "data/research.db"
+    research_db = str(_research_db_path())
     if not Path(research_db).exists():
         return {"strategies": [], "count": 0}
 
