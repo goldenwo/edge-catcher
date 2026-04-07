@@ -168,6 +168,37 @@ class TestKillRegistryPrompt:
 		assert "... and 10 more killed strategies" in prompt
 
 
+class TestKillRegistryCLI:
+	def test_list_subcommand(self, tracker, tmp_path, capsys):
+		tracker.upsert_kill_registry("Dead1", 8, 10, 0.8, '["low sharpe"]')
+		from edge_catcher.__main__ import _cmd_research
+		from types import SimpleNamespace
+		args = SimpleNamespace(
+			research_db=str(tmp_path / "test_research.db"),
+			research_command="kill-registry",
+			kill_registry_action="list",
+			force=False,
+		)
+		_cmd_research(args)
+		captured = capsys.readouterr()
+		assert "Dead1" in captured.out
+
+	def test_reset_subcommand(self, tracker, tmp_path):
+		tracker.upsert_kill_registry("Dead1", 8, 10, 0.8, '["low sharpe"]')
+		from edge_catcher.__main__ import _cmd_research
+		from types import SimpleNamespace
+		args = SimpleNamespace(
+			research_db=str(tmp_path / "test_research.db"),
+			research_command="kill-registry",
+			kill_registry_action="reset",
+			kill_registry_strategy="Dead1",
+			force=False,
+		)
+		_cmd_research(args)
+		entries = tracker.list_kill_registry()
+		assert entries[0]["permanent"] == 0
+
+
 def _save_result(tracker, strategy, series, verdict, reason):
 	"""Helper: save a hypothesis + result pair via HypothesisResult."""
 	import uuid
