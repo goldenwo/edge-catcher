@@ -1,6 +1,7 @@
 """Tests for CoinbaseAdapter generalization."""
 
 import pytest
+pytest.importorskip("requests", reason="requests not installed")
 from edge_catcher.adapters.coinbase import CoinbaseAdapter
 
 

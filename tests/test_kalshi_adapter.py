@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
+pytest.importorskip("requests", reason="requests not installed")
 from edge_catcher.adapters.kalshi import KalshiAdapter
 
 

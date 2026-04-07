@@ -79,5 +79,5 @@ class TestPipelineWithRealGates:
 		assert len(gates) == 4
 		assert gates[0].name == "deflated_sharpe"
 		assert gates[1].name == "monte_carlo"
-		assert gates[2].name == "walk_forward"
+		assert gates[2].name == "temporal_consistency"
 		assert gates[3].name == "param_sensitivity"

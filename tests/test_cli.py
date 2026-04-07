@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+requests = pytest.importorskip("requests", reason="requests not installed")
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a minimal args Namespace for _cmd_download

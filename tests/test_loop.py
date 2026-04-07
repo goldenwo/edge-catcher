@@ -192,6 +192,8 @@ class TestRefinementResumeWalkBackwards:
         loop.run_id = "test"
         loop._cached_results = None
 
+        loop._cached_results = None  # __new__ bypasses __init__
+
         # Simulate: Foo has 2 prior iterations, but only FooV2 code exists (FooV3 save failed)
         loop.tracker = MagicMock()
         loop.tracker.list_results.return_value = [
