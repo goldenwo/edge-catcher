@@ -185,3 +185,17 @@ export const api = {
   backtestHistory: () => req<BacktestHistoryItem[]>('/api/backtest/history'),
   feeInfo: (series: string) => req<FeeInfo>(`/api/series/${encodeURIComponent(series)}/fee-info`),
 }
+
+// ── Research Dashboard ──────────────────────────────────────────────────────
+
+export function getResearchProfiles() {
+  return req<{ profiles: unknown[]; count: number }>('/api/research/profiles')
+}
+
+export function getLoopStatus() {
+  return req<{ phase: string; recent_activity: Array<{ decision: string; created_at: string }>; latest_checkpoint: { checkpoint: string; created_at: string } | null }>('/api/research/loop-status')
+}
+
+export function getReviewQueue() {
+  return req<{ strategies: unknown[]; count: number }>('/api/research/review-queue')
+}
