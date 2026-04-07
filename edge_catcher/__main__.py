@@ -360,6 +360,7 @@ def _cmd_backtest(args) -> None:
     from datetime import date
 
     json_mode = getattr(args, 'json', False)
+    ohlc_provider = None
 
     # --- --list-strategies: output unique strategy names and exit ---
     if getattr(args, 'list_strategies', False):
@@ -447,6 +448,17 @@ def _cmd_backtest(args) -> None:
 
             strategies.append(cls(**kwargs))
 
+        # Inject OHLC provider if --ohlc-config is provided
+        ohlc_provider = None
+        if getattr(args, 'ohlc_config', None):
+            from edge_catcher.research.ohlc_provider import OHLCProvider
+            ohlc_map = json.loads(args.ohlc_config)
+            ohlc_provider = OHLCProvider({
+                asset: (paths[0], paths[1]) for asset, paths in ohlc_map.items()
+            })
+            for s in strategies:
+                s.ohlc = ohlc_provider
+
         start = date.fromisoformat(args.start) if args.start else None
         end = date.fromisoformat(args.end) if args.end else None
 
@@ -486,6 +498,9 @@ def _cmd_backtest(args) -> None:
             print(json.dumps({"status": "error", "message": str(exc)}))
             sys.exit(1)
         raise
+    finally:
+        if ohlc_provider is not None:
+            ohlc_provider.close()
 
 
 def _cmd_research(args) -> None:
@@ -802,6 +817,9 @@ def main() -> None:
                     help="Path to BTC OHLC database (default: data/btc.db)")
     bt.add_argument("--altcoin-ohlc-db", default="data/ohlc.db", dest="altcoin_ohlc_db",
                     help="Path to altcoin OHLC database (default: data/ohlc.db)")
+    bt.add_argument("--ohlc-config", default=None, dest="ohlc_config",
+                    help='JSON mapping asset names to [db_path, table] pairs '
+                         '(e.g. \'{"btc": ["data/kalshi.db", "btc_ohlc"]}\')')
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from edge_catcher.storage.models import Market, Trade
 
 if TYPE_CHECKING:
+	from edge_catcher.research.ohlc_provider import OHLCProvider
 	from edge_catcher.runner.event_backtest import Portfolio
 
 
@@ -39,6 +40,7 @@ class Strategy(ABC):
 	The backtester handles position management, settlement, and P&L tracking.
 	"""
 	name: str
+	ohlc: "OHLCProvider | None" = None  # Set by backtester if external OHLC data is available
 
 	@abstractmethod
 	def on_trade(self, trade: Trade, market: Market, portfolio: 'Portfolio') -> list[Signal]:
