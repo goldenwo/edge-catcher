@@ -12,7 +12,7 @@ import re
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from .agent import ResearchAgent
@@ -125,6 +125,7 @@ class LoopOrchestrator:
 			all_results.extend(grid_results)
 			runs_used += len(grid_results)
 			self._write_phase_outcomes(journal, grid_results, "grid")
+			self._update_kill_registry()
 		elif not self.refine_only:
 			ideate_results, llm_calls_used = self._run_ideate_phase(
 				agent, queue, strategies, series_map,
@@ -133,6 +134,7 @@ class LoopOrchestrator:
 			all_results.extend(ideate_results)
 			runs_used += len(ideate_results)
 			self._write_phase_outcomes(journal, ideate_results, "ideate")
+			self._update_kill_registry()
 
 		# ── Integrity Checkpoint ─────────────────────────────────────
 		tracker_results = self._list_results(refresh=True)
@@ -155,6 +157,7 @@ class LoopOrchestrator:
 				all_results.extend(expand_results)
 				runs_used += len(expand_results)
 				self._write_phase_outcomes(journal, expand_results, "expand")
+				self._update_kill_registry()
 
 		# ── Phase 3: Refine ──────────────────────────────────────────
 		if not self.grid_only:
@@ -168,6 +171,7 @@ class LoopOrchestrator:
 				all_results.extend(refine_results)
 				runs_used += len(refine_results)
 				self._write_phase_outcomes(journal, refine_results, "refine")
+				self._update_kill_registry()
 
 		# ── Journal summary ───────────────────────────────────────────────
 		self._write_journal_summary(journal, all_results)
@@ -677,6 +681,42 @@ class LoopOrchestrator:
 				"verdicts": dict(verdicts),
 				"best_sharpe": best_sharpe,
 			})
+
+	def _update_kill_registry(self) -> None:
+		"""Upsert strategies with kill_rate >= 0.8 across >= 3 series into the kill registry.
+
+		Excludes strategies with any promote or review verdict.
+		"""
+		results = self._list_results(refresh=True)
+		by_strategy: dict[str, list[dict]] = defaultdict(list)
+		for r in results:
+			by_strategy[r["strategy"]].append(r)
+
+		for strategy, strat_results in by_strategy.items():
+			verdicts = [r["verdict"] for r in strat_results]
+			if "promote" in verdicts or "review" in verdicts:
+				continue
+
+			series_tested = len(set(r["series"] for r in strat_results))
+			if series_tested < 3:
+				continue
+
+			kill_count = verdicts.count("kill")
+			kill_rate = kill_count / series_tested
+			if kill_rate < 0.8:
+				continue
+
+			reasons = [r["verdict_reason"] for r in strat_results if r["verdict"] == "kill"]
+			reason_counts = Counter(reasons).most_common(5)
+			reason_summary = json.dumps([f"{reason}: {count}x" for reason, count in reason_counts])
+
+			self.tracker.upsert_kill_registry(
+				strategy=strategy,
+				kill_count=kill_count,
+				series_tested=series_tested,
+				kill_rate=kill_rate,
+				reason_summary=reason_summary,
+			)
 
 	def _write_journal_summary(
 		self,
