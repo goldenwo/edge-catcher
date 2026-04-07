@@ -247,6 +247,10 @@ class LoopOrchestrator:
 			report = reporter.generate_report(all_results)
 			reporter.save(report, self.output_path)
 
+		# Dead code cleanup
+		if not self.grid_only:
+			self._cleanup_dead_strategies()
+
 		# Determine exit code
 		grid_remaining = 0
 		if self.grid_only:
@@ -775,6 +779,54 @@ class LoopOrchestrator:
 				kill_rate=kill_rate,
 				reason_summary=reason_summary,
 			)
+
+	def _cleanup_dead_strategies(self) -> None:
+		"""Remove dead strategy code from strategies_local.py."""
+		from edge_catcher.runner.strategy_parser import (
+			cleanup_dead_strategies, STRATEGIES_LOCAL_PATH, list_strategies,
+		)
+
+		registry = self.tracker.list_kill_registry(permanent_only=True)
+		if not registry:
+			return
+
+		# Safety check: exclude strategies with any promote/review verdict
+		results = self._list_results()
+		has_good_verdict = set()
+		for r in results:
+			if r["verdict"] in ("promote", "review"):
+				has_good_verdict.add(r["strategy"])
+
+		# Also exclude parents of active refinement chains
+		for r in results:
+			strategy = r["strategy"]
+			if r["verdict"] != "kill":
+				# Check if this is a refinement (e.g., StratV2 → parent is Strat)
+				for suffix in ("V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10"):
+					if strategy.endswith(suffix):
+						parent = strategy[:-len(suffix)]
+						has_good_verdict.add(parent)
+
+		dead_strategy_names = [
+			e["strategy"] for e in registry
+			if e["strategy"] not in has_good_verdict
+		]
+
+		if not dead_strategy_names:
+			return
+
+		# Map strategy names (snake_case) to class names (CamelCase)
+		known = list_strategies(file_path=STRATEGIES_LOCAL_PATH)
+		name_to_class = {s["name"]: s["class_name"] for s in known}
+		dead_class_names = [
+			name_to_class[n] for n in dead_strategy_names
+			if n in name_to_class
+		]
+
+		if dead_class_names:
+			removed = cleanup_dead_strategies(STRATEGIES_LOCAL_PATH, dead_class_names)
+			if removed:
+				logger.info("Cleaned up %d dead strategies from strategies_local.py: %s", len(removed), removed)
 
 	def _write_journal_summary(
 		self,
