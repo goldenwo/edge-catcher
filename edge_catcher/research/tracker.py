@@ -49,6 +49,23 @@ CREATE TABLE IF NOT EXISTS results (
     completed_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS kill_registry (
+    strategy TEXT PRIMARY KEY,
+    kill_count INTEGER NOT NULL,
+    series_tested INTEGER NOT NULL,
+    kill_rate REAL NOT NULL,
+    reason_summary TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    permanent INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS strategy_fingerprints (
+    fingerprint TEXT PRIMARY KEY,
+    strategy_name TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hypothesis_dedup
     ON hypotheses(strategy, series, db_path, start_date, end_date, fee_pct);
 """
@@ -247,5 +264,92 @@ class Tracker:
                 ).fetchall()
             }
             return {"total": total, "by_verdict": by_verdict}
+        finally:
+            conn.close()
+
+    def upsert_kill_registry(
+        self,
+        strategy: str,
+        kill_count: int,
+        series_tested: int,
+        kill_rate: float,
+        reason_summary: str,
+    ) -> None:
+        """Upsert a strategy into the kill registry. Always sets permanent=TRUE."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO kill_registry (strategy, kill_count, series_tested, kill_rate, reason_summary)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(strategy) DO UPDATE SET
+                     kill_count=excluded.kill_count,
+                     series_tested=excluded.series_tested,
+                     kill_rate=excluded.kill_rate,
+                     reason_summary=excluded.reason_summary,
+                     permanent=1""",
+                (strategy, kill_count, series_tested, kill_rate, reason_summary),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def reset_kill_registry(self, strategy: str) -> None:
+        """Mark a strategy as non-permanent, allowing re-proposal."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE kill_registry SET permanent=0 WHERE strategy=?",
+                (strategy,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_kill_registry(self, permanent_only: bool = False) -> list[dict]:
+        """Return all kill registry entries, optionally filtered to permanent only."""
+        conn = self._connect()
+        try:
+            query = "SELECT * FROM kill_registry"
+            if permanent_only:
+                query += " WHERE permanent=1"
+            query += " ORDER BY kill_rate DESC, kill_count DESC"
+            rows = conn.execute(query).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def save_fingerprint(self, fingerprint: str, strategy_name: str, code_hash: str) -> None:
+        """Record a strategy's AST fingerprint."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO strategy_fingerprints (fingerprint, strategy_name, code_hash) VALUES (?, ?, ?)",
+                (fingerprint, strategy_name, code_hash),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def check_fingerprint(self, fingerprint: str) -> Optional[str]:
+        """Return strategy name if fingerprint exists, else None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT strategy_name FROM strategy_fingerprints WHERE fingerprint=?",
+                (fingerprint,),
+            ).fetchone()
+            return row["strategy_name"] if row else None
+        finally:
+            conn.close()
+
+    def check_code_hash(self, code_hash: str) -> Optional[str]:
+        """Return strategy name if code hash exists, else None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT strategy_name FROM strategy_fingerprints WHERE code_hash=?",
+                (code_hash,),
+            ).fetchone()
+            return row["strategy_name"] if row else None
         finally:
             conn.close()

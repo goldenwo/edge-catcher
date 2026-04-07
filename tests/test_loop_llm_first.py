@@ -27,6 +27,7 @@ class TestLoopPhaseOrder:
         orch.research_db = "data/research.db"
         orch.max_time_seconds = None
         orch._cached_results = None
+        orch.max_stuck_runs = 3
         orch.output_path = None
         orch.run_id = "test-run-id"
 
@@ -37,10 +38,14 @@ class TestLoopPhaseOrder:
              patch.object(orch, '_discover_series', return_value={}), \
              patch.object(orch, '_list_results', return_value=[]), \
              patch.object(orch, '_write_phase_outcomes'), \
-             patch.object(orch, '_write_journal_summary'), \
+             patch.object(orch, '_write_journal_summary', return_value="stuck"), \
+             patch.object(orch, '_update_kill_registry'), \
+             patch.object(orch, '_cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue'), \
-             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal'):
+             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:
+
+            MockJournal.return_value.get_latest_trajectory.return_value = None
 
             orch.tracker = MagicMock()
             orch.audit = MagicMock()
@@ -86,6 +91,7 @@ class TestLoopPhaseOrder:
         orch.research_db = "data/research.db"
         orch.max_time_seconds = None
         orch._cached_results = None
+        orch.max_stuck_runs = 3
         orch.output_path = None
         orch.run_id = "test-run-id"
 
@@ -93,10 +99,15 @@ class TestLoopPhaseOrder:
              patch.object(orch, '_discover_series', return_value={"data/test.db": ["KXTEST"]}), \
              patch.object(orch, '_list_results', return_value=[]), \
              patch.object(orch, '_write_phase_outcomes'), \
-             patch.object(orch, '_write_journal_summary'), \
+             patch.object(orch, '_write_journal_summary', return_value="stuck"), \
+             patch.object(orch, '_update_kill_registry'), \
+             patch.object(orch, '_cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue') as MockQueue, \
-             patch('edge_catcher.research.loop.GridPlanner') as MockPlanner:
+             patch('edge_catcher.research.loop.GridPlanner') as MockPlanner, \
+             patch('edge_catcher.research.journal.ResearchJournal') as MockJournal:
+
+            MockJournal.return_value.get_latest_trajectory.return_value = None
 
             orch.tracker = MagicMock()
             orch.audit = MagicMock()
