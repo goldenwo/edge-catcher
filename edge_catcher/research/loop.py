@@ -137,8 +137,9 @@ class LoopOrchestrator:
 		# ── Integrity Checkpoint ─────────────────────────────────────
 		tracker_results = self._list_results(refresh=True)
 		result_hash = self.audit.compute_result_hash(tracker_results)
+		checkpoint_name = "post_grid" if self.grid_only else "post_ideate"
 		self.audit.record_integrity(
-			checkpoint="post_ideate",
+			checkpoint=checkpoint_name,
 			result_hash=result_hash,
 			result_count=len(tracker_results),
 		)

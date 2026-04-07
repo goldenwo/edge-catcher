@@ -69,7 +69,8 @@ class TestLoopOrchestratorGridOnly:
 
 
 class TestLoopOrchestratorLLMOnly:
-    def test_llm_only_requires_min_results(self, tmp_path):
+    def test_llm_only_cold_start_with_context(self, tmp_path):
+        """LLM-only mode now supports cold start via Context Engine — no min results needed."""
         db_path = tmp_path / "research.db"
         orch = LoopOrchestrator(
             research_db=str(db_path),
@@ -80,10 +81,15 @@ class TestLoopOrchestratorLLMOnly:
         )
         with patch.object(orch, "_discover_strategies", return_value=["A"]), \
              patch.object(orch, "_discover_series", return_value={"data/k.db": ["S1"]}), \
-             patch("edge_catcher.research.loop.ResearchAgent"):
+             patch("edge_catcher.research.loop.ResearchAgent"), \
+             patch.object(orch, "_run_ideate_phase", return_value=([], 0)) as mock_ideate, \
+             patch.object(orch, "_write_phase_outcomes"), \
+             patch.object(orch, "_write_journal_summary"):
 
             exit_code, results = orch.run()
-            assert exit_code == 1  # error — not enough data
+            # With context engine, cold start is supported — ideate phase runs
+            mock_ideate.assert_called_once()
+            assert exit_code == 0
 
 
 class TestLoopOrchestratorIntegrity:
