@@ -40,13 +40,16 @@ class LLMIdeator:
 		start_date: str,
 		end_date: str,
 		fee_pct: float = 1.0,
+		context_block: str | None = None,
+		profiles: list | None = None,
 	) -> tuple[list[Hypothesis], list[dict]]:
 		"""Run one LLM ideation call and return (hypotheses, novel_proposals).
 
-		Raises ValueError if tracker has fewer than _MIN_RESULTS_FOR_IDEATION results.
+		Raises ValueError if tracker has fewer than _MIN_RESULTS_FOR_IDEATION results
+		and no context_block is provided.
 		"""
 		results = self.tracker.list_results()
-		if len(results) < _MIN_RESULTS_FOR_IDEATION:
+		if len(results) < _MIN_RESULTS_FOR_IDEATION and context_block is None:
 			raise ValueError(
 				f"Not enough data for LLM ideation "
 				f"({len(results)} results, need ≥{_MIN_RESULTS_FOR_IDEATION}). "
@@ -54,7 +57,10 @@ class LLMIdeator:
 			)
 
 		system_prompt = self._load_system_prompt()
-		user_prompt = self.build_ideation_prompt(available_strategies, series_map)
+		user_prompt = self.build_ideation_prompt(
+			available_strategies, series_map,
+			context_block=context_block, profiles=profiles,
+		)
 
 		prompt_hash = hashlib.sha256(
 			(system_prompt + user_prompt).encode()
@@ -108,6 +114,8 @@ class LLMIdeator:
 		self,
 		available_strategies: list[str],
 		series_map: dict[str, list[str]],
+		context_block: str | None = None,
+		profiles: list | None = None,
 	) -> str:
 		"""Build the user prompt from current Tracker state."""
 		results = self.tracker.list_results()
@@ -132,6 +140,12 @@ class LLMIdeator:
 		untested = all_combos - tested_combos
 
 		parts: list[str] = []
+
+		# Block 1: Market context (when provided by Context Engine)
+		if context_block:
+			parts.append(context_block)
+			parts.append("")
+
 		parts.append("## Summary")
 		parts.append(f"Total backtests: {len(results)}")
 		parts.append(f"Promoted: {len(promoted)}, Review: {len(reviewed)}, Explore: {len(explored)}, Killed: {len(killed)}")
@@ -188,9 +202,10 @@ class LLMIdeator:
 
 		parts.append(f"\n## Available Strategies: {', '.join(available_strategies)}")
 
-		parts.append(f"\n## Available Data")
-		for db_path, series_list in series_map.items():
-			parts.append(f"- {db_path}: {', '.join(series_list)}")
+		if not context_block:
+			parts.append(f"\n## Available Data")
+			for db_path, series_list in series_map.items():
+				parts.append(f"- {db_path}: {', '.join(series_list)}")
 
 		if untested:
 			parts.append(f"\n## Untested Combinations ({len(untested)} remaining)")
@@ -209,6 +224,12 @@ class LLMIdeator:
 		self_performance = self._build_self_performance_summary()
 		if self_performance:
 			parts.append(f"\n{self_performance}")
+
+		# Context-driven directives — cross-series relationships and OHLC availability
+		if profiles:
+			context_directives = self._build_context_directives(profiles)
+			if context_directives:
+				parts.append(context_directives)
 
 		return "\n".join(parts)
 
@@ -451,6 +472,51 @@ class LLMIdeator:
 		parts = ["### What To Try Next"]
 		for d in directives:
 			parts.append(f"- {d}")
+		return "\n".join(parts)
+
+	@staticmethod
+	def _build_context_directives(profiles: list) -> str:
+		"""Build steering directives from series profiles."""
+		if not profiles:
+			return ""
+
+		parts: list[str] = ["\n## Context-Driven Directives\n"]
+
+		# Group by external asset to find cross-series relationships
+		by_asset: dict[str, list] = {}
+		with_ohlc: list[str] = []
+		without_ohlc: list[str] = []
+
+		for p in profiles:
+			if p.external_asset:
+				by_asset.setdefault(p.external_asset, []).append(p)
+				with_ohlc.append(p.series_ticker)
+			else:
+				without_ohlc.append(p.series_ticker)
+
+		# Cross-series structural relationships
+		for asset, group in by_asset.items():
+			if len(group) > 1:
+				tickers = ", ".join(p.series_ticker for p in group)
+				freqs = ", ".join(p.settlement_frequency for p in group)
+				parts.append(
+					f"- {tickers} are the same asset ({asset.upper()}) at different "
+					f"frequencies ({freqs}). If a strategy works on one, reason about "
+					f"whether it should transfer to the others."
+				)
+
+		# OHLC availability
+		if with_ohlc:
+			parts.append(
+				f"\n- These series have external OHLC data (strategies can use "
+				f"`self.ohlc`): {', '.join(sorted(with_ohlc))}"
+			)
+		if without_ohlc:
+			parts.append(
+				f"- These series have NO external data (strategies must rely on "
+				f"contract microstructure only): {', '.join(sorted(without_ohlc))}"
+			)
+
 		return "\n".join(parts)
 
 	@staticmethod

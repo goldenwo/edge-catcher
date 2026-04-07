@@ -177,3 +177,110 @@ class TestFindRelatedSeries:
 
 		engine = ContextEngine()
 		assert engine.find_related_series("UNKNOWN", [], same_asset_class=True) == []
+
+
+class TestIdeatorContextIntegration:
+	def test_ideate_accepts_context_block(self):
+		"""ideate() should accept context_block parameter."""
+		import inspect
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		sig = inspect.signature(LLMIdeator.ideate)
+		assert "context_block" in sig.parameters
+
+	def test_build_prompt_includes_context_block(self):
+		"""build_ideation_prompt should include context block when provided."""
+		from unittest.mock import MagicMock
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = []
+		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+
+		prompt = ideator.build_ideation_prompt(
+			available_strategies=["example"],
+			series_map={"data/test.db": ["KXTEST"]},
+			context_block="## Market Profiles\nKXTEST: test series",
+		)
+		assert "## Market Profiles" in prompt
+		# "Available Data" section should be removed when context_block is present
+		assert "## Available Data" not in prompt
+
+	def test_build_prompt_without_context_block_unchanged(self):
+		"""Without context_block, prompt should still have Available Data."""
+		from unittest.mock import MagicMock
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = []
+		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+
+		prompt = ideator.build_ideation_prompt(
+			available_strategies=["example"],
+			series_map={"data/test.db": ["KXTEST"]},
+		)
+		assert "## Available Data" in prompt
+
+	def test_cold_start_bypasses_min_results(self):
+		"""With context_block, ideate should not raise for < 10 results."""
+		from unittest.mock import MagicMock
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = []  # 0 results
+
+		client = MagicMock()
+		client.complete.return_value = '{"analysis":"test","existing_strategy_hypotheses":[],"novel_strategy_proposals":[]}'
+		client._resolve_model.return_value = "test-model"
+		client.last_usage = {"input_tokens": 0, "output_tokens": 0}
+
+		ideator = LLMIdeator(
+			tracker=tracker, audit=MagicMock(), client=client,
+		)
+		# Should NOT raise ValueError with context_block
+		hypotheses, proposals = ideator.ideate(
+			available_strategies=["example"],
+			series_map={"data/test.db": ["KXTEST"]},
+			context_block="## Market Profiles\ntest",
+			start_date="2025-01-01",
+			end_date="2025-12-31",
+		)
+		assert isinstance(hypotheses, list)
+
+
+class TestSteeringDirectives:
+	def test_steering_includes_cross_series_notes(self):
+		"""Steering directives should mention cross-series relationships when profiles are available."""
+		from unittest.mock import MagicMock
+		from edge_catcher.research.context_engine import SeriesProfile
+		from edge_catcher.research.llm_ideator import LLMIdeator
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = []
+		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
+
+		profiles = [
+			SeriesProfile(
+				series_ticker="KXXRP", db_path="data/alt.db",
+				description="XRP hourly", settlement_frequency="hourly",
+				market_count=1000, date_range=("2025-01-01", "2025-12-31"),
+				volume_stats={"median": 10, "mean": 20, "p90": 50},
+				price_distribution={"extreme": 0.5, "mid": 0.2, "moderate": 0.3},
+				result_distribution={"yes": 0.5, "no": 0.5},
+				asset_class="Crypto", external_asset="xrp",
+			),
+			SeriesProfile(
+				series_ticker="KXXRPD", db_path="data/alt.db",
+				description="XRP daily", settlement_frequency="daily",
+				market_count=500, date_range=("2025-01-01", "2025-12-31"),
+				volume_stats={"median": 50, "mean": 80, "p90": 200},
+				price_distribution={"extreme": 0.4, "mid": 0.3, "moderate": 0.3},
+				result_distribution={"yes": 0.5, "no": 0.5},
+				asset_class="Crypto", external_asset="xrp",
+			),
+		]
+
+		directives = ideator._build_context_directives(profiles)
+		assert "KXXRP" in directives
+		assert "KXXRPD" in directives
+		assert "same asset" in directives.lower() or "xrp" in directives.lower()
