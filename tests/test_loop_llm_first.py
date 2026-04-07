@@ -30,6 +30,8 @@ class TestLoopPhaseOrder:
         orch.max_stuck_runs = 3
         orch.output_path = None
         orch.run_id = "test-run-id"
+        orch.cancel_event = None
+        orch.on_progress = None
 
         with patch.object(orch, '_run_ideate_phase', return_value=([], 0)) as mock_ideate, \
              patch.object(orch, '_run_expand_phase', return_value=[]) as mock_expand, \
@@ -94,6 +96,8 @@ class TestLoopPhaseOrder:
         orch.max_stuck_runs = 3
         orch.output_path = None
         orch.run_id = "test-run-id"
+        orch.cancel_event = None
+        orch.on_progress = None
 
         with patch.object(orch, '_discover_strategies', return_value=["example"]), \
              patch.object(orch, '_discover_series', return_value={"data/test.db": ["KXTEST"]}), \

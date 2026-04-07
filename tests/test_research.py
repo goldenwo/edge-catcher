@@ -231,6 +231,70 @@ class TestTracker:
         import json
         assert json.loads(row["validation_details"])[0]["gate_name"] == "deflated_sharpe"
 
+    def test_force_rerun_updates_existing_result_no_orphan(self, tmp_path):
+        """When --force creates a new hypothesis ID for the same combo,
+        save_result should update the existing result, not create an orphan."""
+        tracker = Tracker(tmp_path / "research.db")
+
+        # Save initial result
+        r1 = _make_result(strategy="C", series="KXBTCD", verdict="kill", verdict_reason="bad")
+        tracker.save_result(r1)
+        original_id = r1.hypothesis.id
+
+        # Simulate --force: new Hypothesis with different UUID, same dedup key
+        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+                        start_date="2025-01-01", end_date="2025-12-31")
+        assert h2.id != original_id  # different UUID
+        r2 = HypothesisResult(
+            hypothesis=h2, status="ok", total_trades=200, wins=180, losses=20,
+            win_rate=0.90, net_pnl_cents=1000.0, sharpe=5.0, max_drawdown_pct=2.0,
+            fees_paid_cents=50.0, avg_win_cents=10.0, avg_loss_cents=-5.0,
+            per_strategy={}, verdict="promote", verdict_reason="strong edge",
+            raw_json={},
+        )
+        tracker.save_result(r2)
+
+        # Should have exactly 1 result, not 2 (no orphan)
+        rows = tracker.list_results()
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "promote"
+        assert rows[0]["sharpe"] == 5.0
+        assert rows[0]["strategy"] == "C"
+
+        # No orphaned results
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "research.db"))
+        orphans = conn.execute(
+            "SELECT COUNT(*) FROM results r LEFT JOIN hypotheses h ON r.hypothesis_id = h.id WHERE h.id IS NULL"
+        ).fetchone()[0]
+        conn.close()
+        assert orphans == 0
+
+    def test_delete_orphaned_results(self, tmp_path):
+        """delete_orphaned_results removes result rows with no matching hypothesis."""
+        tracker = Tracker(tmp_path / "research.db")
+
+        # Save a normal result
+        r = _make_result(verdict="promote", verdict_reason="good")
+        tracker.save_result(r)
+
+        # Manually insert an orphan
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "research.db"))
+        conn.execute(
+            """INSERT INTO results (hypothesis_id, status, total_trades, wins, losses,
+               win_rate, net_pnl_cents, sharpe, max_drawdown_pct, fees_paid_cents,
+               avg_win_cents, avg_loss_cents, verdict, verdict_reason, completed_at)
+               VALUES ('orphan-id', 'ok', 50, 25, 25, 0.5, 100, 1.0, 5.0, 10, 5, -5,
+                       'kill', 'orphan', '2026-01-01')"""
+        )
+        conn.commit()
+        conn.close()
+
+        deleted = tracker.delete_orphaned_results()
+        assert deleted == 1
+        assert len(tracker.list_results()) == 1
+
 
 # ---------------------------------------------------------------------------
 # Reporter

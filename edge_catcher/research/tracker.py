@@ -150,6 +150,16 @@ class Tracker:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+            # Resolve the actual hypothesis ID — if the dedup index caused
+            # INSERT OR IGNORE to skip, h.id won't exist in the table and
+            # the result would become an orphan.
+            row = conn.execute(
+                """SELECT id FROM hypotheses
+                   WHERE strategy=? AND series=? AND db_path=?
+                     AND start_date=? AND end_date=? AND fee_pct=?""",
+                (h.strategy, h.series, h.db_path, h.start_date, h.end_date, h.fee_pct),
+            ).fetchone()
+            actual_id = row["id"] if row else h.id
             conn.execute(
                 """INSERT OR REPLACE INTO results
                    (hypothesis_id, status, total_trades, wins, losses, win_rate,
@@ -158,7 +168,7 @@ class Tracker:
                     verdict, verdict_reason, raw_json, validation_details, completed_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    h.id,
+                    actual_id,
                     result.status,
                     result.total_trades,
                     result.wins,
@@ -204,7 +214,7 @@ class Tracker:
         finally:
             conn.close()
 
-    def list_results(self, limit: int | None = None, offset: int | None = None, sort: str = "completed_at") -> list[dict]:
+    def list_results(self, limit: int | None = None, offset: int | None = None, sort: str = "completed_at", verdict: str | None = None) -> list[dict]:
         """Return all results as plain dicts, joined with hypothesis metadata."""
         conn = self._connect()
         try:
@@ -219,15 +229,19 @@ class Tracker:
                           r.verdict, r.verdict_reason, r.validation_details, r.completed_at
                FROM hypotheses h
                JOIN results r ON h.id = r.hypothesis_id
-               ORDER BY r.{sort} DESC
         """
+            params: list = []
+            if verdict is not None:
+                query += " WHERE r.verdict = ?"
+                params.append(verdict)
+            query += f" ORDER BY r.{sort} DESC"
             if limit is not None:
                 query += f" LIMIT {int(limit)}"
             if offset is not None:
                 if limit is None:
                     query += " LIMIT -1"
                 query += f" OFFSET {int(offset)}"
-            rows = conn.execute(query).fetchall()
+            rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -265,6 +279,19 @@ class Tracker:
                 (hypothesis_id,),
             ).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_orphaned_results(self) -> int:
+        """Delete result rows whose hypothesis_id has no matching hypothesis."""
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                """DELETE FROM results
+                   WHERE hypothesis_id NOT IN (SELECT id FROM hypotheses)"""
+            )
+            conn.commit()
+            return cursor.rowcount
         finally:
             conn.close()
 

@@ -6,7 +6,6 @@ import logging
 import math
 import re
 import statistics
-from collections import defaultdict
 
 from scipy.stats import norm
 
@@ -77,7 +76,7 @@ class DeflatedSharpeGate(Gate):
 		skew = _skewness(pnl)
 		kurt = _kurtosis(pnl)  # excess kurtosis: normal = 0
 
-		# Count distinct strategies and collect all Sharpe values from tracker
+		# Count distinct strategy families for N (independent research ideas)
 		if context.tracker is None:
 			return GateResult(
 				passed=False, gate_name=self.name,
@@ -85,40 +84,28 @@ class DeflatedSharpeGate(Gate):
 				details={},
 			)
 		all_results = context.tracker.list_results()
-
-		# Normalize backtester Sharpes to per-trade scale: bt_sharpe / sqrt(N).
-		# This MUST match sr_observed above (mean/std without sqrt(N) scaling).
-		# Group by strategy family (e.g. FooV1, FooV2 → Foo) so N counts
-		# independent research ideas, not parameter variants.
 		ok_results = [r for r in all_results if r.get("status") == "ok"]
-		sharpes_by_family: dict[str, list[float]] = defaultdict(list)
+		families: set[str] = set()
 		for r in ok_results:
-			bt_sharpe = r["sharpe"]
-			trades = r.get("total_trades", 0)
-			if trades >= 1:
-				family = _strategy_family(r["strategy"])
-				sharpes_by_family[family].append(
-					bt_sharpe / math.sqrt(trades)
-				)
-
-		# One representative Sharpe per family (mean across its backtests)
-		ok_sharpes = [
-			statistics.mean(v) for v in sharpes_by_family.values()
-		]
-		N = len(ok_sharpes)
+			if r.get("total_trades", 0) >= 1:
+				families.add(_strategy_family(r["strategy"]))
+		N = len(families)
 
 		if N < 2:
 			return GateResult(
 				passed=False, gate_name=self.name,
-				reason=f"only {N} strategy families tested, need ≥2 for DSR",
+				reason=f"only {N} strategy families tested, need >=2 for DSR",
 				details={"n_strategies": N},
 			)
 
-		# SR0: expected maximum Sharpe from noise
-		sr_var = statistics.variance(ok_sharpes)
-		if sr_var <= 0:
-			sr_var = 1e-6  # avoid sqrt(0)
-		sr0 = math.sqrt(sr_var) * (
+		# SR0: expected maximum per-trade Sharpe from noise.
+		# Use the theoretical null variance 1/(T-1) rather than observed
+		# variance of family-mean Sharpes. The observed approach breaks when
+		# strategies have heterogeneous trade counts (low-trade strategies
+		# inflate variance) and families are tested across many series
+		# (family means bury signal under cross-series noise).
+		sr_std = 1.0 / math.sqrt(T - 1)
+		sr0 = sr_std * (
 			(1 - _GAMMA) * norm.ppf(1 - 1 / N)
 			+ _GAMMA * norm.ppf(1 - 1 / (N * math.e))
 		)
@@ -154,8 +141,7 @@ class DeflatedSharpeGate(Gate):
 			"sr_observed": round(sr_observed, 4),
 			"sr0": round(sr0, 4),
 			"n_strategies": N,
-			"n_sharpes": sum(len(v) for v in sharpes_by_family.values()),
-			"sr_var": round(sr_var, 4),
+			"sr_std": round(sr_std, 4),
 			"skewness": round(skew, 4),
 			"kurtosis": round(kurt, 4),
 			"T": T,

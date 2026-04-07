@@ -300,6 +300,7 @@ function OverviewTab({ running }: { running: boolean }) {
   const [feedOpen, setFeedOpen] = useState(false)
   const [feed, setFeed] = useState<AuditExecution[]>([])
   const [sortCol, setSortCol] = useState<string>('completed_at')
+  const [verdictFilter, setVerdictFilter] = useState<string | undefined>()
   const feedRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
 
@@ -307,12 +308,12 @@ function OverviewTab({ running }: { running: boolean }) {
     try {
       const [c, r] = await Promise.all([
         research.verdictCounts(),
-        research.results(50, 0, sortCol),
+        research.results(50, 0, sortCol, verdictFilter),
       ])
       setCounts(c)
       setResults(r.results)
     } catch { /* ignore */ }
-  }, [sortCol])
+  }, [sortCol, verdictFilter])
 
   // Poll when running
   useEffect(() => {
@@ -343,10 +344,10 @@ function OverviewTab({ running }: { running: boolean }) {
   }, [feed, autoScroll])
 
   const verdictCards = [
-    { label: 'Promote', count: counts.promote, color: 'text-emerald-400' },
-    { label: 'Review', count: counts.review, color: 'text-amber-400' },
-    { label: 'Explore', count: counts.explore, color: 'text-indigo-400' },
-    { label: 'Kill', count: counts.kill, color: 'text-red-400' },
+    { label: 'Promote', key: 'promote', count: counts.promote, color: 'text-emerald-400' },
+    { label: 'Review', key: 'review', count: counts.review, color: 'text-amber-400' },
+    { label: 'Explore', key: 'explore', count: counts.explore, color: 'text-indigo-400' },
+    { label: 'Kill', key: 'kill', count: counts.kill, color: 'text-red-400' },
   ]
 
   const columns = [
@@ -364,10 +365,16 @@ function OverviewTab({ running }: { running: boolean }) {
       {/* Verdict cards */}
       <div className="grid grid-cols-4 gap-3 mb-6">
         {verdictCards.map(c => (
-          <div key={c.label} className="bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+          <button
+            key={c.label}
+            onClick={() => setVerdictFilter(verdictFilter === c.key ? undefined : c.key)}
+            className={`bg-gray-900 border rounded-lg px-4 py-3 text-left cursor-pointer hover:border-gray-600 transition-colors ${
+              verdictFilter === c.key ? 'border-indigo-500 ring-1 ring-indigo-500/50' : 'border-gray-800'
+            }`}
+          >
             <div className="text-xs text-gray-500">{c.label}</div>
             <div className={`text-2xl font-mono ${c.color}`}>{c.count}</div>
-          </div>
+          </button>
         ))}
       </div>
 
