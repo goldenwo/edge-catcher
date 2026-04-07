@@ -125,11 +125,6 @@ class LLMIdeator:
 		explored = [r for r in results if r["verdict"] == "explore"]
 		killed = [r for r in results if r["verdict"] == "kill"]
 
-		# Kill patterns: aggregate by strategy (store raw verdict_reason for grouping)
-		kill_by_strategy: dict[str, list[str]] = {}
-		for r in killed:
-			kill_by_strategy.setdefault(r["strategy"], []).append(r["verdict_reason"])
-
 		# Coverage: what (strategy, series, db_path) combos exist
 		tested_combos = {(r["strategy"], r["series"], r["db_path"]) for r in results}
 		all_combos = set()
@@ -182,23 +177,15 @@ class LLMIdeator:
 				if len(strat_results) > 5:
 					parts.append(f"  - ... and {len(strat_results) - 5} more")
 
-		if kill_by_strategy:
-			parts.append("\n## Kill Patterns")
-			sorted_kills = sorted(
-				kill_by_strategy.items(), key=lambda x: len(x[1]), reverse=True
-			)
-			shown = sorted_kills[:10]
-			omitted = sorted_kills[10:]
-			for strat, reasons in shown:
-				reason_counts = Counter(reasons)
-				parts.append(f"### {strat} ({len(reasons)} kills)")
-				for reason, count in reason_counts.most_common():
-					parts.append(f"  - {reason}: {count}x")
-			if omitted:
-				omitted_kills = sum(len(r) for _, r in omitted)
-				parts.append(
-					f"\n{len(omitted)} strategies with {omitted_kills} total kills omitted"
-				)
+		# Kill registry (persistent, replaces volatile top-10 kill patterns)
+		registry = self.tracker.list_kill_registry(permanent_only=True)
+		if registry:
+			parts.append("\n## Kill Registry (permanently killed — do NOT re-propose)")
+			shown = registry[:50]
+			for entry in shown:
+				parts.append(f"- **{entry['strategy']}** (killed {entry['kill_count']}/{entry['series_tested']} series, rate={entry['kill_rate']:.0%}): {entry['reason_summary']}")
+			if len(registry) > 50:
+				parts.append(f"\n... and {len(registry) - 50} more killed strategies (use kill-registry list to see all)")
 
 		parts.append(f"\n## Available Strategies: {', '.join(available_strategies)}")
 
