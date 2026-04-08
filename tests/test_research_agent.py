@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from edge_catcher.research.agent import ResearchAgent
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis
 
 
@@ -18,7 +19,7 @@ def test_run_hypothesis_no_false_warning_on_new(monkeypatch, caplog):
 
 	agent = ResearchAgent(tracker=tracker, force=False)
 
-	h = Hypothesis(strategy="A", series="KXBTCD", db_path="data/test.db",
+	h = Hypothesis(strategy="A", data_sources=make_ds(db="test.db", series="KXBTCD"),
 	               start_date="2025-01-01", end_date="2025-12-31")
 
 	# Mock subprocess to return valid JSON

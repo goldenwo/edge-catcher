@@ -5,19 +5,38 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
+from edge_catcher.research.data_source_config import DataSourceConfig
+
 
 @dataclass
 class Hypothesis:
     strategy: str               # strategy name (use --list-strategies to see available)
-    series: str                 # series ticker (e.g. 'KXBTCD')
-    db_path: str                # path to database
+    data_sources: DataSourceConfig  # typed data source configuration
+    fee_pct: float = 1.0        # fee multiplier (1.0 = full taker, 0.25 = maker)
     start_date: str | None = None   # ISO date (e.g. '2025-01-01'), None = all data
     end_date: str | None = None     # ISO date (e.g. '2025-12-31'), None = all data
-    fee_pct: float = 1.0        # fee multiplier (1.0 = full taker, 0.25 = maker)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     parent_id: str | None = None
     tags: list[str] = field(default_factory=list)
     notes: str = ""
+
+    @property
+    def series(self) -> str:
+        """Primary series ticker (first primary). Backward compat."""
+        return self.data_sources.primaries[0].series
+
+    @property
+    def db_path(self) -> str:
+        """String key for dedup/tracker storage — NOT a filesystem path.
+
+        Do not pass to Path(), sqlite3.connect(), or subprocess --db-path.
+        Use data_sources.primaries for real DB access.
+
+        Single primary: 'data/exchange.db'
+        Multi primary: 'data/a.db|data/b.db' (sorted)
+        """
+        paths = sorted(p.db for p in self.data_sources.primaries)
+        return "|".join(f"data/{p}" for p in paths)
 
     def dedup_key(self) -> tuple:
         """Unique key for deduplication (strategy, series, db, start, end, fee)."""

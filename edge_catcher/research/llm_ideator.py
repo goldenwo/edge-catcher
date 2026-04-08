@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from .audit import AuditLog
+from .data_source_config import make_ds
 from .hypothesis import Hypothesis
 from .tracker import Tracker
 
@@ -99,8 +100,7 @@ class LLMIdeator:
 		for entry in valid_existing:
 			hypotheses.append(Hypothesis(
 				strategy=entry["strategy"],
-				series=entry["series"],
-				db_path=entry["db_path"],
+				data_sources=make_ds(db=Path(entry["db_path"]).name, series=entry["series"]),
 				start_date=start_date,
 				end_date=end_date,
 				fee_pct=fee_pct,

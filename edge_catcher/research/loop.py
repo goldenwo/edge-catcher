@@ -19,6 +19,7 @@ from typing import Callable
 
 from .agent import ResearchAgent
 from .audit import AuditLog
+from .data_source_config import make_ds
 from .grid_planner import GridPlanner
 from .hypothesis import HypothesisResult
 from .llm_ideator import LLMIdeator
@@ -331,8 +332,7 @@ class LoopOrchestrator:
 				Hypothesis(
 					id=p["id"],
 					strategy=p["strategy"],
-					series=p["series"],
-					db_path=p["db_path"],
+					data_sources=make_ds(db=Path(p["db_path"]).name, series=p["series"]),
 					start_date=p["start_date"],
 					end_date=p["end_date"],
 					fee_pct=p["fee_pct"],
@@ -485,8 +485,7 @@ class LoopOrchestrator:
 			for series, db_path in related:
 				h = Hypothesis(
 					strategy=winner.hypothesis.strategy,
-					series=series,
-					db_path=db_path,
+					data_sources=make_ds(db=Path(db_path).name, series=series),
 					start_date=self.start_date,
 					end_date=self.end_date,
 					fee_pct=self.fee_pct,
@@ -699,8 +698,7 @@ class LoopOrchestrator:
 				for series, db_path in unique_series:
 					hypotheses.append(Hypothesis(
 						strategy=new_name,
-						series=series,
-						db_path=db_path,
+						data_sources=make_ds(db=Path(db_path).name, series=series),
 						start_date=self.start_date,
 						end_date=self.end_date,
 						fee_pct=self.fee_pct,
@@ -1307,8 +1305,7 @@ class LoopOrchestrator:
 			for series in series_list[:3]:  # limit to 3 series per novel strategy
 				hypotheses.append(Hypothesis(
 					strategy=strategy_name,
-					series=series,
-					db_path=db_path,
+					data_sources=make_ds(db=Path(db_path).name, series=series),
 					start_date=self.start_date,
 					end_date=self.end_date,
 					fee_pct=self.fee_pct,

@@ -204,11 +204,11 @@ def _save_result(tracker, strategy, series, verdict, reason):
 	import uuid
 	from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 
+	from edge_catcher.research.data_source_config import make_ds
 	h = Hypothesis(
 		id=str(uuid.uuid4()),
 		strategy=strategy,
-		series=series,
-		db_path="data/test.db",
+		data_sources=make_ds(db="test.db", series=series),
 		start_date="",
 		end_date="",
 		fee_pct=1.0,
