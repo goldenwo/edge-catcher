@@ -10,20 +10,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from edge_catcher.research.audit import AuditLog
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.run_queue import RunQueue
 from edge_catcher.research.tracker import Tracker
 
 
 def _make_hypothesis(strategy="C", series="KXBTCD", **kwargs) -> Hypothesis:
+    kwargs.pop("db_path", None)  # no longer a field
     defaults = dict(
-        db_path="data/kalshi.db",
+        data_sources=make_ds(db="kalshi.db", series=series),
         start_date="2025-01-01",
         end_date="2025-12-31",
         tags=["source:grid"],
     )
     defaults.update(kwargs)
-    return Hypothesis(strategy=strategy, series=series, **defaults)
+    return Hypothesis(strategy=strategy, **defaults)
 
 
 def _make_mock_result(h: Hypothesis, verdict="promote") -> HypothesisResult:

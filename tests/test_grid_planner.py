@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.grid_planner import GridPlanner
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.tracker import Tracker
@@ -15,7 +16,8 @@ from edge_catcher.research.tracker import Tracker
 def _grid_result(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
                  verdict="kill", verdict_reason="k", **kw) -> HypothesisResult:
     """Helper that creates a result with explicit db_path control."""
-    h = Hypothesis(strategy=strategy, series=series, db_path=db_path,
+    from pathlib import Path
+    h = Hypothesis(strategy=strategy, data_sources=make_ds(db=Path(db_path).name, series=series),
                    start_date="2025-01-01", end_date="2025-12-31")
     defaults = dict(status="ok", total_trades=100, wins=90, losses=10,
                     win_rate=0.9, net_pnl_cents=500.0, sharpe=2.5,

@@ -8,13 +8,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.validation.gate import GateContext, GateResult
 
 
 def _make_hypothesis(**kwargs) -> Hypothesis:
+	ds_kwargs = {}
+	for k in ("series",):
+		if k in kwargs:
+			ds_kwargs[k] = kwargs.pop(k)
+	# Extract db from db_path if passed (no longer a Hypothesis field)
+	db = "kalshi.db"
+	if "db_path" in kwargs:
+		from pathlib import Path
+		db = Path(kwargs.pop("db_path")).name
+	ds = make_ds(db=db, series=ds_kwargs.get("series", "KXBTCD"))
 	defaults = dict(
-		strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+		strategy="C", data_sources=ds,
 		start_date="2025-01-01", end_date="2025-12-31",
 	)
 	defaults.update(kwargs)

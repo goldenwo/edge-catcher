@@ -536,10 +536,10 @@ def _cmd_research(args) -> None:
     subcmd = getattr(args, 'research_command', None)
 
     if subcmd == 'run':
+        from edge_catcher.research.data_source_config import make_ds
         h = Hypothesis(
             strategy=args.strategy,
-            series=args.series,
-            db_path=args.db_path,
+            data_sources=make_ds(db=Path(args.db_path).name, series=args.series),
             start_date=args.start,
             end_date=args.end,
             fee_pct=args.fee_pct,
@@ -610,12 +610,12 @@ def _cmd_research(args) -> None:
         # Reconstruct minimal HypothesisResult objects from tracker rows for reporting
         from edge_catcher.research.hypothesis import HypothesisResult
         results = []
+        from edge_catcher.research.data_source_config import make_ds
         for row in rows:
             h = Hypothesis(
                 id=row['id'],
                 strategy=row['strategy'],
-                series=row['series'],
-                db_path=row['db_path'],
+                data_sources=make_ds(db=Path(row['db_path']).name, series=row['series']),
                 start_date=row['start_date'],
                 end_date=row['end_date'],
                 fee_pct=row['fee_pct'],

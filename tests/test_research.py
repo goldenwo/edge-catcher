@@ -10,10 +10,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from edge_catcher.research.agent import ResearchAgent
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.evaluator import Evaluator, Thresholds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.reporter import Reporter
 from edge_catcher.research.tracker import Tracker
+
+
+def _ds(db="kalshi.db", series="KXBTCD"):
+    return make_ds(db=db, series=series)
 
 
 # ---------------------------------------------------------------------------
@@ -22,28 +27,28 @@ from edge_catcher.research.tracker import Tracker
 
 class TestHypothesis:
     def test_auto_uuid(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
         assert h1.id != h2.id
 
     def test_dedup_key_ignores_id(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
         assert h1.dedup_key() == h2.dedup_key()
 
     def test_dedup_key_differs_on_fee(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=0.25)
         assert h1.dedup_key() != h2.dedup_key()
 
     def test_error_constructor(self):
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="x.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(db="x.db"),
                        start_date="2025-01-01", end_date="2025-12-31")
         result = HypothesisResult.error(h, "db not found")
         assert result.status == "error"
@@ -61,7 +66,7 @@ def _make_result(
     fees_paid_cents=100.0, avg_win_cents=10.0, avg_loss_cents=-5.0,
     status="ok", verdict="", verdict_reason="", per_strategy=None, raw_json=None,
 ) -> HypothesisResult:
-    h = Hypothesis(strategy=strategy, series=series, db_path="data/kalshi.db",
+    h = Hypothesis(strategy=strategy, data_sources=_ds(series=series),
                    start_date="2025-01-01", end_date="2025-12-31")
     return HypothesisResult(
         hypothesis=h, status=status, total_trades=total_trades,
@@ -122,7 +127,7 @@ class TestEvaluator:
         assert verdict == "validate"
 
     def test_error_result_is_killed(self):
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="x.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(db="x.db"),
                        start_date="2025-01-01", end_date="2025-12-31")
         error_result = HypothesisResult.error(h, "db not found")
         verdict, reason = self.ev.evaluate(error_result, self.th)
@@ -161,7 +166,7 @@ class TestTracker:
         tracker.save_result(r)
 
         # Same parameters → already tested
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
         existing_id = tracker.is_tested(h2)
         assert existing_id is not None
@@ -171,7 +176,7 @@ class TestTracker:
         r = _make_result(verdict="promote", verdict_reason="test")
         tracker.save_result(r)
 
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=0.25)
         existing_id = tracker.is_tested(h2)
         assert existing_id is None
@@ -195,7 +200,7 @@ class TestTracker:
         tracker.save_result(r)
         # Save a hypothesis WITHOUT a result
         h_pending = Hypothesis(
-            strategy="D", series="KXETH", db_path="data/kalshi.db",
+            strategy="D", data_sources=_ds(series="KXETH"),
             start_date="2025-01-01", end_date="2025-12-31",
             tags=["source:llm_ideated"],
         )
@@ -242,7 +247,7 @@ class TestTracker:
         original_id = r1.hypothesis.id
 
         # Simulate --force: new Hypothesis with different UUID, same dedup key
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
         assert h2.id != original_id  # different UUID
         r2 = HypothesisResult(
@@ -392,7 +397,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_success(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -415,7 +420,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_error_json(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -431,7 +436,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_deduplicates(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -448,7 +453,7 @@ class TestResearchAgent:
 
     def test_force_reruns_despite_existing_result(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -507,7 +512,7 @@ class TestResearchAgent:
         agent = self._make_agent(tmp_path)
 
         hypotheses = [
-            Hypothesis(strategy="C", series=f"SER{i}", db_path="data/kalshi.db",
+            Hypothesis(strategy="C", data_sources=_ds(series=f"SER{i}"),
                        start_date="2025-01-01", end_date="2025-12-31")
             for i in range(10)
         ]
@@ -551,7 +556,7 @@ class TestRunBacktestOnly:
         agent.force = False
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -582,7 +587,7 @@ class TestRunBacktestOnly:
         agent.force = False
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -608,7 +613,7 @@ class TestValidationIntegration:
         agent = ResearchAgent(tracker=tracker)
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -647,7 +652,7 @@ class TestValidationIntegration:
         agent = ResearchAgent(tracker=tracker)
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -838,7 +843,7 @@ def _make_tagged_result(
     """Create a HypothesisResult with specific tags and save it to the tracker."""
     wins = int(total_trades * 0.6)
     h = Hypothesis(
-        strategy=strategy, series=series, db_path="data/kalshi.db",
+        strategy=strategy, data_sources=_ds(series=series),
         start_date="2025-01-01", end_date="2025-12-31",
         tags=tags,
     )
@@ -903,7 +908,7 @@ class TestSelfPerformanceSummary:
                                 ["source:llm_novel_strategy"], tracker)
         # Add an error result manually
         h_err = Hypothesis(
-            strategy="Nov4", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="Nov4", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
             tags=["source:llm_novel_strategy"],
         )

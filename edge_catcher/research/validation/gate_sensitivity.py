@@ -175,8 +175,7 @@ class ParameterSensitivityGate(Gate):
 
 			h = Hypothesis(
 				strategy=temp_name,
-				series=context.hypothesis.series,
-				db_path=context.hypothesis.db_path,
+				data_sources=context.hypothesis.data_sources,
 				start_date=context.hypothesis.start_date,
 				end_date=context.hypothesis.end_date,
 				fee_pct=context.hypothesis.fee_pct,
