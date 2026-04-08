@@ -463,9 +463,10 @@ def _cmd_backtest(args) -> None:
         end = date.fromisoformat(args.end) if args.end else None
 
         from edge_catcher.runner.event_backtest import EventBacktester
-        from edge_catcher.fees import KALSHI_FEE as _KALSHI_FEE
+        from edge_catcher.fees import get_fee_model_for_series
+        _base_model = get_fee_model_for_series(args.series)
         _fee_pct = args.fee_pct
-        fee_fn = lambda p, s: _fee_pct * _KALSHI_FEE.calculate(p, s)
+        fee_fn = lambda p, s: _fee_pct * _base_model.calculate(p, s)
         backtester = EventBacktester()
         result = backtester.run(
             series=args.series,
