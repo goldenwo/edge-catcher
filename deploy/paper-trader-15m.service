@@ -1,5 +1,5 @@
 [Unit]
-Description=Edge Catcher Paper Trader 15m (Strategy REDACTED)
+Description=Edge Catcher Paper Trader 15m
 After=network-online.target
 Wants=network-online.target
 
