@@ -475,6 +475,79 @@ class TestPortfolio:
 
 
 # ---------------------------------------------------------------------------
+# Exit fee tests
+# ---------------------------------------------------------------------------
+
+class TestExitFee:
+	def test_close_position_charges_exit_fee(self):
+		"""close_position() should charge a fee on the exit price."""
+		import math
+		port = Portfolio(1000.0)  # uses default KALSHI_FEE
+		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		entry_fee = port.total_fees_paid
+		ct = port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
+		exit_fee = math.ceil(0.07 * 1 * 0.60 * 0.40 * 100)  # 2¢
+		assert port.total_fees_paid == pytest.approx(entry_fee + exit_fee)
+		# cash = 1000 - (50 + entry_fee) + (60 - exit_fee)
+		assert port.cash == pytest.approx(1000.0 - 50 - entry_fee + 60 - exit_fee)
+
+	def test_close_position_fee_cents_is_entry_plus_exit(self):
+		"""CompletedTrade.fee_cents should reflect total fees (entry + exit)."""
+		import math
+		port = Portfolio(1000.0)
+		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		ct = port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
+		entry_fee = math.ceil(0.07 * 1 * 0.50 * 0.50 * 100)  # 2¢
+		exit_fee = math.ceil(0.07 * 1 * 0.60 * 0.40 * 100)   # 2¢
+		assert ct.fee_cents == pytest.approx(entry_fee + exit_fee)
+
+	def test_close_position_exit_at_zero_no_fee(self):
+		"""Exit at price 0 (after slippage) should have 0 exit fee."""
+		port = Portfolio(1000.0)
+		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		entry_fee = port.total_fees_paid
+		ct = port.close_position('T', 'strat', 0, _dt(1), 'stop_loss', slippage=0)
+		# P=0 → P*(1-P)=0 → exit fee = 0
+		assert port.total_fees_paid == pytest.approx(entry_fee)
+		assert ct.pnl_cents == pytest.approx(-50 - entry_fee)
+
+	def test_close_position_exit_at_hundred_no_fee(self):
+		"""Exit at price 100 should have 0 exit fee (P*(1-P)=0)."""
+		port = Portfolio(1000.0)
+		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		entry_fee = port.total_fees_paid
+		ct = port.close_position('T', 'strat', 100, _dt(1), 'take_profit', slippage=0)
+		assert port.total_fees_paid == pytest.approx(entry_fee)
+		assert ct.pnl_cents == pytest.approx(50 - entry_fee)
+
+	def test_settle_position_still_no_exit_fee(self):
+		"""Settlement must NOT charge an exit fee — only close_position does."""
+		port = Portfolio(1000.0)
+		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		entry_fee = port.total_fees_paid
+		port.settle_position('T', 'strat', 'yes', _dt(2))
+		assert port.total_fees_paid == pytest.approx(entry_fee)
+
+	def test_close_position_pnl_includes_both_fees(self):
+		"""PnL = (exit - entry) * size - entry_fee - exit_fee."""
+		import math
+		fee_fn = lambda p, s: math.ceil(0.07 * s * (p / 100) * (1 - p / 100) * 100) if p > 0 and p < 100 else 0.0
+		port = Portfolio(1000.0, fee_fn=fee_fn)
+		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=3, reason='test')
+		port.open_position(sig, 'strat', _dt(), slippage=0)
+		ct = port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
+		entry_fee = math.ceil(0.07 * 3 * 0.50 * 0.50 * 100)  # ceil(5.25) = 6
+		exit_fee = math.ceil(0.07 * 3 * 0.60 * 0.40 * 100)   # ceil(5.04) = 6
+		expected_pnl = (60 - 50) * 3 - entry_fee - exit_fee   # 30 - 6 - 6 = 18
+		assert ct.pnl_cents == pytest.approx(expected_pnl)
+
+
+# ---------------------------------------------------------------------------
 # Strategy unit tests
 # ---------------------------------------------------------------------------
 

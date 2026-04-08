@@ -146,8 +146,10 @@ class Portfolio:
 		if pos is None:
 			return None
 		actual_exit = max(0, exit_price - slippage)
-		self.cash += actual_exit * pos.size
-		pnl = (actual_exit - pos.entry_price) * pos.size - pos.entry_fee
+		exit_fee = self.fee_fn(actual_exit, pos.size)
+		self.cash += actual_exit * pos.size - exit_fee
+		self.total_fees_paid += exit_fee
+		pnl = (actual_exit - pos.entry_price) * pos.size - pos.entry_fee - exit_fee
 		ct = CompletedTrade(
 			ticker=ticker,
 			side=pos.side,
@@ -158,7 +160,7 @@ class Portfolio:
 			exit_time=time,
 			pnl_cents=pnl,
 			exit_reason=reason,
-			fee_cents=pos.entry_fee,
+			fee_cents=pos.entry_fee + exit_fee,
 		)
 		self._record_trade(ct)
 		return ct
