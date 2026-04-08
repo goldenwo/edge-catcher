@@ -744,7 +744,7 @@ def main() -> None:
         default=None,
         metavar="FILE",
         help="Path to markets YAML file (default: {config}/markets.yaml). "
-             "Example: --markets config.local/markets-crypto.yaml",
+             "Example: --markets config/markets-altcrypto.yaml",
     )
     dl.add_argument(
         "--max-trade-markets",

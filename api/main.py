@@ -92,8 +92,8 @@ def _config_path() -> Path:
 
 
 def _markets_yaml() -> Path:
-    """Always return config.local/markets.yaml — not overridable locally."""
-    return Path("config.local") / "markets.yaml"
+    """Return the primary markets config path."""
+    return Path("config") / "markets.yaml"
 
 
 # ── status ────────────────────────────────────────────────────────────────────
