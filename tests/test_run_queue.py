@@ -16,7 +16,7 @@ from edge_catcher.research.run_queue import RunQueue
 from edge_catcher.research.tracker import Tracker
 
 
-def _make_hypothesis(strategy="C", series="KXBTCD", **kwargs) -> Hypothesis:
+def _make_hypothesis(strategy="C", series="SERIES_A", **kwargs) -> Hypothesis:
     kwargs.pop("db_path", None)  # no longer a field
     defaults = dict(
         data_sources=make_ds(db="kalshi.db", series=series),
@@ -44,7 +44,7 @@ class TestRunQueueSubmit:
         agent = MagicMock()
 
         h1 = _make_hypothesis(strategy="A")
-        h2 = _make_hypothesis(strategy="B", series="KXETH")
+        h2 = _make_hypothesis(strategy="B", series="SERIES_E")
         agent.run_hypothesis.side_effect = [
             _make_mock_result(h1, "promote"),
             _make_mock_result(h2, "kill"),

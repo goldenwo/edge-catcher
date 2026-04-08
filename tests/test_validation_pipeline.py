@@ -12,7 +12,7 @@ from edge_catcher.research.validation.pipeline import ValidationPipeline
 
 def _make_result(sharpe=2.5, total_trades=100, **kwargs) -> HypothesisResult:
 	h = Hypothesis(
-		strategy="C", data_sources=make_ds(db="kalshi.db", series="KXBTCD"),
+		strategy="C", data_sources=make_ds(db="kalshi.db", series="SERIES_A"),
 		start_date="2025-01-01", end_date="2025-12-31",
 	)
 	defaults = dict(

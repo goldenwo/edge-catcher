@@ -23,7 +23,7 @@ def _make_hypothesis(**kwargs) -> Hypothesis:
 	if "db_path" in kwargs:
 		from pathlib import Path
 		db = Path(kwargs.pop("db_path")).name
-	ds = make_ds(db=db, series=ds_kwargs.get("series", "KXBTCD"))
+	ds = make_ds(db=db, series=ds_kwargs.get("series", "SERIES_A"))
 	defaults = dict(
 		strategy="C", data_sources=ds,
 		start_date="2025-01-01", end_date="2025-12-31",

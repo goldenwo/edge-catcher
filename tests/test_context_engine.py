@@ -35,7 +35,7 @@ def sample_db(tmp_path):
 			"INSERT INTO markets (ticker, series_ticker, title, status, result, "
 			"last_price, volume, open_time, close_time, floor_strike, cap_strike) "
 			"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			(f"KXTEST-{i}", "KXTEST", "Test price range on Jan 1?",
+			(f"TEST_SERIES-{i}", "TEST_SERIES", "Test price range on Jan 1?",
 			 "settled", "yes" if i % 3 == 0 else "no",
 			 5 if i % 2 == 0 else 95, i * 10,
 			 open_t, close_t, 100.0, 200.0),
@@ -54,7 +54,7 @@ class TestSeriesProfile:
 
 		assert len(profiles) == 1
 		p = profiles[0]
-		assert p.series_ticker == "KXTEST"
+		assert p.series_ticker == "TEST_SERIES"
 		assert p.db_path == sample_db
 		assert p.market_count == 100
 		assert "Test" in p.description
@@ -88,7 +88,7 @@ class TestSeriesProfile:
 				"INSERT INTO markets (ticker, series_ticker, title, status, result, "
 				"last_price, volume, open_time, close_time) "
 				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-				(f"KXOTHER-{i}", "KXOTHER", "Other series?",
+				(f"OTHER_SERIES-{i}", "OTHER_SERIES", "Other series?",
 				 "settled", "yes", 50, 20,
 				 "2025-01-01T00:00:00+00:00", "2025-01-02T00:00:00+00:00"),
 			)
@@ -98,7 +98,7 @@ class TestSeriesProfile:
 		engine = ContextEngine()
 		profiles = engine.profile_all([sample_db])
 		tickers = {p.series_ticker for p in profiles}
-		assert tickers == {"KXTEST", "KXOTHER"}
+		assert tickers == {"TEST_SERIES", "OTHER_SERIES"}
 
 
 class TestBuildContextBlock:
@@ -115,7 +115,7 @@ class TestBuildContextBlock:
 		profiles = engine.profile_all([sample_db])
 		block = engine.build_context_block(profiles)
 
-		assert "KXTEST" in block
+		assert "TEST_SERIES" in block
 		assert "Market Profiles" in block
 		assert "Volume:" in block
 
@@ -136,7 +136,7 @@ class TestFindRelatedSeries:
 
 		profiles = [
 			SeriesProfile(
-				series_ticker="KXXRP", db_path="data/alt.db",
+				series_ticker="SERIES_D", db_path="data/alt.db",
 				description="XRP hourly", settlement_frequency="hourly",
 				market_count=1000, date_range=("2025-01-01", "2025-12-31"),
 				volume_stats={"median": 10, "mean": 20, "p90": 50},
@@ -145,7 +145,7 @@ class TestFindRelatedSeries:
 				asset_class="Crypto", external_asset="xrp",
 			),
 			SeriesProfile(
-				series_ticker="KXXRPD", db_path="data/alt.db",
+				series_ticker="SERIES_DD", db_path="data/alt.db",
 				description="XRP daily", settlement_frequency="daily",
 				market_count=500, date_range=("2025-01-01", "2025-12-31"),
 				volume_stats={"median": 50, "mean": 80, "p90": 200},
@@ -154,7 +154,7 @@ class TestFindRelatedSeries:
 				asset_class="Crypto", external_asset="xrp",
 			),
 			SeriesProfile(
-				series_ticker="KXNBA", db_path="data/sports.db",
+				series_ticker="SPORTS_SERIES", db_path="data/sports.db",
 				description="NBA spread", settlement_frequency="daily",
 				market_count=200, date_range=("2025-01-01", "2025-12-31"),
 				volume_stats={"median": 30, "mean": 40, "p90": 100},
@@ -165,12 +165,12 @@ class TestFindRelatedSeries:
 		]
 
 		engine = ContextEngine()
-		related = engine.find_related_series("KXXRP", profiles, same_asset_class=True)
+		related = engine.find_related_series("SERIES_D", profiles, same_asset_class=True)
 
 		# Same asset (XRP daily) should be first
-		assert related[0][0] == "KXXRPD"
+		assert related[0][0] == "SERIES_DD"
 		# Sports should not appear (different asset class)
-		assert all(t != "KXNBA" for t, _ in related)
+		assert all(t != "SPORTS_SERIES" for t, _ in related)
 
 	def test_returns_empty_for_unknown_series(self):
 		from edge_catcher.research.context_engine import ContextEngine
@@ -199,8 +199,8 @@ class TestIdeatorContextIntegration:
 
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["example"],
-			series_map={"data/test.db": ["KXTEST"]},
-			context_block="## Market Profiles\nKXTEST: test series",
+			series_map={"data/test.db": ["TEST_SERIES"]},
+			context_block="## Market Profiles\nTEST_SERIES: test series",
 		)
 		assert "## Market Profiles" in prompt
 		# "Available Data" section should be removed when context_block is present
@@ -217,7 +217,7 @@ class TestIdeatorContextIntegration:
 
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["example"],
-			series_map={"data/test.db": ["KXTEST"]},
+			series_map={"data/test.db": ["TEST_SERIES"]},
 		)
 		assert "## Available Data" in prompt
 
@@ -240,7 +240,7 @@ class TestIdeatorContextIntegration:
 		# Should NOT raise ValueError with context_block
 		hypotheses, proposals = ideator.ideate(
 			available_strategies=["example"],
-			series_map={"data/test.db": ["KXTEST"]},
+			series_map={"data/test.db": ["TEST_SERIES"]},
 			context_block="## Market Profiles\ntest",
 			start_date="2025-01-01",
 			end_date="2025-12-31",
@@ -261,7 +261,7 @@ class TestSteeringDirectives:
 
 		profiles = [
 			SeriesProfile(
-				series_ticker="KXXRP", db_path="data/alt.db",
+				series_ticker="SERIES_D", db_path="data/alt.db",
 				description="XRP hourly", settlement_frequency="hourly",
 				market_count=1000, date_range=("2025-01-01", "2025-12-31"),
 				volume_stats={"median": 10, "mean": 20, "p90": 50},
@@ -270,7 +270,7 @@ class TestSteeringDirectives:
 				asset_class="Crypto", external_asset="xrp",
 			),
 			SeriesProfile(
-				series_ticker="KXXRPD", db_path="data/alt.db",
+				series_ticker="SERIES_DD", db_path="data/alt.db",
 				description="XRP daily", settlement_frequency="daily",
 				market_count=500, date_range=("2025-01-01", "2025-12-31"),
 				volume_stats={"median": 50, "mean": 80, "p90": 200},
@@ -281,6 +281,6 @@ class TestSteeringDirectives:
 		]
 
 		directives = ideator._build_context_directives(profiles)
-		assert "KXXRP" in directives
-		assert "KXXRPD" in directives
+		assert "SERIES_D" in directives
+		assert "SERIES_DD" in directives
 		assert "same asset" in directives.lower() or "xrp" in directives.lower()

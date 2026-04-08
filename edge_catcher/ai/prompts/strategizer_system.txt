@@ -80,7 +80,7 @@ def on_trade(self, trade, market, portfolio):
             # Compare contract price to spot price movement...
 ```
 
-**Important:** Not all series have OHLC data. Crypto series (KXBTC*, KXXRP*, KXETH*, KXSOL*, KXDOGE*) do. Sports, entertainment, weather, and politics series do not — for those, `self.ohlc` will be None. Design strategies accordingly.
+**Important:** Not all series have OHLC data. Series with associated OHLC data have price history available for momentum analysis. Sports, entertainment, weather, and politics series do not — for those, `self.ohlc` will be None. Design strategies accordingly.
 
 ## Rules
 

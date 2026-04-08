@@ -55,7 +55,7 @@ class KalshiAdapter(MarketAdapter):
 
     def __init__(
         self,
-        config_path: Path = Path("config/markets.yaml"),
+        config_path: Path = Path("config.local/markets.yaml"),
         api_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> None:

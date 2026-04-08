@@ -19,7 +19,7 @@ def test_run_hypothesis_no_false_warning_on_new(monkeypatch, caplog):
 
 	agent = ResearchAgent(tracker=tracker, force=False)
 
-	h = Hypothesis(strategy="A", data_sources=make_ds(db="test.db", series="KXBTCD"),
+	h = Hypothesis(strategy="A", data_sources=make_ds(db="test.db", series="SERIES_A"),
 	               start_date="2025-01-01", end_date="2025-12-31")
 
 	# Mock subprocess to return valid JSON

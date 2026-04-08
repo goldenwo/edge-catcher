@@ -128,7 +128,7 @@ import sys
 def _backtest_args(**overrides):
     """Build a minimal Namespace for _cmd_backtest."""
     defaults = dict(
-        series="KXBTCD",
+        series="SERIES_A",
         strategy="example",
         start=None,
         end=None,
@@ -190,9 +190,9 @@ class TestListSeries:
         db = tmp_path / "test.db"
         conn = sqlite3.connect(str(db))
         conn.execute("CREATE TABLE markets (series_ticker TEXT, ticker TEXT)")
-        conn.execute("INSERT INTO markets VALUES ('KXBTCD', 'KXBTCD-001')")
-        conn.execute("INSERT INTO markets VALUES ('KXBTC15M', 'KXBTC15M-001')")
-        conn.execute("INSERT INTO markets VALUES ('KXBTCD', 'KXBTCD-002')")
+        conn.execute("INSERT INTO markets VALUES ('SERIES_A', 'SERIES_A-001')")
+        conn.execute("INSERT INTO markets VALUES ('SERIES_B', 'SERIES_B-001')")
+        conn.execute("INSERT INTO markets VALUES ('SERIES_A', 'SERIES_A-002')")
         conn.commit()
         conn.close()
 
@@ -200,7 +200,7 @@ class TestListSeries:
         args = _backtest_args(list_series=True, db_path=str(db), series=None)
         _cmd_backtest(args)
         data = json.loads(capsys.readouterr().out)
-        assert data["series"] == ["KXBTC15M", "KXBTCD"]
+        assert data["series"] == ["SERIES_A", "SERIES_B"]
         assert data["total_markets"] == 3
         assert "db_path" in data
 
@@ -282,7 +282,7 @@ class TestListDbs:
         db = data_dir / "kalshi.db"
         conn = sqlite3.connect(str(db))
         conn.execute("CREATE TABLE markets (series_ticker TEXT, ticker TEXT)")
-        conn.execute("INSERT INTO markets VALUES ('KXBTCD', 'X')")
+        conn.execute("INSERT INTO markets VALUES ('SERIES_A', 'X')")
         conn.commit()
         conn.close()
 
@@ -297,7 +297,7 @@ class TestListDbs:
         entry = data["databases"][0]
         assert "kalshi.db" in entry["path"]
         assert entry["size_mb"] >= 0
-        assert entry["series"] == ["KXBTCD"]
+        assert entry["series"] == ["SERIES_A"]
 
     def test_empty_data_dir(self, tmp_path, capsys, monkeypatch):
         """list-dbs on an empty data/ dir returns empty list."""

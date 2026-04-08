@@ -100,7 +100,7 @@ class TestLoopPhaseOrder:
         orch.on_progress = None
 
         with patch.object(orch, '_discover_strategies', return_value=["example"]), \
-             patch.object(orch, '_discover_series', return_value={"data/test.db": ["KXTEST"]}), \
+             patch.object(orch, '_discover_series', return_value={"data/test.db": ["TEST_SERIES"]}), \
              patch.object(orch, '_list_results', return_value=[]), \
              patch.object(orch, '_write_phase_outcomes'), \
              patch.object(orch, '_write_journal_summary', return_value="stuck"), \
