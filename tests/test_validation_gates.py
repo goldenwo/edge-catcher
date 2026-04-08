@@ -194,8 +194,8 @@ class TestDeflatedSharpeGate:
 		from edge_catcher.research.validation.gate_dsr import _strategy_family
 
 		assert _strategy_family("FooV1") == "Foo"
-		assert _strategy_family("REDACTEDV1") == "REDACTED"
-		assert _strategy_family("REDACTED") == "REDACTED"
+		assert _strategy_family("test-strategy-aV1") == "test-strategy-a"
+		assert _strategy_family("test-strategy-a") == "test-strategy-a"
 		assert _strategy_family("MomentumV2V3") == "Momentum"
 		assert _strategy_family("V1") == "V1"  # degenerate: whole name is suffix
 		assert _strategy_family("MyStratV10") == "MyStrat"

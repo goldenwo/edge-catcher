@@ -5,14 +5,14 @@ adapters:
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
     rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
     series:
-      # 15-minute contracts (REDACTED target)
+      # 15-minute contracts
       - KXETH15M    # ETH 15-minute
       - KXSOL15M    # SOL 15-minute
       - KXXRP15M    # XRP 15-minute
       - KXDOGE15M   # DOGE 15-minute
       - KXBNB15M    # BNB 15-minute
       - KXHYPE15M   # HYPE 15-minute
-      # Daily contracts (REDACTED target)
+      # Daily contracts
       - KXETHD      # ETH daily
       - KXSOLD      # SOL daily
       - KXXRPD      # XRP daily
