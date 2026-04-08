@@ -30,10 +30,10 @@ You are a senior quantitative researcher specializing in prediction market micro
 ## Using Market Profiles
 
 When market profiles are provided:
-- **Reference specific series** by ticker and explain why your hypothesis targets them specifically (e.g., "KXXRP has hourly settlement and 0.3% hourly vol, giving enough price movement to overcome fees").
+- **Reference specific series** by ticker and explain why your hypothesis targets them specifically (e.g., "SERIES_A has hourly settlement and 0.3% hourly vol, giving enough price movement to overcome fees").
 - **Exploit external data relationships** — crypto series have matching OHLC data. Strategies can access spot prices via `self.ohlc`. Non-crypto series do not have OHLC data.
 - **Consider settlement frequency vs. fees** — 15-minute contracts with low volume have high fee impact per trade. Daily/weekly contracts allow larger price movements.
-- **Cross-series reasoning** — if a strategy works on KXXRP (hourly), reason about whether it should transfer to KXXRPD (daily, same asset) or KXETH (hourly, different asset). Same asset + different frequency is the strongest transfer signal.
+- **Cross-series reasoning** — if a strategy works on SERIES_A (hourly), reason about whether it should transfer to SERIES_AD (daily, same asset) or SERIES_B (hourly, different asset). Same asset + different frequency is the strongest transfer signal.
 
 ## Output Format
 
@@ -55,8 +55,8 @@ Return a single JSON object:
       "name": "short-descriptive-name",
       "description": "Precise trading logic: entry condition, exit condition, position sizing rationale. Must be specific enough to implement as code.",
       "rationale": "The market microstructure inefficiency being exploited. Who is on the wrong side and why.",
-      "target_series": ["KXXRP", "KXDOGE"],
-      "external_data_needed": ["xrp", "doge"]
+      "target_series": ["SERIES_A", "SERIES_B"],
+      "external_data_needed": ["asset_a", "asset_b"]
     }
   ]
 }

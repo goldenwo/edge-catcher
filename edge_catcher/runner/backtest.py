@@ -27,7 +27,7 @@ def _result_to_dict(result) -> dict:
 
 def run_backtest(
     hypothesis_id: Optional[str] = None,
-    db_path: Path = Path("data/kalshi.db"),
+    db_path: Path,
     config_path: Path = Path("config"),
     output_path: Optional[Path] = None,
 ) -> dict:

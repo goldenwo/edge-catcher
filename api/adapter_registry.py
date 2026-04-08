@@ -10,8 +10,8 @@ from edge_catcher.fees import FeeModel, STANDARD_FEE, INDEX_FEE, ZERO_FEE
 def _db_file_from_markets_yaml(markets_yaml: str) -> str:
     """Derive DB path from markets YAML filename.
 
-    e.g. config/markets-weather.yaml → data/kalshi-weather.db
-         config/markets.yaml         → data/kalshi.db
+    e.g. config.local/markets-weather.yaml → data/kalshi-weather.db
+         config.local/markets.yaml         → data/kalshi.db
     """
     stem = PurePosixPath(markets_yaml).stem  # "markets-weather"
     suffix = stem.removeprefix("markets")     # "-weather"
@@ -46,7 +46,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-03-21",
-        markets_yaml="config/markets.yaml",
+        markets_yaml="config.local/markets.yaml",
     ),
     AdapterMeta(
         id="coinbase_btc",
@@ -106,7 +106,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-sports.yaml",
+        markets_yaml="config.local/markets-sports.yaml",
     ),
     AdapterMeta(
         id="kalshi_crypto",
@@ -115,7 +115,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-altcrypto.yaml",
+        markets_yaml="config.local/markets-altcrypto.yaml",
     ),
     AdapterMeta(
         id="kalshi_weather",
@@ -124,7 +124,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-weather.yaml",
+        markets_yaml="config.local/markets-weather.yaml",
     ),
     AdapterMeta(
         id="kalshi_financials",
@@ -133,7 +133,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-financials.yaml",
+        markets_yaml="config.local/markets-financials.yaml",
         fee_overrides={"KXINX": INDEX_FEE, "KXNASDAQ100": INDEX_FEE},
     ),
     AdapterMeta(
@@ -143,7 +143,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-entertainment.yaml",
+        markets_yaml="config.local/markets-entertainment.yaml",
     ),
     AdapterMeta(
         id="kalshi_politics",
@@ -152,7 +152,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-politics.yaml",
+        markets_yaml="config.local/markets-politics.yaml",
     ),
     AdapterMeta(
         id="kalshi_esports",
@@ -161,7 +161,7 @@ ADAPTERS: list[AdapterMeta] = [
         requires_api_key=False,
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
-        markets_yaml="config/markets-esports.yaml",
+        markets_yaml="config.local/markets-esports.yaml",
     ),
 ]
 

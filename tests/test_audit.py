@@ -134,7 +134,7 @@ class TestAuditLogValidation:
         audit = AuditLog(tmp_path / "research.db")
         ok, err = audit.validate_hypothesis(
             strategy="C",
-            series="KXBTCD",
+            series="SERIES_A",
             db_path=str(fake_db),
             start_date="2025-01-01",
             end_date="2025-12-31",
@@ -146,7 +146,7 @@ class TestAuditLogValidation:
         audit = AuditLog(tmp_path / "research.db")
         ok, err = audit.validate_hypothesis(
             strategy="C",
-            series="KXBTCD",
+            series="SERIES_A",
             db_path="/nonexistent/path.db",
             start_date="2025-01-01",
             end_date="2025-12-31",
@@ -158,7 +158,7 @@ class TestAuditLogValidation:
         audit = AuditLog(tmp_path / "research.db")
         ok, err = audit.validate_hypothesis(
             strategy="",
-            series="KXBTCD",
+            series="SERIES_A",
             db_path="data/kalshi.db",
             start_date="2025-01-01",
             end_date="2025-12-31",
