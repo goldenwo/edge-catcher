@@ -113,11 +113,12 @@ class Portfolio:
 		strategy_name: str,
 		time: datetime,
 		slippage: int,
+		fee_fn: Optional[Callable[[int, int], float]] = None,
 	) -> bool:
 		"""Deduct cost and entry fee from cash and record position. Returns False if insufficient cash."""
 		actual_entry = signal.price + slippage
 		cost = actual_entry * signal.size
-		fee = self.fee_fn(actual_entry, signal.size)
+		fee = (fee_fn or self.fee_fn)(actual_entry, signal.size)
 		if cost + fee > self.cash:
 			return False
 		self.cash -= cost + fee
@@ -141,13 +142,14 @@ class Portfolio:
 		time: datetime,
 		reason: str,
 		slippage: int,
+		fee_fn: Optional[Callable[[int, int], float]] = None,
 	) -> Optional[CompletedTrade]:
 		"""Close an open position at exit_price (slippage subtracted). Returns CompletedTrade."""
 		pos = self.positions.pop((ticker, strategy), None)
 		if pos is None:
 			return None
 		actual_exit = max(0, exit_price - slippage)
-		exit_fee = self.fee_fn(actual_exit, pos.size)
+		exit_fee = (fee_fn or self.fee_fn)(actual_exit, pos.size)
 		self.cash += actual_exit * pos.size - exit_fee
 		self.total_fees_paid += exit_fee
 		pnl = (actual_exit - pos.entry_price) * pos.size - pos.entry_fee - exit_fee
@@ -835,11 +837,10 @@ class EventBacktester:
 					if not (1 <= signal.price <= 99):
 						continue
 					# Apply per-ticker fee
-					fee_model = ticker_to_fee.get(signal.ticker, ZERO_FEE)
-					old_fee = portfolio.fee_fn
-					portfolio.fee_fn = fee_model.calculate
+					fee_calc = ticker_to_fee.get(signal.ticker, ZERO_FEE).calculate
 					if signal.action == 'buy':
-						portfolio.open_position(signal, strategy.name, trade.created_time, slippage_cents)
+						portfolio.open_position(signal, strategy.name, trade.created_time, slippage_cents,
+							fee_fn=fee_calc)
 					elif signal.action == 'sell':
 						reason = (
 							'take_profit' if 'take_profit' in signal.reason
@@ -849,8 +850,8 @@ class EventBacktester:
 						portfolio.close_position(
 							signal.ticker, strategy.name, signal.price,
 							trade.created_time, reason, slippage_cents,
+							fee_fn=fee_calc,
 						)
-					portfolio.fee_fn = old_fee
 
 		# Final settlement
 		for (t_ticker, t_strategy) in list(portfolio.positions.keys()):
