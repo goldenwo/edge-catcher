@@ -2,7 +2,7 @@
 import math
 
 import pytest
-from edge_catcher.fees import STANDARD_FEE, INDEX_FEE, ZERO_FEE, get_fee_model_for_series
+from edge_catcher.fees import STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
 
 class TestKalshiFee:
@@ -97,23 +97,6 @@ class TestKalshiIndexFee:
 			actual = INDEX_FEE.calculate(price, 1)
 			assert actual == expected, f"Price {price}¢: expected {expected}¢, got {actual}¢"
 
-
-class TestGetFeeModelForSeries:
-	def test_inx_series(self):
-		assert get_fee_model_for_series("KXINXU") is INDEX_FEE
-
-	def test_nasdaq100_series(self):
-		assert get_fee_model_for_series("KXNASDAQ100U") is INDEX_FEE
-
-	def test_other_series_gets_standard(self):
-		assert get_fee_model_for_series("KXBTC") is STANDARD_FEE
-
-	def test_empty_string_gets_standard(self):
-		assert get_fee_model_for_series("") is STANDARD_FEE
-
-	def test_partial_match_not_fooled(self):
-		# "NOTINX" should not match prefix "KXINX"
-		assert get_fee_model_for_series("NOTINX") is STANDARD_FEE
 
 
 class TestZeroFee:

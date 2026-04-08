@@ -844,7 +844,7 @@ def get_series(_: None = Depends(check_auth)) -> list[str]:
 
 @app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
 def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
-    from edge_catcher.fees import get_fee_model_for_series
+    from api.adapter_registry import get_fee_model_for_db
     from edge_catcher.storage.db import get_connection
     db = _db_path()
     if db.exists():
@@ -857,7 +857,7 @@ def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoRespon
                 raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
         finally:
             conn.close()
-    fee_model = get_fee_model_for_series(series)
+    fee_model = get_fee_model_for_db(str(_db_path()), series)
     return FeeInfoResponse(
         id=fee_model.id,
         name=fee_model.name,
@@ -923,7 +923,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
     from edge_catcher.runner.strategy_parser import (
         list_strategies, STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
     )
-    from edge_catcher.fees import get_fee_model_for_series
+    from api.adapter_registry import get_fee_model_for_db
 
     state = backtest_states[task_id]
     state.running = True
@@ -999,7 +999,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                 f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
             )
 
-        fee_model = get_fee_model_for_series(body.series)
+        fee_model = get_fee_model_for_db(str(_db_path()), body.series)
 
         backtester = EventBacktester()
         result = backtester.run(
