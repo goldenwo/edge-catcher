@@ -1,5 +1,6 @@
 """Event-driven backtester for prediction market strategies."""
 
+import heapq
 import json
 import math
 import os
@@ -354,6 +355,90 @@ def _row_to_trade(row: sqlite3.Row) -> Trade:
 
 
 # ---------------------------------------------------------------------------
+# TradeStream / merge_streams — multi-DB support
+# ---------------------------------------------------------------------------
+
+class TradeStream:
+	"""Yields (trade, market, db_path) tuples from a single DB in time order."""
+
+	def __init__(self, db_path: str, series: str, start: date | None = None, end: date | None = None):
+		self.db_path = db_path
+		self.series = series
+		self.start = start
+		self.end = end
+
+	def iter_trades(self):
+		"""Yield (trade, market, db_path) tuples sorted by created_time."""
+		conn = get_connection(Path(self.db_path))
+		try:
+			# Load markets
+			market_query = 'SELECT * FROM markets WHERE series_ticker = ?'
+			params: list = [self.series]
+			if self.start:
+				market_query += ' AND close_time >= ?'
+				params.append(self.start.isoformat())
+			if self.end:
+				end_dt = self.end + timedelta(days=1)
+				market_query += ' AND open_time <= ?'
+				params.append(end_dt.isoformat())
+
+			market_map = {}
+			for row in conn.execute(market_query, params).fetchall():
+				m = _row_to_market(row)
+				market_map[m.ticker] = m
+
+			if not market_map:
+				return
+
+			tickers = list(market_map.keys())
+			conn.execute('CREATE TEMP TABLE IF NOT EXISTS _bt_tickers (ticker TEXT PRIMARY KEY)')
+			conn.execute('DELETE FROM _bt_tickers')
+			conn.executemany('INSERT INTO _bt_tickers VALUES (?)', [(t,) for t in tickers])
+
+			where_clauses = []
+			trade_params: list = []
+			if self.start:
+				where_clauses.append('t.created_time >= ?')
+				trade_params.append(self.start.isoformat())
+			if self.end:
+				end_dt = self.end + timedelta(days=1)
+				where_clauses.append('t.created_time < ?')
+				trade_params.append(end_dt.isoformat())
+			where_sql = (' WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
+
+			trade_query = f'''
+				SELECT t.trade_id, t.ticker, t.yes_price, t.no_price, t.count,
+				       t.taker_side, t.created_time, t.raw_data
+				FROM trades t
+				INNER JOIN _bt_tickers bt ON t.ticker = bt.ticker
+				{where_sql}
+				ORDER BY t.created_time ASC
+			'''
+
+			for row in conn.execute(trade_query, trade_params):
+				trade = _row_to_trade(row)
+				market = market_map.get(trade.ticker)
+				if market is not None:
+					yield (trade, market, self.db_path)
+		finally:
+			conn.close()
+
+
+def merge_streams(streams: list[TradeStream]):
+	"""Merge multiple TradeStreams in time order. Deterministic tiebreaker on db_path."""
+	if len(streams) == 1:
+		yield from streams[0].iter_trades()
+		return
+
+	def keyed(stream):
+		for trade, market, db_path in stream.iter_trades():
+			yield (trade.created_time.isoformat(), db_path), (trade, market, db_path)
+
+	for _key, item in heapq.merge(*[keyed(s) for s in streams]):
+		yield item
+
+
+# ---------------------------------------------------------------------------
 # Metrics computation
 # ---------------------------------------------------------------------------
 
@@ -424,11 +509,12 @@ class EventBacktester:
 		self,
 		series: str,
 		strategies: list[Strategy],
+		*,
+		db_path: Path,
 		start: Optional[date] = None,
 		end: Optional[date] = None,
 		initial_cash: float = 10000.0,
 		slippage_cents: int = 1,
-		db_path: Path = Path('data/kalshi.db'),
 		fee_fn: Optional[Callable[[int, int], float]] = None,
 		on_progress: Optional[Callable[[dict], None]] = None,
 		is_cancelled: Optional[Callable[[], bool]] = None,
@@ -630,6 +716,151 @@ class EventBacktester:
 				curve.insert(0, (start_time, portfolio.initial_cash))
 
 		# --- 6. Compute metrics from running accumulators ---
+		sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy = _compute_metrics(
+			portfolio, portfolio.equity_snapshots,
+		)
+
+		return BacktestResult(
+			total_trades=portfolio.total_trades,
+			wins=wins,
+			losses=losses,
+			net_pnl_cents=portfolio.net_pnl_cents,
+			total_fees_paid=portfolio.total_fees_paid,
+			sharpe=sharpe,
+			max_drawdown_pct=max_dd,
+			win_rate=win_rate,
+			avg_win_cents=avg_win,
+			avg_loss_cents=avg_loss,
+			equity_curve=portfolio.equity_snapshots,
+			per_strategy=per_strategy,
+			per_strategy_curves=portfolio._per_strategy_curves,
+			trade_sample=portfolio._trade_sample,
+			pnl_values=list(portfolio._pnl_values),
+		)
+
+	def run_multi(
+		self,
+		resolved: 'ResolvedSource',
+		strategies: list[Strategy],
+		start: date | None = None,
+		end: date | None = None,
+		initial_cash: float = 10000.0,
+		slippage_cents: int = 1,
+		on_progress=None,
+		is_cancelled=None,
+	) -> BacktestResult:
+		"""Run backtest across one or more primary data sources."""
+		from edge_catcher.research.data_source_resolver import ResolvedSource  # noqa: F811
+
+		# Single-primary fast path
+		if len(resolved.primaries) == 1:
+			src = resolved.primaries[0]
+			return self.run(
+				series=src.series,
+				strategies=strategies,
+				start=start,
+				end=end,
+				initial_cash=initial_cash,
+				slippage_cents=slippage_cents,
+				db_path=Path(src.db_path),
+				fee_fn=src.fee_model.calculate,
+				on_progress=on_progress,
+				is_cancelled=is_cancelled,
+			)
+
+		# Multi-primary: build streams and merge
+		streams = [
+			TradeStream(db_path=src.db_path, series=src.series, start=start, end=end)
+			for src in resolved.primaries
+		]
+
+		# Build ticker -> fee_model mapping
+		ticker_to_fee = {}
+		for src in resolved.primaries:
+			conn = get_connection(Path(src.db_path))
+			try:
+				for row in conn.execute('SELECT ticker FROM markets WHERE series_ticker = ?', [src.series]):
+					ticker_to_fee[row[0]] = src.fee_model
+			finally:
+				conn.close()
+
+		# Collect all markets for settlement
+		all_markets: dict[str, Market] = {}
+		for src in resolved.primaries:
+			conn = get_connection(Path(src.db_path))
+			try:
+				market_query = 'SELECT * FROM markets WHERE series_ticker = ?'
+				params: list = [src.series]
+				if start:
+					market_query += ' AND close_time >= ?'
+					params.append(start.isoformat())
+				if end:
+					end_dt = end + timedelta(days=1)
+					market_query += ' AND open_time <= ?'
+					params.append(end_dt.isoformat())
+				for row in conn.execute(market_query, params).fetchall():
+					m = _row_to_market(row)
+					all_markets[m.ticker] = m
+			finally:
+				conn.close()
+
+		_cancelled = is_cancelled or (lambda: False)
+
+		portfolio = Portfolio(initial_cash, fee_fn=lambda p, s: 0.0)
+
+		trade_count = 0
+		for trade, market, db_path in merge_streams(streams):
+			if _cancelled():
+				break
+
+			# Settlement sweep
+			for (t_ticker, t_strategy) in list(portfolio.positions.keys()):
+				if (t_ticker, t_strategy) not in portfolio.positions:
+					continue
+				pos_market = all_markets.get(t_ticker)
+				if (pos_market and pos_market.close_time and
+					trade.created_time > pos_market.close_time and pos_market.result):
+					portfolio.settle_position(t_ticker, t_strategy, pos_market.result, pos_market.close_time)
+
+			trade_count += 1
+			if trade_count % 10000 == 0:
+				portfolio.snapshot(trade.created_time)
+
+			if market.close_time and trade.created_time > market.close_time:
+				continue
+
+			for strategy in strategies:
+				signals = strategy.on_trade(trade, market, portfolio)
+				for signal in signals:
+					if not (1 <= signal.price <= 99):
+						continue
+					# Apply per-ticker fee
+					fee_model = ticker_to_fee.get(signal.ticker, ZERO_FEE)
+					old_fee = portfolio.fee_fn
+					portfolio.fee_fn = fee_model.calculate
+					if signal.action == 'buy':
+						portfolio.open_position(signal, strategy.name, trade.created_time, slippage_cents)
+					elif signal.action == 'sell':
+						reason = (
+							'take_profit' if 'take_profit' in signal.reason
+							else 'stop_loss' if 'stop_loss' in signal.reason
+							else 'close'
+						)
+						portfolio.close_position(
+							signal.ticker, strategy.name, signal.price,
+							trade.created_time, reason, slippage_cents,
+						)
+					portfolio.fee_fn = old_fee
+
+		# Final settlement
+		for (t_ticker, t_strategy) in list(portfolio.positions.keys()):
+			pos_market = all_markets.get(t_ticker)
+			if pos_market and pos_market.result:
+				portfolio.settle_position(t_ticker, t_strategy, pos_market.result,
+					pos_market.close_time or datetime.now(timezone.utc))
+
+		portfolio.snapshot(datetime.now(timezone.utc))
+
 		sharpe, max_dd, win_rate, avg_win, avg_loss, wins, losses, per_strategy = _compute_metrics(
 			portfolio, portfolio.equity_snapshots,
 		)
