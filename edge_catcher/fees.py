@@ -11,21 +11,21 @@ FeeCalc = Callable[[int, int], float]
 
 @dataclass(frozen=True)
 class FeeModel:
-    """Encapsulates an exchange's fee schedule with display metadata.
+	"""Encapsulates an exchange's fee schedule with display metadata.
 
-    Args for calculate():
-        price: entry price in cents (0-100 for binary contracts)
-        size: number of contracts
-    Returns: fee in cents
-    """
-    id: str
-    name: str
-    description: str
-    formula: str
-    _calc: FeeCalc  # type: ignore[misc]  # frozen dataclass + callable field
+	Args for calculate():
+		price: entry price in cents (0-100 for binary contracts)
+		size: number of contracts
+	Returns: fee in cents
+	"""
+	id: str
+	name: str
+	description: str
+	formula: str
+	_calc: FeeCalc  # type: ignore[misc]  # frozen dataclass + callable field
 
-    def calculate(self, price: int, size: int) -> float:
-        return self._calc(price, size)
+	def calculate(self, price: int, size: int) -> float:
+		return self._calc(price, size)
 
 
 def _make_kalshi_fee(rate: float) -> FeeCalc:
