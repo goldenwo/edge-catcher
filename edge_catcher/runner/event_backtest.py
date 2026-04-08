@@ -674,7 +674,7 @@ class EventBacktester:
 			for strategy in strategies:
 				signals = strategy.on_trade(trade, market, portfolio)
 				for signal in signals:
-					# Kalshi prices are 1-99¢ — skip impossible prices
+					# Binary contract prices are 1-99¢ — skip impossible prices
 					if not (1 <= signal.price <= 99):
 						continue
 					if signal.action == 'buy':

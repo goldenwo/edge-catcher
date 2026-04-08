@@ -790,7 +790,7 @@ def main() -> None:
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
     bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
     bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
-                    help="Multiplier on 0.07*P*(1-P) entry fee formula (default: 1.0 = full Kalshi taker fee; 0.25 = maker fee; 0.0 = no fee)")
+                    help="Multiplier on entry fee formula (default: 1.0 = full taker fee; 0.25 = maker fee; 0.0 = no fee)")
     bt.add_argument("--json", action="store_true", default=False,
                     help="Output only valid JSON to stdout; progress goes to stderr")
     bt.add_argument("--list-strategies", action="store_true", default=False, dest="list_strategies",
@@ -803,7 +803,7 @@ def main() -> None:
                     help="Path to altcoin OHLC database (default: data/ohlc.db)")
     bt.add_argument("--ohlc-config", default=None, dest="ohlc_config",
                     help='JSON mapping asset names to [db_path, table] pairs '
-                         '(e.g. \'{"btc": ["data/kalshi.db", "btc_ohlc"]}\')')
+                         '(e.g. \'{"btc": ["data/ohlc.db", "btc_ohlc"]}\')')
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
