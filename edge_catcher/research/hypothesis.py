@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Hypothesis:
-    strategy: str               # strategy name (e.g. 'Cvol', 'D', 'Cstack')
+    strategy: str               # strategy name (e.g. 'REDACTED', 'REDACTED', 'REDACTED')
     series: str                 # series ticker (e.g. 'KXBTCD')
     db_path: str                # path to database
     start_date: str | None = None   # ISO date (e.g. '2025-01-01'), None = all data
