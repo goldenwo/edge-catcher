@@ -305,6 +305,41 @@ def _build_strategy_map():
     return strategy_map, local_mod is not None
 
 
+def _auto_strategy_args(parser) -> None:
+    """Auto-generate CLI args from strategy __init__ signatures.
+
+    Inspects all discovered strategies and creates --param-name args
+    for each unique parameter. No manual arg definitions needed.
+    """
+    import inspect
+
+    strategy_map, _ = _build_strategy_map()
+
+    # Params that are internal or handled specially (not CLI-configurable)
+    SKIP = {'self', 'size', 'btc_closes', 'ohlc_provider'}
+
+    seen: dict[str, tuple[type, object]] = {}
+    for cls in strategy_map.values():
+        sig = inspect.signature(cls.__init__)
+        for name, param in sig.parameters.items():
+            if name in SKIP or name in seen:
+                continue
+            if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+                continue
+            default = param.default if param.default != inspect.Parameter.empty else None
+            param_type = type(default) if default is not None else int
+            seen[name] = (param_type, default)
+
+    for name, (ptype, default) in sorted(seen.items()):
+        cli_flag = f'--{name.replace("_", "-")}'
+        help_text = f'(default: {default})' if default is not None else None
+        try:
+            parser.add_argument(cli_flag, type=ptype, default=None,
+                                dest=name, help=help_text)
+        except Exception:
+            pass  # Already defined (e.g., by framework args)
+
+
 def _load_coin_closes(series: str, btc_db: str, altcoin_db: str) -> dict:
     """Load price closes dict {timestamp: close} for the coin matching the series prefix."""
     import sqlite3 as _sql
@@ -402,18 +437,6 @@ def _cmd_backtest(args) -> None:
 
         import inspect
 
-        # Map CLI arg names to strategy __init__ param names
-        _CLI_TO_PARAM = {
-            'min_price': 'min_price',
-            'max_price': 'max_price',
-            'tp': 'take_profit',
-            'sl': 'stop_loss',
-            'h1_threshold_high': 'threshold_high',
-            'h1_threshold_low': 'threshold_low',
-            'h5_fav_threshold': 'fav_threshold',
-            'h5_long_threshold': 'long_threshold',
-        }
-
         strategies = []
         for name in strategy_names:
             cls = strategy_map.get(name)
@@ -427,21 +450,21 @@ def _cmd_backtest(args) -> None:
 
             # Build kwargs via introspection — only pass params the class accepts
             sig = inspect.signature(cls.__init__)
-            accepts_kwargs = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
             available: dict = {}
-            for cli_name, param_name in _CLI_TO_PARAM.items():
-                val = getattr(args, cli_name, None)
-                if val is not None and (accepts_kwargs or param_name in sig.parameters):
+            for param_name, param in sig.parameters.items():
+                if param_name == 'self' or param.kind in (
+                    inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL,
+                ):
+                    continue
+                if param_name == 'btc_closes':
+                    closes = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
+                    if closes:
+                        available['btc_closes'] = closes
+                        print(f'  Loaded {len(closes)} candles for momentum filter', file=sys.stderr)
+                    continue
+                val = getattr(args, param_name, None)
+                if val is not None:
                     available[param_name] = val
-
-            # Load coin OHLC data if strategy explicitly declares btc_closes
-            if 'btc_closes' in sig.parameters:
-                closes = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
-                if closes:
-                    available['btc_closes'] = closes
-                    print(f'  Loaded {len(closes)} candles for momentum filter', file=sys.stderr)
 
             strategies.append(cls(**available))
 
@@ -807,23 +830,13 @@ def main() -> None:
 
     bt = sub.add_parser("backtest", help="Run event-driven backtest on historical trade data")
     bt.add_argument("--series", default=None, help="Series ticker (e.g. KXBTCD, KXBTC15M)")
-    bt.add_argument("--strategy", default="A", help="Comma-separated strategy names: A,B,C,TP")
+    bt.add_argument("--strategy", default="example", help="Comma-separated strategy names (use --list-strategies)")
     bt.add_argument("--start", default=None, help="Start date ISO format (e.g. 2025-06-01)")
     bt.add_argument("--end", default=None, help="End date ISO format (e.g. 2026-03-30)")
     bt.add_argument("--cash", type=float, default=10000.0, help="Initial capital (default: 10000)")
     bt.add_argument("--slippage", type=int, default=1, help="Slippage in cents (default: 1)")
-    bt.add_argument("--tp", type=int, default=None, help="Take profit cents (default: 8)")
-    bt.add_argument("--sl", type=int, default=None, help="Stop loss cents (default: 5)")
-    bt.add_argument("--min-price", type=int, default=None, dest="min_price", help="Override strategy min price")
-    bt.add_argument("--max-price", type=int, default=None, dest="max_price", help="Override strategy max price")
-    bt.add_argument("--h1-threshold-high", type=int, default=None, dest="h1_threshold_high",
-                    help="H1 entry threshold for high (fade NO above this, default: 60)")
-    bt.add_argument("--h1-threshold-low", type=int, default=None, dest="h1_threshold_low",
-                    help="H1 entry threshold for low (fade YES below this, default: 40)")
-    bt.add_argument("--h5-fav-threshold", type=int, default=None, dest="h5_fav_threshold",
-                    help="H5_15m favorite threshold — buy NO at or above this (default: 85)")
-    bt.add_argument("--h5-long-threshold", type=int, default=None, dest="h5_long_threshold",
-                    help="H5_15m longshot threshold — buy YES at or below this (default: 15)")
+    # Strategy-specific params auto-generated from __init__ signatures
+    _auto_strategy_args(bt)
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
     bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
     bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
@@ -851,7 +864,7 @@ def main() -> None:
     rs_sub = rs.add_subparsers(dest="research_command")
 
     rs_run = rs_sub.add_parser("run", help="Run a single hypothesis")
-    rs_run.add_argument("--strategy", required=True, help="Strategy name (e.g. REDACTED, REDACTED, REDACTED)")
+    rs_run.add_argument("--strategy", required=True, help="Strategy name (use backtest --list-strategies)")
     rs_run.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD)")
     rs_run.add_argument("--db-path", required=True, dest="db_path", help="Path to database")
     rs_run.add_argument("--start", required=True, help="Start date ISO (e.g. 2025-01-01)")
