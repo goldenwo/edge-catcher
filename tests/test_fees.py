@@ -5,7 +5,7 @@ import pytest
 from edge_catcher.fees import STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
 
-class TestKalshiFee:
+class TestStandardFee:
 	def test_fee_at_midpoint(self):
 		# price=50, size=1: ceil(0.07 * 1 * 0.50 * 0.50 * 100) = ceil(1.75) = 2
 		assert STANDARD_FEE.calculate(50, 1) == 2
@@ -57,7 +57,7 @@ class TestKalshiFee:
 		assert STANDARD_FEE.description  # non-empty
 
 
-class TestKalshiIndexFee:
+class TestIndexFee:
 	def test_fee_at_midpoint(self):
 		# price=50, size=1: ceil(0.035 * 1 * 0.50 * 0.50 * 100) = ceil(0.875) = 1
 		assert INDEX_FEE.calculate(50, 1) == 1
