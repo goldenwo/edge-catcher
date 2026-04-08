@@ -13,7 +13,7 @@ from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.tracker import Tracker
 
 
-def _grid_result(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+def _grid_result(strategy="C", series="SERIES_A", db_path="data/kalshi.db",
                  verdict="kill", verdict_reason="k", **kw) -> HypothesisResult:
     """Helper that creates a result with explicit db_path control."""
     from pathlib import Path
@@ -34,7 +34,7 @@ class TestGridPlannerGenerate:
         tracker = Tracker(tmp_path / "research.db")
         planner = GridPlanner(tracker=tracker)
         strategies = ["A", "B"]
-        series_map = {"data/kalshi.db": ["KXBTCD", "KXETH"]}
+        series_map = {"data/kalshi.db": ["SERIES_A", "SERIES_E"]}
         hypotheses = planner.generate(
             strategies=strategies,
             series_map=series_map,
@@ -45,25 +45,25 @@ class TestGridPlannerGenerate:
         # 2 strategies × 2 series = 4
         assert len(hypotheses) == 4
         combos = {(h.strategy, h.series, h.db_path) for h in hypotheses}
-        assert ("A", "KXBTCD", "data/kalshi.db") in combos
-        assert ("B", "KXETH", "data/kalshi.db") in combos
+        assert ("A", "SERIES_A", "data/kalshi.db") in combos
+        assert ("B", "SERIES_E", "data/kalshi.db") in combos
 
     def test_skips_already_tested(self, tmp_path):
         tracker = Tracker(tmp_path / "research.db")
-        # Pre-save a result for A × KXBTCD
-        r = _grid_result(strategy="A", series="KXBTCD", verdict="kill", verdict_reason="k")
+        # Pre-save a result for A × SERIES_A
+        r = _grid_result(strategy="A", series="SERIES_A", verdict="kill", verdict_reason="k")
         tracker.save_result(r)
 
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A", "B"],
-            series_map={"data/kalshi.db": ["KXBTCD", "KXETH"]},
+            series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
             fee_pct=1.0,
         )
         strategies_series = [(h.strategy, h.series) for h in hypotheses]
-        assert ("A", "KXBTCD") not in strategies_series
+        assert ("A", "SERIES_A") not in strategies_series
         assert len(hypotheses) == 3
 
     def test_tags_source_grid(self, tmp_path):
@@ -71,7 +71,7 @@ class TestGridPlannerGenerate:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A"],
-            series_map={"data/kalshi.db": ["KXBTCD"]},
+            series_map={"data/kalshi.db": ["SERIES_A"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
@@ -82,7 +82,7 @@ class TestGridPlannerGenerate:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=[],
-            series_map={"data/kalshi.db": ["KXBTCD"]},
+            series_map={"data/kalshi.db": ["SERIES_A"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
@@ -104,18 +104,18 @@ class TestGridPlannerOrdering:
     def test_warm_leads_first(self, tmp_path):
         """Strategies with prior promote/explore results should come first."""
         tracker = Tracker(tmp_path / "research.db")
-        # Strategy B has a promote result on KXBTCD
-        r = _grid_result(strategy="B", series="KXBTCD", verdict="promote", verdict_reason="p")
+        # Strategy B has a promote result on SERIES_A
+        r = _grid_result(strategy="B", series="SERIES_A", verdict="promote", verdict_reason="p")
         tracker.save_result(r)
 
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A", "B"],
-            series_map={"data/kalshi.db": ["KXBTCD", "KXETH"]},
+            series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
         # B should appear before A (B has warm results)
-        # B × KXBTCD is already tested, so B × KXETH should be first
+        # B × SERIES_A is already tested, so B × SERIES_E should be first
         assert hypotheses[0].strategy == "B"
-        assert hypotheses[0].series == "KXETH"
+        assert hypotheses[0].series == "SERIES_E"
