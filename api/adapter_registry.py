@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Optional
-from edge_catcher.fees import FeeModel, KALSHI_FEE, ZERO_FEE
+from edge_catcher.fees import FeeModel, STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
 
 def _db_file_from_markets_yaml(markets_yaml: str) -> str:
@@ -28,7 +28,7 @@ class AdapterMeta:
     default_start_date: Optional[str] = None  # ISO date, shown as default in UI
     markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
     db_file: str = ""  # database file this adapter writes to (auto-derived from markets_yaml)
-    fee_model: FeeModel = field(default_factory=lambda: KALSHI_FEE)
+    fee_model: FeeModel = field(default_factory=lambda: STANDARD_FEE)
     coinbase_product_id: Optional[str] = None  # e.g. "ETH-USD" — set for Coinbase adapters
 
     def __post_init__(self):
@@ -174,7 +174,7 @@ def is_api_key_set(meta: AdapterMeta) -> bool:
 def get_fee_model(adapter_id: str) -> FeeModel:
     """Return the fee model for a specific adapter by ID (preferred lookup)."""
     adapter = get_adapter(adapter_id)
-    return adapter.fee_model if adapter else KALSHI_FEE
+    return adapter.fee_model if adapter else STANDARD_FEE
 
 def get_fee_model_for_db(db_path: str) -> FeeModel:
     """Return the fee model for the adapter that writes to db_path.
@@ -188,4 +188,4 @@ def get_fee_model_for_db(db_path: str) -> FeeModel:
     for a in ADAPTERS:
         if str(Path(a.db_file).resolve()) == normalized:
             return a.fee_model
-    return KALSHI_FEE  # fallback
+    return STANDARD_FEE  # fallback

@@ -1,4 +1,4 @@
-"""Exchange fee models for backtesting."""
+"""Fee models for backtesting."""
 from __future__ import annotations
 
 import math
@@ -28,8 +28,8 @@ class FeeModel:
 		return self._calc(price, size)
 
 
-def _make_kalshi_fee(rate: float) -> FeeCalc:
-	"""Factory: Kalshi fee at given rate. ceil(rate × contracts × P × (1-P) × 100) cents."""
+def _make_proportional_fee(rate: float) -> FeeCalc:
+	"""Factory: proportional fee at given rate. ceil(rate × contracts × P × (1-P) × 100) cents."""
 	def _fee(price: int, size: int) -> float:
 		p = price / 100.0
 		raw_fee = rate * size * p * (1 - p) * 100
@@ -41,20 +41,20 @@ def _zero_fee(price: int, size: int) -> float:
 	return 0.0
 
 
-KALSHI_FEE = FeeModel(
-	id='kalshi',
-	name='Kalshi Taker Fee',
-	description='Kalshi taker fee: ceil(7% × P × (1-P)) per contract. Highest near 50¢ (2¢), minimum 1¢ at extremes.',
-	formula='ceil(0.07 × contracts × P × (1-P) × 100) cents',
-	_calc=_make_kalshi_fee(0.07),
+STANDARD_FEE = FeeModel(
+	id='standard',
+	name='Standard Fee',
+	description='Standard taker fee: ceil(7% x P x (1-P) x 100) cents per contract',
+	formula='ceil(0.07 * contracts * P * (1-P) * 100)',
+	_calc=_make_proportional_fee(0.07),
 )
 
-KALSHI_INDEX_FEE = FeeModel(
-	id='kalshi_index',
-	name='Kalshi Index Fee',
-	description='Kalshi fee for S&P 500 and Nasdaq-100: ceil(3.5% × P × (1-P)) per contract.',
-	formula='ceil(0.035 × contracts × P × (1-P) × 100) cents',
-	_calc=_make_kalshi_fee(0.035),
+INDEX_FEE = FeeModel(
+	id='index',
+	name='Index Fee',
+	description='Reduced index fee: ceil(3.5% x P x (1-P) x 100) cents per contract',
+	formula='ceil(0.035 * contracts * P * (1-P) * 100)',
+	_calc=_make_proportional_fee(0.035),
 )
 
 ZERO_FEE = FeeModel(
@@ -75,5 +75,5 @@ def get_fee_model_for_series(series: str) -> FeeModel:
 	All other series use the standard 7% rate.
 	"""
 	if series.startswith(_INDEX_PREFIXES):
-		return KALSHI_INDEX_FEE
-	return KALSHI_FEE
+		return INDEX_FEE
+	return STANDARD_FEE

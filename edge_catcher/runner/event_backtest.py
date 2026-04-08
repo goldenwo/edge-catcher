@@ -1,4 +1,4 @@
-"""Event-driven backtester for Kalshi prediction market strategies."""
+"""Event-driven backtester for prediction market strategies."""
 
 import json
 import math
@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from edge_catcher.fees import KALSHI_FEE
+from edge_catcher.fees import ZERO_FEE
 from edge_catcher.storage.db import get_connection
 from edge_catcher.storage.models import Market, Trade
 from edge_catcher.runner.strategies import Signal, Strategy
@@ -53,7 +53,7 @@ class Portfolio:
 	def __init__(self, initial_cash: float, fee_fn: Optional[Callable[[int, int], float]] = None) -> None:
 		self.cash: float = initial_cash
 		self.initial_cash: float = initial_cash
-		self.fee_fn: Callable[[int, int], float] = fee_fn or KALSHI_FEE.calculate
+		self.fee_fn: Callable[[int, int], float] = fee_fn or ZERO_FEE.calculate
 		self.total_fees_paid: float = 0.0
 		self.positions: dict[tuple[str, str], Position] = {}
 		self.equity_snapshots: list[tuple[datetime, float]] = []

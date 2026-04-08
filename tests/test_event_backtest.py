@@ -13,6 +13,7 @@ from edge_catcher.runner.event_backtest import (
 	Portfolio,
 	Position,
 )
+from edge_catcher.fees import STANDARD_FEE
 from edge_catcher.runner.strategies import Signal, Strategy
 from edge_catcher.storage.models import Market, Trade
 
@@ -431,7 +432,7 @@ class TestPortfolio:
 	def test_entry_fee_charged_at_open(self):
 		# Buy NO at 87¢: fee = ceil(0.07 * 1 * 0.87 * 0.13 * 100) = ceil(0.7917) = 1¢
 		import math
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
 		port.open_position(sig, 'test-buy-no-range', _dt(), slippage=0)
 		expected_fee = math.ceil(0.07 * 1 * 0.87 * 0.13 * 100)  # 1¢
@@ -448,7 +449,7 @@ class TestPortfolio:
 
 	def test_no_fee_at_settlement(self):
 		# Fee is only charged at entry — settlement should not add more fees
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		fee_at_entry = port.total_fees_paid
@@ -482,7 +483,7 @@ class TestExitFee:
 	def test_close_position_charges_exit_fee(self):
 		"""close_position() should charge a fee on the exit price."""
 		import math
-		port = Portfolio(1000.0)  # uses default KALSHI_FEE
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		entry_fee = port.total_fees_paid
@@ -495,7 +496,7 @@ class TestExitFee:
 	def test_close_position_fee_cents_is_entry_plus_exit(self):
 		"""CompletedTrade.fee_cents should reflect total fees (entry + exit)."""
 		import math
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		ct = port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
@@ -505,7 +506,7 @@ class TestExitFee:
 
 	def test_close_position_exit_at_zero_no_fee(self):
 		"""Exit at price 0 (after slippage) should have 0 exit fee."""
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		entry_fee = port.total_fees_paid
@@ -516,7 +517,7 @@ class TestExitFee:
 
 	def test_close_position_exit_at_hundred_no_fee(self):
 		"""Exit at price 100 should have 0 exit fee (P*(1-P)=0)."""
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		entry_fee = port.total_fees_paid
@@ -526,7 +527,7 @@ class TestExitFee:
 
 	def test_settle_position_still_no_exit_fee(self):
 		"""Settlement must NOT charge an exit fee — only close_position does."""
-		port = Portfolio(1000.0)
+		port = Portfolio(1000.0, fee_fn=STANDARD_FEE.calculate)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		entry_fee = port.total_fees_paid
