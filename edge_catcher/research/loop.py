@@ -413,24 +413,30 @@ class LoopOrchestrator:
 			except Exception as exc:
 				logger.warning("Novel strategy generation failed: %s", exc)
 
-			# Add hypotheses for target_series specified in novel proposals
-			for proposal in novel_proposals:
-				target_series = proposal.get("target_series", [])
-				if target_series:
-					from .hypothesis import Hypothesis as _H
-					for series in target_series:
-						for db_path, series_list in series_map.items():
-							if series in series_list:
-								hypotheses.append(_H(
-									strategy=proposal["name"],
-									series=series,
-									db_path=db_path,
-									start_date=self.start_date,
-									end_date=self.end_date,
-									fee_pct=self.fee_pct,
-									tags=["source:llm_novel_strategy"],
-								))
-								break
+		# Add hypotheses for target_series specified in novel proposals,
+		# but only for strategies that were successfully generated and registered.
+		from edge_catcher.runner.strategy_parser import (
+			list_strategies, STRATEGIES_LOCAL_PATH,
+		)
+		available = {s["name"] for s in list_strategies(STRATEGIES_LOCAL_PATH)}
+		from .hypothesis import Hypothesis as _H
+		for proposal in novel_proposals:
+			if proposal["name"] not in available:
+				continue
+			target_series = proposal.get("target_series", [])
+			for series in target_series:
+				for db_path, series_list in series_map.items():
+					if series in series_list:
+						hypotheses.append(_H(
+							strategy=proposal["name"],
+							series=series,
+							db_path=db_path,
+							start_date=self.start_date,
+							end_date=self.end_date,
+							fee_pct=self.fee_pct,
+							tags=["source:llm_novel_strategy"],
+						))
+						break
 
 		# Persist all LLM hypotheses so they can be resumed
 		for h in hypotheses:
