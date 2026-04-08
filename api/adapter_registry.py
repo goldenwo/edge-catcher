@@ -30,6 +30,7 @@ class AdapterMeta:
     db_file: str = ""  # database file this adapter writes to (auto-derived from markets_yaml)
     fee_model: FeeModel = field(default_factory=lambda: STANDARD_FEE)
     coinbase_product_id: Optional[str] = None  # e.g. "ETH-USD" — set for Coinbase adapters
+    fee_overrides: dict[str, FeeModel] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.db_file and self.markets_yaml:
@@ -133,6 +134,7 @@ ADAPTERS: list[AdapterMeta] = [
         api_key_env_var="KALSHI_API_KEY",
         default_start_date="2025-01-01",
         markets_yaml="config/markets-financials.yaml",
+        fee_overrides={"KXINX": INDEX_FEE, "KXNASDAQ100": INDEX_FEE},
     ),
     AdapterMeta(
         id="kalshi_entertainment",
@@ -176,16 +178,21 @@ def get_fee_model(adapter_id: str) -> FeeModel:
     adapter = get_adapter(adapter_id)
     return adapter.fee_model if adapter else STANDARD_FEE
 
-def get_fee_model_for_db(db_path: str) -> FeeModel:
-    """Return the fee model for the adapter that writes to db_path.
+def get_fee_model_for_db(db_path: str, series: str | None = None) -> FeeModel:
+    """Return the fee model for a given DB path, with optional per-series override.
 
-    When multiple adapters share the same db_file (e.g. all Kalshi adapters
-    share data/kalshi.db), returns the fee model of the first match.
-    Prefer get_fee_model(adapter_id) when the adapter ID is known.
+    Resolution: if series is provided and the adapter has fee_overrides
+    matching a prefix of the series, return the override. Otherwise
+    return the adapter's default fee model.
     """
     from pathlib import Path
-    normalized = str(Path(db_path).resolve())
-    for a in ADAPTERS:
-        if str(Path(a.db_file).resolve()) == normalized:
-            return a.fee_model
-    return STANDARD_FEE  # fallback
+    resolved = str(Path(db_path).resolve())
+    for adapter in ADAPTERS:
+        adapter_resolved = str(Path(adapter.db_file).resolve())
+        if resolved == adapter_resolved:
+            if series and adapter.fee_overrides:
+                for prefix, fee_model in adapter.fee_overrides.items():
+                    if series.startswith(prefix):
+                        return fee_model
+            return adapter.fee_model
+    return STANDARD_FEE

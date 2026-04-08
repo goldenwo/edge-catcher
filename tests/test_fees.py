@@ -124,3 +124,25 @@ class TestZeroFee:
 
 	def test_has_display_metadata(self):
 		assert ZERO_FEE.id == 'zero'
+
+
+class TestFeeModelForDbWithOverrides:
+	def test_default_fee_model(self):
+		from api.adapter_registry import get_fee_model_for_db
+		fee = get_fee_model_for_db("data/kalshi.db")
+		assert fee is STANDARD_FEE
+
+	def test_override_by_series_prefix(self):
+		from api.adapter_registry import get_fee_model_for_db
+		fee = get_fee_model_for_db("data/kalshi-financials.db", series="KXINXU-SOMEMARKET")
+		assert fee is INDEX_FEE
+
+	def test_no_override_for_regular_series(self):
+		from api.adapter_registry import get_fee_model_for_db
+		fee = get_fee_model_for_db("data/kalshi-financials.db", series="KXOTHER")
+		assert fee is STANDARD_FEE
+
+	def test_zero_fee_for_coinbase(self):
+		from api.adapter_registry import get_fee_model_for_db
+		fee = get_fee_model_for_db("data/btc.db")
+		assert fee is ZERO_FEE
