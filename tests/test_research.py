@@ -477,19 +477,19 @@ class TestResearchAgent:
 
     def test_generate_adjacent_explore_returns_cousins(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        r = _make_result(strategy="REDACTED", verdict="explore", verdict_reason="borderline")
-        mock_families = {"REDACTED": ["REDACTED", "REDACTED", "REDACTED"]}
+        r = _make_result(strategy="test-strategy-a", verdict="explore", verdict_reason="borderline")
+        mock_families = {"test-strategy-a": ["test-strategy-a-vol", "test-strategy-a-mom", "test-strategy-a-stacked"]}
         with patch("edge_catcher.research.agent._build_strategy_families", return_value=mock_families):
             adjacent = agent.generate_adjacent(r)
         strategies = [h.strategy for h in adjacent]
-        assert set(strategies) == {"REDACTED", "REDACTED", "REDACTED"}
+        assert set(strategies) == {"test-strategy-a-vol", "test-strategy-a-mom", "test-strategy-a-stacked"}
         for h in adjacent:
             assert h.parent_id == r.hypothesis.id
             assert h.series == r.hypothesis.series
 
     def test_generate_adjacent_promoted_targets_other_series(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        r = _make_result(strategy="REDACTED", series="KXBTCD", verdict="promote", verdict_reason="great")
+        r = _make_result(strategy="test-strategy-a", series="KXBTCD", verdict="promote", verdict_reason="great")
 
         mock_discovery = {"data/kalshi.db": ["KXBTCD", "KXETH", "KXNBA"]}
         with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
@@ -500,7 +500,7 @@ class TestResearchAgent:
         assert "KXETH" in series
         assert "KXNBA" in series
         for h in adjacent:
-            assert h.strategy == "REDACTED"
+            assert h.strategy == "test-strategy-a"
             assert h.parent_id == r.hypothesis.id
 
     def test_sweep_respects_max_runs(self, tmp_path):
