@@ -84,7 +84,7 @@ def _get_resolver():
 
 
 def _config_path() -> Path:
-    """Return config path for hypotheses. Always use config/ for shared config like markets.yaml."""
+    """Return config path for hypotheses and fees config."""
     explicit = os.getenv("CONFIG_PATH")
     if explicit:
         return Path(explicit)
