@@ -23,7 +23,7 @@ from edge_catcher.storage.models import Market, Trade
 
 class BuyYesInRange(Strategy):
 	"""Buy YES when yes_price is in [min_price, max_price]."""
-	name = 'REDACTED'
+	name = 'test-buy-yes-range'
 
 	def __init__(self, min_price: int = 70, max_price: int = 99, size: int = 1,
 	             take_profit=None, stop_loss=None) -> None:
@@ -53,7 +53,7 @@ class BuyYesInRange(Strategy):
 
 class BuyNoOnDrop(Strategy):
 	"""Contrarian NO — buy NO when yes_price drops >= threshold."""
-	name = 'REDACTED'
+	name = 'test-buy-no-drop'
 
 	def __init__(self, min_price: int = 50, max_price: int = 80, drop_threshold: int = 5, size: int = 1) -> None:
 		self.min_price = min_price
@@ -78,7 +78,7 @@ class BuyNoOnDrop(Strategy):
 
 class BuyNoInRange(Strategy):
 	"""Longshot fade — buy NO when yes_price in [min, max]."""
-	name = 'REDACTED'
+	name = 'test-buy-no-range'
 
 	def __init__(self, min_price: int = 5, max_price: int = 30, size: int = 1,
 	             take_profit=None, stop_loss=None) -> None:
@@ -110,7 +110,7 @@ class BuyNoInRange(Strategy):
 
 class ActiveExitStub(Strategy):
 	"""Active exit — buy YES in range, exit on TP/SL."""
-	name = 'TP'
+	name = 'test-active-exit'
 
 	def __init__(self, min_price: int = 40, max_price: int = 60, take_profit: int = 8,
 	             stop_loss: int = 5, size: int = 1) -> None:
@@ -139,7 +139,7 @@ class ActiveExitStub(Strategy):
 
 class FadeFirstTrade(Strategy):
 	"""Opening Mispricing Fade — fade the first trade per market when extreme."""
-	name = 'REDACTED'
+	name = 'test-fade-first'
 
 	def __init__(self, threshold_high: int = 60, threshold_low: int = 40,
 	             take_profit: int = 8, stop_loss: int = 5, size: int = 1) -> None:
@@ -168,16 +168,16 @@ class FadeFirstTrade(Strategy):
 		if trade.yes_price > self.threshold_high:
 			no_price = 100 - trade.yes_price
 			return [Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
-				size=self.size, reason=f'REDACTED high: yes_price={trade.yes_price} > {self.threshold_high}')]
+				size=self.size, reason=f'fade-first high: yes_price={trade.yes_price} > {self.threshold_high}')]
 		if trade.yes_price < self.threshold_low:
 			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
-				size=self.size, reason=f'REDACTED low: yes_price={trade.yes_price} < {self.threshold_low}')]
+				size=self.size, reason=f'fade-first low: yes_price={trade.yes_price} < {self.threshold_low}')]
 		return []
 
 
 class ThresholdFade(Strategy):
 	"""Favorite-Longshot Bias for 15-min BTC contracts."""
-	name = 'REDACTED'
+	name = 'test-threshold-fade'
 
 	def __init__(self, fav_threshold: int = 85, long_threshold: int = 15, size: int = 1) -> None:
 		self.fav_threshold = fav_threshold
@@ -350,31 +350,31 @@ class TestPortfolio:
 	def test_open_position_deducts_cash(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		result = port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		result = port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		assert result is True
 		assert port.cash == 950.0
-		assert port.has_position('T', 'REDACTED')
+		assert port.has_position('T', 'test-buy-yes-range')
 
 	def test_open_position_slippage_increases_cost(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=2)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=2)
 		assert port.cash == 948.0
-		assert port.positions[('T', 'REDACTED')].entry_price == 52
+		assert port.positions[('T', 'test-buy-yes-range')].entry_price == 52
 
 	def test_open_position_returns_false_when_insufficient_cash(self):
 		port = Portfolio(10.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		result = port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		result = port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		assert result is False
 		assert port.cash == 10.0
-		assert not port.has_position('T', 'REDACTED')
+		assert not port.has_position('T', 'test-buy-yes-range')
 
 	def test_close_position_adds_proceeds(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=0)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
+		ct = port.close_position('T', 'test-buy-yes-range', 60, _dt(1), 'take_profit', slippage=0)
 		assert ct is not None
 		assert port.cash == 1010.0  # started 1000, paid 50, got back 60
 		assert ct.pnl_cents == 10
@@ -383,8 +383,8 @@ class TestPortfolio:
 	def test_close_position_slippage_reduces_exit(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry = 51
-		ct = port.close_position('T', 'REDACTED', 60, _dt(1), 'take_profit', slippage=1)  # exit = 59
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=1)  # entry = 51
+		ct = port.close_position('T', 'test-buy-yes-range', 60, _dt(1), 'take_profit', slippage=1)  # exit = 59
 		assert ct is not None
 		assert ct.entry_price == 51
 		assert ct.exit_price == 59
@@ -393,8 +393,8 @@ class TestPortfolio:
 	def test_settle_yes_position_win(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
+		ct = port.settle_position('T', 'test-buy-yes-range', 'yes', _dt(2))
 		assert ct is not None
 		assert ct.exit_price == 100
 		assert ct.pnl_cents == 25  # 100 - 75
@@ -403,8 +403,8 @@ class TestPortfolio:
 	def test_settle_yes_position_loss(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
+		ct = port.settle_position('T', 'test-buy-yes-range', 'no', _dt(2))
 		assert ct is not None
 		assert ct.exit_price == 0
 		assert ct.pnl_cents == -75
@@ -413,8 +413,8 @@ class TestPortfolio:
 	def test_settle_no_position_win(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		ct = port.settle_position('T', 'REDACTED', 'no', _dt(2))
+		port.open_position(sig, 'test-buy-no-drop', _dt(), slippage=0)
+		ct = port.settle_position('T', 'test-buy-no-drop', 'no', _dt(2))
 		assert ct is not None
 		assert ct.exit_price == 100
 		assert ct.pnl_cents == 70
@@ -422,8 +422,8 @@ class TestPortfolio:
 	def test_settle_no_position_loss(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=30, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
-		ct = port.settle_position('T', 'REDACTED', 'yes', _dt(2))
+		port.open_position(sig, 'test-buy-no-range', _dt(), slippage=0)
+		ct = port.settle_position('T', 'test-buy-no-range', 'yes', _dt(2))
 		assert ct is not None
 		assert ct.exit_price == 0
 		assert ct.pnl_cents == -30
@@ -433,7 +433,7 @@ class TestPortfolio:
 		import math
 		port = Portfolio(1000.0)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-no-range', _dt(), slippage=0)
 		expected_fee = math.ceil(0.07 * 1 * 0.87 * 0.13 * 100)  # 1¢
 		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
 		assert port.cash == pytest.approx(1000.0 - 87 - expected_fee, rel=1e-6)
@@ -442,7 +442,7 @@ class TestPortfolio:
 		# fee_fn with 0.25 multiplier simulates maker fee (0.25 * 0.07 = 1.75% equivalent)
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.25 * 0.07 * p * (100 - p) / 100 * s)
 		sig = Signal(action='buy', ticker='T', side='no', price=87, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-no-range', _dt(), slippage=0)
 		expected_fee = 0.25 * 0.07 * 87 * 13 / 100
 		assert port.total_fees_paid == pytest.approx(expected_fee, rel=1e-6)
 
@@ -450,15 +450,15 @@ class TestPortfolio:
 		# Fee is only charged at entry — settlement should not add more fees
 		port = Portfolio(1000.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=75, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		fee_at_entry = port.total_fees_paid
-		port.settle_position('T', 'REDACTED', 'yes', _dt(2))
+		port.settle_position('T', 'test-buy-yes-range', 'yes', _dt(2))
 		assert port.total_fees_paid == fee_at_entry  # no new fees at settlement
 
 	def test_get_equity_marks_at_entry(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		# equity = cash(950) + position_entry_value(50) = 1000
 		assert port.get_equity() == 1000.0
 
@@ -466,12 +466,12 @@ class TestPortfolio:
 		port = Portfolio(1000.0)
 		sig1 = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		sig2 = Signal(action='buy', ticker='T', side='yes', price=55, size=1, reason='test')
-		port.open_position(sig1, 'REDACTED', _dt(), slippage=0)
-		assert port.has_position('T', 'REDACTED')
+		port.open_position(sig1, 'test-buy-yes-range', _dt(), slippage=0)
+		assert port.has_position('T', 'test-buy-yes-range')
 		# Second open for same (ticker, strategy) would be rejected by strategy (has_position check)
 		# But portfolio itself allows it — the guard is in the strategy
-		port.open_position(sig2, 'REDACTED', _dt(), slippage=0)  # different strategy: ok
-		assert port.has_position('T', 'REDACTED')
+		port.open_position(sig2, 'test-buy-no-drop', _dt(), slippage=0)  # different strategy: ok
+		assert port.has_position('T', 'test-buy-no-drop')
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +586,7 @@ class TestBuyYesInRange:
 		trade = _make_trade(yes_price=80)
 		# Manually open a position
 		sig = Signal(action='buy', ticker='TEST-1', side='yes', price=80, size=1, reason='manual')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=0)
 		signals = strategy.on_trade(trade, market, port)
 		assert signals == []
 
@@ -645,7 +645,7 @@ class TestBuyNoOnDrop:
 		strategy.on_trade(_make_trade(yes_price=70), market, port)  # prime price
 		signals = strategy.on_trade(_make_trade(yes_price=64), market, port)
 		assert len(signals) == 1
-		port.open_position(signals[0], 'REDACTED', _dt(), slippage=0)
+		port.open_position(signals[0], 'test-buy-no-drop', _dt(), slippage=0)
 		# Second drop: no new signal because position exists
 		strategy.on_trade(_make_trade(yes_price=64), market, port)  # reset last known
 		signals2 = strategy.on_trade(_make_trade(yes_price=58), market, port)
@@ -676,7 +676,7 @@ class TestBuyNoInRange:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		sig = Signal(action='buy', ticker='TEST-1', side='no', price=85, size=1, reason='manual')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(sig, 'test-buy-no-range', _dt(), slippage=0)
 		signals = strategy.on_trade(_make_trade(yes_price=15), market, port)
 		assert signals == []
 
@@ -698,7 +698,7 @@ class TestActiveExitStub:
 		market = _make_market()
 		# Open position manually at actual entry 51 (signal 50 + slippage 1)
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=50, size=1, reason='test')
-		port.open_position(buy_sig, 'TP', _dt(), slippage=1)  # entry_price = 51
+		port.open_position(buy_sig, 'test-active-exit', _dt(), slippage=1)  # entry_price = 51
 		# TP: sell when yes_price >= 51 + 8 = 59
 		trade_tp = _make_trade(yes_price=59)
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -711,7 +711,7 @@ class TestActiveExitStub:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=50, size=1, reason='test')
-		port.open_position(buy_sig, 'TP', _dt(), slippage=1)  # entry_price = 51
+		port.open_position(buy_sig, 'test-active-exit', _dt(), slippage=1)  # entry_price = 51
 		# SL: sell when yes_price <= 51 - 5 = 46
 		trade_sl = _make_trade(yes_price=46)
 		signals = strategy.on_trade(trade_sl, market, port)
@@ -724,7 +724,7 @@ class TestActiveExitStub:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=50, size=1, reason='test')
-		port.open_position(buy_sig, 'TP', _dt(), slippage=1)  # entry=51
+		port.open_position(buy_sig, 'test-active-exit', _dt(), slippage=1)  # entry=51
 		# Prices 47..58 should NOT trigger TP (need >=59) or SL (need <=46)
 		for price in (47, 50, 55, 58):
 			signals = strategy.on_trade(_make_trade(yes_price=price), market, port)
@@ -739,16 +739,16 @@ class TestSlippage:
 	def test_entry_slippage_applied(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=2, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=3)
-		pos = port.positions[('T', 'REDACTED')]
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=3)
+		pos = port.positions[('T', 'test-buy-yes-range')]
 		assert pos.entry_price == 53  # 50 + 3
 		assert port.cash == 1000.0 - 53 * 2
 
 	def test_exit_slippage_applied(self):
 		port = Portfolio(1000.0, fee_fn=lambda p, s: 0.0)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
-		port.open_position(sig, 'REDACTED', _dt(), slippage=1)  # entry=51
-		ct = port.close_position('T', 'REDACTED', 65, _dt(1), 'take_profit', slippage=2)
+		port.open_position(sig, 'test-buy-yes-range', _dt(), slippage=1)  # entry=51
+		ct = port.close_position('T', 'test-buy-yes-range', 65, _dt(1), 'take_profit', slippage=2)
 		assert ct is not None
 		assert ct.exit_price == 63  # 65 - 2
 		assert ct.pnl_cents == 12   # 63 - 51
@@ -816,7 +816,7 @@ class TestBacktestResult:
 		for i, p in enumerate(pnls):
 			port.equity_snapshots.append((now, 1000.0 + sum(pnls[:i+1])))
 			ct = CompletedTrade(
-				ticker='T', side='yes', strategy='REDACTED',
+				ticker='T', side='yes', strategy='test-buy-yes-range',
 				entry_price=50, entry_time=now,
 				exit_price=50 + p, exit_time=now,
 				pnl_cents=p, exit_reason='settlement',
@@ -1072,8 +1072,8 @@ class TestIntegration:
 		)
 		assert result.total_trades == 2
 		assert result.wins == 2
-		assert 'REDACTED' in result.per_strategy
-		assert 'REDACTED' in result.per_strategy
+		assert 'test-buy-yes-range' in result.per_strategy
+		assert 'test-buy-no-range' in result.per_strategy
 
 	def test_capital_constraint_prevents_open(self, tmp_path):
 		"""Portfolio rejects buy when cash is insufficient."""
@@ -1226,7 +1226,7 @@ class TestFadeFirstTrade:
 		# First trade: triggers entry signal
 		signals1 = strategy.on_trade(_make_trade(yes_price=65), market, port)
 		assert len(signals1) == 1
-		port.open_position(signals1[0], 'REDACTED', _dt(), slippage=0)
+		port.open_position(signals1[0], 'test-fade-first', _dt(), slippage=0)
 		# Second trade: same ticker, position exists — check TP/SL only (not entry)
 		# yes_price=63 doesn't trigger TP (need no_price >= 35+8=43, i.e. yes<=57) or SL
 		signals2 = strategy.on_trade(_make_trade(yes_price=63), market, port)
@@ -1258,7 +1258,7 @@ class TestFadeFirstTrade:
 		market = _make_market()
 		# Enter: yes_price=65, no_price=35, entry_price stored = 35 + slippage=1 = 36
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'REDACTED', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
 		# TP fires when current no_price >= 36 + 8 = 44, i.e. yes_price <= 56
 		trade_tp = _make_trade(yes_price=56)  # no_price = 44
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -1273,7 +1273,7 @@ class TestFadeFirstTrade:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'REDACTED', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
 		# SL fires when current no_price <= 36 - 5 = 31, i.e. yes_price >= 69
 		trade_sl = _make_trade(yes_price=69)  # no_price = 31
 		signals = strategy.on_trade(trade_sl, market, port)
@@ -1288,7 +1288,7 @@ class TestFadeFirstTrade:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'REDACTED', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
 		# TP: yes_price >= 36 + 8 = 44
 		trade_tp = _make_trade(yes_price=44)
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -1302,7 +1302,7 @@ class TestFadeFirstTrade:
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'REDACTED', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
 		# Prices where no_price stays 32..43 should not trigger (TP needs >=44, SL needs <=31)
 		for yes_price in (57, 60, 65, 68):
 			# no_price = 43, 40, 35, 32 — all between SL(31) and TP(44)
@@ -1370,7 +1370,7 @@ class TestThresholdFade:
 		market = _make_market()
 		signals1 = strategy.on_trade(_make_trade(yes_price=90), market, port)
 		assert len(signals1) == 1
-		port.open_position(signals1[0], 'REDACTED', _dt(), slippage=0)
+		port.open_position(signals1[0], 'test-threshold-fade', _dt(), slippage=0)
 		# Second trade at same extreme: position exists, no new signal
 		signals2 = strategy.on_trade(_make_trade(yes_price=92), market, port)
 		assert signals2 == []
@@ -1380,11 +1380,11 @@ class TestThresholdFade:
 		strategy = ThresholdFade()
 		port = Portfolio(10000.0)
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=10, size=1, reason='test')
-		port.open_position(buy_sig, 'REDACTED', _dt(), slippage=0)
+		port.open_position(buy_sig, 'test-threshold-fade', _dt(), slippage=0)
 		close_signals = strategy.on_market_close('TEST-1', 'yes', port)
 		assert close_signals == []
 		# Position should still be open (engine handles settlement)
-		assert port.has_position('TEST-1', 'REDACTED')
+		assert port.has_position('TEST-1', 'test-threshold-fade')
 
 	def test_different_tickers_each_get_entry(self):
 		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)

@@ -273,41 +273,35 @@ def _cmd_paper_trade_v2(args) -> None:
 def _build_strategy_map():
     """Build the strategy name → class mapping. Returns (strategy_map, has_local)."""
     import importlib
-    from edge_catcher.runner.strategy_parser import STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE
+    from edge_catcher.runner.strategy_parser import (
+        STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
+    )
 
+    strategy_map: dict = {}
+
+    # Auto-discover public strategies
     pub_mod = importlib.import_module(STRATEGIES_PUBLIC_MODULE)
-    ExampleStrategy = pub_mod.ExampleStrategy
+    for attr_name in dir(pub_mod):
+        obj = getattr(pub_mod, attr_name)
+        if isinstance(obj, type) and hasattr(obj, 'on_trade'):
+            name_attr = getattr(obj, 'name', None)
+            if isinstance(name_attr, str):
+                strategy_map[name_attr] = obj
 
+    # Auto-discover local strategies (override public if same name)
     local_mod = None
-    try:
-        local_mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
-    except ImportError:
-        pass
+    if STRATEGIES_LOCAL_PATH.exists():
+        try:
+            local_mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
+            for attr_name in dir(local_mod):
+                obj = getattr(local_mod, attr_name)
+                if isinstance(obj, type) and hasattr(obj, 'on_trade'):
+                    name_attr = getattr(obj, 'name', None)
+                    if isinstance(name_attr, str):
+                        strategy_map[name_attr] = obj
+        except ImportError:
+            pass
 
-    strategy_map: dict = {
-        'example': ExampleStrategy,
-    }
-    if local_mod is not None:
-        strategy_map.update({
-            'REDACTED': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'TP': local_mod.REDACTED,
-            'REDACTED': local_mod.REDACTED,
-            'A': local_mod.REDACTED, 'Avol': local_mod.REDACTED,
-            'B': local_mod.REDACTED, 'C': local_mod.REDACTED, 'Cvol': local_mod.REDACTED,
-            'D': local_mod.REDACTED, 'H1': local_mod.REDACTED,
-            'Dvol': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-            'Amom': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-            'Cmom': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-            'Cstack': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-            'H5_15m': local_mod.REDACTED, 'H5_15M': local_mod.REDACTED,
-            'Fflow': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-            'Ffvol': local_mod.REDACTED, 'REDACTED': local_mod.REDACTED,
-        })
     return strategy_map, local_mod is not None
 
 
@@ -406,6 +400,20 @@ def _cmd_backtest(args) -> None:
 
         strategy_names = [s.strip() for s in args.strategy.split(',')]
 
+        import inspect
+
+        # Map CLI arg names to strategy __init__ param names
+        _CLI_TO_PARAM = {
+            'min_price': 'min_price',
+            'max_price': 'max_price',
+            'tp': 'take_profit',
+            'sl': 'stop_loss',
+            'h1_threshold_high': 'threshold_high',
+            'h1_threshold_low': 'threshold_low',
+            'h5_fav_threshold': 'fav_threshold',
+            'h5_long_threshold': 'long_threshold',
+        }
+
         strategies = []
         for name in strategy_names:
             cls = strategy_map.get(name)
@@ -416,37 +424,26 @@ def _cmd_backtest(args) -> None:
                 else:
                     print(msg, file=sys.stderr)
                 sys.exit(1)
-            kwargs: dict = {}
-            if args.min_price is not None:
-                kwargs['min_price'] = args.min_price
-            if args.max_price is not None:
-                kwargs['max_price'] = args.max_price
-            if name in ('TP', 'A', 'Avol', 'REDACTED', 'REDACTED', 'C', 'Cvol', 'REDACTED', 'REDACTED',
-                        'Amom', 'REDACTED', 'Cmom', 'REDACTED'):
-                if args.tp is not None:
-                    kwargs['take_profit'] = args.tp
-                if args.sl is not None:
-                    kwargs['stop_loss'] = args.sl
-            if name in ('D', 'H1', 'REDACTED'):
-                if args.tp is not None:
-                    kwargs['take_profit'] = args.tp
-                if args.sl is not None:
-                    kwargs['stop_loss'] = args.sl
-                if args.h1_threshold_high is not None:
-                    kwargs['threshold_high'] = args.h1_threshold_high
-                if args.h1_threshold_low is not None:
-                    kwargs['threshold_low'] = args.h1_threshold_low
-            if name in ('H5_15M', 'H5_15m', 'REDACTED'):
-                if args.h5_fav_threshold is not None:
-                    kwargs['fav_threshold'] = args.h5_fav_threshold
-                if args.h5_long_threshold is not None:
-                    kwargs['long_threshold'] = args.h5_long_threshold
-            # Load coin OHLC data for momentum-filtered strategies
-            if name in ('Amom', 'REDACTED', 'Cmom', 'REDACTED', 'Cstack', 'REDACTED'):
-                kwargs['btc_closes'] = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
-                print(f'  Loaded {len(kwargs["btc_closes"])} candles for momentum filter', file=sys.stderr)
 
-            strategies.append(cls(**kwargs))
+            # Build kwargs via introspection — only pass params the class accepts
+            sig = inspect.signature(cls.__init__)
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            available: dict = {}
+            for cli_name, param_name in _CLI_TO_PARAM.items():
+                val = getattr(args, cli_name, None)
+                if val is not None and (accepts_kwargs or param_name in sig.parameters):
+                    available[param_name] = val
+
+            # Load coin OHLC data if strategy explicitly declares btc_closes
+            if 'btc_closes' in sig.parameters:
+                closes = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
+                if closes:
+                    available['btc_closes'] = closes
+                    print(f'  Loaded {len(closes)} candles for momentum filter', file=sys.stderr)
+
+            strategies.append(cls(**available))
 
         # Inject OHLC provider if --ohlc-config is provided
         ohlc_provider = None
@@ -815,8 +812,8 @@ def main() -> None:
     bt.add_argument("--end", default=None, help="End date ISO format (e.g. 2026-03-30)")
     bt.add_argument("--cash", type=float, default=10000.0, help="Initial capital (default: 10000)")
     bt.add_argument("--slippage", type=int, default=1, help="Slippage in cents (default: 1)")
-    bt.add_argument("--tp", type=int, default=None, help="Take profit cents for ActiveExitStub (default: 8)")
-    bt.add_argument("--sl", type=int, default=None, help="Stop loss cents for ActiveExitStub (default: 5)")
+    bt.add_argument("--tp", type=int, default=None, help="Take profit cents (default: 8)")
+    bt.add_argument("--sl", type=int, default=None, help="Stop loss cents (default: 5)")
     bt.add_argument("--min-price", type=int, default=None, dest="min_price", help="Override strategy min price")
     bt.add_argument("--max-price", type=int, default=None, dest="max_price", help="Override strategy max price")
     bt.add_argument("--h1-threshold-high", type=int, default=None, dest="h1_threshold_high",
@@ -854,7 +851,7 @@ def main() -> None:
     rs_sub = rs.add_subparsers(dest="research_command")
 
     rs_run = rs_sub.add_parser("run", help="Run a single hypothesis")
-    rs_run.add_argument("--strategy", required=True, help="Strategy name (e.g. Cvol, D, Cstack)")
+    rs_run.add_argument("--strategy", required=True, help="Strategy name (e.g. REDACTED, REDACTED, REDACTED)")
     rs_run.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD)")
     rs_run.add_argument("--db-path", required=True, dest="db_path", help="Path to database")
     rs_run.add_argument("--start", required=True, help="Start date ISO (e.g. 2025-01-01)")

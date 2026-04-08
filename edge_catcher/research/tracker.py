@@ -250,7 +250,10 @@ class Tracker:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT verdict, COUNT(*) as cnt FROM results GROUP BY verdict"
+                """SELECT r.verdict, COUNT(*) as cnt
+                   FROM hypotheses h
+                   JOIN results r ON h.id = r.hypothesis_id
+                   GROUP BY r.verdict"""
             ).fetchall()
             return {r["verdict"]: r["cnt"] for r in rows}
         finally:
@@ -295,6 +298,32 @@ class Tracker:
         finally:
             conn.close()
 
+    def clear_unvalidated_promotes(self) -> int:
+        """Delete result rows for promotes that lack validation_details.
+
+        These are stale results from before the validation pipeline was added.
+        Removing the result row (but keeping the hypothesis) causes the next
+        sweep to re-run and re-evaluate them with validation gates.
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                """DELETE FROM results
+                   WHERE verdict = 'promote'
+                     AND (validation_details IS NULL OR validation_details = '')
+                     AND hypothesis_id IN (SELECT id FROM hypotheses)"""
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
+    def cleanup(self) -> dict[str, int]:
+        """Run all cleanup operations. Returns counts of affected rows."""
+        orphans = self.delete_orphaned_results()
+        stale_promotes = self.clear_unvalidated_promotes()
+        return {"orphaned_results_deleted": orphans, "unvalidated_promotes_cleared": stale_promotes}
+
     def list_pending(self) -> list[dict]:
         """Return hypotheses that have no result row (saved but not yet executed)."""
         conn = self._connect()
@@ -314,11 +343,17 @@ class Tracker:
         """Return summary counts."""
         conn = self._connect()
         try:
-            total = conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+            total = conn.execute(
+                """SELECT COUNT(*) FROM hypotheses h
+                   JOIN results r ON h.id = r.hypothesis_id"""
+            ).fetchone()[0]
             by_verdict = {
                 row["verdict"]: row["cnt"]
                 for row in conn.execute(
-                    "SELECT verdict, COUNT(*) AS cnt FROM results GROUP BY verdict"
+                    """SELECT r.verdict, COUNT(*) AS cnt
+                       FROM hypotheses h
+                       JOIN results r ON h.id = r.hypothesis_id
+                       GROUP BY r.verdict"""
                 ).fetchall()
             }
             return {"total": total, "by_verdict": by_verdict}
