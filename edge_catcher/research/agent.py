@@ -9,6 +9,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from .data_source_config import make_ds
 from .evaluator import Evaluator, Thresholds
 from .hypothesis import Hypothesis, HypothesisResult
 from .reporter import Reporter
@@ -287,8 +288,7 @@ class ResearchAgent:
                     adjacent.append(
                         Hypothesis(
                             strategy=h.strategy,
-                            series=series,
-                            db_path=db_path,
+                            data_sources=make_ds(db=Path(db_path).name, series=series),
                             start_date=h.start_date,
                             end_date=h.end_date,
                             fee_pct=h.fee_pct,
@@ -305,8 +305,7 @@ class ResearchAgent:
                 adjacent.append(
                     Hypothesis(
                         strategy=cousin,
-                        series=h.series,
-                        db_path=h.db_path,
+                        data_sources=h.data_sources,
                         start_date=h.start_date,
                         end_date=h.end_date,
                         fee_pct=h.fee_pct,
@@ -409,8 +408,7 @@ class ResearchAgent:
                 hypotheses.append(
                     Hypothesis(
                         strategy=strategy,
-                        series=series,
-                        db_path=db_path,
+                        data_sources=make_ds(db=Path(db_path).name, series=series),
                         start_date=start,
                         end_date=end,
                         fee_pct=fee_pct,

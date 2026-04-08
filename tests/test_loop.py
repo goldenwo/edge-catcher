@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from edge_catcher.research.audit import AuditLog
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.loop import LoopOrchestrator
 from edge_catcher.research.tracker import Tracker
@@ -41,7 +42,7 @@ class TestLoopOrchestratorGridOnly:
              patch("edge_catcher.research.loop.ResearchAgent") as MockAgent:
 
             mock_agent = MockAgent.return_value
-            h = Hypothesis(strategy="A", series="SER1", db_path="data/k.db",
+            h = Hypothesis(strategy="A", data_sources=make_ds(db="k.db", series="SER1"),
                            start_date="2025-01-01", end_date="2025-12-31",
                            tags=["source:grid"])
             mock_agent.run_hypothesis.return_value = _make_result(h, "kill")
@@ -108,7 +109,7 @@ class TestLoopOrchestratorIntegrity:
              patch("edge_catcher.research.loop.ResearchAgent") as MockAgent:
 
             mock_agent = MockAgent.return_value
-            h = Hypothesis(strategy="A", series="S1", db_path="data/k.db",
+            h = Hypothesis(strategy="A", data_sources=make_ds(db="k.db", series="S1"),
                            start_date="2025-01-01", end_date="2025-12-31")
             mock_agent.run_hypothesis.return_value = _make_result(h)
 
@@ -135,7 +136,7 @@ class TestLoopOrchestratorBudget:
              patch("edge_catcher.research.loop.ResearchAgent") as MockAgent:
 
             mock_agent = MockAgent.return_value
-            h = Hypothesis(strategy="A", series="S1", db_path="data/k.db",
+            h = Hypothesis(strategy="A", data_sources=make_ds(db="k.db", series="S1"),
                            start_date="2025-01-01", end_date="2025-12-31")
             mock_agent.run_hypothesis.return_value = _make_result(h, "kill")
 
@@ -164,7 +165,7 @@ class TestWritePhaseOutcomes:
 
         journal = MagicMock()
 
-        h = Hypothesis(strategy="A", series="X", db_path="d.db",
+        h = Hypothesis(strategy="A", data_sources=make_ds(db="d.db", series="X"),
                        start_date="2025-01-01", end_date="2025-12-31")
         error_result = HypothesisResult(
             hypothesis=h, status="error", total_trades=0, wins=0, losses=0,
@@ -254,7 +255,7 @@ class TestShouldKeepRefinementBaseline:
         ]
 
         # New iteration (V3): Sharpe 1.5 — better than V2 but worse than original
-        h = Hypothesis(strategy="FooV3", series="X", db_path="d.db",
+        h = Hypothesis(strategy="FooV3", data_sources=make_ds(db="d.db", series="X"),
                        start_date="2025-01-01", end_date="2025-12-31")
         refined = [HypothesisResult(
             hypothesis=h, status="ok", total_trades=100, wins=60, losses=40,
@@ -308,7 +309,7 @@ class TestLoopOrchestratorProgress:
             research_db=db, max_runs=5, grid_only=True,
             on_progress=on_progress,
         )
-        h = Hypothesis(strategy="A", series="SER1", db_path="data/k.db",
+        h = Hypothesis(strategy="A", data_sources=make_ds(db="k.db", series="SER1"),
                        start_date="2025-01-01", end_date="2025-12-31",
                        tags=["source:grid"])
         mock_result = _make_result(h, verdict="kill")
