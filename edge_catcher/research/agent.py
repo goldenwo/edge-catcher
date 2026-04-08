@@ -20,16 +20,10 @@ from .validation.gate import GateContext
 logger = logging.getLogger(__name__)
 
 
-def _build_ohlc_config(series: str) -> str | None:
-    """Build --ohlc-config JSON for a given series, or None if no OHLC data available."""
-    from edge_catcher.research.context_engine import get_series_to_asset
-
-    for prefix, (asset, db_file, table) in get_series_to_asset().items():
-        if series.startswith(prefix):
-            db_path = str(Path("data") / db_file)
-            if Path(db_path).exists():
-                return json.dumps({asset: [db_path, table]})
-    return None
+def _get_resolver():
+    """Lazy-init a resolver from the live environment."""
+    from edge_catcher.research.data_source_resolver import DataSourceResolver
+    return DataSourceResolver.from_environment()
 
 
 def _build_strategy_families() -> dict[str, list[str]]:
@@ -108,7 +102,7 @@ class ResearchAgent:
             sys.executable, "-m", "edge_catcher", "backtest",
             "--series", h.series,
             "--strategy", h.strategy,
-            "--db-path", h.db_path,
+            "--db-path", str(Path("data") / h.data_sources.primaries[0].db),
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
@@ -116,9 +110,12 @@ class ResearchAgent:
             cmd += ["--start", h.start_date]
         if h.end_date:
             cmd += ["--end", h.end_date]
-        ohlc_config = _build_ohlc_config(h.series)
-        if ohlc_config:
-            cmd.extend(["--ohlc-config", ohlc_config])
+        resolved = _get_resolver().resolve(h)
+        if resolved.ohlc_config:
+            ohlc_json = json.dumps({
+                asset: list(val) for asset, val in resolved.ohlc_config.items()
+            })
+            cmd.extend(["--ohlc-config", ohlc_json])
 
         try:
             proc = subprocess.run(
@@ -226,7 +223,7 @@ class ResearchAgent:
             sys.executable, "-m", "edge_catcher", "backtest",
             "--series", h.series,
             "--strategy", h.strategy,
-            "--db-path", h.db_path,
+            "--db-path", str(Path("data") / h.data_sources.primaries[0].db),
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
@@ -234,9 +231,12 @@ class ResearchAgent:
             cmd += ["--start", h.start_date]
         if h.end_date:
             cmd += ["--end", h.end_date]
-        ohlc_config = _build_ohlc_config(h.series)
-        if ohlc_config:
-            cmd.extend(["--ohlc-config", ohlc_config])
+        resolved = _get_resolver().resolve(h)
+        if resolved.ohlc_config:
+            ohlc_json = json.dumps({
+                asset: list(val) for asset, val in resolved.ohlc_config.items()
+            })
+            cmd.extend(["--ohlc-config", ohlc_json])
 
         try:
             proc = subprocess.run(
