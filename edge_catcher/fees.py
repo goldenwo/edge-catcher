@@ -65,15 +65,3 @@ ZERO_FEE = FeeModel(
 	_calc=_zero_fee,
 )
 
-_INDEX_PREFIXES = ("KXINX", "KXNASDAQ100")
-
-
-def get_fee_model_for_series(series: str) -> FeeModel:
-	"""Return the fee model for a Kalshi series ticker.
-
-	S&P 500 (KXINX*) and Nasdaq-100 (KXNASDAQ100*) use the halved 3.5% rate.
-	All other series use the standard 7% rate.
-	"""
-	if series.startswith(_INDEX_PREFIXES):
-		return INDEX_FEE
-	return STANDARD_FEE
