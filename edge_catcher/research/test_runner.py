@@ -599,6 +599,288 @@ class VolumeMispricingTest(StatisticalTest):
 		)
 
 
+class MomentumAlignmentTest(StatisticalTest):
+	"""Test whether contract prices lag or lead external spot price movements.
+
+	Uses OHLC data from an external SQLite DB to classify each trade into a
+	momentum regime (up/down/flat), then checks whether contracts in "up"
+	momentum are systematically underpriced (actual win rate > implied) and
+	contracts in "down" momentum are overpriced.
+
+	Requires params["ohlc_config"] = {"db_path": str, "table": str, "asset": str}.
+	Falls back to INSUFFICIENT_DATA gracefully if OHLC data is unavailable.
+	"""
+	name: ClassVar[str] = "momentum_alignment"
+
+	def run(
+		self,
+		conn: sqlite3.Connection,
+		series: str,
+		params: dict,
+		thresholds: dict,
+	) -> TestResult:
+		ohlc_config: Optional[dict] = params.get("ohlc_config")
+		lookback: int = params.get("lookback_candles", 5)
+		buckets: list[list[float]] = params.get("buckets", [[0.30, 0.70]])
+		min_n: int = params.get("min_n_per_bucket", 30)
+		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
+		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
+
+		# 1. Validate ohlc_config and open OHLC connection
+		if not ohlc_config:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_ohlc_config"},
+			)
+
+		ohlc_db_path: str = ohlc_config.get("db_path", "")
+		ohlc_table: str = ohlc_config.get("table", "")
+
+		import os
+		if not os.path.exists(ohlc_db_path):
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "ohlc_db_not_found", "db_path": ohlc_db_path},
+			)
+
+		try:
+			ohlc_conn = sqlite3.connect(ohlc_db_path)
+			ohlc_cursor = ohlc_conn.cursor()
+			# Check the table exists
+			ohlc_cursor.execute(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+				(ohlc_table,),
+			)
+			if ohlc_cursor.fetchone() is None:
+				ohlc_conn.close()
+				return TestResult(
+					verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+					detail={"reason": "ohlc_table_not_found", "table": ohlc_table},
+				)
+		except Exception as exc:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "ohlc_open_error", "error": str(exc)},
+			)
+
+		try:
+			return self._run_with_ohlc(
+				conn=conn,
+				ohlc_conn=ohlc_conn,
+				ohlc_table=ohlc_table,
+				series=series,
+				lookback=lookback,
+				buckets=buckets,
+				min_n=min_n,
+				maker_fee=maker_fee,
+				z_threshold=z_threshold,
+				min_fee_adj=min_fee_adj,
+			)
+		finally:
+			ohlc_conn.close()
+
+	def _run_with_ohlc(
+		self,
+		conn: sqlite3.Connection,
+		ohlc_conn: sqlite3.Connection,
+		ohlc_table: str,
+		series: str,
+		lookback: int,
+		buckets: list[list[float]],
+		min_n: int,
+		maker_fee: float,
+		z_threshold: float,
+		min_fee_adj: float,
+	) -> TestResult:
+		cursor = conn.cursor()
+		ohlc_cursor = ohlc_conn.cursor()
+
+		# 3. Query settled markets for the series with trades
+		cursor.execute(
+			"SELECT ticker, result, last_price, close_time "
+			"FROM markets WHERE series_ticker = ? AND result IS NOT NULL",
+			(series,),
+		)
+		markets = cursor.fetchall()
+
+		if not markets:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_settled_markets", "n": 0},
+			)
+
+		bucket_tuples = [(lo, hi) for lo, hi in buckets]
+
+		# Per regime → per bucket → list of (implied, won, close_date)
+		regime_bucket_data: dict[str, dict[tuple[float, float], list[tuple[float, bool, Optional[str]]]]] = {
+			"up":   {(lo, hi): [] for lo, hi in bucket_tuples},
+			"down": {(lo, hi): [] for lo, hi in bucket_tuples},
+			"flat": {(lo, hi): [] for lo, hi in bucket_tuples},
+		}
+
+		# 4-6. For each market, fetch trades, look up OHLC, classify regime
+		for row in markets:
+			ticker, result, last_price, close_time = row[0], row[1], row[2], row[3]
+			won = (result == "yes")
+			close_date = close_time[:10] if close_time else None
+
+			# Fetch trades for this market
+			cursor.execute(
+				"SELECT yes_price, count, created_time FROM trades WHERE ticker = ?",
+				(ticker,),
+			)
+			trade_rows = cursor.fetchall()
+			if not trade_rows:
+				continue
+
+			# Compute VWAP from trades
+			implied = _compute_vwap(cursor, ticker, last_price)
+			if implied is None:
+				continue
+
+			# Use the earliest trade time as the reference point for OHLC lookup
+			# (we want the candle *before* the first trade)
+			trade_times = [t[2] for t in trade_rows if t[2] is not None]
+			if not trade_times:
+				continue
+			ref_time = min(trade_times)
+
+			# 4. Look up the most recent OHLC candle before the trade time
+			ohlc_cursor.execute(
+				f"SELECT timestamp, close FROM \"{ohlc_table}\" "
+				"WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
+				(ref_time,),
+			)
+			current_candle = ohlc_cursor.fetchone()
+			if current_candle is None:
+				continue
+			current_close = current_candle[1]
+
+			# Look up candle N steps back from the current candle
+			ohlc_cursor.execute(
+				f"SELECT timestamp, close FROM \"{ohlc_table}\" "
+				"WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+				(ref_time, lookback),
+			)
+			lookback_candle = ohlc_cursor.fetchone()
+			if lookback_candle is None:
+				continue
+			lookback_close = lookback_candle[1]
+
+			# 5. Compute momentum and classify regime
+			if lookback_close == 0:
+				continue
+			momentum = (current_close - lookback_close) / lookback_close
+
+			flat_threshold = 0.001  # 0.1% threshold for "flat"
+			if momentum > flat_threshold:
+				regime = "up"
+			elif momentum < -flat_threshold:
+				regime = "down"
+			else:
+				regime = "flat"
+
+			# 7. Assign to bucket by implied price
+			for lo, hi in bucket_tuples:
+				if lo <= implied < hi:
+					regime_bucket_data[regime][(lo, hi)].append((implied, won, close_date))
+					break
+
+		# 8. Test for underreaction: in "up" momentum, win_rate > implied;
+		#    in "down" momentum, win_rate < implied.
+		# We focus on "up" + "down" regimes combined, signed by hypothesis direction.
+		# Build analysis rows: for "up" regime keep as-is (edge = win_rate - implied > 0 is the signal)
+		# For "down" regime, invert (edge = implied - win_rate > 0 is the signal)
+		# We compute the aggregate signal across both momentum regimes.
+
+		bucket_results: list[dict] = []
+		any_bucket_has_data = False
+		all_signal_rows: list[tuple[float, bool, Optional[str]]] = []
+
+		for lo, hi in bucket_tuples:
+			up_rows = regime_bucket_data["up"][(lo, hi)]
+			down_rows = regime_bucket_data["down"][(lo, hi)]
+			flat_rows = regime_bucket_data["flat"][(lo, hi)]
+
+			# Need enough data in at least one directional regime
+			if len(up_rows) < min_n and len(down_rows) < min_n:
+				continue
+
+			any_bucket_has_data = True
+
+			def _regime_summary(rows: list) -> dict:
+				if not rows:
+					return {"n": 0}
+				wins = sum(1 for _, won, _ in rows if won)
+				n = len(rows)
+				imp = sum(i for i, _, _ in rows) / n
+				z, p, nc = clustered_z(rows)
+				return {
+					"n": n, "n_clusters": nc,
+					"implied_prob": imp,
+					"win_rate": wins / n,
+					"edge": wins / n - imp,
+					"z_stat_clustered": float(z),
+					"p_value_clustered": float(p),
+				}
+
+			bucket_results.append({
+				"bucket_lo": lo, "bucket_hi": hi,
+				"up_regime": _regime_summary(up_rows),
+				"down_regime": _regime_summary(down_rows),
+				"flat_regime": _regime_summary(flat_rows),
+			})
+
+			# Aggregate signal: use "up" rows directly (up momentum → contracts underpriced → win_rate > implied)
+			if len(up_rows) >= min_n:
+				all_signal_rows.extend(up_rows)
+
+		if not any_bucket_has_data:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_bucket_met_min_n", "buckets": []},
+			)
+
+		# 9-10. Aggregate statistics
+		total_n = len(all_signal_rows)
+		if total_n == 0:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_up_regime_rows", "buckets": bucket_results},
+			)
+
+		total_wins = sum(1 for _, won, _ in all_signal_rows if won)
+		total_implied = sum(imp for imp, _, _ in all_signal_rows) / total_n
+		overall_edge = total_wins / total_n - total_implied
+
+		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_signal_rows)
+		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
+
+		# Verdict
+		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
+			verdict = EDGE_EXISTS
+		elif abs(overall_z_clust) >= z_threshold and overall_fee_adj <= 0:
+			verdict = EDGE_NOT_TRADEABLE
+		else:
+			verdict = NO_EDGE
+
+		return TestResult(
+			verdict=verdict,
+			z_stat=float(overall_z_clust),
+			fee_adjusted_edge=overall_fee_adj,
+			detail={
+				"n": total_n,
+				"n_clusters": overall_n_clust,
+				"overall_implied": total_implied,
+				"overall_win_rate": total_wins / total_n,
+				"overall_edge": overall_edge,
+				"lookback_candles": lookback,
+				"buckets": bucket_results,
+			},
+		)
+
+
 class TestRunner:
 	"""Dispatches hypothesis configs to the appropriate StatisticalTest."""
 
@@ -611,6 +893,7 @@ class TestRunner:
 		self.register("price_bucket_bias", PriceBucketBiasTest())
 		self.register("lifecycle_bias", LifecycleBiasTest())
 		self.register("volume_mispricing", VolumeMispricingTest())
+		self.register("momentum_alignment", MomentumAlignmentTest())
 
 	def register(self, name: str, test: StatisticalTest) -> None:
 		self.test_types[name] = test

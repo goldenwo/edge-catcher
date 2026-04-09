@@ -9,6 +9,30 @@ from edge_catcher.research.test_runner import (
 )
 
 
+def _make_ohlc_db(tmp_path, candles: list[dict], table: str = "ohlc") -> str:
+	"""Create a simple OHLC SQLite DB with timestamp, open, high, low, close, volume columns."""
+	db_path = tmp_path / "ohlc.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.execute(f"""
+		CREATE TABLE {table} (
+			timestamp TEXT,
+			open REAL,
+			high REAL,
+			low REAL,
+			close REAL,
+			volume REAL
+		)
+	""")
+	for c in candles:
+		conn.execute(
+			f"INSERT INTO {table} (timestamp, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?)",
+			(c["timestamp"], c["open"], c["high"], c["low"], c["close"], c.get("volume", 0.0)),
+		)
+	conn.commit()
+	conn.close()
+	return str(db_path)
+
+
 def _make_test_db(tmp_path, markets, trades):
 	"""Create a test SQLite DB with markets and trades tables."""
 	db_path = tmp_path / "test.db"
@@ -515,3 +539,201 @@ class TestVolumeMispricingTest:
 		)
 		conn.close()
 		assert result.verdict == INSUFFICIENT_DATA
+
+
+class TestMomentumAlignmentTest:
+	"""Tests for MomentumAlignmentTest — spot price momentum vs contract price lag."""
+
+	def test_edge_exists_contracts_lag_spot(self, tmp_path):
+		"""OHLC shows upward momentum. Contracts at 50% but settle YES 70% → EDGE_EXISTS."""
+		from edge_catcher.research.test_runner import TestRunner, EDGE_EXISTS
+
+		# Build OHLC candles showing strong upward momentum:
+		# Each day has candles at 01:00–06:00 with steadily rising close prices.
+		# lookback=5: compare candle at 05:xx to candle at 01:xx → positive momentum.
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			for hour in range(1, 7):  # hours 01–06
+				candles.append({
+					"timestamp": f"2026-01-{day:02d}T0{hour}:00:00Z",
+					"open": 100.0 + hour * 4,
+					"high": 100.0 + hour * 5 + 1,
+					"low": 100.0 + hour * 4 - 1,
+					"close": 100.0 + hour * 5,
+					"volume": 1000.0,
+				})
+
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="ohlc_btc")
+
+		# Build 200 markets: contracts at 50% (VWAP from trades), 70% win rate
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"MA-{i}"
+			won = i < 140  # 70% win rate
+			day = (i % n_days) + 1
+			markets.append({
+				"ticker": ticker,
+				"series_ticker": "SER_MA",
+				"result": "yes" if won else "no",
+				"last_price": 50,
+				"volume": 10,
+				"close_time": f"2026-01-{day:02d}T20:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"ma-{i}",
+				"ticker": ticker,
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 1,
+				# Trade happens at 07:00 — after the rising candles at 01–06
+				"created_time": f"2026-01-{day:02d}T07:00:00Z",
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"momentum_alignment", conn, "SER_MA",
+			params={
+				"ohlc_config": {"db_path": ohlc_db, "table": "ohlc_btc", "asset": "BTC"},
+				"lookback_candles": 5,
+				"buckets": [[0.30, 0.70]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		assert result.z_stat > 2.0  # positive z: win rate > implied in up-momentum regime
+
+	def test_no_edge_when_aligned(self, tmp_path):
+		"""OHLC shows mixed momentum, contracts settle roughly at implied → NO_EDGE."""
+		from edge_catcher.research.test_runner import TestRunner, NO_EDGE
+
+		# Build OHLC candles with alternating up/down momentum (mixed)
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			base = 100.0
+			# Even days trend up, odd days trend down
+			direction = 1 if day % 2 == 0 else -1
+			for hour in range(1, 7):
+				candles.append({
+					"timestamp": f"2026-01-{day:02d}T0{hour}:00:00Z",
+					"open": base + direction * hour * 4,
+					"high": base + direction * hour * 5 + 1,
+					"low": base + direction * hour * 4 - 1,
+					"close": base + direction * hour * 5,
+					"volume": 1000.0,
+				})
+
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="ohlc_mixed")
+
+		# 200 markets: ~50% win rate at ~50% implied
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"MA2-{i}"
+			won = i < 100  # 50% win rate
+			day = (i % n_days) + 1
+			markets.append({
+				"ticker": ticker,
+				"series_ticker": "SER_MA2",
+				"result": "yes" if won else "no",
+				"last_price": 50,
+				"volume": 10,
+				"close_time": f"2026-01-{day:02d}T20:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"ma2-{i}",
+				"ticker": ticker,
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 1,
+				"created_time": f"2026-01-{day:02d}T07:00:00Z",
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"momentum_alignment", conn, "SER_MA2",
+			params={
+				"ohlc_config": {"db_path": ohlc_db, "table": "ohlc_mixed", "asset": "BTC"},
+				"lookback_candles": 5,
+				"buckets": [[0.30, 0.70]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+
+	def test_insufficient_data_no_ohlc(self, tmp_path):
+		"""No ohlc_config provided, or DB/table missing → INSUFFICIENT_DATA, no crash."""
+		from edge_catcher.research.test_runner import TestRunner, INSUFFICIENT_DATA
+
+		markets = [
+			{
+				"ticker": "MA3-1",
+				"series_ticker": "SER_MA3",
+				"result": "yes",
+				"last_price": 50,
+				"close_time": "2026-01-01T12:00:00Z",
+				"open_time": "2026-01-01T00:00:00Z",
+			}
+		]
+		trades = [
+			{
+				"trade_id": "ma3-t-1",
+				"ticker": "MA3-1",
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 1,
+				"created_time": "2026-01-01T06:00:00Z",
+			}
+		]
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+
+		# Case 1: no ohlc_config at all
+		result = runner.run(
+			"momentum_alignment", conn, "SER_MA3",
+			params={"buckets": [[0.30, 0.70]], "min_n_per_bucket": 5, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		assert result.verdict == INSUFFICIENT_DATA
+
+		# Case 2: ohlc_config points to non-existent DB
+		result2 = runner.run(
+			"momentum_alignment", conn, "SER_MA3",
+			params={
+				"ohlc_config": {"db_path": str(tmp_path / "nonexistent.db"), "table": "ohlc", "asset": "BTC"},
+				"buckets": [[0.30, 0.70]],
+				"min_n_per_bucket": 5,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		assert result2.verdict == INSUFFICIENT_DATA
+
+		# Case 3: DB exists but table is missing
+		empty_db = _make_ohlc_db(tmp_path, [], table="some_table")
+		result3 = runner.run(
+			"momentum_alignment", conn, "SER_MA3",
+			params={
+				"ohlc_config": {"db_path": empty_db, "table": "nonexistent_table", "asset": "BTC"},
+				"buckets": [[0.30, 0.70]],
+				"min_n_per_bucket": 5,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		assert result3.verdict == INSUFFICIENT_DATA
+
+		conn.close()
