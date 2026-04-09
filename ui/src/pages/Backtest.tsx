@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, StrategyInfo, BacktestHistoryItem, FeeInfo } from '../api'
 import { usePipeline } from '../components/PipelineStatus'
 import EquityCurve from '../components/EquityCurve'
@@ -40,28 +41,34 @@ function fmtPct(n: unknown): string {
   return isNaN(num) ? '--' : `${(num * 100).toFixed(1)}%`
 }
 
-// Persist form selections across tab switches
-function useSessionState<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const saved = sessionStorage.getItem(key)
-      return saved ? JSON.parse(saved) : initial
-    } catch { return initial }
-  })
-  useEffect(() => {
-    sessionStorage.setItem(key, JSON.stringify(value))
-  }, [key, value])
-  return [value, setValue]
-}
-
 export default function Backtest() {
   const { status: pipeline, loading: pipelineLoading, refresh: refreshPipeline } = usePipeline()
+  const [searchParams, setSearchParams] = useSearchParams()
 
-  // Config form state (persisted across tab switches)
+  // Config form state (persisted in URL search params)
   const [seriesList, setSeriesList] = useState<string[]>([])
   const [strategiesList, setStrategiesList] = useState<StrategyInfo[]>([])
-  const [series, setSeries] = useSessionState<string>('bt-series', '')
-  const [selectedStrategies, setSelectedStrategies] = useSessionState<string[]>('bt-strategies', [])
+
+  const series = searchParams.get('series') ?? ''
+  const selectedStrategies = searchParams.get('strategies')?.split(',').filter(Boolean) ?? []
+
+  const setSeries = (v: string) => {
+    setSearchParams((prev) => {
+      if (v) prev.set('series', v)
+      else prev.delete('series')
+      return prev
+    }, { replace: true })
+  }
+  const setSelectedStrategies = (update: string[] | ((prev: string[]) => string[])) => {
+    setSearchParams((prev) => {
+      const next = typeof update === 'function'
+        ? update(prev.get('strategies')?.split(',').filter(Boolean) ?? [])
+        : update
+      if (next.length) prev.set('strategies', next.join(','))
+      else prev.delete('strategies')
+      return prev
+    }, { replace: true })
+  }
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
