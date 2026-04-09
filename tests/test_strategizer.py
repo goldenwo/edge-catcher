@@ -38,7 +38,7 @@ class TimedDecay(Strategy):
         return []
 ```
 
-This strategy buys YES contracts when the price is in the sweet spot range.
+This strategy buys YES contracts when the price is in the target range.
 '''
 
 
