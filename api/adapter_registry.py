@@ -168,6 +168,32 @@ ADAPTERS: list[AdapterMeta] = [
 def get_adapter(adapter_id: str) -> Optional[AdapterMeta]:
     return next((a for a in ADAPTERS if a.id == adapter_id), None)
 
+
+def resolve_db_for_series(series: str) -> Optional[Path]:
+    """Find which database contains a given series_ticker."""
+    from edge_catcher.storage.db import get_connection
+
+    seen: set[str] = set()
+    for adapter in ADAPTERS:
+        db_path = Path(adapter.db_file)
+        db_key = str(db_path)
+        if db_key in seen or not db_path.exists():
+            continue
+        seen.add(db_key)
+        try:
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM markets WHERE series_ticker = ? LIMIT 1", (series,)
+                ).fetchone()
+                if row:
+                    return db_path
+            finally:
+                conn.close()
+        except Exception:
+            continue
+    return None
+
 def is_api_key_set(meta: AdapterMeta) -> bool:
     if not meta.api_key_env_var:
         return False
