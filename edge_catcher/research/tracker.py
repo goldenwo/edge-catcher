@@ -412,6 +412,25 @@ class Tracker:
         finally:
             conn.close()
 
+    def reject_and_update_kill_registry(self, hypothesis_id: str, reason: str) -> None:
+        """Mark hypothesis as killed and update the kill registry with recalculated stats."""
+        result = self.get_result_by_id(hypothesis_id)
+        if not result:
+            raise ValueError(f"Hypothesis {hypothesis_id!r} not found")
+        strategy = result["strategy"]
+        all_results = self.list_results_for_strategy(strategy)
+        kill_count = sum(1 for r in all_results if r.get("verdict") == "kill") + 1
+        series_tested = len(set(r["series"] for r in all_results))
+        kill_rate = kill_count / len(all_results) if all_results else 1.0
+        self.update_verdict(hypothesis_id, "kill")
+        self.upsert_kill_registry(
+            strategy=strategy,
+            kill_count=kill_count,
+            series_tested=series_tested,
+            kill_rate=kill_rate,
+            reason_summary=reason,
+        )
+
     def reset_kill_registry(self, strategy: str) -> None:
         """Mark a strategy as non-permanent, allowing re-proposal."""
         conn = self._connect()
