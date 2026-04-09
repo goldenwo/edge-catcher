@@ -65,20 +65,15 @@ export default function Analyze() {
     return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av))
   })
 
-  const deleteResult = useCallback(async (run_id: string) => {
+  const deleteResult = async (run_id: string) => {
     try {
       await api.deleteResult(run_id)
       if (detail?.run_id === run_id) setDetail(null)
-      // If last item on page, go back one page
-      setOffset((prev) => {
-        const newOff = rows.length <= 1 && prev >= PAGE_SIZE ? prev - PAGE_SIZE : prev
-        loadResults(newOff, hypFilter, verdictFilter)
-        return newOff
-      })
+      loadResults(offset, hypFilter, verdictFilter)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [rows.length, detail, hypFilter, verdictFilter, loadResults])
+  }
 
   const loadDetail = async (run_id: string) => {
     setSummary(null)

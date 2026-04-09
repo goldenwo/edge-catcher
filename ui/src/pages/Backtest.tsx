@@ -108,19 +108,14 @@ export default function Backtest() {
       .catch(() => {})
   }, [])
 
-  const deleteBacktest = useCallback(async (id: string) => {
+  const deleteBacktest = async (id: string) => {
     try {
       await api.deleteBacktest(id)
-      // If this was the last item on the current page, go back one page
-      setHistoryOffset((prev) => {
-        const newOff = history.length <= 1 && prev >= HISTORY_PAGE ? prev - HISTORY_PAGE : prev
-        loadHistory(newOff)
-        return newOff
-      })
+      loadHistory(historyOffset)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [history.length, loadHistory])
+  }
 
   // Load series, strategies, and history (re-fetch when pipeline status arrives)
   useEffect(() => {
