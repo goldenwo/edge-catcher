@@ -23,6 +23,15 @@ from fastapi.staticfiles import StaticFiles
 
 from api.auth import check_auth
 from api.adapter_registry import ADAPTERS, get_adapter, is_api_key_set
+from api.config_helpers import (
+	validate_db as _validate_db,
+	get_resolver as _get_resolver,
+	config_path as _config_path,
+	markets_yaml as _markets_yaml,
+	research_db_path as _research_db_path,
+	load_merged_hypotheses,
+)
+from edge_catcher.ai.client import detect_active_provider as _detect_active_provider
 from api.models import (
     AdapterDownloadRequest,
     AdapterDownloadStatus,
@@ -65,35 +74,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ── path helpers ──────────────────────────────────────────────────────────────
-
-def _validate_db(db: str) -> Path:
-    """Resolve a db filename to a safe Path within data/. Raises ValueError on invalid input."""
-    from api.adapter_registry import ADAPTERS
-    valid_dbs = {Path(a.db_file).name for a in ADAPTERS}
-    if db not in valid_dbs:
-        raise ValueError(f"Unknown database: {db}. Valid: {sorted(valid_dbs)}")
-    return Path("data") / db
-
-
-def _get_resolver():
-    from edge_catcher.research.data_source_resolver import DataSourceResolver
-    return DataSourceResolver.from_environment()
-
-
-def _config_path() -> Path:
-    """Return config path for hypotheses and fees config."""
-    explicit = os.getenv("CONFIG_PATH")
-    if explicit:
-        return Path(explicit)
-    return Path("config")
-
-
-def _markets_yaml() -> Path:
-    """Return the primary markets config path."""
-    return Path("config") / "markets.yaml"
 
 
 # ── status ────────────────────────────────────────────────────────────────────
@@ -215,16 +195,7 @@ async def get_download_status(_: None = Depends(check_auth)) -> DownloadStatusRe
 
 @app.get("/api/hypotheses", response_model=list[HypothesisItem])
 def get_hypotheses(_: None = Depends(check_auth)) -> list[HypothesisItem]:
-    import yaml
-
-    # Merge hypotheses from config/ and config.local/ (local overrides public)
-    merged: dict = {}
-    for cfg_dir in [_config_path(), Path("config.local")]:
-        cfg_file = cfg_dir / "hypotheses.yaml"
-        if cfg_file.exists():
-            with open(cfg_file) as f:
-                data = yaml.safe_load(f) or {}
-            merged.update(data.get("hypotheses", {}))
+    merged = load_merged_hypotheses()
 
     return [
         HypothesisItem(
@@ -708,20 +679,6 @@ _AI_MODEL_OPTIONS: dict[str, list[dict[str, str]]] = {
 }
 
 
-def _detect_active_provider() -> Optional[str]:
-    """Replicate LLMClient._resolve_provider logic for the API layer."""
-    env_provider = os.getenv("EDGE_CATCHER_LLM_PROVIDER")
-    if env_provider:
-        return env_provider
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.getenv("OPENAI_API_KEY"):
-        return "openai"
-    if os.getenv("OPENROUTER_API_KEY"):
-        return "openrouter"
-    return None
-
-
 @app.get("/api/settings/ai", response_model=AISettingsResponse)
 async def get_ai_settings() -> AISettingsResponse:
     return AISettingsResponse(
@@ -772,7 +729,6 @@ async def save_ai_model(body: ModelOverrideRequest) -> dict:
 
 @app.get("/api/pipeline/status", response_model=PipelineStatusResponse)
 def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
-    import yaml as _yaml
     from edge_catcher.runner.strategy_parser import list_strategies
 
     db = _validate_db("kalshi.db")
@@ -812,14 +768,7 @@ def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
             conn.close()
 
     # Hypotheses — merge config/ and config.local/, using dict to deduplicate
-    merged_hyps: dict = {}
-    for cfg_dir in [_config_path(), Path("config.local")]:
-        cfg_file = cfg_dir / "hypotheses.yaml"
-        if cfg_file.exists():
-            with open(cfg_file) as f:
-                data = _yaml.safe_load(f) or {}
-            merged_hyps.update(data.get("hypotheses", {}))
-    hyp_count = len(merged_hyps)
+    hyp_count = len(load_merged_hypotheses())
 
     # Strategies
     from edge_catcher.runner.strategy_parser import STRATEGIES_LOCAL_PATH, STRATEGIES_PUBLIC_PATH
@@ -1222,10 +1171,6 @@ def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
     finally:
         state.running = False
         state.elapsed_seconds = _time.monotonic() - start
-
-
-def _research_db_path() -> Path:
-    return Path(os.getenv("RESEARCH_DB", "data/research.db"))
 
 
 @app.get("/api/research/profiles")

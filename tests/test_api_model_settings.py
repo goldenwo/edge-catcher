@@ -41,8 +41,10 @@ def test_get_models_anthropic(client):
 
 
 def test_get_models_no_provider(client):
-    """GET /api/settings/ai/models returns empty when no provider configured."""
-    with patch.dict(os.environ, _clean_env(), clear=True):
+    """GET /api/settings/ai/models returns empty when no provider configured and no CLI on PATH."""
+    import shutil
+    with patch.dict(os.environ, _clean_env(), clear=True), \
+            patch.object(shutil, "which", return_value=None):
         resp = client.get("/api/settings/ai/models")
     assert resp.status_code == 200
     data = resp.json()
