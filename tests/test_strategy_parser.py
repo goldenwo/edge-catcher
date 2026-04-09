@@ -40,12 +40,12 @@ def test_list_strategies_name_fallback():
     source = textwrap.dedent('''\
         from edge_catcher.runner.strategies import Strategy
 
-        class FadeLongVol(Strategy):
+        class MyCustomStrat(Strategy):
             def on_trade(self, trade, market, portfolio):
                 return []
     ''')
     result = list_strategies(source=source)
-    assert result[0] == {"name": "fade_long_vol", "class_name": "FadeLongVol"}
+    assert result[0] == {"name": "my_custom_strat", "class_name": "MyCustomStrat"}
 
 
 def test_list_strategies_syntax_error():
@@ -73,6 +73,77 @@ def test_list_strategies_missing_file():
     """Returns empty list for non-existent file."""
     result = list_strategies(file_path=Path("/nonexistent/file.py"))
     assert result == []
+
+
+def test_list_strategies_transitive_inheritance():
+    """Discovers strategies that inherit from another strategy, not Strategy directly."""
+    source = textwrap.dedent('''\
+        from edge_catcher.runner.strategies import Strategy
+
+        class BaseStrat(Strategy):
+            name = 'base'
+            def on_trade(self, trade, market, portfolio):
+                return []
+
+        class FilteredStrat(BaseStrat):
+            name = 'filtered'
+            def on_trade(self, trade, market, portfolio):
+                return []
+    ''')
+    result = list_strategies(source=source)
+    assert len(result) == 2
+    assert result[0] == {"name": "base", "class_name": "BaseStrat"}
+    assert result[1] == {"name": "filtered", "class_name": "FilteredStrat"}
+
+
+def test_list_strategies_deep_transitive():
+    """Discovers strategies through multiple levels of inheritance."""
+    source = textwrap.dedent('''\
+        from edge_catcher.runner.strategies import Strategy
+
+        class Level1(Strategy):
+            name = 'level1'
+            def on_trade(self, trade, market, portfolio):
+                return []
+
+        class Level2(Level1):
+            name = 'level2'
+
+        class Level3(Level2):
+            name = 'level3'
+    ''')
+    result = list_strategies(source=source)
+    assert len(result) == 3
+    names = [r["name"] for r in result]
+    assert names == ["level1", "level2", "level3"]
+
+
+def test_list_strategies_mixin_not_picked_up():
+    """Non-strategy mixins are not discovered, but mixin+strategy combos are."""
+    source = textwrap.dedent('''\
+        from edge_catcher.runner.strategies import Strategy
+
+        class SomeMixin:
+            pass
+
+        class BaseStrat(Strategy):
+            name = 'base'
+            def on_trade(self, trade, market, portfolio):
+                return []
+
+        class MixedStrat(SomeMixin, BaseStrat):
+            name = 'mixed'
+            def on_trade(self, trade, market, portfolio):
+                return []
+    ''')
+    result = list_strategies(source=source)
+    assert len(result) == 2
+    names = [r["name"] for r in result]
+    assert "base" in names
+    assert "mixed" in names
+    # SomeMixin should NOT appear
+    class_names = [r["class_name"] for r in result]
+    assert "SomeMixin" not in class_names
 
 
 # ── validate_strategy_code ───────────────────────────────────────────────────
