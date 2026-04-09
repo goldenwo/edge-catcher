@@ -9,8 +9,30 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def detect_active_provider() -> Optional[str]:
+	"""Detect the active LLM provider from environment.
+
+	Resolution order:
+	1. EDGE_CATCHER_LLM_PROVIDER env var
+	2. First API key found (ANTHROPIC > OPENAI > OPENROUTER)
+	3. claude-code CLI on PATH
+	"""
+	env = os.getenv("EDGE_CATCHER_LLM_PROVIDER")
+	if env:
+		return env
+	if os.getenv("ANTHROPIC_API_KEY"):
+		return "anthropic"
+	if os.getenv("OPENAI_API_KEY"):
+		return "openai"
+	if os.getenv("OPENROUTER_API_KEY"):
+		return "openrouter"
+	if shutil.which("claude") or shutil.which("npx"):
+		return "claude-code"
+	return None
+
+
 class LLMError(Exception):
-    """Raised when an LLM operation fails."""
+	"""Raised when an LLM operation fails."""
 
 
 class LLMClient:
@@ -65,18 +87,7 @@ class LLMClient:
     def _resolve_provider(self, explicit: Optional[str]) -> Optional[str]:
         if explicit:
             return explicit
-        env = os.getenv("EDGE_CATCHER_LLM_PROVIDER")
-        if env:
-            return env
-        if os.getenv("ANTHROPIC_API_KEY"):
-            return "anthropic"
-        if os.getenv("OPENAI_API_KEY"):
-            return "openai"
-        if os.getenv("OPENROUTER_API_KEY"):
-            return "openrouter"
-        if shutil.which("claude") or shutil.which("npx"):
-            return "claude-code"
-        return None
+        return detect_active_provider()
 
     def _resolve_api_key(self) -> Optional[str]:
         _env_vars = {
