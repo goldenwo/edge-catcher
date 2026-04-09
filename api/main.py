@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -966,6 +965,8 @@ def research_loop_start(
     body: ResearchLoopStartRequest,
     _: None = Depends(check_auth),
 ) -> dict:
+    import threading
+
     if is_research_loop_running():
         raise HTTPException(status_code=409, detail="A research loop is already running")
     # Clear completed/errored state entries so status returns to idle

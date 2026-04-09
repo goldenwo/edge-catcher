@@ -45,14 +45,14 @@ class TestLoopControlEndpoints:
 		research_loop_state.clear()
 
 	def test_start_loop(self):
-		with patch("api.main.threading") as mock_threading:
+		with patch("threading.Thread") as mock_thread:
 			resp = client.post("/api/research/loop/start", json={
 				"mode": "grid_only", "max_runs": 50, "max_time": 30, "parallel": 2,
 			})
 		assert resp.status_code == 200
 		data = resp.json()
 		assert "task_id" in data
-		assert mock_threading.Thread.called
+		assert mock_thread.called
 
 	def test_start_loop_conflict(self):
 		state = ResearchLoopState(task_id="t1", running=True)
