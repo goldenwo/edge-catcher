@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from pathlib import Path
 
+from .data_source_config import make_ds
 from .hypothesis import Hypothesis
 from .tracker import Tracker
 
@@ -74,8 +76,7 @@ class GridPlanner:
 					if dedup_key not in tested_keys:
 						hypotheses.append(Hypothesis(
 							strategy=strategy,
-							series=series,
-							db_path=db_path,
+							data_sources=make_ds(db=Path(db_path).name, series=series),
 							start_date=start_date,
 							end_date=end_date,
 							fee_pct=fee_pct,

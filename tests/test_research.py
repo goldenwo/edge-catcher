@@ -10,10 +10,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from edge_catcher.research.agent import ResearchAgent
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.evaluator import Evaluator, Thresholds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.reporter import Reporter
 from edge_catcher.research.tracker import Tracker
+
+
+def _ds(db="kalshi.db", series="SERIES_A"):
+    return make_ds(db=db, series=series)
 
 
 # ---------------------------------------------------------------------------
@@ -22,28 +27,28 @@ from edge_catcher.research.tracker import Tracker
 
 class TestHypothesis:
     def test_auto_uuid(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
         assert h1.id != h2.id
 
     def test_dedup_key_ignores_id(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
         assert h1.dedup_key() == h2.dedup_key()
 
     def test_dedup_key_differs_on_fee(self):
-        h1 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h1 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=0.25)
         assert h1.dedup_key() != h2.dedup_key()
 
     def test_error_constructor(self):
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="x.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(db="x.db"),
                        start_date="2025-01-01", end_date="2025-12-31")
         result = HypothesisResult.error(h, "db not found")
         assert result.status == "error"
@@ -56,12 +61,12 @@ class TestHypothesis:
 # ---------------------------------------------------------------------------
 
 def _make_result(
-    strategy="C", series="KXBTCD", total_trades=100, wins=90, losses=10,
+    strategy="C", series="SERIES_A", total_trades=100, wins=90, losses=10,
     win_rate=0.90, net_pnl_cents=500.0, sharpe=2.5, max_drawdown_pct=5.0,
     fees_paid_cents=100.0, avg_win_cents=10.0, avg_loss_cents=-5.0,
     status="ok", verdict="", verdict_reason="", per_strategy=None, raw_json=None,
 ) -> HypothesisResult:
-    h = Hypothesis(strategy=strategy, series=series, db_path="data/kalshi.db",
+    h = Hypothesis(strategy=strategy, data_sources=_ds(series=series),
                    start_date="2025-01-01", end_date="2025-12-31")
     return HypothesisResult(
         hypothesis=h, status=status, total_trades=total_trades,
@@ -122,7 +127,7 @@ class TestEvaluator:
         assert verdict == "validate"
 
     def test_error_result_is_killed(self):
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="x.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(db="x.db"),
                        start_date="2025-01-01", end_date="2025-12-31")
         error_result = HypothesisResult.error(h, "db not found")
         verdict, reason = self.ev.evaluate(error_result, self.th)
@@ -161,7 +166,7 @@ class TestTracker:
         tracker.save_result(r)
 
         # Same parameters → already tested
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=1.0)
         existing_id = tracker.is_tested(h2)
         assert existing_id is not None
@@ -171,7 +176,7 @@ class TestTracker:
         r = _make_result(verdict="promote", verdict_reason="test")
         tracker.save_result(r)
 
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31", fee_pct=0.25)
         existing_id = tracker.is_tested(h2)
         assert existing_id is None
@@ -180,7 +185,7 @@ class TestTracker:
         tracker = Tracker(tmp_path / "research.db")
         tracker.save_result(_make_result(verdict="promote", verdict_reason="p"))
         tracker.save_result(_make_result(strategy="D", verdict="kill", verdict_reason="k"))
-        tracker.save_result(_make_result(strategy="A", series="KXETH", verdict="explore", verdict_reason="e"))
+        tracker.save_result(_make_result(strategy="A", series="SERIES_E", verdict="explore", verdict_reason="e"))
 
         stats = tracker.stats()
         assert stats["total"] == 3
@@ -195,7 +200,7 @@ class TestTracker:
         tracker.save_result(r)
         # Save a hypothesis WITHOUT a result
         h_pending = Hypothesis(
-            strategy="D", series="KXETH", db_path="data/kalshi.db",
+            strategy="D", data_sources=_ds(series="SERIES_E"),
             start_date="2025-01-01", end_date="2025-12-31",
             tags=["source:llm_ideated"],
         )
@@ -203,7 +208,7 @@ class TestTracker:
         pending = tracker.list_pending()
         assert len(pending) == 1
         assert pending[0]["strategy"] == "D"
-        assert pending[0]["series"] == "KXETH"
+        assert pending[0]["series"] == "SERIES_E"
 
     def test_list_pending_empty_when_all_have_results(self, tmp_path):
         tracker = Tracker(tmp_path / "research.db")
@@ -237,12 +242,12 @@ class TestTracker:
         tracker = Tracker(tmp_path / "research.db")
 
         # Save initial result
-        r1 = _make_result(strategy="C", series="KXBTCD", verdict="kill", verdict_reason="bad")
+        r1 = _make_result(strategy="C", series="SERIES_A", verdict="kill", verdict_reason="bad")
         tracker.save_result(r1)
         original_id = r1.hypothesis.id
 
         # Simulate --force: new Hypothesis with different UUID, same dedup key
-        h2 = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h2 = Hypothesis(strategy="C", data_sources=_ds(),
                         start_date="2025-01-01", end_date="2025-12-31")
         assert h2.id != original_id  # different UUID
         r2 = HypothesisResult(
@@ -392,7 +397,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_success(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -415,7 +420,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_error_json(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -431,7 +436,7 @@ class TestResearchAgent:
 
     def test_run_hypothesis_deduplicates(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -448,7 +453,7 @@ class TestResearchAgent:
 
     def test_force_reruns_despite_existing_result(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        h = Hypothesis(strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+        h = Hypothesis(strategy="C", data_sources=_ds(),
                        start_date="2025-01-01", end_date="2025-12-31")
 
         mock_proc = MagicMock()
@@ -489,16 +494,16 @@ class TestResearchAgent:
 
     def test_generate_adjacent_promoted_targets_other_series(self, tmp_path):
         agent = self._make_agent(tmp_path)
-        r = _make_result(strategy="test-strategy-a", series="KXBTCD", verdict="promote", verdict_reason="great")
+        r = _make_result(strategy="test-strategy-a", series="SERIES_A", verdict="promote", verdict_reason="great")
 
-        mock_discovery = {"data/kalshi.db": ["KXBTCD", "KXETH", "KXNBA"]}
+        mock_discovery = {"data/kalshi.db": ["SERIES_A", "SERIES_E", "SPORTS_SERIES"]}
         with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
             adjacent = agent.generate_adjacent(r)
 
         series = [h.series for h in adjacent]
-        assert "KXBTCD" not in series   # skip the one already run
-        assert "KXETH" in series
-        assert "KXNBA" in series
+        assert "SERIES_A" not in series   # skip the one already run
+        assert "SERIES_E" in series
+        assert "SPORTS_SERIES" in series
         for h in adjacent:
             assert h.strategy == "test-strategy-a"
             assert h.parent_id == r.hypothesis.id
@@ -507,7 +512,7 @@ class TestResearchAgent:
         agent = self._make_agent(tmp_path)
 
         hypotheses = [
-            Hypothesis(strategy="C", series=f"SER{i}", db_path="data/kalshi.db",
+            Hypothesis(strategy="C", data_sources=_ds(series=f"SER{i}"),
                        start_date="2025-01-01", end_date="2025-12-31")
             for i in range(10)
         ]
@@ -551,7 +556,7 @@ class TestRunBacktestOnly:
         agent.force = False
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -582,7 +587,7 @@ class TestRunBacktestOnly:
         agent.force = False
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -608,7 +613,7 @@ class TestValidationIntegration:
         agent = ResearchAgent(tracker=tracker)
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -647,7 +652,7 @@ class TestValidationIntegration:
         agent = ResearchAgent(tracker=tracker)
 
         h = Hypothesis(
-            strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="C", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
         )
 
@@ -838,7 +843,7 @@ def _make_tagged_result(
     """Create a HypothesisResult with specific tags and save it to the tracker."""
     wins = int(total_trades * 0.6)
     h = Hypothesis(
-        strategy=strategy, series=series, db_path="data/kalshi.db",
+        strategy=strategy, data_sources=_ds(series=series),
         start_date="2025-01-01", end_date="2025-12-31",
         tags=tags,
     )
@@ -878,10 +883,10 @@ class TestSelfPerformanceSummary:
         """Results tagged source:llm_novel_strategy are categorised; adjacent-tagged ones filtered out."""
         ideator, tracker = self._make_ideator(tmp_path)
         # A genuine novel result
-        _make_tagged_result("NovelA", "KXBTCD", "promote", 2.5, 100,
+        _make_tagged_result("NovelA", "SERIES_A", "promote", 2.5, 100,
                             ["source:llm_novel_strategy"], tracker)
         # An adjacent expansion — should be excluded from novel group
-        _make_tagged_result("NovelA_adj", "KXBTCD", "explore", 1.5, 80,
+        _make_tagged_result("NovelA_adj", "SERIES_A", "explore", 1.5, 80,
                             ["source:llm_novel_strategy", "adjacent-promoted"], tracker)
 
         summary = ideator._build_self_performance_summary()
@@ -899,11 +904,11 @@ class TestSelfPerformanceSummary:
             ("explore", "Nov2"),
             ("kill", "Nov3"),
         ]:
-            _make_tagged_result(strategy, "KXBTCD", verdict, 1.5, 100,
+            _make_tagged_result(strategy, "SERIES_A", verdict, 1.5, 100,
                                 ["source:llm_novel_strategy"], tracker)
         # Add an error result manually
         h_err = Hypothesis(
-            strategy="Nov4", series="KXBTCD", db_path="data/kalshi.db",
+            strategy="Nov4", data_sources=_ds(),
             start_date="2025-01-01", end_date="2025-12-31",
             tags=["source:llm_novel_strategy"],
         )
@@ -921,7 +926,7 @@ class TestSelfPerformanceSummary:
             {"gate_name": "deflated_sharpe", "passed": True, "reason": "DSR ok"},
             {"gate_name": "walk_forward", "passed": False, "reason": "WF failed"},
         ]
-        _make_tagged_result("NovelB", "KXBTCD", "explore", 1.8, 100,
+        _make_tagged_result("NovelB", "SERIES_A", "explore", 1.8, 100,
                             ["source:llm_novel_strategy"], tracker,
                             validation_details=gates)
 
@@ -935,10 +940,10 @@ class TestSelfPerformanceSummary:
         ideator, tracker = self._make_ideator(tmp_path)
         # 3 novel results killed with low trade count
         for i in range(3):
-            _make_tagged_result(f"ThinStrat{i}", "KXBTCD", "kill", 0.5, 10,
+            _make_tagged_result(f"ThinStrat{i}", "SERIES_A", "kill", 0.5, 10,
                                 ["source:llm_novel_strategy"], tracker)
         # 1 promote with decent trade count
-        _make_tagged_result("GoodStrat", "KXBTCD", "promote", 2.5, 120,
+        _make_tagged_result("GoodStrat", "SERIES_A", "promote", 2.5, 120,
                             ["source:llm_novel_strategy"], tracker)
 
         summary = ideator._build_self_performance_summary()
@@ -953,7 +958,7 @@ class TestSelfPerformanceSummary:
                 {"gate_name": "deflated_sharpe", "passed": True, "reason": "ok"},
                 {"gate_name": "walk_forward", "passed": False, "reason": "failed"},
             ]
-            _make_tagged_result(strategy, "KXBTCD", "explore", 1.5, 100,
+            _make_tagged_result(strategy, "SERIES_A", "explore", 1.5, 100,
                                 ["source:llm_novel_strategy"], tracker,
                                 validation_details=gates)
 
@@ -1117,11 +1122,11 @@ class TestLoopJournalIntegration:
         journal = self._make_journal(tmp_path)
 
         results = [
-            _make_result(strategy="Foo", series="KXBTCD", verdict="promote",
+            _make_result(strategy="Foo", series="SERIES_A", verdict="promote",
                          verdict_reason="great", sharpe=2.5, total_trades=100),
-            _make_result(strategy="Foo", series="KXETH", verdict="explore",
+            _make_result(strategy="Foo", series="SERIES_E", verdict="explore",
                          verdict_reason="mid", sharpe=1.5, total_trades=80),
-            _make_result(strategy="Bar", series="KXBTCD", verdict="kill",
+            _make_result(strategy="Bar", series="SERIES_A", verdict="kill",
                          verdict_reason="bad", sharpe=0.5, total_trades=50),
         ]
 
@@ -1142,11 +1147,11 @@ class TestLoopJournalIntegration:
         journal = self._make_journal(tmp_path)
 
         results = [
-            _make_result(strategy="Foo", series="KXBTCD", verdict="promote",
+            _make_result(strategy="Foo", series="SERIES_A", verdict="promote",
                          verdict_reason="good", sharpe=2.5, total_trades=100),
-            _make_result(strategy="Foo", series="KXETH", verdict="kill",
+            _make_result(strategy="Foo", series="SERIES_E", verdict="kill",
                          verdict_reason="bad", sharpe=0.5, total_trades=50),
-            _make_result(strategy="Foo", series="KXNBA", verdict="kill",
+            _make_result(strategy="Foo", series="SPORTS_SERIES", verdict="kill",
                          verdict_reason="bad2", sharpe=0.4, total_trades=40),
         ]
 
@@ -1197,7 +1202,7 @@ class TestLoopJournalIntegration:
         journal = self._make_journal(tmp_path)
 
         results = [
-            _make_result(strategy="WinStrat", series="KXBTCD", verdict="promote",
+            _make_result(strategy="WinStrat", series="SERIES_A", verdict="promote",
                          verdict_reason="excellent", sharpe=3.5,
                          total_trades=120, win_rate=0.75, net_pnl_cents=800.0),
         ]
@@ -1217,7 +1222,7 @@ class TestLoopJournalIntegration:
 
         # LoserStrat: 4 kills out of 4 series
         results = [
-            _make_result(strategy="LoserStrat", series=f"KXSER{i}", verdict="kill",
+            _make_result(strategy="LoserStrat", series=f"SER{i}", verdict="kill",
                          verdict_reason="bad", sharpe=0.3, total_trades=30)
             for i in range(4)
         ]
@@ -1235,9 +1240,9 @@ class TestLoopJournalIntegration:
         journal = self._make_journal(tmp_path)
 
         results = [
-            _make_result(strategy="ThinStrat", series="KXBTCD", verdict="kill",
+            _make_result(strategy="ThinStrat", series="SERIES_A", verdict="kill",
                          verdict_reason="few trades", sharpe=0.5, total_trades=10),
-            _make_result(strategy="ThinStrat", series="KXETH", verdict="kill",
+            _make_result(strategy="ThinStrat", series="SERIES_E", verdict="kill",
                          verdict_reason="few trades", sharpe=0.4, total_trades=15),
         ]
 

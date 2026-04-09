@@ -71,7 +71,7 @@ class TemporalConsistencyGate(Gate):
 				)
 
 			w_h = Hypothesis(
-				strategy=h.strategy, series=h.series, db_path=h.db_path,
+				strategy=h.strategy, data_sources=h.data_sources,
 				start_date=w_start, end_date=w_end, fee_pct=h.fee_pct,
 			)
 			data = context.agent.run_backtest_only(w_h)
@@ -123,6 +123,8 @@ class TemporalConsistencyGate(Gate):
 
 	def _resolve_dates(self, h: Hypothesis) -> tuple[str | None, str | None]:
 		"""Resolve start/end dates, querying DB if needed."""
+		from pathlib import Path
+
 		start = h.start_date
 		end = h.end_date
 
@@ -130,7 +132,8 @@ class TemporalConsistencyGate(Gate):
 			return start, end
 
 		try:
-			with sqlite3.connect(h.db_path) as conn:
+			db_path = str(Path("data") / h.data_sources.primaries[0].db)
+			with sqlite3.connect(db_path) as conn:
 				row = conn.execute(
 					"SELECT MIN(open_time) as min_t, MAX(close_time) as max_t "
 					"FROM markets WHERE series_ticker = ?",
