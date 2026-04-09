@@ -29,7 +29,12 @@ from api.config_helpers import (
 	research_db_path as _research_db_path,
 	load_merged_hypotheses,
 )
-from edge_catcher.ai.client import detect_active_provider as _detect_active_provider
+from edge_catcher.ai.client import detect_active_provider as _detect_active_provider_full
+
+
+def _detect_active_provider() -> str | None:
+	"""Detect provider for API settings (excludes CLI auto-detection)."""
+	return _detect_active_provider_full(include_cli=False)
 from api.models import (
     AdapterDownloadRequest,
     AdapterDownloadStatus,

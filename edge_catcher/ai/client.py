@@ -9,13 +9,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def detect_active_provider() -> Optional[str]:
+def detect_active_provider(include_cli: bool = True) -> Optional[str]:
 	"""Detect the active LLM provider from environment.
 
 	Resolution order:
 	1. EDGE_CATCHER_LLM_PROVIDER env var
 	2. First API key found (ANTHROPIC > OPENAI > OPENROUTER)
-	3. claude-code CLI on PATH
+	3. claude-code CLI on PATH (only when include_cli=True)
 	"""
 	env = os.getenv("EDGE_CATCHER_LLM_PROVIDER")
 	if env:
@@ -26,7 +26,7 @@ def detect_active_provider() -> Optional[str]:
 		return "openai"
 	if os.getenv("OPENROUTER_API_KEY"):
 		return "openrouter"
-	if shutil.which("claude") or shutil.which("npx"):
+	if include_cli and (shutil.which("claude") or shutil.which("npx")):
 		return "claude-code"
 	return None
 
