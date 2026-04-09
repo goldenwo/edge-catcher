@@ -156,7 +156,7 @@ def _backtest_args(**overrides):
 class TestListStrategies:
     def test_outputs_json_list(self, capsys):
         """--list-strategies prints a JSON object with a 'strategies' key."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(list_strategies=True)
         _cmd_backtest(args)
         captured = capsys.readouterr()
@@ -167,7 +167,7 @@ class TestListStrategies:
 
     def test_no_duplicates(self, capsys):
         """Each strategy name appears exactly once — no alias duplicates."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(list_strategies=True)
         _cmd_backtest(args)
         data = json.loads(capsys.readouterr().out)
@@ -176,7 +176,7 @@ class TestListStrategies:
 
     def test_series_not_required(self, capsys):
         """--list-strategies works without --series."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(list_strategies=True, series=None)
         _cmd_backtest(args)  # should not raise
         data = json.loads(capsys.readouterr().out)
@@ -196,7 +196,7 @@ class TestListSeries:
         conn.commit()
         conn.close()
 
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(list_series=True, db_path=str(db), series=None)
         _cmd_backtest(args)
         data = json.loads(capsys.readouterr().out)
@@ -212,7 +212,7 @@ class TestListSeries:
         conn = sqlite3.connect(str(db))
         conn.close()
 
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(list_series=True, db_path=str(db), series=None)
         with pytest.raises(SystemExit) as exc_info:
             _cmd_backtest(args)
@@ -224,7 +224,7 @@ class TestListSeries:
 class TestJsonFlag:
     def test_json_mode_outputs_status_ok(self, tmp_path, capsys):
         """--json mode: stdout is valid JSON with status='ok'."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         from unittest.mock import MagicMock, patch
 
         mock_result = MagicMock()
@@ -246,7 +246,7 @@ class TestJsonFlag:
 
     def test_json_mode_error_returns_error_json(self, capsys):
         """--json mode: exceptions produce error JSON to stdout, exit 1."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         from unittest.mock import patch
 
         args = _backtest_args(json=True)
@@ -261,7 +261,7 @@ class TestJsonFlag:
 
     def test_json_mode_missing_series_error(self, capsys):
         """--json + no --series → error JSON, exit 1."""
-        from edge_catcher.__main__ import _cmd_backtest
+        from edge_catcher.cli.backtest import run as _cmd_backtest
         args = _backtest_args(json=True, series=None)
         with pytest.raises(SystemExit) as exc_info:
             _cmd_backtest(args)
