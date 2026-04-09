@@ -135,17 +135,52 @@ async def get_download_status(_: None = Depends(check_auth)) -> DownloadStatusRe
 
 @app.get("/api/hypotheses", response_model=list[HypothesisItem])
 def get_hypotheses(_: None = Depends(check_auth)) -> list[HypothesisItem]:
-    merged = load_merged_hypotheses()
+    from api.config_helpers import config_path as _cfg_path
+    import yaml
 
+    public_ids: set[str] = set()
+    pub_file = _cfg_path() / "hypotheses.yaml"
+    if pub_file.exists():
+        with open(pub_file) as f:
+            data = yaml.safe_load(f) or {}
+        public_ids = set(data.get("hypotheses", {}).keys())
+
+    merged = load_merged_hypotheses()
     return [
         HypothesisItem(
             id=hyp_id,
             name=cfg.get("name", hyp_id),
             market=cfg.get("market", "unknown"),
             status=cfg.get("status", "exploratory"),
+            source="public" if hyp_id in public_ids else "local",
         )
         for hyp_id, cfg in merged.items()
     ]
+
+
+@app.delete("/api/hypotheses/{hypothesis_id}")
+def delete_hypothesis(
+    hypothesis_id: str,
+    _: None = Depends(check_auth),
+) -> dict:
+    import yaml
+
+    local_file = Path("config.local") / "hypotheses.yaml"
+    if not local_file.exists():
+        raise HTTPException(status_code=404, detail="No local hypotheses file")
+    with open(local_file) as f:
+        data = yaml.safe_load(f) or {}
+    hyps = data.get("hypotheses", {})
+    if hypothesis_id not in hyps:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{hypothesis_id}' is not in config.local — cannot delete public hypotheses",
+        )
+    del hyps[hypothesis_id]
+    data["hypotheses"] = hyps
+    with open(local_file, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+    return {"ok": True, "deleted": hypothesis_id}
 
 
 @app.post("/api/analyze")
@@ -232,6 +267,28 @@ def get_result(
     return ResultDetail(**d)
 
 
+@app.delete("/api/results/{run_id}")
+def delete_result(
+    run_id: str,
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.storage.db import get_connection
+
+    db = _validate_db("kalshi.db")
+    if not db.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    conn = get_connection(db)
+    try:
+        cur = conn.execute("DELETE FROM analysis_results WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM hypothesis_runs WHERE run_id = ?", (run_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+    return {"ok": True}
+
+
 # ── AI ────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/formalize", response_model=FormalizeResponse)
@@ -260,7 +317,11 @@ def formalize_hypothesis(
             message=result.get("raw_response", ""),
             error="Could not parse LLM response",
         )
-    return FormalizeResponse(message=result["message"], error=None)
+    return FormalizeResponse(
+        message=result["message"],
+        error=None,
+        hypothesis_id=result.get("hypothesis_id"),
+    )
 
 
 @app.post("/api/interpret", response_model=InterpretResponse)
@@ -596,6 +657,27 @@ def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]
         return []
     rows = query_backtest_history(db)
     return [BacktestHistoryItem(**r) for r in rows]
+
+
+@app.delete("/api/backtest/history/{task_id}")
+def delete_backtest(
+    task_id: str,
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.storage.db import get_connection
+
+    db = _validate_db("kalshi.db")
+    if not db.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+    conn = get_connection(db)
+    try:
+        cur = conn.execute("DELETE FROM backtest_results WHERE task_id = ?", (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
+    return {"ok": True}
 
 
 @app.get("/api/backtest/active")
