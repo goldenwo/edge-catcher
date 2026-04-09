@@ -162,8 +162,8 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 		state.running = False
 
 
-def query_backtest_history(db_path: Path, limit: int = 50) -> list[dict]:
-	"""Query backtest_results table, return list of dicts ready for response model."""
+def query_backtest_history(db_path: Path, limit: int = 25, offset: int = 0) -> tuple[list[dict], int]:
+	"""Query backtest_results table, return (rows, total_count)."""
 	import json
 	from edge_catcher.storage.db import get_connection
 
@@ -174,11 +174,13 @@ def query_backtest_history(db_path: Path, limit: int = 50) -> list[dict]:
 			"SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
 		).fetchone()
 		if not exists:
-			return []
+			return [], 0
+		total = conn.execute("SELECT COUNT(*) FROM backtest_results").fetchone()[0]
 		rows = conn.execute(
-			"SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT ?", (limit,)
+			"SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT ? OFFSET ?",
+			(limit, offset),
 		).fetchall()
-		return [
+		results = [
 			dict(
 				task_id=r["task_id"],
 				series=r["series"],
@@ -192,5 +194,6 @@ def query_backtest_history(db_path: Path, limit: int = 50) -> list[dict]:
 			)
 			for r in rows
 		]
+		return results, total
 	finally:
 		conn.close()

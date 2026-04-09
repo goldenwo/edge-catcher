@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, StrategyInfo, BacktestHistoryItem, FeeInfo } from '../api'
 import { usePipeline } from '../components/PipelineStatus'
 import EquityCurve from '../components/EquityCurve'
 import ConfirmButton from '../components/ConfirmButton'
+import Pagination from '../components/Pagination'
 
 type HistorySortKey = 'timestamp' | 'total_trades' | 'net_pnl_cents' | 'win_rate' | 'sharpe'
 
@@ -71,6 +72,9 @@ export default function Backtest() {
 
   // History
   const [history, setHistory] = useState<BacktestHistoryItem[]>([])
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const [historyOffset, setHistoryOffset] = useState(0)
+  const HISTORY_PAGE = 25
   const [showHistory, setShowHistory] = useState(false)
   const [historySortKey, setHistorySortKey] = useState<HistorySortKey>('timestamp')
   const [historySortAsc, setHistorySortAsc] = useState(false)
@@ -98,21 +102,32 @@ export default function Backtest() {
     return historySortAsc ? cmp : -cmp
   })
 
-  const deleteBacktest = async (id: string) => {
+  const loadHistory = useCallback((off: number) => {
+    api.backtestHistory(HISTORY_PAGE, off)
+      .then((page) => { setHistory(page.results); setHistoryTotal(page.total) })
+      .catch(() => {})
+  }, [])
+
+  const deleteBacktest = useCallback(async (id: string) => {
     try {
       await api.deleteBacktest(id)
-      setHistory((prev) => prev.filter((h) => h.task_id !== id))
+      // If this was the last item on the current page, go back one page
+      setHistoryOffset((prev) => {
+        const newOff = history.length <= 1 && prev >= HISTORY_PAGE ? prev - HISTORY_PAGE : prev
+        loadHistory(newOff)
+        return newOff
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }
+  }, [history.length, loadHistory])
 
   // Load series, strategies, and history (re-fetch when pipeline status arrives)
   useEffect(() => {
     api.series().then(setSeriesList).catch(() => {})
     api.strategies().then(setStrategiesList).catch(() => {})
-    api.backtestHistory().then(setHistory).catch(() => {})
-  }, [pipeline])
+    loadHistory(historyOffset)
+  }, [pipeline, historyOffset, loadHistory])
 
   useEffect(() => {
     if (!series) {
@@ -171,7 +186,7 @@ export default function Backtest() {
           setError(e instanceof Error ? e.message : String(e))
         }
         // Refresh history + pipeline status
-        api.backtestHistory().then(setHistory).catch(() => {})
+        loadHistory(0); setHistoryOffset(0)
         refreshPipeline()
       }
     } catch {
@@ -571,7 +586,7 @@ export default function Backtest() {
           onClick={() => setShowHistory(!showHistory)}
           className="text-sm text-gray-400 hover:text-gray-200 transition-colors"
         >
-          {showHistory ? 'Hide' : 'Show'} backtest history ({history.length})
+          {showHistory ? 'Hide' : 'Show'} backtest history ({historyTotal})
         </button>
         {showHistory && history.length > 0 && (
           <div className="mt-3 overflow-x-auto rounded-lg border border-gray-800">
@@ -637,6 +652,16 @@ export default function Backtest() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {showHistory && history.length > 0 && (
+          <div className="mt-3">
+            <Pagination
+              offset={historyOffset}
+              limit={HISTORY_PAGE}
+              total={historyTotal}
+              onChange={setHistoryOffset}
+            />
           </div>
         )}
         {showHistory && history.length === 0 && (

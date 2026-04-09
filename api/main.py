@@ -15,7 +15,7 @@ try:
 except ImportError:
     pass
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -205,8 +205,59 @@ def analyze(
 
 # ── results ───────────────────────────────────────────────────────────────────
 
-@app.get("/api/results", response_model=list[ResultSummary])
-def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
+@app.get("/api/results")
+def get_results(
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    hypothesis_id: Optional[str] = None,
+    verdict: Optional[str] = None,
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.storage.db import get_connection
+
+    db = _validate_db("kalshi.db")
+    if not db.exists():
+        return {"results": [], "total": 0}
+    conn = get_connection(db)
+    try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_results'"
+        ).fetchone()
+        if not exists:
+            return {"results": [], "total": 0}
+
+        where_clauses = []
+        params: list = []
+        if hypothesis_id:
+            where_clauses.append("hypothesis_id = ?")
+            params.append(hypothesis_id)
+        if verdict:
+            where_clauses.append("verdict = ?")
+            params.append(verdict)
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM analysis_results{where_sql}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""
+            SELECT run_id, hypothesis_id, verdict, run_timestamp
+            FROM analysis_results{where_sql}
+            ORDER BY run_timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+        return {
+            "results": [ResultSummary(**dict(r)).model_dump() for r in rows],
+            "total": total,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/results/hypothesis-ids")
+def get_result_hypothesis_ids(_: None = Depends(check_auth)) -> list[str]:
     from edge_catcher.storage.db import get_connection
 
     db = _validate_db("kalshi.db")
@@ -214,24 +265,15 @@ def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
         return []
     conn = get_connection(db)
     try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_results'"
+        ).fetchone()
+        if not exists:
+            return []
         rows = conn.execute(
-            """
-            SELECT run_id, hypothesis_id, verdict, run_timestamp
-            FROM analysis_results
-            WHERE run_id IN (
-                SELECT run_id FROM (
-                    SELECT run_id, ROW_NUMBER() OVER (
-                        PARTITION BY hypothesis_id ORDER BY run_timestamp DESC
-                    ) AS rn
-                    FROM analysis_results
-                )
-                WHERE rn = 1
-            )
-            ORDER BY run_timestamp DESC
-            LIMIT 100
-            """
+            "SELECT DISTINCT hypothesis_id FROM analysis_results ORDER BY hypothesis_id"
         ).fetchall()
-        return [ResultSummary(**dict(r)) for r in rows]
+        return [r[0] for r in rows]
     finally:
         conn.close()
 
@@ -280,7 +322,10 @@ def delete_result(
     conn = get_connection(db)
     try:
         cur = conn.execute("DELETE FROM analysis_results WHERE run_id = ?", (run_id,))
-        conn.execute("DELETE FROM hypothesis_runs WHERE run_id = ?", (run_id,))
+        try:
+            conn.execute("DELETE FROM hypothesis_runs WHERE run_id = ?", (run_id,))
+        except Exception:
+            pass  # table may not exist
         conn.commit()
     finally:
         conn.close()
@@ -649,14 +694,21 @@ async def stop_backtest(task_id: str, _: None = Depends(check_auth)) -> dict:
     return {"ok": True}
 
 
-@app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
-def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
+@app.get("/api/backtest/history")
+def backtest_history(
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    _: None = Depends(check_auth),
+) -> dict:
     from api.backtest_service import query_backtest_history
     db = _validate_db("kalshi.db")
     if not db.exists():
-        return []
-    rows = query_backtest_history(db)
-    return [BacktestHistoryItem(**r) for r in rows]
+        return {"results": [], "total": 0}
+    rows, total = query_backtest_history(db, limit=limit, offset=offset)
+    return {
+        "results": [BacktestHistoryItem(**r).model_dump() for r in rows],
+        "total": total,
+    }
 
 
 @app.delete("/api/backtest/history/{task_id}")
@@ -981,6 +1033,91 @@ def research_audit_decisions(
         return []
     audit = AuditLog(research_db)
     return audit.list_decisions(limit=limit)
+
+
+# ── storage management ──────────────────────────────────────────────────────
+
+@app.get("/api/storage/report")
+def storage_report(_: None = Depends(check_auth)) -> dict:
+    from edge_catcher.storage.archiver import get_size_report
+
+    archive_dir = Path("data/archive")
+    dbs = {}
+    for db_name in ("kalshi.db", "research.db"):
+        db_path = Path("data") / db_name
+        if db_path.exists():
+            dbs[db_name] = get_size_report(db_path, archive_dir)
+        else:
+            dbs[db_name] = {"db_size_mb": 0, "archive_size_mb": 0, "total_mb": 0}
+
+    # Row counts
+    counts: dict = {}
+    kalshi_db = Path("data/kalshi.db")
+    if kalshi_db.exists():
+        from edge_catcher.storage.db import get_connection
+        conn = get_connection(kalshi_db)
+        try:
+            for table in ("trades", "markets", "analysis_results", "backtest_results"):
+                try:
+                    counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                except Exception:
+                    counts[table] = 0
+        finally:
+            conn.close()
+
+    return {"databases": dbs, "row_counts": counts}
+
+
+@app.post("/api/storage/archive")
+def storage_archive(
+    days: int = Query(90, ge=1),
+    _: None = Depends(check_auth),
+) -> dict:
+    from edge_catcher.storage.db import get_connection
+    from edge_catcher.storage.archiver import (
+        archive_old_trades, archive_old_markets,
+        archive_old_analysis_results, archive_old_backtest_results,
+    )
+
+    archive_dir = Path("data/archive")
+    kalshi_db = _validate_db("kalshi.db")
+    if not kalshi_db.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+
+    conn = get_connection(kalshi_db)
+    try:
+        results = {
+            "trades": archive_old_trades(conn, archive_dir, days),
+            "markets": archive_old_markets(conn, archive_dir, days),
+            "analysis": archive_old_analysis_results(conn, archive_dir, days),
+            "backtests": archive_old_backtest_results(conn, archive_dir, days),
+        }
+    finally:
+        conn.close()
+    return results
+
+
+@app.post("/api/storage/vacuum")
+def storage_vacuum(_: None = Depends(check_auth)) -> dict:
+    from edge_catcher.storage.db import get_connection
+    from edge_catcher.storage.archiver import vacuum_db, get_size_report
+
+    kalshi_db = _validate_db("kalshi.db")
+    if not kalshi_db.exists():
+        raise HTTPException(status_code=404, detail="Database not found")
+
+    before = get_size_report(kalshi_db)
+    conn = get_connection(kalshi_db)
+    try:
+        vacuum_db(conn)
+    finally:
+        conn.close()
+    after = get_size_report(kalshi_db)
+    return {
+        "before_mb": before["db_size_mb"],
+        "after_mb": after["db_size_mb"],
+        "saved_mb": round(before["db_size_mb"] - after["db_size_mb"], 4),
+    }
 
 
 # ── static UI (production) ────────────────────────────────────────────────────

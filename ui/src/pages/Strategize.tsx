@@ -37,10 +37,8 @@ export default function Strategize() {
       setLatestVerdict(null)
       return
     }
-    api.results().then((results: ResultSummary[]) => {
-      const matching = results
-        .filter((r) => r.hypothesis_id === selectedHypId)
-        .sort((a, b) => b.run_timestamp.localeCompare(a.run_timestamp))
+    api.results(1, 0, { hypothesis_id: selectedHypId }).then((page) => {
+      const matching = page.results
       if (matching.length > 0) {
         setLatestVerdict(matching[0].verdict)
         if (!selectedRunId) setSelectedRunId(matching[0].run_id)
