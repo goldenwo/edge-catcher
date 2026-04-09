@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import check_auth
-from api.adapter_registry import ADAPTERS, get_adapter, is_api_key_set
+from api.adapter_registry import get_adapter
 from api.config_helpers import (
 	validate_db as _validate_db,
 	config_path as _config_path,
@@ -47,8 +47,7 @@ from api.models import (
     ResultDetail,
     ResultSummary,
     StatusResponse,
-    PipelineStatusResponse, PipelineDataStatus, PipelineHypothesesStatus,
-    PipelineAnalysisStatus, PipelineStrategiesStatus, PipelineBacktestStatus,
+    PipelineStatusResponse,
     StrategyInfo, StrategizeRequest, StrategizeResponse,
     StrategySaveRequest, StrategySaveResponse,
     BacktestRequest, BacktestStatusResponse, BacktestHistoryItem,
@@ -56,12 +55,11 @@ from api.models import (
     ModelOption, ModelSettingsResponse, ModelOverrideRequest,
     ResearchLoopStartRequest, ReviewRejectRequest,
 )
-from api.tasks import download_state, get_adapter_state, save_adapter_history, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
+from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 from api.download_service import (
 	run_kalshi_download as _run_kalshi_download,
 	run_coinbase_download as _run_coinbase_download,
 	run_legacy_download as _run_legacy_download,
-	adapter_has_data as _adapter_has_data,
 	save_api_key as _save_api_key,
 	clear_api_key as _clear_api_key,
 )
