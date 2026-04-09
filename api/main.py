@@ -1109,7 +1109,7 @@ def storage_report(_: None = Depends(check_auth)) -> dict:
         from edge_catcher.storage.db import get_connection
         conn = get_connection(kalshi_db)
         try:
-            for table in ("trades", "markets", "analysis_results", "backtest_results"):
+            for table in ("trades", "markets"):
                 try:
                     counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 except Exception:
@@ -1126,10 +1126,7 @@ def storage_archive(
     _: None = Depends(check_auth),
 ) -> dict:
     from edge_catcher.storage.db import get_connection
-    from edge_catcher.storage.archiver import (
-        archive_old_trades, archive_old_markets,
-        archive_old_analysis_results, archive_old_backtest_results,
-    )
+    from edge_catcher.storage.archiver import archive_old_trades, archive_old_markets
 
     archive_dir = Path("data/archive")
     kalshi_db = _validate_db("kalshi.db")
@@ -1141,8 +1138,6 @@ def storage_archive(
         results = {
             "trades": archive_old_trades(conn, archive_dir, days),
             "markets": archive_old_markets(conn, archive_dir, days),
-            "analysis": archive_old_analysis_results(conn, archive_dir, days),
-            "backtests": archive_old_backtest_results(conn, archive_dir, days),
         }
     finally:
         conn.close()
