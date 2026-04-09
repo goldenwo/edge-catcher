@@ -165,14 +165,15 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 
     cursor = db_conn.cursor()
 
-    # ── Fetch settled markets ──────────────────────────────────────────────────
-    cursor.execute("""
-        SELECT ticker, result, last_price, close_time
-        FROM markets
-        WHERE result IN ('yes', 'no')
-    """)
-    markets = cursor.fetchall()
-    total_markets = len(markets)
+    # ── Count total and fetch only markets in bucket range ────────────────────
+    bucket_lo = min(lo for lo, _ in BUCKETS)
+    bucket_hi = max(hi for _, hi in BUCKETS)
+    price_lo = int(bucket_lo * 100)
+    price_hi = int(bucket_hi * 100)
+
+    total_markets = cursor.execute(
+        "SELECT COUNT(*) FROM markets WHERE result IN ('yes', 'no')"
+    ).fetchone()[0]
 
     if total_markets == 0:
         return HypothesisResult(
@@ -188,26 +189,28 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
             total_markets_seen=0,
         )
 
-    # ── Bucket markets (longshot range only) ───────────────────────────────────
-    # Markets outside 1–30 cents are ignored — we're only testing longshots here.
-    # This is intentional: if you tested the full range, high-probability
-    # contracts would dominate and obscure the longshot signal.
+    # Only fetch markets in the bucket range — avoids loading 1M+ rows
+    cursor.execute("""
+        SELECT ticker, result, last_price, close_time
+        FROM markets
+        WHERE result IN ('yes', 'no')
+            AND last_price >= ? AND last_price < ?
+    """, (price_lo, price_hi))
+    markets = cursor.fetchall()
+
     bucket_data: dict[tuple, list] = {b: [] for b in BUCKETS}
     warnings: list[str] = []
-    longshot_count = 0
 
     for ticker, result, last_price, close_time in markets:
-        implied = _compute_vwap(cursor, ticker, last_price)
-        if implied is None:
-            continue
+        implied = last_price / 100.0
         bucket = _bucket_for(implied)
         if bucket is None:
-            continue   # outside 1–30 cent range, skip
-        longshot_count += 1
+            continue
         won = (result == "yes")
         close_date = close_time[:10] if close_time else None
         bucket_data[bucket].append((implied, won, close_date))
 
+    longshot_count = sum(len(v) for v in bucket_data.values())
     warnings.append(
         f"{longshot_count:,} longshot contracts analyzed out of {total_markets:,} total"
     )

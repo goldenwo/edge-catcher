@@ -122,17 +122,14 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 \tmaker_fee = fee_config.get("maker", 0.0175)
 
 \tbuckets = [tuple(b) for b in hyp_config.get("buckets", [(0.01, 0.99)])]
+\tprice_lo = int(min(lo for lo, _ in buckets) * 100)
+\tprice_hi = int(max(hi for _, hi in buckets) * 100)
 
 \tcursor = db_conn.cursor()
 
-\t# Query settled markets with last_price as implied probability
-\tcursor.execute("""
-\t\tSELECT ticker, result, close_time, last_price / 100.0 AS implied
-\t\tFROM markets
-\t\tWHERE result IN ('yes', 'no') AND last_price > 0
-\t""")
-\tmarkets = cursor.fetchall()
-\ttotal_markets = len(markets)
+\ttotal_markets = cursor.execute(
+\t\t"SELECT COUNT(*) FROM markets WHERE result IN ('yes', 'no')"
+\t).fetchone()[0]
 
 \tif total_markets == 0:
 \t\treturn HypothesisResult(
@@ -148,12 +145,19 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 \t\t\ttotal_markets_seen=0,
 \t\t)
 
+\t# Only fetch markets in bucket range
+\tcursor.execute("""
+\t\tSELECT ticker, result, close_time, last_price / 100.0 AS implied
+\t\tFROM markets
+\t\tWHERE result IN ('yes', 'no')
+\t\t\tAND last_price >= ? AND last_price < ?
+\t""", (price_lo, price_hi))
+\tmarkets = cursor.fetchall()
+
 \tbucket_data: dict[tuple, list] = {{b: [] for b in buckets}}
 \twarnings: list[str] = []
 
 \tfor ticker, result, close_time, implied in markets:
-\t\tif implied is None:
-\t\t\tcontinue
 \t\tfor lo, hi in buckets:
 \t\t\tif lo <= implied < hi:
 \t\t\t\tbucket_data[(lo, hi)].append((
