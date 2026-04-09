@@ -10,7 +10,7 @@ interface BacktestResult {
   win_rate?: number
   net_pnl_cents?: number
   sharpe?: number
-  max_drawdown_cents?: number
+  max_drawdown_pct?: number
   per_strategy?: Record<string, Record<string, unknown>>
   equity_curve?: [string, number][]
   per_strategy_curves?: Record<string, [string, number][]>
@@ -453,7 +453,7 @@ export default function Backtest() {
               ['Win Rate', fmtPct(result.win_rate)],
               ['Net P&L', fmtDollar(result.net_pnl_cents)],
               ['Sharpe', fmt(result.sharpe)],
-              ['Max Drawdown', fmtDollar(result.max_drawdown_cents)],
+              ['Max Drawdown', fmtPct(result.max_drawdown_pct)],
               ['Fees Paid', fmtDollar(result.total_fees_paid)],
             ] as [string, string | number][]).map(([label, value]) => (
               <div key={label} className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3">
