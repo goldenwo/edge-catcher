@@ -9,8 +9,8 @@ import logging
 import os
 from pathlib import Path
 
-from api.config_helpers import validate_db, config_path, markets_yaml
-from api.tasks import AdapterDownloadState, save_adapter_history
+from api.config_helpers import validate_db, markets_yaml
+from api.tasks import save_adapter_history
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def run_kalshi_download(
 	except Exception as exc:
 		logger.error("Kalshi adapter download failed: %s", exc)
 		state.error = str(exc)
-		state.progress = "Error"
+		state.progress = f"Error: {exc}"
 	finally:
 		state.running = False
 
