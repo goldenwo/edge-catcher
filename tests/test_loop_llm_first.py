@@ -35,7 +35,7 @@ class TestLoopPhaseOrder:
 
         with patch.object(orch, '_run_hypothesis_phase', return_value=([], 0)) as mock_hyp, \
              patch.object(orch, '_run_expand_phase', return_value=[]) as mock_expand, \
-             patch.object(orch, '_run_refinement_phase', return_value=[]) as mock_refine, \
+             patch('edge_catcher.research.refinement.RefinementExecutor.run', return_value=[]) as mock_refine, \
              patch.object(orch, '_discover_strategies', return_value=[]), \
              patch.object(orch, '_discover_series', return_value={}), \
              patch.object(orch, '_list_results', return_value=[]), \
@@ -101,7 +101,7 @@ class TestLoopPhaseOrder:
         with patch.object(orch, '_run_ideate_phase', return_value=([], 0)) as mock_ideate, \
              patch.object(orch, '_run_hypothesis_phase', return_value=([], 0)) as mock_hyp, \
              patch.object(orch, '_run_expand_phase', return_value=[]), \
-             patch.object(orch, '_run_refinement_phase', return_value=[]), \
+             patch('edge_catcher.research.refinement.RefinementExecutor.run', return_value=[]), \
              patch.object(orch, '_discover_strategies', return_value=[]), \
              patch.object(orch, '_discover_series', return_value={}), \
              patch.object(orch, '_list_results', return_value=[]), \
