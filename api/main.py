@@ -25,7 +25,6 @@ from api.auth import check_auth
 from api.adapter_registry import ADAPTERS, get_adapter, is_api_key_set
 from api.config_helpers import (
 	validate_db as _validate_db,
-	get_resolver as _get_resolver,
 	config_path as _config_path,
 	markets_yaml as _markets_yaml,
 	research_db_path as _research_db_path,
