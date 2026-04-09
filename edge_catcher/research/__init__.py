@@ -10,7 +10,6 @@ from .grid_planner import GridPlanner
 from .run_queue import RunQueue
 from .llm_ideator import LLMIdeator
 from .loop import LoopOrchestrator
-from .observer import ResearchObserver
 from .validation import ValidationPipeline, GateContext, GateResult, Gate
 from .journal import ResearchJournal
 
@@ -27,7 +26,6 @@ __all__ = [
     "RunQueue",
     "LLMIdeator",
     "LoopOrchestrator",
-    "ResearchObserver",
     "ValidationPipeline",
     "GateContext",
     "GateResult",
