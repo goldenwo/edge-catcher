@@ -112,21 +112,6 @@ def _load_configs(config_path: Path):
 \treturn hyp_config, {{}}
 
 
-def _compute_vwap(cursor, ticker, last_price):
-\t"""Volume-weighted average price (0-1 scale), falling back to last_price."""
-\tcursor.execute(
-\t\t"SELECT SUM(CAST(yes_price AS REAL) * count) / SUM(count) FROM trades WHERE ticker = ?",
-\t\t(ticker,),
-\t)
-\trow = cursor.fetchone()
-\tvwap_cents = row[0] if row else None
-\tif vwap_cents is not None:
-\t\treturn vwap_cents / 100.0
-\tif last_price is not None and last_price > 0:
-\t\treturn last_price / 100.0
-\treturn None
-
-
 def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 \t"""Run the {name} hypothesis against settled markets."""
 \thyp_config, fee_config = _load_configs(config_path)
@@ -139,9 +124,18 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 \tbuckets = [tuple(b) for b in hyp_config.get("buckets", [(0.01, 0.99)])]
 
 \tcursor = db_conn.cursor()
+
+\t# Single query: join markets with precomputed VWAP, fall back to last_price
 \tcursor.execute("""
-\t\tSELECT ticker, result, last_price, close_time
-\t\tFROM markets WHERE result IN ('yes', 'no')
+\t\tSELECT m.ticker, m.result, m.close_time,
+\t\t\tCOALESCE(v.vwap, m.last_price) / 100.0 AS implied
+\t\tFROM markets m
+\t\tLEFT JOIN (
+\t\t\tSELECT ticker, SUM(CAST(yes_price AS REAL) * count) / SUM(count) AS vwap
+\t\t\tFROM trades GROUP BY ticker
+\t\t) v ON v.ticker = m.ticker
+\t\tWHERE m.result IN ('yes', 'no')
+\t\t\tAND COALESCE(v.vwap, m.last_price) > 0
 \t""")
 \tmarkets = cursor.fetchall()
 \ttotal_markets = len(markets)
@@ -163,8 +157,7 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 \tbucket_data: dict[tuple, list] = {{b: [] for b in buckets}}
 \twarnings: list[str] = []
 
-\tfor ticker, result, last_price, close_time in markets:
-\t\timplied = _compute_vwap(cursor, ticker, last_price)
+\tfor ticker, result, close_time, implied in markets:
 \t\tif implied is None:
 \t\t\tcontinue
 \t\tfor lo, hi in buckets:
