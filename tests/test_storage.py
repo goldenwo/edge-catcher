@@ -12,12 +12,11 @@ from edge_catcher.storage.db import (
     get_settled_markets,
     get_trades_for_ticker,
     init_db,
-    save_analysis_result,
     upsert_market,
     upsert_trade,
     upsert_trades_batch,
 )
-from edge_catcher.storage.models import HypothesisResult, Market, Trade
+from edge_catcher.storage.models import Market, Trade
 from tests.conftest import make_market, make_trade
 
 
@@ -36,8 +35,6 @@ def test_init_creates_tables(tmp_db_path):
     conn.close()
     assert "markets" in tables
     assert "trades" in tables
-    assert "analysis_results" in tables
-    assert "hypothesis_runs" in tables
 
 
 def test_wal_mode_enabled(tmp_db_conn):
@@ -139,47 +136,6 @@ def test_upsert_trades_batch_empty(tmp_db_conn):
     assert inserted == 0
 
 
-# ---------------------------------------------------------------------------
-# Analysis results
-# ---------------------------------------------------------------------------
-
-def test_save_analysis_result(tmp_db_conn):
-    result = HypothesisResult(
-        hypothesis_id="kalshi_hypothesis",
-        run_id="test-run-id-001",
-        run_timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
-        market="kalshi",
-        status="exploratory",
-        naive_n=100,
-        naive_z_stat=-2.5,
-        naive_p_value=0.012,
-        naive_edge=-0.10,
-        clustered_n=30,
-        clustered_z_stat=-2.0,
-        clustered_p_value=0.045,
-        clustered_edge=-0.10,
-        fee_adjusted_edge=-0.11,
-        confidence_interval_low=0.20,
-        confidence_interval_high=0.40,
-        verdict="NO_EDGE",
-        warnings=[],
-    )
-    save_analysis_result(tmp_db_conn, result)
-    tmp_db_conn.commit()
-
-    row = tmp_db_conn.execute(
-        "SELECT run_id, verdict FROM analysis_results WHERE run_id = ?",
-        ("test-run-id-001",),
-    ).fetchone()
-    assert row is not None
-    assert row["verdict"] == "NO_EDGE"
-
-    run_row = tmp_db_conn.execute(
-        "SELECT hypothesis_id FROM hypothesis_runs WHERE run_id = ?",
-        ("test-run-id-001",),
-    ).fetchone()
-    assert run_row["hypothesis_id"] == "kalshi_hypothesis"
-
 
 def test_get_db_stats(tmp_db_conn):
     upsert_market(tmp_db_conn, make_market())
@@ -187,39 +143,10 @@ def test_get_db_stats(tmp_db_conn):
     stats = get_db_stats(tmp_db_conn)
     assert stats["markets"] == 1
     assert stats["trades"] == 0
+    assert "results" not in stats
 
 
 def test_cache_size_pragma_set(tmp_db_conn):
     """_configure_connection() sets cache_size to -262144 (~256 MB)."""
     cache_size = tmp_db_conn.execute("PRAGMA cache_size").fetchone()[0]
     assert cache_size == -262144
-
-
-# ---------------------------------------------------------------------------
-# backtest_results table
-# ---------------------------------------------------------------------------
-
-def test_backtest_results_table_exists(tmp_db_conn):
-    """backtest_results table is created by init_db."""
-    row = tmp_db_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
-    ).fetchone()
-    assert row is not None, "backtest_results table should exist after init_db"
-
-
-def test_backtest_results_insert_and_query(tmp_db_conn):
-    """Can insert and query a backtest result row."""
-    tmp_db_conn.execute(
-        """INSERT INTO backtest_results
-           (task_id, series, strategies, run_timestamp, total_trades, wins, losses,
-            net_pnl_cents, sharpe, max_drawdown_pct, win_rate, result_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        ("task-001", "SERIES_A", '["example"]', "2026-03-31T00:00:00Z",
-         100, 60, 40, 500, 1.5, 5.0, 0.6, "reports/backtest_task-001.json"),
-    )
-    tmp_db_conn.commit()
-    row = tmp_db_conn.execute(
-        "SELECT * FROM backtest_results WHERE task_id = ?", ("task-001",)
-    ).fetchone()
-    assert row["series"] == "SERIES_A"
-    assert row["sharpe"] == 1.5
