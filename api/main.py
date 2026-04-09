@@ -862,18 +862,9 @@ def research_review_reject(
         raise HTTPException(status_code=404, detail=f"Hypothesis {hypothesis_id!r} not found")
     if result.get("verdict") == "kill":
         return {"ok": True}
-    strategy = result["strategy"]
-    all_strategy_results = tracker.list_results_for_strategy(strategy)
-    kill_count = sum(1 for r in all_strategy_results if r.get("verdict") == "kill")
-    series_tested = len(set(r["series"] for r in all_strategy_results))
-    kill_rate = (kill_count + 1) / len(all_strategy_results) if all_strategy_results else 1.0
-    tracker.update_verdict(hypothesis_id, "kill")
-    tracker.upsert_kill_registry(
-        strategy=strategy,
-        kill_count=kill_count + 1,
-        series_tested=series_tested,
-        kill_rate=kill_rate,
-        reason_summary=body.reason or "Manually rejected from dashboard",
+    tracker.reject_and_update_kill_registry(
+        hypothesis_id,
+        body.reason or "Manually rejected from dashboard",
     )
     return {"ok": True}
 
