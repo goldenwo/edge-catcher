@@ -1,6 +1,5 @@
 """CLI entry point: python -m edge_catcher [download|analyze|archive|formalize|interpret]"""
 
-import logging
 import sys
 from pathlib import Path
 
@@ -8,169 +7,6 @@ from pathlib import Path
 from edge_catcher.cli import main, _try_load_dotenv, _setup_logging
 
 __all__ = ["main", "_try_load_dotenv", "_setup_logging"]  # silence re-export lint hint
-
-
-def _cmd_download(args) -> None:
-    from edge_catcher.adapters.kalshi import KalshiAdapter
-    from edge_catcher.storage.db import (
-        get_connection,
-        init_db,
-        upsert_market,
-        upsert_trades_batch,
-        get_markets_by_series,
-    )
-
-    logger = logging.getLogger(__name__)
-
-    markets_file = Path(args.markets) if args.markets else Path(args.config) / "markets.yaml"
-
-    # Derive DB path from markets file name when not explicitly provided
-    # e.g. markets-crypto.yaml → data/kalshi-crypto.db, markets.yaml → data/kalshi.db
-    if args.db_path:
-        db_path = Path(args.db_path)
-    else:
-        stem = markets_file.stem  # e.g. "markets-crypto" or "markets"
-        suffix = stem.removeprefix("markets")  # e.g. "-crypto" or ""
-        db_path = Path(f"data/kalshi{suffix}.db")
-
-    init_db(db_path)
-    adapter = KalshiAdapter(
-        config_path=markets_file,
-        dry_run=args.dry_run,
-    )
-
-    conn = get_connection(db_path)
-    try:
-        if not args.skip_market_scan:
-            # --- Phase 1: Download markets incrementally, page by page ---
-            total_markets = 0
-            for series, page_markets in adapter.iter_market_pages():
-                for m in page_markets:
-                    upsert_market(conn, m)
-                conn.commit()
-                total_markets += len(page_markets)
-                print(
-                    f"  Markets: +{len(page_markets)} for {series} "
-                    f"(running total: {total_markets})"
-                )
-
-            logger.info(f"Market download complete: {total_markets} markets saved")
-            print(f"Downloaded {total_markets} markets total.")
-        else:
-            # Count existing markets for logging
-            total_markets = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
-            print(f"Skipping market scan — using {total_markets:,} markets already in DB.")
-
-        # --- Phase 2: Download trades for markets with volume > 0 ---
-        # Prioritize short-duration contracts first — they are close-to-expiry by nature
-        # and most valuable for time-decay analysis. Configure via CLI or config.
-        # Override: set --priority-series on the command line.
-        PRIORITY_SERIES = getattr(args, "priority_series", None) or []
-        priority_markets = []
-        other_markets = []
-        for series in adapter.get_configured_series():
-            series_markets = get_markets_by_series(conn, series)
-            for m in series_markets:
-                if m.volume is None or (m.volume or 0) > 0:
-                    if m.series_ticker in PRIORITY_SERIES:
-                        priority_markets.append(m)
-                    else:
-                        other_markets.append(m)
-
-        # Within each group, sort by volume DESC
-        priority_markets.sort(key=lambda m: m.volume or 0, reverse=True)
-        other_markets.sort(key=lambda m: m.volume or 0, reverse=True)
-        all_markets_with_vol = priority_markets + other_markets
-
-        max_trade_markets = getattr(args, "max_trade_markets", None)
-        if max_trade_markets:
-            all_markets_with_vol = all_markets_with_vol[:max_trade_markets]
-
-        # Skip markets that already have trades in DB (resume support)
-        existing_trade_tickers = set()
-        for row in conn.execute("SELECT DISTINCT ticker FROM trades"):
-            existing_trade_tickers.add(row[0])
-        before_skip = len(all_markets_with_vol)
-        all_markets_with_vol = [
-            m for m in all_markets_with_vol
-            if m.ticker not in existing_trade_tickers
-        ]
-
-        total_tickers = len(all_markets_with_vol)
-        total_trades = 0
-        skipped = before_skip - total_tickers
-        logger.info(
-            f"Downloading trades for {total_tickers} markets with volume > 0"
-            + (f" (skipped {skipped} already in DB)" if skipped else "")
-            + (f" (capped at {max_trade_markets})" if max_trade_markets else "")
-        )
-
-        for i, market in enumerate(all_markets_with_vol, 1):
-            trades = adapter.collect_trades(market.ticker)
-            if trades:
-                upsert_trades_batch(conn, trades)
-                conn.commit()
-                total_trades += len(trades)
-                print(
-                    f"  Market {i}/{total_tickers}: {market.ticker} "
-                    f"(vol={market.volume}) — {len(trades)} trades "
-                    f"(total: {total_trades})"
-                )
-            else:
-                if i % 50 == 0:
-                    print(f"  Progress: {i}/{total_tickers} markets processed...")
-
-    finally:
-        conn.close()
-
-    print(
-        f"\nDownload complete: {total_markets} markets, {total_trades} trades"
-    )
-
-
-def _cmd_download_btc(args) -> None:
-    from edge_catcher.adapters.coinbase import CoinbaseAdapter
-    from edge_catcher.storage.db import get_connection, init_btc_ohlc_table
-    from datetime import datetime, timezone
-    import time
-
-    db_path = Path(args.db)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = get_connection(db_path)
-    init_btc_ohlc_table(conn)
-
-    # Default start: 2025-03-21T00:00:00 UTC (earliest Kalshi market open)
-    start_ts = int(datetime(2025, 3, 21, tzinfo=timezone.utc).timestamp())
-    end_ts = int(datetime.now(timezone.utc).timestamp())
-
-    adapter = CoinbaseAdapter()
-    n = adapter.download_range(start_ts, end_ts, conn)
-    conn.close()
-    print(f"Downloaded {n:,} new BTC-USD candles.")
-
-
-def _cmd_download_altcoin_ohlc(args) -> None:
-    from edge_catcher.adapters.coinbase import CoinbaseAdapter
-    from edge_catcher.storage.db import get_connection, init_ohlc_table
-    from datetime import datetime, timezone, date
-
-    db_path = Path(args.db)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = get_connection(db_path)
-
-    start_ts = int(datetime.fromisoformat(args.start_date).replace(tzinfo=timezone.utc).timestamp())
-    end_date = args.end_date or date.today().isoformat()
-    end_ts = int(datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc).timestamp())
-
-    coins = [c.strip().upper() for c in args.coins.split(",") if c.strip()]
-    for coin in coins:
-        product_id = f"{coin}-USD"
-        adapter = CoinbaseAdapter(product_id=product_id)
-        init_ohlc_table(conn, adapter.table_name)
-        n = adapter.download_range(start_ts, end_ts, conn)
-        print(f"Downloading {product_id}: {n:,} candles")
-
-    conn.close()
 
 
 def _cmd_analyze(args) -> None:
@@ -693,45 +529,6 @@ def _old_main() -> None:
 
     sub = parser.add_subparsers(dest="command")
 
-    dl = sub.add_parser("download", help="Download market data from Kalshi")
-    dl.add_argument("--db-path", default=None,
-                     help="DB path (default: derived from --markets file, e.g. data/kalshi-crypto.db)")
-    dl.add_argument("--dry-run", action="store_true", help="Fetch one page only")
-    dl.add_argument(
-        "--skip-market-scan",
-        action="store_true",
-        help="Skip Phase 1 market page scan and go directly to trade downloads. "
-             "Use on restart when markets are already in DB.",
-    )
-    dl.add_argument(
-        "--markets",
-        default=None,
-        metavar="FILE",
-        help="Path to markets YAML file (default: {config}/markets.yaml). "
-             "Example: --markets config/markets-altcrypto.yaml",
-    )
-    dl.add_argument(
-        "--max-trade-markets",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Cap trades download to top N markets by volume (default: all volume>0 markets)",
-    )
-
-    btc = sub.add_parser("download-btc", help="Download BTC-USD 1-minute OHLC from Coinbase")
-    btc.add_argument("--db", default="data/btc.db", help="Path to SQLite DB for BTC OHLC data")
-    btc.set_defaults(func=_cmd_download_btc)
-
-    altcoin = sub.add_parser("download-altcoin-ohlc", help="Download 1-minute OHLC for altcoins from Coinbase")
-    altcoin.add_argument("--db", default="data/ohlc.db", help="Path to SQLite DB for altcoin OHLC data")
-    altcoin.add_argument("--coins", default="SOL,ETH,XRP,DOGE,BNB",
-                         help="Comma-separated coin symbols (default: SOL,ETH,XRP,DOGE,BNB)")
-    altcoin.add_argument("--start-date", default="2025-01-01", dest="start_date",
-                         help="Start date ISO format (default: 2025-01-01)")
-    altcoin.add_argument("--end-date", default=None, dest="end_date",
-                         help="End date ISO format (default: today)")
-    altcoin.set_defaults(func=_cmd_download_altcoin_ohlc)
-
     an = sub.add_parser("analyze", help="Run hypothesis analysis against local DB")
     an.add_argument("--hypothesis", default=None, help="Hypothesis ID (default: all)")
     an.add_argument("--db-path", default="data/kalshi.db")
@@ -901,12 +698,6 @@ def _old_main() -> None:
         _cmd_backtest(args)
     elif args.command == "list-dbs":
         _cmd_list_dbs(args)
-    elif args.command == "download":
-        _cmd_download(args)
-    elif args.command == "download-btc":
-        _cmd_download_btc(args)
-    elif args.command == "download-altcoin-ohlc":
-        _cmd_download_altcoin_ohlc(args)
     elif args.command == "analyze":
         _cmd_analyze(args)
     elif args.command == "archive":
