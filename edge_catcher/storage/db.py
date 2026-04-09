@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     sharpe REAL,
     max_drawdown_pct REAL,
     win_rate REAL,
-    result_path TEXT
+    result_path TEXT,
+    hypothesis_id TEXT
 );
 """
 
@@ -205,6 +206,11 @@ def init_db(db_path: Path) -> None:
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)",
             (datetime.now(timezone.utc).isoformat(),),
         )
+        # Migration: add hypothesis_id to backtest_results if missing
+        try:
+            conn.execute("ALTER TABLE backtest_results ADD COLUMN hypothesis_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.commit()
         logger.info("Database initialized successfully")
     finally:
