@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class StatusResponse(BaseModel):
     markets: int
     trades: int
-    results: int
+    results: int = 0  # deprecated — will be removed in Task 5
     db_size_mb: float
     last_download: Optional[str]
 

@@ -1,12 +1,11 @@
 import sqlite3
-import json
 import logging
 from pathlib import Path
 from typing import Optional, List
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from edge_catcher.storage.models import Market, Trade, HypothesisResult
+from edge_catcher.storage.models import Market, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -65,56 +64,6 @@ CREATE TABLE IF NOT EXISTS candlesticks (
     PRIMARY KEY (ticker, period_start)
 );
 
-CREATE TABLE IF NOT EXISTS analysis_results (
-    run_id TEXT PRIMARY KEY,
-    hypothesis_id TEXT NOT NULL,
-    run_timestamp TEXT NOT NULL,
-    market TEXT NOT NULL,
-    status TEXT NOT NULL,
-    naive_n INTEGER,
-    naive_z_stat REAL,
-    naive_p_value REAL,
-    naive_edge REAL,
-    clustered_n INTEGER,
-    clustered_z_stat REAL,
-    clustered_p_value REAL,
-    clustered_edge REAL,
-    fee_adjusted_edge REAL,
-    confidence_interval_low REAL,
-    confidence_interval_high REAL,
-    verdict TEXT,
-    warnings TEXT,
-    total_markets_seen INTEGER,
-    delisted_or_cancelled INTEGER,
-    raw_bucket_data TEXT
-);
-
-CREATE TABLE IF NOT EXISTS hypothesis_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    hypothesis_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    run_timestamp TEXT NOT NULL,
-    verdict TEXT,
-    UNIQUE(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS backtest_results (
-    task_id TEXT PRIMARY KEY,
-    series TEXT NOT NULL,
-    strategies TEXT NOT NULL,
-    start_date TEXT,
-    end_date TEXT,
-    run_timestamp TEXT NOT NULL,
-    total_trades INTEGER,
-    wins INTEGER,
-    losses INTEGER,
-    net_pnl_cents INTEGER,
-    sharpe REAL,
-    max_drawdown_pct REAL,
-    win_rate REAL,
-    result_path TEXT,
-    hypothesis_id TEXT
-);
 """
 
 _INDEXES_SQL = """
@@ -122,8 +71,6 @@ CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_trades_ticker_time ON trades(ticker, created_time);
 CREATE INDEX IF NOT EXISTS idx_markets_series ON markets(series_ticker);
 CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status);
-CREATE INDEX IF NOT EXISTS idx_analysis_hypothesis ON analysis_results(hypothesis_id, run_timestamp);
-CREATE INDEX IF NOT EXISTS idx_hypothesis_runs_id ON hypothesis_runs(hypothesis_id);
 """
 
 _BTC_OHLC_SQL = """
@@ -206,11 +153,6 @@ def init_db(db_path: Path) -> None:
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?)",
             (datetime.now(timezone.utc).isoformat(),),
         )
-        # Migration: add hypothesis_id to backtest_results if missing
-        try:
-            conn.execute("ALTER TABLE backtest_results ADD COLUMN hypothesis_id TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
         conn.commit()
         logger.info("Database initialized successfully")
     finally:
@@ -427,92 +369,12 @@ def get_settled_markets(
     return [_row_to_market(row) for row in cursor.fetchall()]
 
 
-def save_analysis_result(conn: sqlite3.Connection, result: HypothesisResult) -> None:
-    """Persist a HypothesisResult to analysis_results and hypothesis_runs."""
-    warnings_json = json.dumps(result.warnings) if result.warnings else "[]"
-
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO analysis_results (
-            run_id, hypothesis_id, run_timestamp, market, status,
-            naive_n, naive_z_stat, naive_p_value, naive_edge,
-            clustered_n, clustered_z_stat, clustered_p_value, clustered_edge,
-            fee_adjusted_edge, confidence_interval_low, confidence_interval_high,
-            verdict, warnings, total_markets_seen, delisted_or_cancelled, raw_bucket_data
-        ) VALUES (
-            ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?, ?, ?
-        )
-        """,
-        (
-            result.run_id,
-            result.hypothesis_id,
-            _dt_to_str(result.run_timestamp),
-            result.market,
-            result.status,
-            result.naive_n,
-            result.naive_z_stat,
-            result.naive_p_value,
-            result.naive_edge,
-            result.clustered_n,
-            result.clustered_z_stat,
-            result.clustered_p_value,
-            result.clustered_edge,
-            result.fee_adjusted_edge,
-            result.confidence_interval_low,
-            result.confidence_interval_high,
-            result.verdict,
-            warnings_json,
-            result.total_markets_seen,
-            result.delisted_or_cancelled,
-            result.raw_bucket_data,
-        ),
-    )
-
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO hypothesis_runs (hypothesis_id, run_id, run_timestamp, verdict)
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            result.hypothesis_id,
-            result.run_id,
-            _dt_to_str(result.run_timestamp),
-            result.verdict,
-        ),
-    )
-    logger.debug("Saved analysis result %s for hypothesis %s", result.run_id, result.hypothesis_id)
-
-
-def get_analysis_history(
-    conn: sqlite3.Connection,
-    hypothesis_id: str,
-    limit: int = 20,
-) -> List[dict]:
-    """Return the most recent analysis results for a hypothesis as plain dicts."""
-    cursor = conn.execute(
-        """
-        SELECT * FROM analysis_results
-        WHERE hypothesis_id = ?
-        ORDER BY run_timestamp DESC
-        LIMIT ?
-        """,
-        (hypothesis_id, limit),
-    )
-    rows = cursor.fetchall()
-    return [dict(row) for row in rows]
-
 
 def get_db_stats(conn: sqlite3.Connection) -> dict:
     """Return basic database statistics."""
     markets_count = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
     trades_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    results_count = conn.execute("SELECT COUNT(*) FROM analysis_results").fetchone()[0]
 
-    # Determine DB file size via PRAGMA database_list
     db_path_row = conn.execute("PRAGMA database_list").fetchone()
     db_size_mb = 0.0
     if db_path_row:
@@ -523,6 +385,5 @@ def get_db_stats(conn: sqlite3.Connection) -> dict:
     return {
         "markets": markets_count,
         "trades": trades_count,
-        "results": results_count,
         "db_size_mb": round(db_size_mb, 4),
     }
