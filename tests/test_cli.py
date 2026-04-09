@@ -289,7 +289,7 @@ class TestListDbs:
         # Patch Path("data") to point to our tmp data dir
         monkeypatch.chdir(tmp_path)
 
-        from edge_catcher.__main__ import _cmd_list_dbs
+        from edge_catcher.cli.utils import _run_list_dbs as _cmd_list_dbs
         _cmd_list_dbs(argparse.Namespace())
         data = json.loads(capsys.readouterr().out)
         assert "databases" in data
@@ -305,7 +305,7 @@ class TestListDbs:
         data_dir.mkdir()
         monkeypatch.chdir(tmp_path)
 
-        from edge_catcher.__main__ import _cmd_list_dbs
+        from edge_catcher.cli.utils import _run_list_dbs as _cmd_list_dbs
         _cmd_list_dbs(argparse.Namespace())
         data = json.loads(capsys.readouterr().out)
         assert data == {"databases": []}
