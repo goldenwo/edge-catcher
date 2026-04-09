@@ -9,10 +9,16 @@ logger = logging.getLogger(__name__)
 
 
 def _load_hypothesis_configs(config_path: Path) -> Dict[str, dict]:
-    """Load all hypothesis entries from hypotheses.yaml."""
-    hyp_yaml = config_path / "hypotheses.yaml"
-    with open(hyp_yaml) as f:
-        return yaml.safe_load(f).get("hypotheses", {})
+    """Load hypothesis entries from config_path and its .local sibling, merged."""
+    merged: Dict[str, dict] = {}
+    local_dir = config_path.parent / (config_path.name + ".local")
+    for cfg_dir in [config_path, local_dir]:
+        hyp_yaml = cfg_dir / "hypotheses.yaml"
+        if hyp_yaml.exists():
+            with open(hyp_yaml) as f:
+                data = yaml.safe_load(f) or {}
+            merged.update(data.get("hypotheses", {}))
+    return merged
 
 
 def discover(config_path: Path = Path("config")) -> Dict[str, Any]:

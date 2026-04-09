@@ -224,7 +224,7 @@ def test_formalize_creates_config_entry_and_stub(tmp_path):
     assert stub_path.exists()
     content = stub_path.read_text()
     assert 'HYPOTHESIS_ID = "test_hypothesis"' in content
-    assert "NotImplementedError" in content
+    assert "def run(db_conn" in content
 
 
 def test_formalize_stub_contains_hypothesis_id(tmp_path):
