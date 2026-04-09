@@ -29,8 +29,13 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 	state.progress = "Loading strategies..."
 
 	try:
-		# Cache validated DB path
-		db_path = _validate_db("kalshi.db")
+		# Resolve which DB contains the requested series
+		from api.adapter_registry import resolve_db_for_series
+		db_path = resolve_db_for_series(body.series)
+		if db_path is None:
+			state.error = f"Series '{body.series}' not found in any database"
+			state.running = False
+			return
 
 		# Build strategy map from public + local strategies
 		strategy_map: dict[str, type] = {}
