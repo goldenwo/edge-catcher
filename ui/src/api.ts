@@ -61,6 +61,7 @@ export interface Hypothesis {
   name: string
   market: string
   status: string
+  source: 'public' | 'local'
 }
 
 export interface ResultSummary {
@@ -93,6 +94,7 @@ export interface ResultDetail extends ResultSummary {
 export interface FormalizeResponse {
   message: string
   error: string | null
+  hypothesis_id: string | null
 }
 
 export interface AISettings {
@@ -172,6 +174,12 @@ export const api = {
   startDownload: () => req<{ task_id: string }>('/api/download', { method: 'POST' }),
   downloadStatus: () => req<DownloadStatus>('/api/download/status'),
   hypotheses: () => req<Hypothesis[]>('/api/hypotheses'),
+  deleteHypothesis: (id: string) =>
+    req<{ ok: boolean }>(`/api/hypotheses/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  deleteResult: (run_id: string) =>
+    req<{ ok: boolean }>(`/api/results/${encodeURIComponent(run_id)}`, { method: 'DELETE' }),
+  deleteBacktest: (task_id: string) =>
+    req<{ ok: boolean }>(`/api/backtest/history/${encodeURIComponent(task_id)}`, { method: 'DELETE' }),
   analyze: (hypothesis_id: string | null) =>
     req<Record<string, unknown>>('/api/analyze', json({ hypothesis_id })),
   results: () => cachedReq<ResultSummary[]>('/api/results', 30_000),

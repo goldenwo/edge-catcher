@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { api, StrategyInfo, BacktestHistoryItem, FeeInfo } from '../api'
 import { usePipeline } from '../components/PipelineStatus'
 import EquityCurve from '../components/EquityCurve'
+import ConfirmButton from '../components/ConfirmButton'
+
+type HistorySortKey = 'timestamp' | 'total_trades' | 'net_pnl_cents' | 'win_rate' | 'sharpe'
 
 interface BacktestResult {
   total_trades?: number
@@ -69,6 +72,8 @@ export default function Backtest() {
   // History
   const [history, setHistory] = useState<BacktestHistoryItem[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  const [historySortKey, setHistorySortKey] = useState<HistorySortKey>('timestamp')
+  const [historySortAsc, setHistorySortAsc] = useState(false)
 
   const intervalRef = useRef<ReturnType<typeof setInterval>>()
 
@@ -79,6 +84,27 @@ export default function Backtest() {
   const clearPolling = () => {
     clearInterval(intervalRef.current)
     intervalRef.current = undefined
+  }
+
+  const sortHistory = (key: HistorySortKey) => {
+    if (historySortKey === key) setHistorySortAsc((a) => !a)
+    else { setHistorySortKey(key); setHistorySortAsc(true) }
+  }
+
+  const sortedHistory = [...history].sort((a, b) => {
+    const av = a[historySortKey] ?? ''
+    const bv = b[historySortKey] ?? ''
+    const cmp = typeof av === 'number' && typeof bv === 'number' ? av - bv : String(av).localeCompare(String(bv))
+    return historySortAsc ? cmp : -cmp
+  })
+
+  const deleteBacktest = async (id: string) => {
+    try {
+      await api.deleteBacktest(id)
+      setHistory((prev) => prev.filter((h) => h.task_id !== id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   // Load series, strategies, and history (re-fetch when pipeline status arrives)
@@ -552,18 +578,33 @@ export default function Backtest() {
             <table className="w-full text-sm">
               <thead className="border-b border-gray-800 bg-gray-900">
                 <tr>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Timestamp</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Hypothesis</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Series</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Strategies</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Trades</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Net P&L</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Win Rate</th>
-                  <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">Sharpe</th>
+                  {([
+                    ['timestamp', 'Timestamp'],
+                    [null, 'Hypothesis'],
+                    [null, 'Series'],
+                    [null, 'Strategies'],
+                    ['total_trades', 'Trades'],
+                    ['net_pnl_cents', 'Net P&L'],
+                    ['win_rate', 'Win Rate'],
+                    ['sharpe', 'Sharpe'],
+                  ] as const).map(([key, label], i) =>
+                    key ? (
+                      <th
+                        key={i}
+                        className="px-4 py-2 text-left text-xs text-gray-400 font-medium cursor-pointer select-none hover:text-white"
+                        onClick={() => sortHistory(key as HistorySortKey)}
+                      >
+                        {label} {historySortKey === key ? (historySortAsc ? '↑' : '↓') : ''}
+                      </th>
+                    ) : (
+                      <th key={i} className="px-4 py-2 text-left text-xs text-gray-400 font-medium">{label}</th>
+                    )
+                  )}
+                  <th className="w-8" />
                 </tr>
               </thead>
               <tbody>
-                {history.map((h) => (
+                {sortedHistory.map((h) => (
                   <tr
                     key={h.task_id}
                     className={`border-b border-gray-800/50 cursor-pointer transition-colors ${
@@ -585,6 +626,13 @@ export default function Backtest() {
                     <td className="px-4 py-3 text-gray-400">{fmtDollar(h.net_pnl_cents)}</td>
                     <td className="px-4 py-3 text-gray-400">{fmtPct(h.win_rate)}</td>
                     <td className="px-4 py-3 text-gray-400">{fmt(h.sharpe)}</td>
+                    <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
+                      <ConfirmButton
+                        onConfirm={() => deleteBacktest(h.task_id)}
+                        label="Delete"
+                        confirmText="Delete?"
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>

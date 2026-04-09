@@ -26,6 +26,7 @@ class HypothesisItem(BaseModel):
     name: str
     market: str
     status: str
+    source: str  # "public" or "local"
 
 
 class AnalyzeRequest(BaseModel):
@@ -71,6 +72,7 @@ class FormalizeRequest(BaseModel):
 class FormalizeResponse(BaseModel):
     message: str
     error: Optional[str] = None
+    hypothesis_id: Optional[str] = None
 
 
 class InterpretRequest(BaseModel):
