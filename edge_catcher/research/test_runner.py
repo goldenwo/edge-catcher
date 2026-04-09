@@ -417,6 +417,188 @@ class LifecycleBiasTest(StatisticalTest):
 		)
 
 
+class VolumeMispricingTest(StatisticalTest):
+	"""Test whether thin (low-volume) markets have wider mispricing than liquid ones.
+
+	Splits settled markets into volume terciles and checks whether the low-volume
+	tercile shows significantly more mispricing than the medium/high terciles.
+	"""
+	name: ClassVar[str] = "volume_mispricing"
+
+	def run(
+		self,
+		conn: sqlite3.Connection,
+		series: str,
+		params: dict,
+		thresholds: dict,
+	) -> TestResult:
+		buckets: list[list[float]] = params.get("buckets", [[0.40, 0.60]])
+		min_n: int = params.get("min_n_per_bucket", 30)
+		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
+		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
+
+		cursor = conn.cursor()
+
+		# 1. Query all settled markets for the series with volume data
+		cursor.execute(
+			"SELECT ticker, result, last_price, volume, close_time "
+			"FROM markets WHERE series_ticker = ? AND result IS NOT NULL",
+			(series,),
+		)
+		markets = cursor.fetchall()
+
+		if not markets:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_settled_markets", "n": 0},
+			)
+
+		# 2. Split into volume terciles
+		volumes = [row[3] or 0 for row in markets]
+		sorted_volumes = sorted(volumes)
+		n_total = len(sorted_volumes)
+		t1 = sorted_volumes[n_total // 3]      # upper bound of low tercile
+		t2 = sorted_volumes[2 * n_total // 3]  # upper bound of medium tercile
+
+		bucket_tuples = [(lo, hi) for lo, hi in buckets]
+
+		# Per tercile → per bucket → list of (implied, won, close_date)
+		tercile_bucket_data: dict[str, dict[tuple[float, float], list[tuple[float, bool, Optional[str]]]]] = {
+			"low":    {(lo, hi): [] for lo, hi in bucket_tuples},
+			"medium": {(lo, hi): [] for lo, hi in bucket_tuples},
+			"high":   {(lo, hi): [] for lo, hi in bucket_tuples},
+		}
+
+		for row in markets:
+			ticker, result, last_price, volume, close_time = row[0], row[1], row[2], row[3], row[4]
+			vol = volume or 0
+
+			# Assign to tercile
+			if vol <= t1:
+				tercile = "low"
+			elif vol <= t2:
+				tercile = "medium"
+			else:
+				tercile = "high"
+
+			implied = _compute_vwap(cursor, ticker, last_price)
+			if implied is None:
+				continue
+
+			for lo, hi in bucket_tuples:
+				if lo <= implied < hi:
+					won = (result == "yes")
+					close_date = close_time[:10] if close_time else None
+					tercile_bucket_data[tercile][(lo, hi)].append((implied, won, close_date))
+					break
+
+		# 3. Analyze low-volume tercile per bucket
+		bucket_results: list[dict] = []
+		any_bucket_has_data = False
+		all_low_rows: list[tuple[float, bool, Optional[str]]] = []
+
+		for lo, hi in bucket_tuples:
+			low_rows = tercile_bucket_data["low"][(lo, hi)]
+			med_rows = tercile_bucket_data["medium"][(lo, hi)]
+			hi_rows  = tercile_bucket_data["high"][(lo, hi)]
+
+			if len(low_rows) < min_n:
+				continue
+
+			any_bucket_has_data = True
+
+			# Low tercile stats
+			lv_wins = sum(1 for _, won, _ in low_rows if won)
+			lv_n = len(low_rows)
+			lv_implied = sum(imp for imp, _, _ in low_rows) / lv_n
+			lv_win_rate = lv_wins / lv_n
+			lv_edge = lv_win_rate - lv_implied
+
+			lv_z, lv_p, lv_nc = clustered_z(low_rows)
+			lv_z_naive, lv_p_naive = proportions_ztest(lv_wins, lv_n, lv_implied)
+			lv_ci_lo, lv_ci_hi = wilson_ci(lv_wins, lv_n)
+
+			# Medium/high stats (optional, for detail reporting)
+			def _tercile_summary(rows: list) -> dict:
+				if not rows:
+					return {"n": 0}
+				wins = sum(1 for _, won, _ in rows if won)
+				n = len(rows)
+				imp = sum(i for i, _, _ in rows) / n
+				z, p, nc = clustered_z(rows)
+				return {
+					"n": n, "n_clusters": nc,
+					"implied_prob": imp,
+					"win_rate": wins / n,
+					"edge": wins / n - imp,
+					"z_stat_clustered": float(z),
+					"p_value_clustered": float(p),
+				}
+
+			bucket_results.append({
+				"bucket_lo": lo, "bucket_hi": hi,
+				"low_volume": {
+					"n": lv_n, "n_clusters": lv_nc,
+					"implied_prob": lv_implied,
+					"actual_win_rate": lv_win_rate,
+					"edge": lv_edge,
+					"z_stat_naive": float(lv_z_naive),
+					"z_stat_clustered": float(lv_z),
+					"p_value_naive": float(lv_p_naive),
+					"p_value_clustered": float(lv_p),
+					"ci_lower": lv_ci_lo,
+					"ci_upper": lv_ci_hi,
+				},
+				"medium_volume": _tercile_summary(med_rows),
+				"high_volume":   _tercile_summary(hi_rows),
+				"edge_differential_low_vs_high": (
+					lv_edge - _tercile_summary(hi_rows).get("edge", 0.0)
+					if hi_rows else None
+				),
+			})
+
+			all_low_rows.extend(low_rows)
+
+		if not any_bucket_has_data:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_bucket_met_min_n", "buckets": [], "tercile_bounds": (t1, t2)},
+			)
+
+		# 4-5. Aggregate across buckets using all qualifying low-volume rows
+		total_n = len(all_low_rows)
+		total_wins = sum(1 for _, won, _ in all_low_rows if won)
+		total_implied = sum(imp for imp, _, _ in all_low_rows) / total_n
+		overall_edge = total_wins / total_n - total_implied
+
+		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_low_rows)
+		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
+
+		# 6. Verdict: significant mispricing in low-volume tercile → EDGE_EXISTS
+		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
+			verdict = EDGE_EXISTS
+		elif abs(overall_z_clust) >= z_threshold and overall_fee_adj <= 0:
+			verdict = EDGE_NOT_TRADEABLE
+		else:
+			verdict = NO_EDGE
+
+		return TestResult(
+			verdict=verdict,
+			z_stat=float(overall_z_clust),
+			fee_adjusted_edge=overall_fee_adj,
+			detail={
+				"n_low_volume": total_n,
+				"n_clusters": overall_n_clust,
+				"overall_implied": total_implied,
+				"overall_win_rate": total_wins / total_n,
+				"overall_edge": overall_edge,
+				"tercile_bounds": (t1, t2),
+				"buckets": bucket_results,
+			},
+		)
+
+
 class TestRunner:
 	"""Dispatches hypothesis configs to the appropriate StatisticalTest."""
 
@@ -428,6 +610,7 @@ class TestRunner:
 		"""Register built-in test types. Called during __init__."""
 		self.register("price_bucket_bias", PriceBucketBiasTest())
 		self.register("lifecycle_bias", LifecycleBiasTest())
+		self.register("volume_mispricing", VolumeMispricingTest())
 
 	def register(self, name: str, test: StatisticalTest) -> None:
 		self.test_types[name] = test
