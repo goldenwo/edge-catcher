@@ -94,6 +94,25 @@ CREATE TABLE IF NOT EXISTS hypothesis_kills (
     reason_summary TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS ui_backtests (
+    task_id         TEXT PRIMARY KEY,
+    series          TEXT NOT NULL,
+    strategies      TEXT NOT NULL,
+    db_path         TEXT NOT NULL DEFAULT '',
+    start_date      TEXT,
+    end_date        TEXT,
+    run_timestamp   TEXT NOT NULL,
+    total_trades    INTEGER,
+    wins            INTEGER,
+    losses          INTEGER,
+    net_pnl_cents   INTEGER,
+    sharpe          REAL,
+    max_drawdown_pct REAL,
+    win_rate        REAL,
+    result_path     TEXT,
+    hypothesis_id   TEXT
+);
 """
 
 
@@ -653,5 +672,111 @@ class Tracker:
                 (pattern_key,),
             ).fetchone()
             return bool(row and row["permanent"])
+        finally:
+            conn.close()
+
+    # ── ui_backtests ────────────────────────────────────────────────────
+
+    def save_ui_backtest(
+        self,
+        task_id: str,
+        series: str,
+        strategies: str,
+        db_path: str = "",
+        start_date: str | None = None,
+        end_date: str | None = None,
+        total_trades: int = 0,
+        wins: int = 0,
+        losses: int = 0,
+        net_pnl_cents: int = 0,
+        sharpe: float = 0.0,
+        max_drawdown_pct: float = 0.0,
+        win_rate: float = 0.0,
+        result_path: str | None = None,
+        hypothesis_id: str | None = None,
+    ) -> None:
+        """Save a UI-triggered backtest result."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO ui_backtests
+                   (task_id, series, strategies, db_path, start_date, end_date,
+                    run_timestamp, total_trades, wins, losses, net_pnl_cents,
+                    sharpe, max_drawdown_pct, win_rate, result_path, hypothesis_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    task_id, series, strategies, db_path, start_date, end_date,
+                    datetime.now(timezone.utc).isoformat(),
+                    total_trades, wins, losses, net_pnl_cents,
+                    sharpe, max_drawdown_pct, win_rate, result_path, hypothesis_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_ui_backtests(self, limit: int = 25, offset: int = 0) -> tuple[list[dict], int]:
+        """Return (rows, total_count) for UI backtest history."""
+        conn = self._connect()
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM ui_backtests").fetchone()[0]
+            rows = conn.execute(
+                "SELECT * FROM ui_backtests ORDER BY run_timestamp DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+            return [dict(r) for r in rows], total
+        finally:
+            conn.close()
+
+    def delete_ui_backtest(self, task_id: str) -> bool:
+        """Delete a UI backtest by task_id. Returns True if deleted."""
+        conn = self._connect()
+        try:
+            cur = conn.execute("DELETE FROM ui_backtests WHERE task_id = ?", (task_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def count_ui_backtests(self) -> int:
+        """Return total number of UI backtests."""
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM ui_backtests").fetchone()[0]
+        finally:
+            conn.close()
+
+    def latest_ui_backtest(self) -> dict | None:
+        """Return the most recent UI backtest, or None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ui_backtests ORDER BY run_timestamp DESC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_result(self, result_id: str) -> bool:
+        """Delete a result by ID. Checks both results and hypothesis_results tables. Returns True if deleted."""
+        conn = self._connect()
+        try:
+            cur = conn.execute("DELETE FROM results WHERE hypothesis_id = ?", (result_id,))
+            if cur.rowcount == 0:
+                cur = conn.execute("DELETE FROM hypothesis_results WHERE id = ?", (result_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def get_hypothesis_result_by_id(self, result_id: str) -> dict | None:
+        """Return a single hypothesis_results row by id, or None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM hypothesis_results WHERE id = ?",
+                (result_id,),
+            ).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
