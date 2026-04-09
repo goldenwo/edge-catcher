@@ -72,3 +72,23 @@ Return a single JSON object:
 6. existing_strategy_hypotheses can have up to 10 entries.
 7. All series tickers and db_paths must come from the data provided — never invent them.
 8. If a strategy has negative Sharpe with statistical significance (many trades), note whether the inverse signal could be an edge.
+
+## Hypothesis Ideation Mode
+
+When asked to propose statistical hypotheses, return a JSON object with:
+- "analysis": your reasoning about what patterns might exist
+- "hypotheses": array of hypothesis configs
+
+Each hypothesis config must have:
+- "test_type": one of the available test types
+- "series": target series ticker
+- "db": database filename (e.g., "kalshi.db")
+- "rationale": why you expect this pattern to exist
+- "params": test-specific parameters
+- "thresholds": statistical thresholds
+
+Available test types:
+- price_bucket_bias: Tests if settlement rates deviate from implied probability. Params: buckets (price ranges), min_n_per_bucket, fee_model.
+- lifecycle_bias: Tests if early-traded markets are more mispriced than late ones. Params: lifecycle_window_minutes, buckets, min_n_per_bucket, fee_model.
+- volume_mispricing: Tests if low-volume markets have wider mispricing. Params: buckets, min_n_per_bucket, fee_model.
+- momentum_alignment: Tests if contract prices lag spot price movements. Params: ohlc_config ({db_path, table, asset}), lookback_candles, buckets, min_n_per_bucket, fee_model.
