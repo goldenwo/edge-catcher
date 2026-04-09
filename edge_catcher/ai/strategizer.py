@@ -104,6 +104,62 @@ def _parse_strategy_response(response: str) -> tuple[str, str]:
     return code, "unnamed-strategy"
 
 
+def _build_hypothesis_prompt(hypothesis_config: dict, test_result, profiles: list) -> str:
+    """Build a user prompt for strategy generation from a validated hypothesis."""
+    parts = [
+        "## Validated Hypothesis",
+        f"Test type: {hypothesis_config.get('test_type', 'unknown')}",
+        f"Series: {hypothesis_config.get('series', 'unknown')}",
+        f"Database: {hypothesis_config.get('db', 'unknown')}",
+        f"Rationale: {hypothesis_config.get('rationale', '')}",
+        "",
+        "## Statistical Evidence",
+        f"Verdict: {test_result.verdict}",
+        f"Z-statistic: {test_result.z_stat:.2f}",
+        f"Fee-adjusted edge: {test_result.fee_adjusted_edge:.4f}",
+        f"Detail: {json.dumps(test_result.detail, indent=2)}",
+        "",
+        "## Parameters",
+        f"{json.dumps(hypothesis_config.get('params', {}), indent=2)}",
+    ]
+
+    # Add series profile if available
+    if profiles:
+        parts.append("")
+        parts.append("## Series Context")
+        for p in profiles:
+            if hasattr(p, 'series_ticker') and p.series_ticker == hypothesis_config.get('series'):
+                parts.append(f"Settlement: {getattr(p, 'settlement_frequency', 'unknown')}")
+                parts.append(f"Markets: {getattr(p, 'market_count', 'unknown')}")
+                break
+
+    parts.append("")
+    parts.append("Generate a Python strategy class that exploits this validated edge.")
+    parts.append("The strategy should target the specific conditions where the edge was found.")
+
+    return "\n".join(parts)
+
+
+def generate_from_hypothesis(
+    hypothesis_config: dict,
+    test_result,
+    profiles: list,
+    client=None,
+) -> tuple[str, str]:
+    """Generate strategy code from a validated statistical hypothesis.
+
+    Returns (code, strategy_name).
+    """
+    if client is None:
+        client = LLMClient()
+
+    system_prompt = _load_system_prompt()
+    user_prompt = _build_hypothesis_prompt(hypothesis_config, test_result, profiles)
+
+    response = client.complete(system_prompt, user_prompt, task="strategizer")
+    return _parse_strategy_response(response)
+
+
 def strategize(
     hypothesis_id: str,
     run_id: Optional[str],
