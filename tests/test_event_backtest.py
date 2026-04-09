@@ -78,7 +78,7 @@ class BuyNoOnDrop(Strategy):
 
 
 class BuyNoInRange(Strategy):
-	"""Longshot fade — buy NO when yes_price in [min, max]."""
+	"""Test stub — buy NO when yes_price in [min, max]."""
 	name = 'test-buy-no-range'
 
 	def __init__(self, min_price: int = 5, max_price: int = 30, size: int = 1,
@@ -105,7 +105,7 @@ class BuyNoInRange(Strategy):
 				and not portfolio.has_position(trade.ticker, self.name)):
 			no_price = 100 - trade.yes_price
 			return [Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
-				size=self.size, reason=f'yes_price={trade.yes_price} in longshot range [{self.min_price},{self.max_price}]')]
+				size=self.size, reason=f'yes_price={trade.yes_price} in range [{self.min_price},{self.max_price}]')]
 		return []
 
 
@@ -138,9 +138,9 @@ class ActiveExitStub(Strategy):
 		return []
 
 
-class FadeFirstTrade(Strategy):
-	"""Opening Mispricing Fade — fade the first trade per market when extreme."""
-	name = 'test-fade-first'
+class FirstTradeEntry(Strategy):
+	"""Test stub — act on first trade per market when extreme."""
+	name = 'test-first-trade'
 
 	def __init__(self, threshold_high: int = 60, threshold_low: int = 40,
 	             take_profit: int = 8, stop_loss: int = 5, size: int = 1) -> None:
@@ -169,16 +169,16 @@ class FadeFirstTrade(Strategy):
 		if trade.yes_price > self.threshold_high:
 			no_price = 100 - trade.yes_price
 			return [Signal(action='buy', ticker=trade.ticker, side='no', price=no_price,
-				size=self.size, reason=f'fade-first high: yes_price={trade.yes_price} > {self.threshold_high}')]
+				size=self.size, reason=f'first-trade high: yes_price={trade.yes_price} > {self.threshold_high}')]
 		if trade.yes_price < self.threshold_low:
 			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
-				size=self.size, reason=f'fade-first low: yes_price={trade.yes_price} < {self.threshold_low}')]
+				size=self.size, reason=f'first-trade low: yes_price={trade.yes_price} < {self.threshold_low}')]
 		return []
 
 
-class ThresholdFade(Strategy):
-	"""Threshold-based fade — buy NO above fav, YES below long."""
-	name = 'test-threshold-fade'
+class DualThreshold(Strategy):
+	"""Test stub — two-sided threshold entry."""
+	name = 'test-dual-threshold'
 
 	def __init__(self, fav_threshold: int = 85, long_threshold: int = 15, size: int = 1) -> None:
 		self.fav_threshold = fav_threshold
@@ -190,10 +190,10 @@ class ThresholdFade(Strategy):
 			return []
 		if trade.yes_price >= self.fav_threshold:
 			return [Signal(action='buy', ticker=trade.ticker, side='no', price=100 - trade.yes_price,
-				size=self.size, reason=f'FLB fade fav: yes_price={trade.yes_price} >= {self.fav_threshold}')]
+				size=self.size, reason=f'high threshold: yes_price={trade.yes_price} >= {self.fav_threshold}')]
 		if trade.yes_price <= self.long_threshold:
 			return [Signal(action='buy', ticker=trade.ticker, side='yes', price=trade.yes_price,
-				size=self.size, reason=f'FLB longshot: yes_price={trade.yes_price} <= {self.long_threshold}')]
+				size=self.size, reason=f'low threshold: yes_price={trade.yes_price} <= {self.long_threshold}')]
 		return []
 
 
@@ -1186,12 +1186,12 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------------
-# FadeFirstTrade unit tests
+# FirstTradeEntry (first-trade stub) unit tests
 # ---------------------------------------------------------------------------
 
-class TestFadeFirstTrade:
-	def test_fade_first_trade_above_threshold_buys_no(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+class TestFirstTradeEntry:
+	def test_first_trade_entry_above_threshold_buys_no(self):
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=65)
@@ -1201,8 +1201,8 @@ class TestFadeFirstTrade:
 		assert signals[0].side == 'no'
 		assert signals[0].price == 35  # 100 - 65
 
-	def test_fade_first_trade_below_threshold_buys_yes(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+	def test_first_trade_entry_below_threshold_buys_yes(self):
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=35)
@@ -1213,7 +1213,7 @@ class TestFadeFirstTrade:
 		assert signals[0].price == 35
 
 	def test_no_signal_when_first_trade_in_midrange(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=50)
@@ -1221,13 +1221,13 @@ class TestFadeFirstTrade:
 		assert signals == []
 
 	def test_ignores_subsequent_trades(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# First trade: triggers entry signal
 		signals1 = strategy.on_trade(_make_trade(yes_price=65), market, port)
 		assert len(signals1) == 1
-		port.open_position(signals1[0], 'test-fade-first', _dt(), slippage=0)
+		port.open_position(signals1[0], 'test-first-trade', _dt(), slippage=0)
 		# Second trade: same ticker, position exists — check TP/SL only (not entry)
 		# yes_price=63 doesn't trigger TP (need no_price >= 35+8=43, i.e. yes<=57) or SL
 		signals2 = strategy.on_trade(_make_trade(yes_price=63), market, port)
@@ -1235,7 +1235,7 @@ class TestFadeFirstTrade:
 
 	def test_ignores_subsequent_trades_without_position(self):
 		"""When first trade is in midrange (no entry), subsequent trades are also ignored."""
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		strategy.on_trade(_make_trade(yes_price=50), market, port)  # no entry
@@ -1243,7 +1243,7 @@ class TestFadeFirstTrade:
 		assert signals == []
 
 	def test_one_position_per_ticker(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# Different ticker should get its own entry
@@ -1254,12 +1254,12 @@ class TestFadeFirstTrade:
 
 	def test_take_profit_exit_no_position(self):
 		"""NO position TP: fires when no_price (100-yes_price) rises enough."""
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		# Enter: yes_price=65, no_price=35, entry_price stored = 35 + slippage=1 = 36
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-first-trade', _dt(), slippage=1)  # entry_price = 36
 		# TP fires when current no_price >= 36 + 8 = 44, i.e. yes_price <= 56
 		trade_tp = _make_trade(yes_price=56)  # no_price = 44
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -1270,11 +1270,11 @@ class TestFadeFirstTrade:
 
 	def test_stop_loss_exit_no_position(self):
 		"""NO position SL: fires when no_price falls enough (yes_price rises)."""
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-first-trade', _dt(), slippage=1)  # entry_price = 36
 		# SL fires when current no_price <= 36 - 5 = 31, i.e. yes_price >= 69
 		trade_sl = _make_trade(yes_price=69)  # no_price = 31
 		signals = strategy.on_trade(trade_sl, market, port)
@@ -1285,11 +1285,11 @@ class TestFadeFirstTrade:
 
 	def test_take_profit_exit_yes_position(self):
 		"""YES position TP: fires when yes_price rises enough."""
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='yes', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-first-trade', _dt(), slippage=1)  # entry_price = 36
 		# TP: yes_price >= 36 + 8 = 44
 		trade_tp = _make_trade(yes_price=44)
 		signals = strategy.on_trade(trade_tp, market, port)
@@ -1299,11 +1299,11 @@ class TestFadeFirstTrade:
 		assert 'take_profit' in signals[0].reason
 
 	def test_no_exit_between_tp_and_sl(self):
-		strategy = FadeFirstTrade(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
+		strategy = FirstTradeEntry(threshold_high=60, threshold_low=40, take_profit=8, stop_loss=5)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=35, size=1, reason='test')
-		port.open_position(buy_sig, 'test-fade-first', _dt(), slippage=1)  # entry_price = 36
+		port.open_position(buy_sig, 'test-first-trade', _dt(), slippage=1)  # entry_price = 36
 		# Prices where no_price stays 32..43 should not trigger (TP needs >=44, SL needs <=31)
 		for yes_price in (57, 60, 65, 68):
 			# no_price = 43, 40, 35, 32 — all between SL(31) and TP(44)
@@ -1312,12 +1312,12 @@ class TestFadeFirstTrade:
 
 
 # ---------------------------------------------------------------------------
-# ThresholdFade unit tests
+# DualThreshold (two-sided stub) unit tests
 # ---------------------------------------------------------------------------
 
-class TestThresholdFade:
+class TestDualThreshold:
 	def test_buys_no_at_fav_threshold(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=90)
@@ -1328,7 +1328,7 @@ class TestThresholdFade:
 		assert signals[0].price == 10  # 100 - 90
 
 	def test_buys_no_at_exact_fav_threshold(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=85)
@@ -1336,8 +1336,8 @@ class TestThresholdFade:
 		assert len(signals) == 1
 		assert signals[0].side == 'no'
 
-	def test_buys_yes_at_longshot_threshold(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+	def test_buys_yes_at_low_threshold(self):
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=10)
@@ -1348,7 +1348,7 @@ class TestThresholdFade:
 		assert signals[0].price == 10
 
 	def test_buys_yes_at_exact_long_threshold(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		trade = _make_trade(yes_price=15)
@@ -1357,7 +1357,7 @@ class TestThresholdFade:
 		assert signals[0].side == 'yes'
 
 	def test_no_signal_in_midrange(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		for price in (16, 50, 84):
@@ -1366,29 +1366,29 @@ class TestThresholdFade:
 
 	def test_no_duplicate_position(self):
 		"""Once a position is open, subsequent trades don't generate new entries."""
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market = _make_market()
 		signals1 = strategy.on_trade(_make_trade(yes_price=90), market, port)
 		assert len(signals1) == 1
-		port.open_position(signals1[0], 'test-threshold-fade', _dt(), slippage=0)
+		port.open_position(signals1[0], 'test-dual-threshold', _dt(), slippage=0)
 		# Second trade at same extreme: position exists, no new signal
 		signals2 = strategy.on_trade(_make_trade(yes_price=92), market, port)
 		assert signals2 == []
 
 	def test_holds_to_settlement_no_on_market_close(self):
 		"""on_market_close returns [] — strategy relies on engine settlement."""
-		strategy = ThresholdFade()
+		strategy = DualThreshold()
 		port = Portfolio(10000.0)
 		buy_sig = Signal(action='buy', ticker='TEST-1', side='no', price=10, size=1, reason='test')
-		port.open_position(buy_sig, 'test-threshold-fade', _dt(), slippage=0)
+		port.open_position(buy_sig, 'test-dual-threshold', _dt(), slippage=0)
 		close_signals = strategy.on_market_close('TEST-1', 'yes', port)
 		assert close_signals == []
 		# Position should still be open (engine handles settlement)
-		assert port.has_position('TEST-1', 'test-threshold-fade')
+		assert port.has_position('TEST-1', 'test-dual-threshold')
 
 	def test_different_tickers_each_get_entry(self):
-		strategy = ThresholdFade(fav_threshold=85, long_threshold=15)
+		strategy = DualThreshold(fav_threshold=85, long_threshold=15)
 		port = Portfolio(10000.0)
 		market1 = _make_market(ticker='T1')
 		market2 = _make_market(ticker='T2')
