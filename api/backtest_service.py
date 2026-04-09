@@ -16,12 +16,11 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 	import importlib
 	import inspect
 	import json
-	from datetime import datetime, timezone
-	from datetime import date
+	from datetime import date, datetime, timezone
 
 	from edge_catcher.runner.event_backtest import EventBacktester
 	from edge_catcher.runner.strategy_parser import (
-		list_strategies, STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
+		STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
 	)
 	from api.adapter_registry import get_fee_model_for_db
 
@@ -30,6 +29,9 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 	state.progress = "Loading strategies..."
 
 	try:
+		# Cache validated DB path
+		db_path = _validate_db("kalshi.db")
+
 		# Build strategy map from public + local strategies
 		strategy_map: dict[str, type] = {}
 
@@ -99,7 +101,7 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 				f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
 			)
 
-		fee_model = get_fee_model_for_db(str(_validate_db("kalshi.db")), body.series)
+		fee_model = get_fee_model_for_db(str(db_path), body.series)
 
 		backtester = EventBacktester()
 		result = backtester.run(
@@ -109,7 +111,7 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 			end=end,
 			initial_cash=body.cash,
 			slippage_cents=body.slippage,
-			db_path=_validate_db("kalshi.db"),
+			db_path=db_path,
 			fee_fn=fee_model.calculate,
 			on_progress=on_progress,
 			is_cancelled=lambda: state.cancel_requested,
@@ -131,8 +133,8 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 
 		# Index in DB
 		from edge_catcher.storage.db import get_connection, init_db
-		init_db(_validate_db("kalshi.db"))
-		conn = get_connection(_validate_db("kalshi.db"))
+		init_db(db_path)
+		conn = get_connection(db_path)
 		try:
 			conn.execute(
 				"""INSERT OR REPLACE INTO backtest_results
@@ -174,7 +176,7 @@ def query_backtest_history(db_path: Path, limit: int = 50) -> list[dict]:
 		if not exists:
 			return []
 		rows = conn.execute(
-			f"SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT {limit}"
+			"SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT ?", (limit,)
 		).fetchall()
 		return [
 			dict(
