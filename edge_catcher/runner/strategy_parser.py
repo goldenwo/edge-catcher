@@ -44,14 +44,15 @@ def _extract_name_attr(node: ast.ClassDef) -> Optional[str]:
 	return None
 
 
-def _is_strategy_subclass(node: ast.ClassDef) -> bool:
-	"""Check if any base class name contains 'Strategy'."""
+def _base_names(node: ast.ClassDef) -> set[str]:
+	"""Return the set of simple base class names for a ClassDef."""
+	names: set[str] = set()
 	for base in node.bases:
-		if isinstance(base, ast.Name) and 'Strategy' in base.id:
-			return True
-		if isinstance(base, ast.Attribute) and 'Strategy' in base.attr:
-			return True
-	return False
+		if isinstance(base, ast.Name):
+			names.add(base.id)
+		elif isinstance(base, ast.Attribute):
+			names.add(base.attr)
+	return names
 
 
 def list_strategies(
@@ -59,6 +60,11 @@ def list_strategies(
 	source: Optional[str] = None,
 ) -> list[dict]:
 	"""Parse strategy classes from a file or source string.
+
+	Uses a two-pass scan: first finds classes that directly subclass Strategy
+	(or any name containing 'Strategy'), then finds classes whose bases include
+	any already-identified strategy class. This handles filtered variants
+	where the base is a local strategy class rather than Strategy itself.
 
 	Returns list of {"name": str, "class_name": str}.
 	Returns empty list on syntax errors or missing files.
@@ -77,9 +83,29 @@ def list_strategies(
 		logger.warning("Syntax error parsing strategies, returning empty list")
 		return []
 
+	classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+
+	# Pass 1: direct Strategy subclasses
+	strategy_class_names: set[str] = set()
+	for node in classes:
+		bases = _base_names(node)
+		if any('Strategy' in b for b in bases):
+			strategy_class_names.add(node.name)
+
+	# Pass 2: classes that inherit from any known strategy class (transitive)
+	changed = True
+	while changed:
+		changed = False
+		for node in classes:
+			if node.name in strategy_class_names:
+				continue
+			if _base_names(node) & strategy_class_names:
+				strategy_class_names.add(node.name)
+				changed = True
+
 	results = []
-	for node in tree.body:
-		if isinstance(node, ast.ClassDef) and _is_strategy_subclass(node):
+	for node in classes:
+		if node.name in strategy_class_names:
 			name = _extract_name_attr(node) or _camel_to_snake(node.name)
 			results.append({"name": name, "class_name": node.name})
 	return results

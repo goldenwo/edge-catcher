@@ -104,7 +104,7 @@ class TestGridPlannerOrdering:
     def test_warm_leads_first(self, tmp_path):
         """Strategies with prior promote/explore results should come first."""
         tracker = Tracker(tmp_path / "research.db")
-        # Strategy B has a promote result on SERIES_A
+        # Strategy "B" has a promote result on SERIES_A
         r = _grid_result(strategy="B", series="SERIES_A", verdict="promote", verdict_reason="p")
         tracker.save_result(r)
 
