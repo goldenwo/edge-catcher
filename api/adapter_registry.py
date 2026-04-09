@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Optional
 from edge_catcher.fees import FeeModel, STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
