@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 def _load_hypothesis_configs(config_path: Path) -> Dict[str, dict]:
-    """Load hypothesis entries from config_path and its .local sibling, merged."""
+    """Load hypothesis entries from config_path and its .local sibling, merged.
+
+    Entries are keyed by their YAML key. Additionally, if a hypothesis has a
+    'module' field, the last segment of the module path is added as an alias
+    so modules can look themselves up by their internal HYPOTHESIS_ID.
+    """
     merged: Dict[str, dict] = {}
     local_dir = config_path.parent / (config_path.name + ".local")
     for cfg_dir in [config_path, local_dir]:
@@ -18,6 +23,14 @@ def _load_hypothesis_configs(config_path: Path) -> Dict[str, dict]:
             with open(hyp_yaml) as f:
                 data = yaml.safe_load(f) or {}
             merged.update(data.get("hypotheses", {}))
+    # Add module-name aliases so modules can self-lookup by HYPOTHESIS_ID
+    aliases: Dict[str, dict] = {}
+    for hyp_id, cfg in merged.items():
+        module_path = cfg.get("module", "")
+        module_name = module_path.rsplit(".", 1)[-1] if module_path else ""
+        if module_name and module_name != hyp_id and module_name not in merged:
+            aliases[module_name] = cfg
+    merged.update(aliases)
     return merged
 
 
@@ -71,6 +84,11 @@ def run_hypothesis(
         )
 
     logger.info("Running hypothesis: %s", hyp_id)
+    # Pass hyp_config if run() accepts it, so modules don't need to re-lookup
+    import inspect
+    sig = inspect.signature(mod.run)
+    if "hyp_config" in sig.parameters:
+        return mod.run(db_conn, config_path, hyp_config=configs[hyp_id])
     return mod.run(db_conn, config_path)
 
 
