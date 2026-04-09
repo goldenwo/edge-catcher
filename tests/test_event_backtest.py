@@ -177,7 +177,7 @@ class FadeFirstTrade(Strategy):
 
 
 class ThresholdFade(Strategy):
-	"""Favorite-Longshot Bias for 15-min BTC contracts."""
+	"""Threshold-based fade — buy NO above fav, YES below long."""
 	name = 'test-threshold-fade'
 
 	def __init__(self, fav_threshold: int = 85, long_threshold: int = 15, size: int = 1) -> None:

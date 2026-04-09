@@ -212,8 +212,8 @@ class PriceBucketBiasTest(StatisticalTest):
 class LifecycleBiasTest(StatisticalTest):
 	"""Test whether mispricing varies by market age (time since open).
 
-	Detects 'debut fade' patterns where newly listed markets are systematically
-	mispriced in their early trading period vs later.
+	Detects early-listing mispricing patterns where newly opened markets are
+	systematically mispriced in their initial trading period vs later.
 	"""
 	name: ClassVar[str] = "lifecycle_bias"
 
