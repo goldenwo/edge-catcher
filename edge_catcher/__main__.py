@@ -4,22 +4,10 @@ import logging
 import sys
 from pathlib import Path
 
+# New thin shell — delegates to edge_catcher.cli command modules
+from edge_catcher.cli import main, _try_load_dotenv, _setup_logging
 
-def _try_load_dotenv() -> None:
-    """Load .env file if python-dotenv is installed (silently skip otherwise)."""
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-
-
-def _setup_logging(verbose: bool = False) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+__all__ = ["main", "_try_load_dotenv", "_setup_logging"]  # silence re-export lint hint
 
 
 def _cmd_download(args) -> None:
@@ -234,31 +222,6 @@ def _cmd_interpret(args) -> None:
 
 
 def _cmd_paper_trade(args) -> None:
-    from dotenv import load_dotenv
-    load_dotenv()
-    from edge_catcher.monitors.paper_trader import run_paper_trader
-    import asyncio
-    asyncio.run(run_paper_trader(
-        db_path=Path(args.db),
-        min_price=args.min_price,
-        max_price=args.max_price,
-        enable_strategy_b=args.enable_strategy_b,
-    ))
-
-
-def _cmd_paper_trade_15m(args) -> None:
-    from dotenv import load_dotenv
-    load_dotenv()
-    from edge_catcher.monitors.paper_trader_15m import run_paper_trader_15m
-    import asyncio
-    asyncio.run(run_paper_trader_15m(
-        db_path=Path(args.db),
-        threshold_high=args.threshold_high,
-        threshold_low=args.threshold_low,
-    ))
-
-
-def _cmd_paper_trade_v2(args) -> None:
     from dotenv import load_dotenv
     load_dotenv()
     from edge_catcher.monitors.paper_trader_v2 import run_paper_trader_v2, ALL_SERIES
@@ -718,7 +681,8 @@ def _cmd_archive(args) -> None:
         conn.close()
 
 
-def main() -> None:
+def _old_main() -> None:
+    """Legacy main — kept for reference only. Use edge_catcher.cli.main instead."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -892,29 +856,12 @@ def main() -> None:
     rs_killreg.add_argument("--strategy", default=None, dest="kill_registry_strategy",
                              help="Strategy name (required for reset)")
 
-    pt = sub.add_parser("paper-trade", help="Run paper trading simulation via Kalshi WebSocket")
-    pt.add_argument("--db", default="data/paper_trades.db")
-    pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
-    pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter for Strategy A (cents)")
-    pt.add_argument("--enable-strategy-b", action="store_true", default=False,
-                    help="Enable contrarian NO strategy (default: disabled)")
+    pt = sub.add_parser("paper-trade", help="Run paper trading via Kalshi WebSocket")
+    pt.add_argument("--db", default="data/paper_trades_v2.db",
+                    help="SQLite DB path (default: data/paper_trades_v2.db)")
+    pt.add_argument("--series", default=None,
+                    help="Comma-separated series to subscribe (default: all)")
     pt.set_defaults(func=_cmd_paper_trade)
-
-    pt15 = sub.add_parser('paper-trade-15m', help='Run 15-min BTC paper trading (Strategy D)')
-    pt15.add_argument('--db', default='data/paper_trades.db')
-    pt15.add_argument('--threshold-high', type=int, default=60,
-                      help='Buy NO when first yes_ask > this (cents)', dest='threshold_high')
-    pt15.add_argument('--threshold-low', type=int, default=40,
-                      help='Buy YES when first yes_ask < this (cents)', dest='threshold_low')
-    pt15.set_defaults(func=_cmd_paper_trade_15m)
-
-    ptv2 = sub.add_parser('paper-trade-v2',
-                          help='Unified paper trader across multiple series')
-    ptv2.add_argument('--db', default='data/paper_trades_v2.db',
-                      help='SQLite DB path (default: data/paper_trades_v2.db)')
-    ptv2.add_argument('--series', default=None,
-                      help='Comma-separated series to subscribe (default: all 5)')
-    ptv2.set_defaults(func=_cmd_paper_trade_v2)
 
     fm = sub.add_parser(
         "formalize",
@@ -970,14 +917,11 @@ def main() -> None:
         _cmd_interpret(args)
     elif args.command == "paper-trade":
         _cmd_paper_trade(args)
-    elif args.command == "paper-trade-15m":
-        _cmd_paper_trade_15m(args)
-    elif args.command == "paper-trade-v2":
-        _cmd_paper_trade_v2(args)
     else:
         parser.print_help()
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    # TODO: switch to main() once all cli/* stubs are populated (Tasks 2-5)
+    _old_main()
