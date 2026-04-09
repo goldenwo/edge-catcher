@@ -186,30 +186,30 @@ class TestWritePhaseOutcomes:
 class TestRefinementResumeWalkBackwards:
     def test_refinement_resume_finds_latest_existing_version(self):
         """When resuming refinement, should start from the latest version with actual code."""
-        loop = LoopOrchestrator.__new__(LoopOrchestrator)
-        loop.max_refinements = 5
-        loop.max_time_seconds = None
-        loop.start_date = "2025-01-01"
-        loop.end_date = "2025-12-31"
-        loop.fee_pct = 1.0
-        loop.run_id = "test"
-        loop._cached_results = None
+        from edge_catcher.research.refinement import RefinementExecutor
 
-        loop._cached_results = None  # __new__ bypasses __init__
-
-        # Simulate: Foo has 2 prior iterations, but only FooV2 code exists (FooV3 save failed)
-        loop.tracker = MagicMock()
-        loop.tracker.list_results.return_value = [
+        tracker = MagicMock()
+        tracker.list_results.return_value = [
             {"tags": '["source:llm_refinement", "parent_strategy:Foo", "iteration:1"]',
              "strategy": "FooV2"},
             {"tags": '["source:llm_refinement", "parent_strategy:Foo", "iteration:2"]',
              "strategy": "FooV3"},
         ]
-        loop.tracker.list_results_for_strategy.return_value = [
+        tracker.list_results_for_strategy.return_value = [
             {"status": "ok", "sharpe": 1.5, "verdict": "explore", "series": "X",
              "db_path": "d.db", "total_trades": 80, "net_pnl_cents": 200,
              "max_drawdown_pct": 5.0, "win_rate": 0.55, "verdict_reason": "test"},
         ]
+
+        refiner = RefinementExecutor(
+            tracker=tracker,
+            audit=MagicMock(),
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+            fee_pct=1.0,
+            max_refinements=5,
+            remaining_time_fn=lambda: None,
+        )
 
         agent = MagicMock()
         # FooV3 doesn't exist, FooV2 does
@@ -219,8 +219,8 @@ class TestRefinementResumeWalkBackwards:
             return None
         agent.read_strategy_code.side_effect = read_strategy_side_effect
 
-        # Verify _count_existing_refinements returns 2
-        count = loop._count_existing_refinements("Foo")
+        # Verify count_existing_refinements returns 2
+        count = refiner.count_existing_refinements("Foo")
         assert count == 2
 
         # The walk-backwards logic should try FooV3 (None), then FooV2 (found),
@@ -266,12 +266,13 @@ class TestShouldKeepRefinementBaseline:
         )]
 
         # With baseline awareness, should NOT keep (1.5 < 2.0)
-        assert not LoopOrchestrator._should_keep_refinement(
+        from edge_catcher.research.refinement import RefinementExecutor
+        assert not RefinementExecutor.should_keep_refinement(
             prev_results, refined, baseline_results=baseline_results
         )
 
         # Without baseline (old behavior), would keep (1.5 > 1.2)
-        assert LoopOrchestrator._should_keep_refinement(
+        assert RefinementExecutor.should_keep_refinement(
             prev_results, refined, baseline_results=None
         )
 
