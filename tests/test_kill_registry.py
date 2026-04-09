@@ -66,14 +66,12 @@ class TestKillRegistry:
 
 
 class TestKillRegistryUpdate:
-	"""Test the loop's _update_kill_registry logic."""
+	"""Test the observer's update_kill_registry logic."""
 
 	def test_strategy_with_high_kill_rate_enters_registry(self, tracker):
 		"""Strategy killed on 4/5 series (80%) should enter the registry."""
-		from edge_catcher.research.loop import LoopOrchestrator
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
+		from edge_catcher.research.observer import ResearchObserver
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		# Simulate: strategy killed on 4 series, explore on 1
 		# But has NO promote/review verdicts
@@ -83,7 +81,7 @@ class TestKillRegistryUpdate:
 		_save_result(tracker, "KillMe", "S4", "kill", "low sharpe")
 		_save_result(tracker, "KillMe", "S5", "explore", "borderline")
 
-		orch._update_kill_registry()
+		observer.update_kill_registry()
 
 		entries = tracker.list_kill_registry()
 		assert len(entries) == 1
@@ -92,30 +90,26 @@ class TestKillRegistryUpdate:
 
 	def test_strategy_with_promote_excluded(self, tracker):
 		"""Strategy with any promote verdict should NOT enter the registry."""
-		from edge_catcher.research.loop import LoopOrchestrator
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
+		from edge_catcher.research.observer import ResearchObserver
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		_save_result(tracker, "MixedStrat", "S1", "kill", "low sharpe")
 		_save_result(tracker, "MixedStrat", "S2", "kill", "low sharpe")
 		_save_result(tracker, "MixedStrat", "S3", "kill", "low sharpe")
 		_save_result(tracker, "MixedStrat", "S4", "promote", "good")
 
-		orch._update_kill_registry()
+		observer.update_kill_registry()
 		assert tracker.list_kill_registry() == []
 
 	def test_strategy_below_threshold_excluded(self, tracker):
 		"""Strategy with <3 series tested should not enter."""
-		from edge_catcher.research.loop import LoopOrchestrator
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
+		from edge_catcher.research.observer import ResearchObserver
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		_save_result(tracker, "FewTests", "S1", "kill", "low sharpe")
 		_save_result(tracker, "FewTests", "S2", "kill", "low sharpe")
 
-		orch._update_kill_registry()
+		observer.update_kill_registry()
 		assert tracker.list_kill_registry() == []
 
 

@@ -39,10 +39,10 @@ class TestLoopPhaseOrder:
              patch.object(orch, '_discover_strategies', return_value=[]), \
              patch.object(orch, '_discover_series', return_value={}), \
              patch.object(orch, '_list_results', return_value=[]), \
-             patch.object(orch, '_write_phase_outcomes'), \
-             patch.object(orch, '_write_journal_summary', return_value="stuck"), \
-             patch.object(orch, '_update_kill_registry'), \
-             patch.object(orch, '_cleanup_dead_strategies'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_phase_outcomes'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_journal_summary', return_value="stuck"), \
+             patch('edge_catcher.research.observer.ResearchObserver.update_kill_registry'), \
+             patch('edge_catcher.research.observer.ResearchObserver.cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue'), \
              patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:
@@ -105,10 +105,10 @@ class TestLoopPhaseOrder:
              patch.object(orch, '_discover_strategies', return_value=[]), \
              patch.object(orch, '_discover_series', return_value={}), \
              patch.object(orch, '_list_results', return_value=[]), \
-             patch.object(orch, '_write_phase_outcomes'), \
-             patch.object(orch, '_write_journal_summary', return_value="stuck"), \
-             patch.object(orch, '_update_kill_registry'), \
-             patch.object(orch, '_cleanup_dead_strategies'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_phase_outcomes'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_journal_summary', return_value="stuck"), \
+             patch('edge_catcher.research.observer.ResearchObserver.update_kill_registry'), \
+             patch('edge_catcher.research.observer.ResearchObserver.cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue'), \
              patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:
@@ -155,10 +155,10 @@ class TestLoopPhaseOrder:
         with patch.object(orch, '_discover_strategies', return_value=["example"]), \
              patch.object(orch, '_discover_series', return_value={"data/test.db": ["TEST_SERIES"]}), \
              patch.object(orch, '_list_results', return_value=[]), \
-             patch.object(orch, '_write_phase_outcomes'), \
-             patch.object(orch, '_write_journal_summary', return_value="stuck"), \
-             patch.object(orch, '_update_kill_registry'), \
-             patch.object(orch, '_cleanup_dead_strategies'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_phase_outcomes'), \
+             patch('edge_catcher.research.observer.ResearchObserver.write_journal_summary', return_value="stuck"), \
+             patch('edge_catcher.research.observer.ResearchObserver.update_kill_registry'), \
+             patch('edge_catcher.research.observer.ResearchObserver.cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue') as MockQueue, \
              patch('edge_catcher.research.loop.GridPlanner') as MockPlanner, \
