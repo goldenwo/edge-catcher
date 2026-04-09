@@ -95,26 +95,24 @@ EDGE_NOT_TRADEABLE = "EDGE_NOT_TRADEABLE"
 EDGE_EXISTS        = "EDGE_EXISTS"
 
 
-def _load_configs(config_path: Path):
-\t"""Load hypothesis config and fee model, checking config.local first."""
-\tfrom edge_catcher.hypotheses.registry import _load_hypothesis_configs
-\tall_configs = _load_hypothesis_configs(config_path)
-\thyp_config = all_configs[HYPOTHESIS_ID]
-
-\tfee_model_key = hyp_config.get("fee_model", "kalshi")
+def _load_fee_config(config_path: Path, fee_model_key: str = "kalshi") -> dict:
+\t"""Load fee model config, checking config.local first."""
 \tfor cfg_dir in [config_path.parent / (config_path.name + ".local"), config_path]:
 \t\tfees_path = cfg_dir / "fees.yaml"
 \t\tif fees_path.exists():
 \t\t\twith open(fees_path) as f:
 \t\t\t\tfee_config = yaml.safe_load(f).get(fee_model_key, {{}})
 \t\t\tif fee_config:
-\t\t\t\treturn hyp_config, fee_config
-\treturn hyp_config, {{}}
+\t\t\t\treturn fee_config
+\treturn {{}}
 
 
-def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
+def run(db_conn, config_path: Path = Path("config"), *, hyp_config: dict | None = None) -> HypothesisResult:
 \t"""Run the {name} hypothesis against settled markets."""
-\thyp_config, fee_config = _load_configs(config_path)
+\tif hyp_config is None:
+\t\tfrom edge_catcher.hypotheses.registry import _load_hypothesis_configs
+\t\thyp_config = _load_hypothesis_configs(config_path)[HYPOTHESIS_ID]
+\tfee_config = _load_fee_config(config_path, hyp_config.get("fee_model", "kalshi"))
 \tthresholds = hyp_config.get("thresholds", {{}})
 \tmin_n = thresholds.get("min_n_per_bucket", 30)
 \tmin_clusters = thresholds.get("min_independent_obs", 80)
