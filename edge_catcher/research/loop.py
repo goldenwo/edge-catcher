@@ -485,12 +485,9 @@ class LoopOrchestrator:
 				continue
 
 			# Create backtest hypothesis for the target series
-			series = config["series"]
-			h_db_path = f"data/{config['db']}"
 			hypotheses.append(Hypothesis(
 				strategy=strategy_name,
-				series=series,
-				db_path=h_db_path,
+				data_sources=make_ds(db=config["db"], series=config["series"]),
 				start_date=self.start_date,
 				end_date=self.end_date,
 				fee_pct=self.fee_pct,
