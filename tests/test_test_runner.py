@@ -360,3 +360,158 @@ class TestLifecycleBiasTest:
 		)
 		conn.close()
 		assert result.verdict == INSUFFICIENT_DATA
+
+
+class TestVolumeMispricingTest:
+	"""Tests for VolumeMispricingTest — liquidity-based edge detection."""
+
+	def test_edge_exists_low_volume_mispriced(self, tmp_path):
+		"""Low-volume markets (volume=1) have 30% win rate at 50% implied;
+		high-volume markets (volume=100) have 50% win rate → EDGE_EXISTS."""
+		from edge_catcher.research.test_runner import TestRunner, EDGE_EXISTS
+
+		markets = []
+		trades = []
+		# 150 low-volume markets: 30% win rate
+		for i in range(150):
+			ticker = f"VM-low-{i}"
+			won = i < 45  # 30% win rate
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker,
+				"series_ticker": "SER_VM",
+				"result": "yes" if won else "no",
+				"last_price": 50,
+				"volume": 1,  # thin market
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vm-low-{i}",
+				"ticker": ticker,
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		# 150 high-volume markets: 50% win rate
+		for i in range(150):
+			ticker = f"VM-high-{i}"
+			won = i < 75  # 50% win rate
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker,
+				"series_ticker": "SER_VM",
+				"result": "yes" if won else "no",
+				"last_price": 50,
+				"volume": 100,  # liquid market
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vm-high-{i}",
+				"ticker": ticker,
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 100,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"volume_mispricing", conn, "SER_VM",
+			params={
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		assert result.z_stat < -2.0
+
+	def test_no_edge_uniform_across_volumes(self, tmp_path):
+		"""All volume levels show ~50% win rate → NO_EDGE."""
+		from edge_catcher.research.test_runner import TestRunner, NO_EDGE
+
+		markets = []
+		trades = []
+		volumes = [1, 10, 100]
+		for vi, vol in enumerate(volumes):
+			for i in range(90):
+				ticker = f"VM-{vi}-{i}"
+				won = i < 45  # 50% win rate
+				day = (i % 28) + 1
+				markets.append({
+					"ticker": ticker,
+					"series_ticker": "SER_VM2",
+					"result": "yes" if won else "no",
+					"last_price": 50,
+					"volume": vol,
+					"close_time": f"2026-01-{day:02d}T12:00:00Z",
+					"open_time": f"2026-01-{day:02d}T00:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"vm-{vi}-{i}",
+					"ticker": ticker,
+					"yes_price": 50,
+					"no_price": 50,
+					"count": vol,
+					"created_time": f"2026-01-{day:02d}T06:00:00Z",
+				})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"volume_mispricing", conn, "SER_VM2",
+			params={
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+
+	def test_insufficient_data(self, tmp_path):
+		"""Too few markets → INSUFFICIENT_DATA."""
+		from edge_catcher.research.test_runner import TestRunner, INSUFFICIENT_DATA
+
+		markets = [
+			{
+				"ticker": "VM-1",
+				"series_ticker": "SER_VM3",
+				"result": "yes",
+				"last_price": 50,
+				"volume": 5,
+				"close_time": "2026-01-01T12:00:00Z",
+				"open_time": "2026-01-01T00:00:00Z",
+			}
+		]
+		trades = [
+			{
+				"trade_id": "vm-t-1",
+				"ticker": "VM-1",
+				"yes_price": 50,
+				"no_price": 50,
+				"count": 1,
+				"created_time": "2026-01-01T06:00:00Z",
+			}
+		]
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"volume_mispricing", conn, "SER_VM3",
+			params={
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 30,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == INSUFFICIENT_DATA
