@@ -248,11 +248,10 @@ def formalize_hypothesis(
             detail="AI deps missing. Run: pip install -e '.[ai]'",
         )
 
-    cfg_file = _config_path() / "hypotheses.yaml"
     try:
         model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
         client = LLMClient(provider=body.provider, model=model_override)
-        result = formalize(body.description, client, config_path=cfg_file)
+        result = formalize(body.description, client)
     except Exception as exc:
         return FormalizeResponse(message="", error=str(exc))
 
