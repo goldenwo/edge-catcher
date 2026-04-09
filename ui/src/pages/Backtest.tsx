@@ -40,14 +40,28 @@ function fmtPct(n: unknown): string {
   return isNaN(num) ? '--' : `${(num * 100).toFixed(1)}%`
 }
 
+// Persist form selections across tab switches
+function useSessionState<T>(key: string, initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const saved = sessionStorage.getItem(key)
+      return saved ? JSON.parse(saved) : initial
+    } catch { return initial }
+  })
+  useEffect(() => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, [key, value])
+  return [value, setValue]
+}
+
 export default function Backtest() {
   const { status: pipeline, loading: pipelineLoading, refresh: refreshPipeline } = usePipeline()
 
-  // Config form state
+  // Config form state (persisted across tab switches)
   const [seriesList, setSeriesList] = useState<string[]>([])
   const [strategiesList, setStrategiesList] = useState<StrategyInfo[]>([])
-  const [series, setSeries] = useState<string>('')
-  const [selectedStrategies, setSelectedStrategies] = useState<Set<string>>(new Set())
+  const [series, setSeries] = useSessionState<string>('bt-series', '')
+  const [selectedStrategies, setSelectedStrategies] = useSessionState<string[]>('bt-strategies', [])
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -152,12 +166,9 @@ export default function Backtest() {
   }, [])
 
   const toggleStrategy = (name: string) => {
-    setSelectedStrategies((prev) => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
+    setSelectedStrategies((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+    )
   }
 
   const pollStatus = async (tid: string) => {
@@ -191,7 +202,7 @@ export default function Backtest() {
   }
 
   const handleRun = async () => {
-    if (!series || selectedStrategies.size === 0) return
+    if (!series || selectedStrategies.length === 0) return
     setError(null)
     setResult(null)
     setProgress('')
@@ -202,7 +213,7 @@ export default function Backtest() {
 
     const params: Record<string, unknown> = {
       series,
-      strategies: Array.from(selectedStrategies),
+      strategies: selectedStrategies,
     }
     if (startDate) params.start = startDate
     if (endDate) params.end = endDate
@@ -337,14 +348,14 @@ export default function Backtest() {
               <label
                 key={s.name}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm cursor-pointer transition-colors ${
-                  selectedStrategies.has(s.name)
+                  selectedStrategies.includes(s.name)
                     ? 'border-indigo-500 bg-indigo-950 text-indigo-300'
                     : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'
                 }`}
               >
                 <input
                   type="checkbox"
-                  checked={selectedStrategies.has(s.name)}
+                  checked={selectedStrategies.includes(s.name)}
                   onChange={() => toggleStrategy(s.name)}
                   className="sr-only"
                 />
@@ -438,7 +449,7 @@ export default function Backtest() {
         {/* Run button */}
         <button
           onClick={handleRun}
-          disabled={running || !series || selectedStrategies.size === 0 || !prerequisitesMet}
+          disabled={running || !series || selectedStrategies.length === 0 || !prerequisitesMet}
           className="px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
         >
           {running ? 'Running...' : 'Run Backtest'}
