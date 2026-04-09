@@ -826,6 +826,7 @@ async def backtest_result(task_id: str) -> dict:
 
 def _run_research_loop(task_id: str, body: ResearchLoopStartRequest) -> None:
     """Background thread: runs the research loop."""
+    import threading
     import time as _time
     from edge_catcher.research.loop import LoopOrchestrator
 
