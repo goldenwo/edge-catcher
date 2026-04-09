@@ -58,7 +58,7 @@ def test_skip_market_scan_flag_accepted():
 
 def test_skip_market_scan_skips_phase1(tmp_path):
     """When --skip-market-scan is set, iter_market_pages() is never called."""
-    from edge_catcher.__main__ import _cmd_download
+    from edge_catcher.cli.download import _run_download as _cmd_download
 
     mock_conn = MagicMock()
     mock_conn.execute.return_value.fetchone.return_value = (500000,)
@@ -85,7 +85,7 @@ def test_skip_market_scan_skips_phase1(tmp_path):
 
 def test_skip_market_scan_proceeds_to_phase2(tmp_path):
     """When --skip-market-scan is set, Phase 2 (trade downloads) still runs."""
-    from edge_catcher.__main__ import _cmd_download
+    from edge_catcher.cli.download import _run_download as _cmd_download
     from tests.conftest import make_market
 
     market = make_market(ticker="TEST-001")  # volume defaults to 100 in make_market
