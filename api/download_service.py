@@ -76,6 +76,8 @@ def run_kalshi_download(
 					upsert_trades_batch(conn, trades)
 					conn.commit()
 					trades_count += len(trades)
+					if hasattr(state, 'trades_fetched'):
+						state.trades_fetched = trades_count
 			state.rows_fetched = trades_count
 		finally:
 			conn.close()
