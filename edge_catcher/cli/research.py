@@ -88,6 +88,8 @@ def register(subparsers) -> None:
 	rs_killreg.add_argument("--strategy", default=None, dest="kill_registry_strategy",
 	                        help="Strategy name (required for reset)")
 
+	rs.set_defaults(func=run)
+
 
 def run(args) -> None:
 	"""Dispatch to the appropriate research sub-subcommand."""
