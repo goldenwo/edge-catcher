@@ -171,7 +171,7 @@ class TestKillRegistryPrompt:
 class TestKillRegistryCLI:
 	def test_list_subcommand(self, tracker, tmp_path, capsys):
 		tracker.upsert_kill_registry("Dead1", 8, 10, 0.8, '["low sharpe"]')
-		from edge_catcher.__main__ import _cmd_research
+		from edge_catcher.cli.research import run as _cmd_research
 		from types import SimpleNamespace
 		args = SimpleNamespace(
 			research_db=str(tmp_path / "test_research.db"),
@@ -185,7 +185,7 @@ class TestKillRegistryCLI:
 
 	def test_reset_subcommand(self, tracker, tmp_path):
 		tracker.upsert_kill_registry("Dead1", 8, 10, 0.8, '["low sharpe"]')
-		from edge_catcher.__main__ import _cmd_research
+		from edge_catcher.cli.research import run as _cmd_research
 		from types import SimpleNamespace
 		args = SimpleNamespace(
 			research_db=str(tmp_path / "test_research.db"),
