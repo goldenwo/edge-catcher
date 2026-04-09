@@ -78,3 +78,4 @@ scripts/
 tests/test_flow_strategy.py
 
 .superpowers/
+.claude/settings.local.json
