@@ -631,34 +631,36 @@ def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
 
 @app.get("/api/series")
 def get_series(_: None = Depends(check_auth)) -> list[str]:
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        return []
+    from api.adapter_registry import ADAPTERS
     from edge_catcher.storage.db import get_connection
-    conn = get_connection(db)
-    try:
-        rows = conn.execute("SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker").fetchall()
-        return [r[0] for r in rows]
-    finally:
-        conn.close()
+
+    all_series: set[str] = set()
+    seen_dbs: set[str] = set()
+    for adapter in ADAPTERS:
+        db_path = Path(adapter.db_file)
+        db_key = str(db_path)
+        if db_key in seen_dbs or not db_path.exists():
+            continue
+        seen_dbs.add(db_key)
+        try:
+            conn = get_connection(db_path)
+            try:
+                rows = conn.execute("SELECT DISTINCT series_ticker FROM markets ORDER BY series_ticker").fetchall()
+                all_series.update(r[0] for r in rows if r[0])
+            finally:
+                conn.close()
+        except Exception:
+            continue
+    return sorted(all_series)
 
 
 @app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
 def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
-    from api.adapter_registry import get_fee_model_for_db
-    from edge_catcher.storage.db import get_connection
-    db = _validate_db("kalshi.db")
-    if db.exists():
-        conn = get_connection(db)
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM markets WHERE series_ticker = ? LIMIT 1", (series,)
-            ).fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
-        finally:
-            conn.close()
-    fee_model = get_fee_model_for_db(str(_validate_db("kalshi.db")), series)
+    from api.adapter_registry import get_fee_model_for_db, resolve_db_for_series
+    db = resolve_db_for_series(series)
+    if db is None:
+        raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
+    fee_model = get_fee_model_for_db(str(db), series)
     return FeeInfoResponse(
         id=fee_model.id,
         name=fee_model.name,
