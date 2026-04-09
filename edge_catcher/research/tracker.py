@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -68,6 +69,31 @@ CREATE TABLE IF NOT EXISTS strategy_fingerprints (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hypothesis_dedup
     ON hypotheses(strategy, series, db_path, start_date, end_date, fee_pct);
+
+CREATE TABLE IF NOT EXISTS hypothesis_results (
+    id TEXT PRIMARY KEY,
+    test_type TEXT NOT NULL,
+    series TEXT NOT NULL,
+    db TEXT NOT NULL,
+    params TEXT NOT NULL,
+    thresholds TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    z_stat REAL NOT NULL,
+    fee_adjusted_edge REAL NOT NULL,
+    detail TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hypothesis_kills (
+    pattern_key TEXT PRIMARY KEY,
+    kill_count INTEGER NOT NULL DEFAULT 0,
+    last_params TEXT NOT NULL DEFAULT '{}',
+    last_z_stat REAL NOT NULL DEFAULT 0.0,
+    permanent INTEGER NOT NULL DEFAULT 0,
+    reason_summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -444,5 +470,169 @@ class Tracker:
                 (code_hash,),
             ).fetchone()
             return row["strategy_name"] if row else None
+        finally:
+            conn.close()
+
+    # ── hypothesis_results & hypothesis_kills ────────────────────────
+
+    def save_hypothesis_result(
+        self,
+        test_type: str,
+        series: str,
+        db: str,
+        params: dict,
+        thresholds: dict,
+        verdict: str,
+        z_stat: float,
+        fee_adjusted_edge: float,
+        detail: dict,
+        rationale: str = "",
+    ) -> str:
+        """Save a statistical hypothesis test result. Returns the generated id."""
+        row_id = str(uuid.uuid4())
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO hypothesis_results
+                   (id, test_type, series, db, params, thresholds, verdict,
+                    z_stat, fee_adjusted_edge, detail, rationale, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row_id,
+                    test_type,
+                    series,
+                    db,
+                    json.dumps(params),
+                    json.dumps(thresholds),
+                    verdict,
+                    z_stat,
+                    fee_adjusted_edge,
+                    json.dumps(detail),
+                    rationale,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return row_id
+
+    def list_hypothesis_results(
+        self,
+        test_type: str | None = None,
+        series: str | None = None,
+        verdict: str | None = None,
+    ) -> list[dict]:
+        """List hypothesis results with optional filters."""
+        conn = self._connect()
+        try:
+            query = "SELECT * FROM hypothesis_results"
+            clauses: list[str] = []
+            params: list = []
+            if test_type is not None:
+                clauses.append("test_type = ?")
+                params.append(test_type)
+            if series is not None:
+                clauses.append("series = ?")
+                params.append(series)
+            if verdict is not None:
+                clauses.append("verdict = ?")
+                params.append(verdict)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY created_at DESC"
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def record_hypothesis_kill(
+        self,
+        test_type: str,
+        series: str,
+        db: str,
+        verdict: str,
+        params: dict,
+        z_stat: float,
+    ) -> None:
+        """Record a hypothesis test failure toward the kill counter.
+
+        Kill logic:
+        - INSUFFICIENT_DATA -> skip (don't count)
+        - NO_EDGE -> increment kill_count; permanent at 3
+        - EDGE_NOT_TRADEABLE -> increment kill_count; permanent at 5
+        """
+        if verdict == "INSUFFICIENT_DATA":
+            return
+
+        pattern_key = f"{test_type}:{series}:{db}"
+        threshold = 3 if verdict == "NO_EDGE" else 5
+
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT kill_count FROM hypothesis_kills WHERE pattern_key = ?",
+                (pattern_key,),
+            ).fetchone()
+
+            if row is None:
+                new_count = 1
+                conn.execute(
+                    """INSERT INTO hypothesis_kills
+                       (pattern_key, kill_count, last_params, last_z_stat,
+                        permanent, reason_summary)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        pattern_key,
+                        new_count,
+                        json.dumps(params),
+                        z_stat,
+                        1 if new_count >= threshold else 0,
+                        verdict,
+                    ),
+                )
+            else:
+                new_count = row["kill_count"] + 1
+                conn.execute(
+                    """UPDATE hypothesis_kills
+                       SET kill_count = ?, last_params = ?, last_z_stat = ?,
+                           permanent = ?, reason_summary = ?
+                       WHERE pattern_key = ?""",
+                    (
+                        new_count,
+                        json.dumps(params),
+                        z_stat,
+                        1 if new_count >= threshold else 0,
+                        verdict,
+                        pattern_key,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_hypothesis_kills(self, permanent_only: bool = False) -> list[dict]:
+        """List hypothesis kill registry entries."""
+        conn = self._connect()
+        try:
+            query = "SELECT * FROM hypothesis_kills"
+            if permanent_only:
+                query += " WHERE permanent = 1"
+            query += " ORDER BY kill_count DESC"
+            rows = conn.execute(query).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def is_hypothesis_killed(self, test_type: str, series: str, db: str) -> bool:
+        """Check if a hypothesis pattern is permanently killed."""
+        pattern_key = f"{test_type}:{series}:{db}"
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT permanent FROM hypothesis_kills WHERE pattern_key = ?",
+                (pattern_key,),
+            ).fetchone()
+            return bool(row and row["permanent"])
         finally:
             conn.close()

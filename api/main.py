@@ -69,12 +69,22 @@ app.add_middleware(
 
 # ── path helpers ──────────────────────────────────────────────────────────────
 
-def _db_path() -> Path:
-    return Path(os.getenv("DB_PATH", "data/kalshi.db"))
+def _validate_db(db: str) -> Path:
+    """Resolve a db filename to a safe Path within data/. Raises ValueError on invalid input."""
+    from api.adapter_registry import ADAPTERS
+    valid_dbs = {Path(a.db_file).name for a in ADAPTERS}
+    if db not in valid_dbs:
+        raise ValueError(f"Unknown database: {db}. Valid: {sorted(valid_dbs)}")
+    return Path("data") / db
+
+
+def _get_resolver():
+    from edge_catcher.research.data_source_resolver import DataSourceResolver
+    return DataSourceResolver.from_environment()
 
 
 def _config_path() -> Path:
-    """Return config path for hypotheses. Always use config/ for shared config like markets.yaml."""
+    """Return config path for hypotheses and fees config."""
     explicit = os.getenv("CONFIG_PATH")
     if explicit:
         return Path(explicit)
@@ -82,7 +92,7 @@ def _config_path() -> Path:
 
 
 def _markets_yaml() -> Path:
-    """Always return config/markets.yaml — not overridable locally."""
+    """Return the primary markets config path."""
     return Path("config") / "markets.yaml"
 
 
@@ -92,7 +102,7 @@ def _markets_yaml() -> Path:
 def get_status(_: None = Depends(check_auth)) -> StatusResponse:
     from edge_catcher.storage.db import get_connection, get_db_stats
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         return StatusResponse(
             markets=0,
@@ -124,7 +134,7 @@ def _run_download() -> None:
         upsert_trades_batch,
     )
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     cfg = _config_path()
 
     download_state.running = True
@@ -237,7 +247,7 @@ def analyze(
     try:
         return run_backtest(
             hypothesis_id=body.hypothesis_id,
-            db_path=_db_path(),
+            db_path=_validate_db("kalshi.db"),
             config_path=_config_path(),
             output_path=None,  # uses ANALYSIS_OUTPUT default
         )
@@ -253,7 +263,7 @@ def analyze(
 def get_results(_: None = Depends(check_auth)) -> list[ResultSummary]:
     from edge_catcher.storage.db import get_connection
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         return []
     conn = get_connection(db)
@@ -287,7 +297,7 @@ def get_result(
 ) -> ResultDetail:
     from edge_catcher.storage.db import get_connection
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         raise HTTPException(status_code=404, detail="Database not found")
     conn = get_connection(db)
@@ -357,7 +367,7 @@ def interpret_result(
             detail="AI deps missing. Run: pip install -e '.[ai]'",
         )
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         raise HTTPException(status_code=404, detail="Database not found")
 
@@ -481,7 +491,7 @@ def _run_kalshi_adapter_download(
         upsert_trades_batch,
     )
 
-    db = Path(db_file) if db_file else _db_path()
+    db = Path(db_file) if db_file else _validate_db("kalshi.db")
 
     state.running = True
     state.progress = "Initializing..."
@@ -765,7 +775,7 @@ def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
     import yaml as _yaml
     from edge_catcher.runner.strategy_parser import list_strategies
 
-    db = _db_path()
+    db = _validate_db("kalshi.db")
 
     # Data + Analysis + Backtest — single DB connection
     data_status = PipelineDataStatus(has_data=False, markets=0, trades=0)
@@ -830,7 +840,7 @@ def pipeline_status(_: None = Depends(check_auth)) -> PipelineStatusResponse:
 
 @app.get("/api/series")
 def get_series(_: None = Depends(check_auth)) -> list[str]:
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         return []
     from edge_catcher.storage.db import get_connection
@@ -844,9 +854,9 @@ def get_series(_: None = Depends(check_auth)) -> list[str]:
 
 @app.get("/api/series/{series}/fee-info", response_model=FeeInfoResponse)
 def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoResponse:
-    from edge_catcher.fees import get_fee_model_for_series
+    from api.adapter_registry import get_fee_model_for_db
     from edge_catcher.storage.db import get_connection
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if db.exists():
         conn = get_connection(db)
         try:
@@ -857,7 +867,7 @@ def series_fee_info(series: str, _: None = Depends(check_auth)) -> FeeInfoRespon
                 raise HTTPException(status_code=404, detail=f"Series '{series}' not found")
         finally:
             conn.close()
-    fee_model = get_fee_model_for_series(series)
+    fee_model = get_fee_model_for_db(str(_validate_db("kalshi.db")), series)
     return FeeInfoResponse(
         id=fee_model.id,
         name=fee_model.name,
@@ -891,7 +901,7 @@ def strategize_endpoint(
 
     model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
     client = LLMClient(provider=body.provider, model=model_override)
-    result = strategize(body.hypothesis_id, body.run_id, client, _db_path(), _config_path())
+    result = strategize(body.hypothesis_id, body.run_id, client, _validate_db("kalshi.db"), _config_path())
     return StrategizeResponse(**result)
 
 
@@ -923,7 +933,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
     from edge_catcher.runner.strategy_parser import (
         list_strategies, STRATEGIES_PUBLIC_MODULE, STRATEGIES_LOCAL_MODULE, STRATEGIES_LOCAL_PATH,
     )
-    from edge_catcher.fees import get_fee_model_for_series
+    from api.adapter_registry import get_fee_model_for_db
 
     state = backtest_states[task_id]
     state.running = True
@@ -999,7 +1009,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
                 f"({pct:.0f}%) \u2014 P&L: {info['net_pnl_cents']:+}\u00a2"
             )
 
-        fee_model = get_fee_model_for_series(body.series)
+        fee_model = get_fee_model_for_db(str(_validate_db("kalshi.db")), body.series)
 
         backtester = EventBacktester()
         result = backtester.run(
@@ -1009,7 +1019,7 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
             end=end,
             initial_cash=body.cash,
             slippage_cents=body.slippage,
-            db_path=_db_path(),
+            db_path=_validate_db("kalshi.db"),
             fee_fn=fee_model.calculate,
             on_progress=on_progress,
             is_cancelled=lambda: state.cancel_requested,
@@ -1032,8 +1042,8 @@ def _run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 
         # Index in DB
         from edge_catcher.storage.db import get_connection, init_db
-        init_db(_db_path())
-        conn = get_connection(_db_path())
+        init_db(_validate_db("kalshi.db"))
+        conn = get_connection(_validate_db("kalshi.db"))
         try:
             conn.execute(
                 """INSERT OR REPLACE INTO backtest_results
@@ -1092,7 +1102,7 @@ async def stop_backtest(task_id: str, _: None = Depends(check_auth)) -> dict:
 @app.get("/api/backtest/history", response_model=list[BacktestHistoryItem])
 def backtest_history(_: None = Depends(check_auth)) -> list[BacktestHistoryItem]:
     import json
-    db = _db_path()
+    db = _validate_db("kalshi.db")
     if not db.exists():
         return []
     from edge_catcher.storage.db import get_connection

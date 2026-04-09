@@ -80,7 +80,7 @@ def on_trade(self, trade, market, portfolio):
             # Compare contract price to spot price movement...
 ```
 
-**Important:** Not all series have OHLC data. Crypto series (KXBTC*, KXXRP*, KXETH*, KXSOL*, KXDOGE*) do. Sports, entertainment, weather, and politics series do not — for those, `self.ohlc` will be None. Design strategies accordingly.
+**Important:** Not all series have OHLC data. Series with associated OHLC data have price history available for momentum analysis. Sports, entertainment, weather, and politics series do not — for those, `self.ohlc` will be None. Design strategies accordingly.
 
 ## Rules
 
@@ -92,3 +92,16 @@ def on_trade(self, trade, market, portfolio):
 6. Use constructor parameters for configurable thresholds (with sensible defaults).
 7. Always check `portfolio.has_position(trade.ticker, self.name)` before buying to avoid duplicate positions.
 8. Kalshi markets are binary (yes/no). yes_price + no_price = 100. Settlement: winner gets 100¢, loser gets 0¢.
+
+## Generating from Validated Hypotheses
+
+When generating a strategy from a validated hypothesis, you receive:
+- The statistical test results showing WHERE the edge exists (which price buckets, which market conditions)
+- The series profile showing HOW the market behaves
+- The fee model showing the cost of trading
+
+Your strategy should:
+- Target the specific conditions where the edge was found (e.g., specific price ranges, lifecycle phases)
+- Respect the fee structure (don't trade where edge < fees)
+- Use the settlement frequency and volume stats to set position sizing
+- Reference self.ohlc for external price data if the hypothesis uses momentum_alignment

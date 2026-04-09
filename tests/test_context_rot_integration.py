@@ -5,6 +5,7 @@ import uuid
 import pytest
 from unittest.mock import MagicMock, patch
 
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.tracker import Tracker
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.loop import LoopOrchestrator
@@ -18,8 +19,8 @@ def tracker(tmp_path):
 def _make_result(strategy, series, verdict, reason="test", sharpe=0.5):
 	h = Hypothesis(
 		id=str(uuid.uuid4()),
-		strategy=strategy, series=series,
-		db_path="data/test.db", start_date="", end_date="", fee_pct=1.0,
+		strategy=strategy, data_sources=make_ds(db="test.db", series=series),
+		start_date="", end_date="", fee_pct=1.0,
 	)
 	return HypothesisResult(
 		hypothesis=h, status="ok",

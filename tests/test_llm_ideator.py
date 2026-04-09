@@ -40,7 +40,7 @@ class TestLLMIdeatorBuildPrompt:
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=MagicMock())
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["A", "B", "C"],
-			series_map={"data/kalshi.db": ["KXBTCD", "KXETH"]},
+			series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
 		)
 		assert "promote" in prompt.lower()
 		assert "kill" in prompt.lower()
@@ -54,7 +54,7 @@ class TestLLMIdeatorBuildPrompt:
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=MagicMock())
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["MyStrat", "AnotherStrat"],
-			series_map={"data/kalshi.db": ["KXBTCD"]},
+			series_map={"data/kalshi.db": ["SERIES_A"]},
 		)
 		assert "MyStrat" in prompt
 		assert "AnotherStrat" in prompt
@@ -69,7 +69,7 @@ class TestLLMIdeatorParseResponse:
 		response = json.dumps({
 			"reasoning": "testing",
 			"existing_strategy_hypotheses": [
-				{"strategy": "A", "series": "KXBTCD", "db_path": "data/kalshi.db", "rationale": "r"}
+				{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi.db", "rationale": "r"}
 			],
 			"novel_strategy_proposals": [
 				{"name": "new-strat", "description": "buy low sell high", "rationale": "r"}
@@ -144,7 +144,7 @@ class TestLLMIdeatorIdeate:
 		with pytest.raises(ValueError, match="Not enough data"):
 			ideator.ideate(
 				available_strategies=["A"],
-				series_map={"data/kalshi.db": ["KXBTCD"]},
+				series_map={"data/kalshi.db": ["SERIES_A"]},
 				start_date="2025-01-01",
 				end_date="2025-12-31",
 			)
@@ -155,7 +155,7 @@ class TestCoverageTrackingIncludesDbPath:
 		"""Untested combos should distinguish between same series in different DBs."""
 		tracker = MagicMock()
 		tracker.list_results.return_value = [
-			{"strategy": "A", "series": "KXBTCD", "db_path": "data/kalshi.db",
+			{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi.db",
 			 "verdict": "explore", "verdict_reason": "test", "sharpe": 1.2,
 			 "win_rate": 0.55, "net_pnl_cents": 100, "total_trades": 80,
 			 "tags": "[]", "validation_details": None},
@@ -164,13 +164,13 @@ class TestCoverageTrackingIncludesDbPath:
 		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
 
 		series_map = {
-			"data/kalshi.db": ["KXBTCD"],
-			"data/coinbase.db": ["KXBTCD"],  # same series name, different DB
+			"data/kalshi.db": ["SERIES_A"],
+			"data/coinbase.db": ["SERIES_A"],  # same series name, different DB
 		}
 
 		prompt = ideator.build_ideation_prompt(["A"], series_map)
 
-		# Should show 1 untested combo: A × KXBTCD in coinbase.db
+		# Should show 1 untested combo: A × SERIES_A in coinbase.db
 		assert "1 remaining" in prompt or "Untested Combinations (1" in prompt
 
 

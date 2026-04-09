@@ -340,49 +340,6 @@ def _auto_strategy_args(parser) -> None:
             pass  # Already defined (e.g., by framework args)
 
 
-def _load_coin_closes(series: str, btc_db: str, altcoin_db: str) -> dict:
-    """Load price closes dict {timestamp: close} for the coin matching the series prefix."""
-    import sqlite3 as _sql
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
-
-    # Map series prefix → (coin, db_path, table_name)
-    _SERIES_MAP = [
-        ("KXBTC", "BTC", btc_db, "btc_ohlc"),
-        ("KXSOL", "SOL", altcoin_db, "sol_ohlc"),
-        ("KXETH", "ETH", altcoin_db, "eth_ohlc"),
-        ("KXXRP", "XRP", altcoin_db, "xrp_ohlc"),
-        ("KXDOGE", "DOGE", altcoin_db, "doge_ohlc"),
-        ("KXBNB", "BNB", altcoin_db, "bnb_ohlc"),
-        ("KXHYPE", "HYPE", altcoin_db, "hype_ohlc"),
-    ]
-
-    db_path = btc_db
-    table = "btc_ohlc"
-    coin = "BTC"
-    for prefix, c, db, tbl in _SERIES_MAP:
-        if series.upper().startswith(prefix):
-            coin, db_path, table = c, db, tbl
-            break
-
-    try:
-        _conn = _sql.connect(str(db_path))
-        _conn.row_factory = _sql.Row
-        # Check table exists before querying
-        exists = _conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        if not exists:
-            _conn.close()
-            _log.warning("_load_coin_closes: table %s not found in %s — skipping momentum filter", table, db_path)
-            return {}
-        _rows = _conn.execute(f"SELECT timestamp, close FROM {table} ORDER BY timestamp").fetchall()
-        _conn.close()
-        return {r["timestamp"]: r["close"] for r in _rows}
-    except Exception as exc:
-        _log.warning("_load_coin_closes: could not load %s from %s: %s — skipping momentum filter", table, db_path, exc)
-        return {}
-
 
 def _cmd_backtest(args) -> None:
     import json
@@ -426,7 +383,7 @@ def _cmd_backtest(args) -> None:
 
     try:
         if not args.series:
-            msg = "--series is required for backtest (e.g. --series KXBTCD)"
+            msg = "--series is required for backtest (e.g. --series TICKER)"
             if json_mode:
                 print(json.dumps({"status": "error", "message": msg}))
             else:
@@ -456,12 +413,6 @@ def _cmd_backtest(args) -> None:
                     inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL,
                 ):
                     continue
-                if param_name == 'btc_closes':
-                    closes = _load_coin_closes(args.series, args.btc_db, args.altcoin_ohlc_db)
-                    if closes:
-                        available['btc_closes'] = closes
-                        print(f'  Loaded {len(closes)} candles for momentum filter', file=sys.stderr)
-                    continue
                 val = getattr(args, param_name, None)
                 if val is not None:
                     available[param_name] = val
@@ -483,8 +434,8 @@ def _cmd_backtest(args) -> None:
         end = date.fromisoformat(args.end) if args.end else None
 
         from edge_catcher.runner.event_backtest import EventBacktester
-        from edge_catcher.fees import get_fee_model_for_series
-        _base_model = get_fee_model_for_series(args.series)
+        from api.adapter_registry import get_fee_model_for_db
+        _base_model = get_fee_model_for_db(args.db_path, args.series)
         _fee_pct = args.fee_pct
         fee_fn = lambda p, s: _fee_pct * _base_model.calculate(p, s)
         backtester = EventBacktester()
@@ -536,10 +487,10 @@ def _cmd_research(args) -> None:
     subcmd = getattr(args, 'research_command', None)
 
     if subcmd == 'run':
+        from edge_catcher.research.data_source_config import make_ds
         h = Hypothesis(
             strategy=args.strategy,
-            series=args.series,
-            db_path=args.db_path,
+            data_sources=make_ds(db=Path(args.db_path).name, series=args.series),
             start_date=args.start,
             end_date=args.end,
             fee_pct=args.fee_pct,
@@ -564,7 +515,6 @@ def _cmd_research(args) -> None:
         print(_json.dumps(report, indent=2))
 
     elif subcmd == 'sweep-all':
-        from edge_catcher.research.agent import _STRATEGY_FAMILY
         strategy_map, _ = _build_strategy_map()
         all_strategies = [s for s in strategy_map if s not in ('example',)]
         all_results: list = []
@@ -610,12 +560,12 @@ def _cmd_research(args) -> None:
         # Reconstruct minimal HypothesisResult objects from tracker rows for reporting
         from edge_catcher.research.hypothesis import HypothesisResult
         results = []
+        from edge_catcher.research.data_source_config import make_ds
         for row in rows:
             h = Hypothesis(
                 id=row['id'],
                 strategy=row['strategy'],
-                series=row['series'],
-                db_path=row['db_path'],
+                data_sources=make_ds(db=Path(row['db_path']).name, series=row['series']),
                 start_date=row['start_date'],
                 end_date=row['end_date'],
                 fee_pct=row['fee_pct'],
@@ -794,7 +744,7 @@ def main() -> None:
         default=None,
         metavar="FILE",
         help="Path to markets YAML file (default: {config}/markets.yaml). "
-             "Example: --markets config/markets-crypto.yaml",
+             "Example: --markets config/markets-altcrypto.yaml",
     )
     dl.add_argument(
         "--max-trade-markets",
@@ -829,7 +779,7 @@ def main() -> None:
     ar.add_argument("--archive-dir", default="data/archive")
 
     bt = sub.add_parser("backtest", help="Run event-driven backtest on historical trade data")
-    bt.add_argument("--series", default=None, help="Series ticker (e.g. KXBTCD, KXBTC15M)")
+    bt.add_argument("--series", default=None, help="Series ticker (e.g. TICKER)")
     bt.add_argument("--strategy", default="example", help="Comma-separated strategy names (use --list-strategies)")
     bt.add_argument("--start", default=None, help="Start date ISO format (e.g. 2025-06-01)")
     bt.add_argument("--end", default=None, help="End date ISO format (e.g. 2026-03-30)")
@@ -840,7 +790,7 @@ def main() -> None:
     bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
     bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
     bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
-                    help="Multiplier on 0.07*P*(1-P) entry fee formula (default: 1.0 = full Kalshi taker fee; 0.25 = maker fee; 0.0 = no fee)")
+                    help="Multiplier on entry fee formula (default: 1.0 = full taker fee; 0.25 = maker fee; 0.0 = no fee)")
     bt.add_argument("--json", action="store_true", default=False,
                     help="Output only valid JSON to stdout; progress goes to stderr")
     bt.add_argument("--list-strategies", action="store_true", default=False, dest="list_strategies",
@@ -853,7 +803,7 @@ def main() -> None:
                     help="Path to altcoin OHLC database (default: data/ohlc.db)")
     bt.add_argument("--ohlc-config", default=None, dest="ohlc_config",
                     help='JSON mapping asset names to [db_path, table] pairs '
-                         '(e.g. \'{"btc": ["data/kalshi.db", "btc_ohlc"]}\')')
+                         '(e.g. \'{"btc": ["data/ohlc.db", "btc_ohlc"]}\')')
 
     ldbs = sub.add_parser("list-dbs", help="Scan data/ for *.db files and list their series as JSON")
     ldbs.set_defaults(func=_cmd_list_dbs)
@@ -865,7 +815,7 @@ def main() -> None:
 
     rs_run = rs_sub.add_parser("run", help="Run a single hypothesis")
     rs_run.add_argument("--strategy", required=True, help="Strategy name (use backtest --list-strategies)")
-    rs_run.add_argument("--series", required=True, help="Series ticker (e.g. KXBTCD)")
+    rs_run.add_argument("--series", required=True, help="Series ticker (e.g. SERIES)")
     rs_run.add_argument("--db-path", required=True, dest="db_path", help="Path to database")
     rs_run.add_argument("--start", required=True, help="Start date ISO (e.g. 2025-01-01)")
     rs_run.add_argument("--end", required=True, help="End date ISO (e.g. 2025-12-31)")
@@ -947,7 +897,7 @@ def main() -> None:
     pt.add_argument("--min-price", type=int, default=70, help="Min yes_ask to enter for Strategy A (cents)")
     pt.add_argument("--max-price", type=int, default=99, help="Max yes_ask to enter for Strategy A (cents)")
     pt.add_argument("--enable-strategy-b", action="store_true", default=False,
-                    help="Enable contrarian NO strategy (default: disabled — killed 2026-03-31 after historical backtest confirmed -$48.57 net, 32.4%% win rate)")
+                    help="Enable contrarian NO strategy (default: disabled)")
     pt.set_defaults(func=_cmd_paper_trade)
 
     pt15 = sub.add_parser('paper-trade-15m', help='Run 15-min BTC paper trading (Strategy D)')
@@ -959,7 +909,7 @@ def main() -> None:
     pt15.set_defaults(func=_cmd_paper_trade_15m)
 
     ptv2 = sub.add_parser('paper-trade-v2',
-                          help='Unified paper trader — KXBTCD, KXBTC15M, KXXRP, KXNBAMENTION, KXSOLD')
+                          help='Unified paper trader across multiple series')
     ptv2.add_argument('--db', default='data/paper_trades_v2.db',
                       help='SQLite DB path (default: data/paper_trades_v2.db)')
     ptv2.add_argument('--series', default=None,

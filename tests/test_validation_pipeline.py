@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.validation.gate import Gate, GateContext, GateResult
 from edge_catcher.research.validation.pipeline import ValidationPipeline
@@ -11,7 +12,7 @@ from edge_catcher.research.validation.pipeline import ValidationPipeline
 
 def _make_result(sharpe=2.5, total_trades=100, **kwargs) -> HypothesisResult:
 	h = Hypothesis(
-		strategy="C", series="KXBTCD", db_path="data/kalshi.db",
+		strategy="C", data_sources=make_ds(db="kalshi.db", series="SERIES_A"),
 		start_date="2025-01-01", end_date="2025-12-31",
 	)
 	defaults = dict(

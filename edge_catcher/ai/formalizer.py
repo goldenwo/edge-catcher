@@ -123,7 +123,7 @@ def formalize(
     Args:
         description: Natural-language hypothesis.
         client: LLMClient instance (caller is responsible for authentication).
-        config_path: Path to ``hypotheses.yaml`` (default: ``config/hypotheses.yaml``).
+        config_path: Path to ``hypotheses.yaml`` (default: ``config.local/hypotheses.yaml``).
         hypotheses_base: Override base directory for stub file creation.
             When ``None`` the module string is mapped to a project-root path.
             Pass ``tmp_path / "hypotheses"`` in tests to keep them hermetic.
@@ -132,7 +132,7 @@ def formalize(
         On success: ``{"hypothesis_id", "config_path", "module_path", "message"}``.
         On parse failure: ``{"error": True, "raw_response": str}``.
     """
-    config_path = config_path or Path("config/hypotheses.yaml")
+    config_path = config_path or Path("config.local/hypotheses.yaml")
 
     system_prompt = _load_system_prompt()
     user_prompt = _build_user_prompt(description)
@@ -147,15 +147,18 @@ def formalize(
         return {"error": True, "raw_response": response}
 
     # ── append to hypotheses.yaml ─────────────────────────────────────────────
-    with open(config_path) as f:
-        existing = yaml.safe_load(f) or {}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            existing = yaml.safe_load(f) or {}
     existing.setdefault("hypotheses", {})[hypothesis_id] = hyp_config
     with open(config_path, "w") as f:
         yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
 
     # ── resolve stub file path ────────────────────────────────────────────────
     module_str = hyp_config.get(
-        "module", f"edge_catcher.hypotheses.custom.{hypothesis_id}"
+        "module", f"edge_catcher.hypotheses.local.{hypothesis_id}"
     )
     if hypotheses_base:
         module_file = _module_str_to_relative_file(module_str, hypotheses_base)

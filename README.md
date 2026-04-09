@@ -8,7 +8,7 @@ Built for rigorous, anti-p-hacking statistical research: pre-registered hypothes
 
 ## Features
 
-- **Multi-market adapter pattern** — Kalshi (BTC, altcoins, sports, weather, politics, esports, entertainment, financials) + Coinbase OHLC
+- **Multi-market adapter pattern** — Kalshi (multiple categories) + Coinbase OHLC
 - **Event-driven backtester** — Run strategies against historical trade data with fee-adjusted PnL, Sharpe ratio, win rate, and per-strategy breakdowns
 - **Autonomous research loop** — Grid sweep across all strategy×series combinations, then LLM-driven hypothesis ideation for novel strategies
 - **Incremental data pipeline** — SQLite with WAL mode, resumable downloads, 90-day rolling archive
@@ -67,16 +67,11 @@ edge-catcher/
 │   └── models.py         # API schemas
 ├── ui/                   # React + Vite frontend
 ├── config/
-│   ├── markets.yaml            # BTC (default)
-│   ├── markets-altcrypto.yaml  # ETH/SOL/XRP/DOGE/BNB/HYPE
-│   ├── markets-sports.yaml     # NBA/MLB spreads
-│   ├── markets-weather.yaml    # Temperature/rain
-│   ├── markets-financials.yaml # Nasdaq/S&P/yields/jobless
-│   ├── markets-entertainment.yaml # Spotify/awards
-│   ├── markets-politics.yaml   # Elections/mentions
-│   ├── markets-esports.yaml    # CS2/LoL/ATP/J-League
 │   ├── fees.yaml               # Fee models per market
 │   └── hypotheses.yaml         # Hypothesis configs
+├── config.local/               # Market configs (gitignored)
+│   ├── markets.yaml            # Default market series
+│   └── markets-*.yaml          # Category-specific series
 └── tests/                # pytest suite (255+ tests)
 ```
 
@@ -92,14 +87,14 @@ git clone https://github.com/goldenwo/edge-catcher.git
 cd edge-catcher
 pip install -e ".[dev]"
 
-# Download market data (Kalshi BTC series by default)
+# Download market data (default series)
 python -m edge_catcher download
 
-# Download BTC OHLC from Coinbase (no API key needed)
+# Download OHLC data (no API key needed)
 python -m edge_catcher download-btc
 
 # Run a backtest
-python -m edge_catcher backtest --series KXBTCD --strategy example --json
+python -m edge_catcher backtest --series SERIES_A --strategy example --json
 
 # Run all registered hypotheses
 python -m edge_catcher analyze
@@ -111,13 +106,13 @@ python -m edge_catcher analyze
 
 ```bash
 # Data download
-python -m edge_catcher download                      # Kalshi BTC contracts
-python -m edge_catcher download --markets config/markets-altcrypto.yaml  # Altcoins
-python -m edge_catcher download-btc                  # Coinbase BTC-USD OHLC
-python -m edge_catcher download-altcoin-ohlc         # Coinbase altcoin OHLC (SOL,ETH,XRP,DOGE,BNB)
+python -m edge_catcher download                      # Default market contracts
+python -m edge_catcher download --markets config.local/markets-altcrypto.yaml  # Category-specific
+python -m edge_catcher download-btc                  # OHLC candles (primary asset)
+python -m edge_catcher download-altcoin-ohlc         # OHLC candles (additional assets)
 
 # Backtesting
-python -m edge_catcher backtest --series KXBTCD --strategy example --json
+python -m edge_catcher backtest --series SERIES_A --strategy example --json
 python -m edge_catcher backtest --list-strategies    # Show available strategies
 python -m edge_catcher backtest --list-series        # Show available series
 python -m edge_catcher list-dbs                      # Scan all databases
@@ -183,42 +178,30 @@ Kalshi adapters download settled contracts and trade history. No API key require
 
 | Adapter | Config | Database |
 |---------|--------|----------|
-| BTC (hourly/daily/weekly/15M) | `config/markets.yaml` | `data/kalshi.db` |
-| Altcoins (ETH/SOL/XRP/DOGE/BNB/HYPE) | `config/markets-altcrypto.yaml` | `data/kalshi-altcrypto.db` |
-| Sports (NBA/MLB) | `config/markets-sports.yaml` | `data/kalshi-sports.db` |
-| Weather | `config/markets-weather.yaml` | `data/kalshi-weather.db` |
-| Financials | `config/markets-financials.yaml` | `data/kalshi-financials.db` |
-| Entertainment | `config/markets-entertainment.yaml` | `data/kalshi-entertainment.db` |
-| Politics | `config/markets-politics.yaml` | `data/kalshi-politics.db` |
-| Esports | `config/markets-esports.yaml` | `data/kalshi-esports.db` |
+| Default | `config.local/markets.yaml` | `data/kalshi.db` |
+| Per-category | `config.local/markets-*.yaml` | `data/kalshi-*.db` |
+
+Each category adapter reads its market series from a YAML config in `config.local/`. Database filenames are auto-derived from the config filename.
 
 ### Coinbase OHLC Adapters
 
 Coinbase adapters download 1-minute OHLC candles. No API key required (public endpoints).
 
-| Adapter | Product | Database | Table |
-|---------|---------|----------|-------|
-| BTC-USD | `BTC-USD` | `data/btc.db` | `btc_ohlc` |
-| ETH-USD | `ETH-USD` | `data/ohlc.db` | `eth_ohlc` |
-| SOL-USD | `SOL-USD` | `data/ohlc.db` | `sol_ohlc` |
-| XRP-USD | `XRP-USD` | `data/ohlc.db` | `xrp_ohlc` |
-| DOGE-USD | `DOGE-USD` | `data/ohlc.db` | `doge_ohlc` |
-
-All Coinbase adapters share a global rate limiter (~6.6 req/s, safe under Coinbase's 10 req/s public limit).
+OHLC adapters download 1-minute candles for supported assets. Each writes to a table in `data/ohlc.db` (or `data/btc.db` for the primary asset). All adapters share a global rate limiter.
 
 ---
 
 ## Configuration
 
-### Markets (`config/markets.yaml`)
+### Markets (`config.local/markets.yaml`)
 
 ```yaml
 adapters:
   kalshi:
     enabled: true
     series:
-      - KXBTC    # BTC hourly range contracts
-      - KXBTCD   # BTC daily contracts
+      - SERIES_A   # example series
+      - SERIES_B   # example series
     statuses:
       - settled
     min_available_ram_pct: 10  # RAM guard for Pi/low-memory machines

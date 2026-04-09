@@ -44,7 +44,7 @@ class TestLoopIntegration:
 
 		with patch.object(orch, "_discover_strategies", return_value=["A", "B"]), \
 			 patch.object(orch, "_discover_series", return_value={
-				 "data/kalshi.db": ["KXBTCD", "KXETH"]
+				 "data/kalshi.db": ["SERIES_A", "SERIES_E"]
 			 }), \
 			 patch("edge_catcher.research.agent.subprocess.run", return_value=mock_proc):
 
