@@ -19,6 +19,7 @@ from typing import Callable
 
 from .agent import ResearchAgent
 from .audit import AuditLog
+from .data_source_config import make_ds
 from .grid_planner import GridPlanner
 from .hypothesis import HypothesisResult
 from .llm_ideator import LLMIdeator
@@ -184,10 +185,16 @@ class LoopOrchestrator:
 			self._update_kill_registry()
 			self._report_progress("grid", len(all_results), self.max_runs)
 		elif not self.refine_only:
-			ideate_results, llm_calls_used = self._run_ideate_phase(
-				agent, queue, strategies, series_map,
-				budget_ideate, start_time,
-			)
+			if self.llm_only:
+				ideate_results, llm_calls_used = self._run_ideate_phase(
+					agent, queue, strategies, series_map,
+					budget_ideate, start_time,
+				)
+			else:
+				ideate_results, llm_calls_used = self._run_hypothesis_phase(
+					agent, queue, strategies, series_map,
+					budget_ideate, start_time,
+				)
 			all_results.extend(ideate_results)
 			runs_used += len(ideate_results)
 			self._write_phase_outcomes(journal, ideate_results, "ideate")
@@ -303,6 +310,211 @@ class LoopOrchestrator:
 		)
 		return exit_code, all_results
 
+	def _run_hypothesis_phase(
+		self,
+		agent: ResearchAgent,
+		queue: RunQueue,
+		strategies: list[str],
+		series_map: dict[str, list[str]],
+		budget: int,
+		start_time: float,
+	) -> tuple[list[HypothesisResult], int]:
+		"""Run hypothesis-driven Phase 1: Hypothesize -> Analyze -> Strategize -> Backtest.
+
+		Returns (results, llm_calls_used).
+		"""
+		from .context_engine import ContextEngine
+		from .hypothesis import Hypothesis
+		from .test_runner import TestRunner, EDGE_EXISTS
+		from edge_catcher.ai.client import LLMClient
+		from edge_catcher.ai.strategizer import generate_from_hypothesis
+		from edge_catcher.runner.strategy_parser import (
+			validate_strategy_code, save_strategy, list_strategies,
+			compute_code_hash, compute_ast_fingerprint,
+			STRATEGIES_LOCAL_PATH, STRATEGIES_LOCAL_MODULE,
+		)
+		from edge_catcher.storage.db import get_connection
+
+		results: list[HypothesisResult] = []
+		llm_calls_used = 0
+
+		# ── Build context ────────────────────────────────────────────
+		db_paths = list(series_map.keys())
+		data_dir = str(Path(db_paths[0]).parent) if db_paths else "data"
+		engine = ContextEngine(data_dir=data_dir)
+		profiles = engine.profile_all(db_paths)
+		context_block = engine.build_context_block(profiles)
+
+		# ── Ideate hypotheses via LLM ────────────────────────────────
+		try:
+			client = LLMClient()
+			ideator = LLMIdeator(
+				tracker=self.tracker, audit=self.audit, client=client,
+				journal=self._journal,
+			)
+			runner = TestRunner()
+
+			hypothesis_kills = self.tracker.list_hypothesis_kills(permanent_only=True)
+			logger.info("Starting LLM hypothesis ideation...")
+			hypothesis_configs = ideator.ideate_hypotheses(
+				context_block=context_block,
+				hypothesis_kill_registry=hypothesis_kills,
+				journal=self._journal,
+				available_test_types=list(runner.test_types.keys()),
+			)
+			llm_calls_used += 1
+		except Exception as exc:
+			logger.error("LLM hypothesis ideation failed: %s", exc)
+			return results, 0
+
+		logger.info("LLM proposed %d hypothesis configs", len(hypothesis_configs))
+
+		# ── Statistical analysis loop ────────────────────────────────
+		validated: list[tuple[dict, object]] = []
+		tested_count = 0
+		for config in hypothesis_configs:
+			db_path = str(Path("data") / config["db"])
+			try:
+				conn = get_connection(Path(db_path))
+				test_result = runner.run(
+					config["test_type"], conn, config["series"],
+					config["params"], config["thresholds"],
+				)
+				conn.close()
+				tested_count += 1
+			except Exception as exc:
+				logger.warning("Statistical test failed for %s: %s", config.get("test_type"), exc)
+				continue
+
+			# Save result to tracker
+			self.tracker.save_hypothesis_result(
+				test_type=config["test_type"],
+				series=config["series"],
+				db=config["db"],
+				params=config["params"],
+				thresholds=config["thresholds"],
+				verdict=test_result.verdict,
+				z_stat=test_result.z_stat,
+				fee_adjusted_edge=test_result.fee_adjusted_edge,
+				detail=test_result.detail,
+				rationale=config.get("rationale", ""),
+			)
+
+			# Update kill registry for non-edge results
+			if test_result.verdict != EDGE_EXISTS:
+				self.tracker.record_hypothesis_kill(
+					config["test_type"], config["series"], config["db"],
+					verdict=test_result.verdict,
+					params=config["params"],
+					z_stat=test_result.z_stat,
+				)
+
+			if test_result.verdict == EDGE_EXISTS:
+				validated.append((config, test_result))
+
+		logger.info(
+			"Hypothesis analysis: %d tested, %d edges found",
+			tested_count, len(validated),
+		)
+
+		# ── Strategize from validated edges ──────────────────────────
+		hypotheses: list[Hypothesis] = []
+		for config, test_result in validated:
+			if llm_calls_used >= self.max_llm_calls:
+				logger.info("LLM call budget exhausted, skipping remaining strategy generation")
+				break
+			try:
+				code, strategy_name = generate_from_hypothesis(
+					config, test_result, profiles, client,
+				)
+				llm_calls_used += 1
+			except Exception as exc:
+				logger.warning("Strategy generation failed for %s: %s", config.get("test_type"), exc)
+				continue
+
+			ok, error = validate_strategy_code(code)
+			if not ok:
+				logger.warning("Generated strategy failed validation: %s", error)
+				continue
+
+			# AST fingerprint dedup check
+			code_hash = compute_code_hash(code)
+			existing_by_hash = self.tracker.check_code_hash(code_hash)
+			if existing_by_hash:
+				logger.warning(
+					"Hypothesis strategy '%s' is a code-level duplicate of '%s' -- skipping",
+					strategy_name, existing_by_hash,
+				)
+				continue
+
+			ast_fp = compute_ast_fingerprint(code)
+			if ast_fp:
+				existing_by_ast = self.tracker.check_fingerprint(ast_fp)
+				if existing_by_ast:
+					logger.warning(
+						"Hypothesis strategy '%s' is structurally identical to '%s' -- skipping",
+						strategy_name, existing_by_ast,
+					)
+					continue
+
+			# Save fingerprint for future dedup
+			if ast_fp:
+				self.tracker.save_fingerprint(ast_fp, strategy_name, code_hash)
+
+			# Save to strategies_local.py
+			result = save_strategy(code, strategy_name, STRATEGIES_LOCAL_PATH)
+			if not result.get("ok"):
+				logger.warning("Failed to save strategy: %s", result.get("error"))
+				continue
+
+			# Reload module to pick up new strategy
+			try:
+				mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
+				importlib.reload(mod)
+			except Exception as exc:
+				logger.warning("Failed to reload strategies_local: %s", exc)
+
+			# Verify strategy registered after reload
+			available = list_strategies(STRATEGIES_LOCAL_PATH)
+			available_names = [s["name"] for s in available]
+			if strategy_name not in available_names:
+				logger.warning(
+					"Strategy '%s' not found in strategy map after reload. Available: %s",
+					strategy_name, available_names,
+				)
+				continue
+
+			# Create backtest hypothesis for the target series
+			hypotheses.append(Hypothesis(
+				strategy=strategy_name,
+				data_sources=make_ds(db=config["db"], series=config["series"]),
+				start_date=self.start_date,
+				end_date=self.end_date,
+				fee_pct=self.fee_pct,
+				tags=["source:hypothesis_driven"],
+				notes=config.get("rationale", ""),
+			))
+
+		logger.info(
+			"Generated %d strategies from validated hypotheses",
+			len(hypotheses),
+		)
+
+		# ── Submit backtests ─────────────────────────────────────────
+		if hypotheses:
+			# Persist hypotheses so they can be resumed
+			for h in hypotheses:
+				self.tracker.save_hypothesis(h)
+
+			batch = hypotheses[:budget]
+			remaining_time = self._remaining_time(start_time)
+			bt_results = queue.submit(
+				batch, phase="hypothesis_driven", max_time_seconds=remaining_time,
+			)
+			results.extend(bt_results)
+
+		return results, llm_calls_used
+
 	def _run_ideate_phase(
 		self,
 		agent: ResearchAgent,
@@ -331,8 +543,7 @@ class LoopOrchestrator:
 				Hypothesis(
 					id=p["id"],
 					strategy=p["strategy"],
-					series=p["series"],
-					db_path=p["db_path"],
+					data_sources=make_ds(db=Path(p["db_path"]).name, series=p["series"]),
 					start_date=p["start_date"],
 					end_date=p["end_date"],
 					fee_pct=p["fee_pct"],
@@ -485,8 +696,7 @@ class LoopOrchestrator:
 			for series, db_path in related:
 				h = Hypothesis(
 					strategy=winner.hypothesis.strategy,
-					series=series,
-					db_path=db_path,
+					data_sources=make_ds(db=Path(db_path).name, series=series),
 					start_date=self.start_date,
 					end_date=self.end_date,
 					fee_pct=self.fee_pct,
@@ -699,8 +909,7 @@ class LoopOrchestrator:
 				for series, db_path in unique_series:
 					hypotheses.append(Hypothesis(
 						strategy=new_name,
-						series=series,
-						db_path=db_path,
+						data_sources=make_ds(db=Path(db_path).name, series=series),
 						start_date=self.start_date,
 						end_date=self.end_date,
 						fee_pct=self.fee_pct,
@@ -1307,8 +1516,7 @@ class LoopOrchestrator:
 			for series in series_list[:3]:  # limit to 3 series per novel strategy
 				hypotheses.append(Hypothesis(
 					strategy=strategy_name,
-					series=series,
-					db_path=db_path,
+					data_sources=make_ds(db=Path(db_path).name, series=series),
 					start_date=self.start_date,
 					end_date=self.end_date,
 					fee_pct=self.fee_pct,

@@ -214,12 +214,12 @@ def test_backtest_results_insert_and_query(tmp_db_conn):
            (task_id, series, strategies, run_timestamp, total_trades, wins, losses,
             net_pnl_cents, sharpe, max_drawdown_pct, win_rate, result_path)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        ("task-001", "KXBTCD", '["example"]', "2026-03-31T00:00:00Z",
+        ("task-001", "SERIES_A", '["example"]', "2026-03-31T00:00:00Z",
          100, 60, 40, 500, 1.5, 5.0, 0.6, "reports/backtest_task-001.json"),
     )
     tmp_db_conn.commit()
     row = tmp_db_conn.execute(
         "SELECT * FROM backtest_results WHERE task_id = ?", ("task-001",)
     ).fetchone()
-    assert row["series"] == "KXBTCD"
+    assert row["series"] == "SERIES_A"
     assert row["sharpe"] == 1.5

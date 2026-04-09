@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from .audit import AuditLog
+from .data_source_config import make_ds
 from .hypothesis import Hypothesis
 from .tracker import Tracker
 
@@ -99,8 +100,7 @@ class LLMIdeator:
 		for entry in valid_existing:
 			hypotheses.append(Hypothesis(
 				strategy=entry["strategy"],
-				series=entry["series"],
-				db_path=entry["db_path"],
+				data_sources=make_ds(db=Path(entry["db_path"]).name, series=entry["series"]),
 				start_date=start_date,
 				end_date=end_date,
 				fee_pct=fee_pct,
@@ -520,6 +520,163 @@ class LLMIdeator:
 			sharpe = r["sharpe"] if r.get("sharpe") is not None else 0.0
 			descriptions.append(f"{r['strategy']} (Sharpe {sharpe:.2f} on {r['series']})")
 		return f"Winning patterns to expand: {', '.join(descriptions)}. Explore variants of these."
+
+	def ideate_hypotheses(
+		self,
+		context_block: str,
+		hypothesis_kill_registry: list[dict],
+		journal,  # ResearchJournal | None
+		available_test_types: list[str],
+	) -> list[dict]:
+		"""Propose statistical hypotheses about market inefficiencies.
+
+		Returns list of hypothesis config dicts, each with:
+		- test_type: str (one of available_test_types)
+		- series: str
+		- db: str
+		- rationale: str
+		- params: dict
+		- thresholds: dict
+		"""
+		system_prompt = self._load_system_prompt()
+		user_prompt = self._build_hypothesis_ideation_prompt(
+			context_block, hypothesis_kill_registry, journal, available_test_types,
+		)
+
+		prompt_hash = hashlib.sha256(
+			(system_prompt + user_prompt).encode()
+		).hexdigest()
+
+		response = self.client.complete(system_prompt, user_prompt, task="ideator")
+		logger.info("LLM hypothesis ideation response:\n%s", response[:2000])
+
+		# Parse JSON from response
+		hypotheses = self._parse_hypothesis_response(response)
+
+		# Filter killed patterns
+		permanent_kills = {
+			entry["pattern_key"]
+			for entry in hypothesis_kill_registry
+			if entry.get("permanent")
+		}
+		hypotheses = [
+			h for h in hypotheses
+			if f"{h['test_type']}:{h['series']}:{h['db']}" not in permanent_kills
+		]
+
+		# Validate required fields and test type
+		required_fields = {"test_type", "series", "db", "params", "thresholds"}
+		valid_types = set(available_test_types)
+		validated: list[dict] = []
+		for h in hypotheses:
+			if not required_fields.issubset(h.keys()):
+				missing = required_fields - h.keys()
+				logger.warning("Hypothesis missing fields %s, skipping: %s", missing, h)
+				continue
+			if h["test_type"] not in valid_types:
+				logger.warning("Hypothesis has invalid test_type %r, skipping", h["test_type"])
+				continue
+			validated.append(h)
+
+		# Record audit
+		model = self.client._resolve_model("ideator") or ""
+		usage = self.client.last_usage
+		token_count = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+
+		self.audit.record_decision(
+			prompt_hash=prompt_hash,
+			prompt_text=user_prompt,
+			response_text=response,
+			parsed_output={"hypotheses": validated},
+			model=model,
+			token_count=token_count,
+		)
+
+		return validated
+
+	def _build_hypothesis_ideation_prompt(
+		self,
+		context_block: str,
+		hypothesis_kill_registry: list[dict],
+		journal,  # ResearchJournal | None
+		available_test_types: list[str],
+	) -> str:
+		"""Build the user prompt for hypothesis ideation mode."""
+		parts: list[str] = []
+
+		# Block 1: Series profiles from Context Engine
+		parts.append("## Series Profiles\n")
+		parts.append(context_block)
+
+		# Block 2: Prior hypothesis results
+		prior_results = self.tracker.list_hypothesis_results()
+		if prior_results:
+			parts.append("\n## Prior Hypothesis Results\n")
+			by_type: dict[str, list[dict]] = {}
+			for r in prior_results:
+				by_type.setdefault(r.get("test_type", "unknown"), []).append(r)
+			for test_type, results in sorted(by_type.items()):
+				verdicts = Counter(r.get("verdict", "unknown") for r in results)
+				verdict_str = ", ".join(f"{v}: {c}" for v, c in sorted(verdicts.items()))
+				series_list = sorted(set(r.get("series", "?") for r in results))
+				parts.append(f"- {test_type}: {len(results)} tests ({verdict_str}) on {', '.join(series_list)}")
+		else:
+			parts.append("\n## Prior Hypothesis Results\nNo prior hypothesis results.")
+
+		# Block 3: Kill registry
+		if hypothesis_kill_registry:
+			parts.append("\n## Killed Hypothesis Patterns (do NOT re-propose)\n")
+			for entry in hypothesis_kill_registry:
+				key = entry.get("pattern_key", "unknown")
+				reason = entry.get("reason", "")
+				parts.append(f"- {key}: {reason}" if reason else f"- {key}")
+		else:
+			parts.append("\n## Killed Hypothesis Patterns\nNone.")
+
+		# Block 4: Available test types
+		test_type_descriptions = {
+			"price_bucket_bias": "Tests if settlement rates deviate from implied probability",
+			"lifecycle_bias": "Tests if early-traded markets are more mispriced than late ones",
+			"volume_mispricing": "Tests if low-volume markets have wider mispricing",
+			"momentum_alignment": "Tests if contract prices lag spot price movements",
+		}
+		parts.append("\n## Available Test Types\n")
+		for tt in available_test_types:
+			desc = test_type_descriptions.get(tt, "Statistical hypothesis test")
+			parts.append(f"- {tt}: {desc}")
+
+		# Block 5: Journal observations
+		if journal:
+			try:
+				entries = journal.get_recent_entries()
+				if entries:
+					parts.append("\n## Research Journal (recent observations)\n")
+					for entry in entries:
+						parts.append(f"- {entry}")
+			except Exception:
+				pass  # journal is optional
+
+		parts.append("\n## Task\nPropose statistical hypotheses about market inefficiencies. Use Hypothesis Ideation Mode output format.")
+
+		return "\n".join(parts)
+
+	def _parse_hypothesis_response(self, response: str) -> list[dict]:
+		"""Parse hypothesis ideation JSON response.
+
+		Returns empty list on parse failure.
+		"""
+		cleaned = response.strip()
+		fence_match = re.search(r"```(?:json)?\n(.*?)```", cleaned, re.DOTALL)
+		if fence_match:
+			cleaned = fence_match.group(1).strip()
+
+		try:
+			data = json.loads(cleaned)
+		except json.JSONDecodeError:
+			logger.warning("LLMIdeator: failed to parse hypothesis response as JSON")
+			return []
+
+		return data.get("hypotheses", [])
 
 	def _load_system_prompt(self) -> str:
 		return (_PROMPTS_DIR / "ideator_system.txt").read_text()
