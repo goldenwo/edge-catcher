@@ -915,7 +915,7 @@ class TestBacktestResult:
 
 class TestIntegration:
 	def test_strategy_a_full_backtest(self, tmp_path):
-		"""Full run: Strategy A buys YES at 80, market resolves YES -> win."""
+		"""Full run: YES buyer at 80, market resolves YES -> win."""
 		close = _dt(2)
 		markets = [{
 			'ticker': 'INT-A',
@@ -945,7 +945,7 @@ class TestIntegration:
 		assert result.net_pnl_cents == 20  # 100 - 80
 
 	def test_strategy_c_full_backtest_win(self, tmp_path):
-		"""Strategy C buys NO at (100-15=85), market resolves NO -> win."""
+		"""NO buyer at (100-15=85), market resolves NO -> win."""
 		markets = [{
 			'ticker': 'INT-C',
 			'series_ticker': 'INTSERIES2',
@@ -1053,10 +1053,10 @@ class TestIntegration:
 			},
 		]
 		trades = [
-			# MT-1: Strategy A buys YES at 75 (in range 70-99), resolves YES -> win
+			# MT-1: YES buyer at 75 (in range 70-99), resolves YES -> win
 			{'trade_id': 'mt1', 'ticker': 'MT-1', 'yes_price': 75, 'no_price': 25,
 			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0))},
-			# MT-2: Strategy C buys NO at (100-10=90), resolves NO -> win
+			# MT-2: NO buyer at (100-10=90), resolves NO -> win
 			{'trade_id': 'mt2', 'ticker': 'MT-2', 'yes_price': 10, 'no_price': 90,
 			 'count': 1, 'taker_side': 'yes', 'created_time': _iso(_dt(0))},
 			# Trigger settlement for both
