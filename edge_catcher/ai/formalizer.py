@@ -125,17 +125,11 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
 
 \tcursor = db_conn.cursor()
 
-\t# Single query: join markets with precomputed VWAP, fall back to last_price
+\t# Query settled markets with last_price as implied probability
 \tcursor.execute("""
-\t\tSELECT m.ticker, m.result, m.close_time,
-\t\t\tCOALESCE(v.vwap, m.last_price) / 100.0 AS implied
-\t\tFROM markets m
-\t\tLEFT JOIN (
-\t\t\tSELECT ticker, SUM(CAST(yes_price AS REAL) * count) / SUM(count) AS vwap
-\t\t\tFROM trades GROUP BY ticker
-\t\t) v ON v.ticker = m.ticker
-\t\tWHERE m.result IN ('yes', 'no')
-\t\t\tAND COALESCE(v.vwap, m.last_price) > 0
+\t\tSELECT ticker, result, close_time, last_price / 100.0 AS implied
+\t\tFROM markets
+\t\tWHERE result IN ('yes', 'no') AND last_price > 0
 \t""")
 \tmarkets = cursor.fetchall()
 \ttotal_markets = len(markets)
