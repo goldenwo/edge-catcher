@@ -210,11 +210,7 @@ class PriceBucketBiasTest(StatisticalTest):
 
 
 class LifecycleBiasTest(StatisticalTest):
-	"""Test whether mispricing varies by market age (time since open).
-
-	Detects early-listing mispricing patterns where newly opened markets are
-	systematically mispriced in their initial trading period vs later.
-	"""
+	"""Test whether pricing behavior varies by market age (time since open)."""
 	name: ClassVar[str] = "lifecycle_bias"
 
 	def run(
