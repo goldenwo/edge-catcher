@@ -91,6 +91,28 @@ export interface ResultDetail extends ResultSummary {
   raw_bucket_data: unknown
 }
 
+export interface Paginated<T> {
+  results: T[]
+  total: number
+}
+
+export interface StorageReport {
+  databases: Record<string, { db_size_mb: number; archive_size_mb: number; total_mb: number }>
+  row_counts: Record<string, number>
+}
+
+export interface ArchiveResult {
+  rows_archived: number
+  rows_deleted: number
+  archive_file: string
+}
+
+export interface VacuumResult {
+  before_mb: number
+  after_mb: number
+  saved_mb: number
+}
+
 export interface FormalizeResponse {
   message: string
   error: string | null
@@ -176,13 +198,19 @@ export const api = {
   hypotheses: () => req<Hypothesis[]>('/api/hypotheses'),
   deleteHypothesis: (id: string) =>
     req<{ ok: boolean }>(`/api/hypotheses/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  resultHypothesisIds: () => req<string[]>('/api/results/hypothesis-ids'),
   deleteResult: (run_id: string) =>
     req<{ ok: boolean }>(`/api/results/${encodeURIComponent(run_id)}`, { method: 'DELETE' }),
   deleteBacktest: (task_id: string) =>
     req<{ ok: boolean }>(`/api/backtest/history/${encodeURIComponent(task_id)}`, { method: 'DELETE' }),
   analyze: (hypothesis_id: string | null) =>
     req<Record<string, unknown>>('/api/analyze', json({ hypothesis_id })),
-  results: () => cachedReq<ResultSummary[]>('/api/results', 30_000),
+  results: (limit = 25, offset = 0, filters?: { hypothesis_id?: string; verdict?: string }) => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    if (filters?.hypothesis_id) p.set('hypothesis_id', filters.hypothesis_id)
+    if (filters?.verdict) p.set('verdict', filters.verdict)
+    return req<Paginated<ResultSummary>>(`/api/results?${p}`)
+  },
   result: (run_id: string) => req<ResultDetail>(`/api/results/${run_id}`),
   formalize: (description: string, provider: string | null) =>
     req<FormalizeResponse>('/api/formalize', json({ description, provider })),
@@ -210,8 +238,13 @@ export const api = {
   backtestStatus: (taskId: string) => req<BacktestStatusResp>(`/api/backtest/${taskId}/status`),
   stopBacktest: (taskId: string) => req<{ ok: boolean }>(`/api/backtest/${taskId}/stop`, { method: 'POST' }),
   backtestResult: (taskId: string) => req<Record<string, unknown>>(`/api/backtest/${taskId}/result`),
-  backtestHistory: () => cachedReq<BacktestHistoryItem[]>('/api/backtest/history', 30_000),
+  backtestHistory: (limit = 25, offset = 0) =>
+    req<Paginated<BacktestHistoryItem>>(`/api/backtest/history?limit=${limit}&offset=${offset}`),
   feeInfo: (series: string) => req<FeeInfo>(`/api/series/${encodeURIComponent(series)}/fee-info`),
+  storageReport: () => req<StorageReport>('/api/storage/report'),
+  storageArchive: (days = 90) =>
+    req<Record<string, ArchiveResult>>(`/api/storage/archive?days=${days}`, { method: 'POST' }),
+  storageVacuum: () => req<VacuumResult>('/api/storage/vacuum', { method: 'POST' }),
 }
 
 // ── Research Dashboard ──────────────────────────────────────────────────────

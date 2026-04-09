@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, ResultDetail, ResultSummary } from '../api'
 import Badge from '../components/Badge'
 import ConfirmButton from '../components/ConfirmButton'
+import Pagination from '../components/Pagination'
 
 type SortKey = keyof Pick<ResultSummary, 'run_timestamp' | 'hypothesis_id' | 'verdict'>
 
@@ -22,42 +23,62 @@ export default function Analyze() {
   const [sortAsc, setSortAsc] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Filters
+  // Pagination
+  const PAGE_SIZE = 25
+  const [offset, setOffset] = useState(0)
+  const [total, setTotal] = useState(0)
+
+  // Filters (server-side)
   const [hypFilter, setHypFilter] = useState('')
   const [verdictFilter, setVerdictFilter] = useState('')
+  const [allHypothesisIds, setAllHypothesisIds] = useState<string[]>([])
 
-  const hypothesisIds = useMemo(() => [...new Set(rows.map((r) => r.hypothesis_id))].sort(), [rows])
-
-  useEffect(() => {
-    api.results().then(setRows).catch((e) => setError(String(e)))
+  const loadResults = useCallback((off: number, hypId?: string, verdict?: string) => {
+    const filters = {
+      hypothesis_id: hypId || undefined,
+      verdict: verdict || undefined,
+    }
+    api.results(PAGE_SIZE, off, filters)
+      .then((page) => { setRows(page.results); setTotal(page.total) })
+      .catch((e) => setError(String(e)))
   }, [])
+
+  // Load all hypothesis IDs once for the filter dropdown
+  useEffect(() => {
+    api.resultHypothesisIds().then(setAllHypothesisIds).catch(() => {})
+  }, [])
+
+  useEffect(() => { loadResults(offset, hypFilter, verdictFilter) }, [offset, hypFilter, verdictFilter, loadResults])
+
+  // Reset to page 1 when filters change
+  const applyHypFilter = (v: string) => { setHypFilter(v); setOffset(0) }
+  const applyVerdictFilter = (v: string) => { setVerdictFilter(verdictFilter === v ? '' : v); setOffset(0) }
 
   const sortBy = (key: SortKey) => {
     if (sortKey === key) setSortAsc((a) => !a)
     else { setSortKey(key); setSortAsc(true) }
   }
 
-  const filtered = useMemo(() => rows.filter((r) => {
-    if (hypFilter && r.hypothesis_id !== hypFilter) return false
-    if (verdictFilter && r.verdict !== verdictFilter) return false
-    return true
-  }), [rows, hypFilter, verdictFilter])
-
-  const sorted = [...filtered].sort((a, b) => {
+  const sorted = [...rows].sort((a, b) => {
     const av = a[sortKey] ?? ''
     const bv = b[sortKey] ?? ''
     return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av))
   })
 
-  const deleteResult = async (run_id: string) => {
+  const deleteResult = useCallback(async (run_id: string) => {
     try {
       await api.deleteResult(run_id)
-      setRows((prev) => prev.filter((r) => r.run_id !== run_id))
       if (detail?.run_id === run_id) setDetail(null)
+      // If last item on page, go back one page
+      setOffset((prev) => {
+        const newOff = rows.length <= 1 && prev >= PAGE_SIZE ? prev - PAGE_SIZE : prev
+        loadResults(newOff, hypFilter, verdictFilter)
+        return newOff
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }
+  }, [rows.length, detail, hypFilter, verdictFilter, loadResults])
 
   const loadDetail = async (run_id: string) => {
     setSummary(null)
@@ -101,23 +122,23 @@ export default function Analyze() {
       )}
 
       {/* Filters */}
-      {rows.length > 0 && (
+      {(total > 0 || hypFilter || verdictFilter) && (
         <div className="flex flex-wrap items-center gap-3">
-          {hypothesisIds.length > 1 && (
+          {allHypothesisIds.length > 1 && (
             <select
               value={hypFilter}
-              onChange={(e) => setHypFilter(e.target.value)}
+              onChange={(e) => applyHypFilter(e.target.value)}
               className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             >
               <option value="">All hypotheses</option>
-              {hypothesisIds.map((id) => <option key={id} value={id}>{id}</option>)}
+              {allHypothesisIds.map((id) => <option key={id} value={id}>{id}</option>)}
             </select>
           )}
           <div className="flex gap-1">
             {VERDICTS.map((v) => (
               <button
                 key={v}
-                onClick={() => setVerdictFilter(verdictFilter === v ? '' : v)}
+                onClick={() => applyVerdictFilter(v)}
                 className={`px-2 py-1 rounded text-xs transition-colors ${
                   verdictFilter === v
                     ? 'bg-indigo-700 text-white'
@@ -183,6 +204,13 @@ export default function Analyze() {
           </tbody>
         </table>
       </div>
+
+      <Pagination
+        offset={offset}
+        limit={PAGE_SIZE}
+        total={total}
+        onChange={setOffset}
+      />
 
       {detail && (
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 space-y-4">

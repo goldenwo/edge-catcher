@@ -22,14 +22,14 @@ export default function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [s, results, history] = await Promise.all([
+      const [s, resultsPage, historyPage] = await Promise.all([
         api.status(),
-        api.results(),
-        api.backtestHistory(),
+        api.results(10),
+        api.backtestHistory(10),
       ])
       setStatus(s)
 
-      const analysisItems: ActivityItem[] = (results as ResultSummary[]).map((r) => ({
+      const analysisItems: ActivityItem[] = (resultsPage.results as ResultSummary[]).map((r) => ({
         id: `a-${r.run_id}`,
         type: 'analysis',
         label: r.hypothesis_id,
@@ -38,7 +38,7 @@ export default function Dashboard() {
         verdict: r.verdict,
       }))
 
-      const backtestItems: ActivityItem[] = (history as BacktestHistoryItem[]).map((b) => ({
+      const backtestItems: ActivityItem[] = (historyPage.results as BacktestHistoryItem[]).map((b) => ({
         id: `b-${b.task_id}`,
         type: 'backtest',
         label: b.series,

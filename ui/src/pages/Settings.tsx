@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, AISettings, ModelSettings } from '../api'
+import { api, AISettings, ModelSettings, StorageReport, VacuumResult, ArchiveResult } from '../api'
 
 interface ProviderConfig {
   id: keyof AISettings
@@ -109,6 +109,172 @@ function ProviderCard({
   )
 }
 
+function StorageSection() {
+  const [report, setReport] = useState<StorageReport | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [archiving, setArchiving] = useState(false)
+  const [vacuuming, setVacuuming] = useState(false)
+  const [days, setDays] = useState(90)
+  const [archiveResult, setArchiveResult] = useState<Record<string, ArchiveResult> | null>(null)
+  const [vacuumResult, setVacuumResult] = useState<VacuumResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  function loadReport() {
+    setLoading(true)
+    api.storageReport()
+      .then(setReport)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { loadReport() }, [])
+
+  async function handleArchive() {
+    setArchiving(true)
+    setArchiveResult(null)
+    setError(null)
+    try {
+      const r = await api.storageArchive(days)
+      setArchiveResult(r)
+      loadReport()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setArchiving(false)
+    }
+  }
+
+  async function handleVacuum() {
+    setVacuuming(true)
+    setVacuumResult(null)
+    setError(null)
+    try {
+      const r = await api.storageVacuum()
+      setVacuumResult(r)
+      loadReport()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setVacuuming(false)
+    }
+  }
+
+  const fmtMB = (n: number) => n < 1 ? `${(n * 1024).toFixed(0)} KB` : `${n.toFixed(1)} MB`
+
+  return (
+    <section>
+      <h2 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+        Storage
+      </h2>
+
+      {error && (
+        <p className="text-sm text-red-400 mb-4 bg-red-950 rounded px-3 py-1.5">{error}</p>
+      )}
+
+      {loading && !report && (
+        <p className="text-sm text-gray-500">Loading storage info...</p>
+      )}
+
+      {report && (
+        <div className="space-y-4">
+          {/* DB sizes */}
+          <div className="grid grid-cols-2 gap-3">
+            {Object.entries(report.databases).map(([name, info]) => (
+              <div key={name} className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3">
+                <dt className="text-xs text-gray-500 font-mono">{name}</dt>
+                <dd className="text-lg font-mono mt-1">{fmtMB(info.db_size_mb)}</dd>
+              </div>
+            ))}
+          </div>
+
+          {/* Row counts */}
+          {Object.keys(report.row_counts).length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {Object.entries(report.row_counts).map(([table, count]) => (
+                <div key={table} className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-3">
+                  <dt className="text-xs text-gray-500">{table.replace(/_/g, ' ')}</dt>
+                  <dd className="font-mono mt-1">{count.toLocaleString()}</dd>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Archive */}
+          <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-3">
+            <div>
+              <h3 className="text-sm font-medium text-gray-200">Archive old data</h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Exports rows older than the threshold to compressed CSV, then deletes them from the database.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-gray-400">Keep last</label>
+              <input
+                type="number"
+                value={days}
+                onChange={(e) => setDays(Math.max(1, Number(e.target.value)))}
+                min={1}
+                className="w-20 px-2 py-1.5 rounded bg-gray-800 border border-gray-700 text-sm text-gray-100 focus:outline-none focus:border-indigo-500"
+              />
+              <span className="text-xs text-gray-400">days</span>
+              <button
+                onClick={handleArchive}
+                disabled={archiving}
+                className="ml-auto px-3 py-1.5 rounded bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-sm text-white transition-colors"
+              >
+                {archiving ? 'Archiving...' : 'Archive Now'}
+              </button>
+            </div>
+            {archiveResult && (
+              <div className="text-xs text-gray-400 space-y-1 border-t border-gray-800 pt-3">
+                {Object.entries(archiveResult).map(([key, r]) => (
+                  <div key={key} className="flex justify-between">
+                    <span>{key}</span>
+                    <span className="font-mono">
+                      {r.rows_archived > 0
+                        ? `${r.rows_archived} archived, ${r.rows_deleted} deleted`
+                        : 'nothing to archive'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Vacuum */}
+          <div className="rounded-lg border border-gray-800 bg-gray-900 p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-medium text-gray-200">Vacuum database</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  Defragments the database file and reclaims unused space.
+                </p>
+              </div>
+              <button
+                onClick={handleVacuum}
+                disabled={vacuuming}
+                className="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-sm text-white transition-colors"
+              >
+                {vacuuming ? 'Vacuuming...' : 'Vacuum'}
+              </button>
+            </div>
+            {vacuumResult && (
+              <p className="text-xs text-gray-400 border-t border-gray-800 pt-3">
+                {fmtMB(vacuumResult.before_mb)} → {fmtMB(vacuumResult.after_mb)}
+                {vacuumResult.saved_mb > 0 && (
+                  <span className="text-green-400 ml-2">
+                    (saved {fmtMB(vacuumResult.saved_mb)})
+                  </span>
+                )}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function Settings() {
   const [settings, setSettings] = useState<AISettings | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -202,6 +368,8 @@ export default function Settings() {
           </div>
         )}
       </section>
+
+      <StorageSection />
     </div>
   )
 }
