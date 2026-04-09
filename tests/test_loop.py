@@ -85,8 +85,8 @@ class TestLoopOrchestratorLLMOnly:
              patch.object(orch, "_discover_series", return_value={"data/k.db": ["S1"]}), \
              patch("edge_catcher.research.loop.ResearchAgent"), \
              patch.object(orch, "_run_ideate_phase", return_value=([], 0)) as mock_ideate, \
-             patch.object(orch, "_write_phase_outcomes"), \
-             patch.object(orch, "_write_journal_summary"):
+             patch("edge_catcher.research.observer.ResearchObserver.write_phase_outcomes"), \
+             patch("edge_catcher.research.observer.ResearchObserver.write_journal_summary", return_value="stuck"):
 
             exit_code, results = orch.run()
             # With context engine, cold start is supported — ideate phase runs
@@ -159,9 +159,10 @@ class TestLoopOrchestratorBudget:
 
 class TestWritePhaseOutcomes:
     def test_write_phase_outcomes_handles_unexpected_verdicts(self):
-        """_write_phase_outcomes should not crash on 'candidate' or 'error' verdicts."""
-        loop = LoopOrchestrator.__new__(LoopOrchestrator)
-        loop.run_id = "test-run"
+        """write_phase_outcomes should not crash on 'candidate' or 'error' verdicts."""
+        from edge_catcher.research.observer import ResearchObserver
+
+        observer = ResearchObserver(tracker=MagicMock(), run_id="test-run")
 
         journal = MagicMock()
 
@@ -176,7 +177,7 @@ class TestWritePhaseOutcomes:
         )
 
         # Should not raise KeyError
-        loop._write_phase_outcomes(journal, [error_result], "grid")
+        observer.write_phase_outcomes(journal, [error_result], "grid")
         journal.write_entry.assert_called_once()
         content = journal.write_entry.call_args[0][2]
         assert content["verdicts"]["error"] == 1

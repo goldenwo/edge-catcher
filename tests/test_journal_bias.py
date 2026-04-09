@@ -29,16 +29,15 @@ def _make_result(strategy, series, verdict, sharpe, validation_details=None):
 class TestNearMissObservations:
 	def test_near_miss_written_for_highest_sharpe_kill(self):
 		"""Should write a near-miss observation for the highest-Sharpe killed strategy."""
-		from edge_catcher.research.loop import LoopOrchestrator
+		from edge_catcher.research.observer import ResearchObserver
 
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.run_id = "test-run"
-		orch.tracker = MagicMock()
-		orch.tracker.get_result_by_id.return_value = {
+		tracker = MagicMock()
+		tracker.get_result_by_id.return_value = {
 			"validation_details": json.dumps([
 				{"gate": "monte_carlo", "passed": False, "details": {"p_value": 0.12}},
 			]),
 		}
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		journal = MagicMock()
 		results = [
@@ -47,7 +46,7 @@ class TestNearMissObservations:
 			_make_result("BadStrat", "S3", "kill", -0.5),
 		]
 
-		orch._write_phase_outcomes(journal, results, "ideate")
+		observer.write_phase_outcomes(journal, results, "ideate")
 
 		# Check that a near-miss observation was written
 		calls = journal.write_entry.call_args_list
@@ -60,15 +59,14 @@ class TestNearMissObservations:
 
 	def test_no_near_miss_when_no_kills(self):
 		"""Should not write near-miss if there are no kills."""
-		from edge_catcher.research.loop import LoopOrchestrator
+		from edge_catcher.research.observer import ResearchObserver
 
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.run_id = "test-run"
-		orch.tracker = MagicMock()
+		tracker = MagicMock()
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 		journal = MagicMock()
 		results = [_make_result("GoodStrat", "S1", "promote", 1.5)]
 
-		orch._write_phase_outcomes(journal, results, "ideate")
+		observer.write_phase_outcomes(journal, results, "ideate")
 
 		calls = journal.write_entry.call_args_list
 		near_miss_calls = [
@@ -81,12 +79,10 @@ class TestNearMissObservations:
 class TestGateMarginAnnotations:
 	def test_promote_observation_includes_gate_margins(self):
 		"""Promoted strategy observations should include gate pass details."""
-		from edge_catcher.research.loop import LoopOrchestrator
+		from edge_catcher.research.observer import ResearchObserver
 
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = MagicMock()
-		orch.run_id = "test-run"
-		orch.tracker.get_result_by_id.return_value = {
+		tracker = MagicMock()
+		tracker.get_result_by_id.return_value = {
 			"validation_details": json.dumps([
 				{"gate": "monte_carlo", "passed": True, "details": {"p_value": 0.02}},
 				{"gate": "deflated_sharpe", "passed": True, "details": {"dsr_margin": 0.3}},
@@ -94,19 +90,15 @@ class TestGateMarginAnnotations:
 				{"gate": "param_sensitivity", "passed": True, "details": {"neighbors_passing": 3, "neighbors_tested": 4}},
 			]),
 		}
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		journal = MagicMock()
 		results = [_make_result("GoodStrat", "S1", "promote", 1.5)]
 
-		# Call _write_journal_summary since that's where promote observations live
-		# We need to set up the method properly
-		orch._consecutive_stuck = 0
-
-		# Actually, promote observations are in _write_journal_summary
-		# We need to mock the journal and classify_trajectory
+		# promote observations are in write_journal_summary
 		from edge_catcher.research.journal import ResearchJournal
 		with patch.object(ResearchJournal, 'classify_trajectory', return_value='improving'):
-			orch._write_journal_summary(journal, results, prev_content=None)
+			observer.write_journal_summary(journal, results, prev_content=None)
 
 		calls = journal.write_entry.call_args_list
 		# Find the promote observation

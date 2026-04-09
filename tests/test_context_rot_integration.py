@@ -35,18 +35,16 @@ def _make_result(strategy, series, verdict, reason="test", sharpe=0.5):
 
 class TestKillRegistryIntegration:
 	def test_kill_registry_populated_after_update(self, tracker):
-		"""After saving results with high kill rate, _update_kill_registry should populate it."""
+		"""After saving results with high kill rate, update_kill_registry should populate it."""
+		from edge_catcher.research.observer import ResearchObserver
+
 		# Pre-populate tracker with kills (4 kills = 100% kill rate, meets >=3 series threshold)
 		for series in ["S1", "S2", "S3", "S4"]:
 			r = _make_result("BadStrat", series, "kill", "low sharpe")
 			tracker.save_result(r)
 
-		# Create orchestrator with this tracker
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
-
-		orch._update_kill_registry()
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
+		observer.update_kill_registry()
 
 		entries = tracker.list_kill_registry()
 		assert len(entries) == 1
@@ -54,15 +52,14 @@ class TestKillRegistryIntegration:
 
 	def test_kill_registry_empty_when_below_threshold(self, tracker):
 		"""Strategy with only 2 series tested should not enter kill registry."""
+		from edge_catcher.research.observer import ResearchObserver
+
 		for series in ["S1", "S2"]:
 			r = _make_result("FewTests", series, "kill", "low sharpe")
 			tracker.save_result(r)
 
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
-
-		orch._update_kill_registry()
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
+		observer.update_kill_registry()
 
 		assert tracker.list_kill_registry() == []
 
@@ -179,17 +176,17 @@ class TestStuckBreakerIntegration:
 
 	def test_kill_registry_and_stuck_can_coexist(self, tracker, tmp_path):
 		"""Kill registry updates and stuck budget detection should work together."""
+		from edge_catcher.research.observer import ResearchObserver
+
 		# Add kill results
 		for series in ["S1", "S2", "S3", "S4"]:
 			r = _make_result("DeadStrategy", series, "kill", "negative pnl")
 			tracker.save_result(r)
 
-		orch = LoopOrchestrator.__new__(LoopOrchestrator)
-		orch.tracker = tracker
-		orch._cached_results = None
+		observer = ResearchObserver(tracker=tracker, run_id="test-run")
 
 		# Update kill registry
-		orch._update_kill_registry()
+		observer.update_kill_registry()
 
 		# Verify registry populated
 		entries = tracker.list_kill_registry()
