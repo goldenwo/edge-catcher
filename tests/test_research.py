@@ -1108,17 +1108,19 @@ class TestGateHelpers:
 # ---------------------------------------------------------------------------
 
 class TestLoopJournalIntegration:
-    def _make_orch(self, tmp_path):
-        from edge_catcher.research.loop import LoopOrchestrator
-        return LoopOrchestrator(research_db=str(tmp_path / "research.db"))
+    def _make_observer(self, tmp_path):
+        from edge_catcher.research.observer import ResearchObserver
+        from edge_catcher.research.tracker import Tracker
+        tracker = Tracker(str(tmp_path / "research.db"))
+        return ResearchObserver(tracker=tracker, run_id="test-run")
 
     def _make_journal(self, tmp_path):
         from edge_catcher.research.journal import ResearchJournal
         return ResearchJournal(db_path=str(tmp_path / "research.db"))
 
     def test_write_phase_outcomes(self, tmp_path):
-        """_write_phase_outcomes writes one outcome entry per strategy."""
-        orch = self._make_orch(tmp_path)
+        """write_phase_outcomes writes one outcome entry per strategy."""
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         results = [
@@ -1130,7 +1132,7 @@ class TestLoopJournalIntegration:
                          verdict_reason="bad", sharpe=0.5, total_trades=50),
         ]
 
-        orch._write_phase_outcomes(journal, results, "grid")
+        observer.write_phase_outcomes(journal, results, "grid")
 
         entries = journal.read_recent()
         # Two strategies → two outcome entries (plus one near-miss observation)
@@ -1143,7 +1145,7 @@ class TestLoopJournalIntegration:
 
     def test_write_phase_outcomes_verdict_aggregation(self, tmp_path):
         """Verdicts for same strategy are summed across series."""
-        orch = self._make_orch(tmp_path)
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         results = [
@@ -1155,7 +1157,7 @@ class TestLoopJournalIntegration:
                          verdict_reason="bad2", sharpe=0.4, total_trades=40),
         ]
 
-        orch._write_phase_outcomes(journal, results, "grid")
+        observer.write_phase_outcomes(journal, results, "grid")
 
         entries = journal.read_recent()
         # One strategy → one outcome entry (plus one near-miss observation)
@@ -1167,14 +1169,14 @@ class TestLoopJournalIntegration:
 
     def test_write_phase_outcomes_empty(self, tmp_path):
         """Empty results list produces no journal entries."""
-        orch = self._make_orch(tmp_path)
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
-        orch._write_phase_outcomes(journal, [], "grid")
+        observer.write_phase_outcomes(journal, [], "grid")
         assert journal.read_recent() == []
 
     def test_write_journal_summary_trajectory(self, tmp_path):
-        """_write_journal_summary writes a trajectory entry with correct fields."""
-        orch = self._make_orch(tmp_path)
+        """write_journal_summary writes a trajectory entry with correct fields."""
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         results = [
@@ -1184,7 +1186,7 @@ class TestLoopJournalIntegration:
                          sharpe=0.5, total_trades=50),
         ]
 
-        orch._write_journal_summary(journal, results)
+        observer.write_journal_summary(journal, results)
 
         entries = journal.read_recent()
         trajectory_entries = [e for e in entries if e["entry_type"] == "trajectory"]
@@ -1198,7 +1200,7 @@ class TestLoopJournalIntegration:
 
     def test_write_journal_summary_observations(self, tmp_path):
         """Promoted results generate observation entries."""
-        orch = self._make_orch(tmp_path)
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         results = [
@@ -1207,7 +1209,7 @@ class TestLoopJournalIntegration:
                          total_trades=120, win_rate=0.75, net_pnl_cents=800.0),
         ]
 
-        orch._write_journal_summary(journal, results)
+        observer.write_journal_summary(journal, results)
 
         entries = journal.read_recent()
         observation_entries = [e for e in entries if e["entry_type"] == "observation"]
@@ -1217,7 +1219,7 @@ class TestLoopJournalIntegration:
 
     def test_write_journal_summary_high_kill_rate_observation(self, tmp_path):
         """Strategy with >80% kill rate across >=3 series gets an observation entry."""
-        orch = self._make_orch(tmp_path)
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         # LoserStrat: 4 kills out of 4 series
@@ -1227,7 +1229,7 @@ class TestLoopJournalIntegration:
             for i in range(4)
         ]
 
-        orch._write_journal_summary(journal, results)
+        observer.write_journal_summary(journal, results)
 
         entries = journal.read_recent()
         observations = [e for e in entries if e["entry_type"] == "observation"]
@@ -1236,7 +1238,7 @@ class TestLoopJournalIntegration:
 
     def test_write_journal_summary_low_trade_observation(self, tmp_path):
         """Strategy averaging <50 trades across >=2 series gets an observation entry."""
-        orch = self._make_orch(tmp_path)
+        observer = self._make_observer(tmp_path)
         journal = self._make_journal(tmp_path)
 
         results = [
@@ -1246,7 +1248,7 @@ class TestLoopJournalIntegration:
                          verdict_reason="few trades", sharpe=0.4, total_trades=15),
         ]
 
-        orch._write_journal_summary(journal, results)
+        observer.write_journal_summary(journal, results)
 
         entries = journal.read_recent()
         observations = [e for e in entries if e["entry_type"] == "observation"]
