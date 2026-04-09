@@ -204,7 +204,11 @@ export const api = {
   deleteBacktest: (task_id: string) =>
     req<{ ok: boolean }>(`/api/backtest/history/${encodeURIComponent(task_id)}`, { method: 'DELETE' }),
   analyze: (hypothesis_id: string | null) =>
-    req<Record<string, unknown>>('/api/analyze', json({ hypothesis_id })),
+    req<{ task_id: string }>('/api/analyze', json({ hypothesis_id })),
+  analyzeStatus: (taskId: string) =>
+    req<{ running: boolean; progress: string; error: string | null }>(`/api/analyze/${taskId}/status`),
+  analyzeResult: (taskId: string) =>
+    req<Record<string, unknown>>(`/api/analyze/${taskId}/result`),
   results: (limit = 25, offset = 0, filters?: { hypothesis_id?: string; verdict?: string }) => {
     const p = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     if (filters?.hypothesis_id) p.set('hypothesis_id', filters.hypothesis_id)
