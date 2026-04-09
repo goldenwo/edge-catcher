@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, FormalizeResponse, Hypothesis } from '../api'
 import Badge from '../components/Badge'
+import ConfirmButton from '../components/ConfirmButton'
 
 interface RunResult {
   verdict?: string
@@ -29,6 +30,34 @@ export default function Hypotheses() {
   const [provider, setProvider] = useState<Provider | ''>('')
   const [loading, setLoading] = useState(false)
   const [formalizeResult, setFormalizeResult] = useState<FormalizeResponse | null>(null)
+  const [newHypothesisId, setNewHypothesisId] = useState<string | null>(null)
+
+  // Filters
+  const [search, setSearch] = useState('')
+  const [marketFilter, setMarketFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+
+  const markets = useMemo(() => [...new Set(hypotheses.map((h) => h.market))].sort(), [hypotheses])
+  const statuses = useMemo(() => [...new Set(hypotheses.map((h) => h.status))].sort(), [hypotheses])
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase()
+    return hypotheses.filter((h) => {
+      if (q && !h.name.toLowerCase().includes(q) && !h.id.toLowerCase().includes(q)) return false
+      if (marketFilter && h.market !== marketFilter) return false
+      if (statusFilter && h.status !== statusFilter) return false
+      return true
+    })
+  }, [hypotheses, search, marketFilter, statusFilter])
+
+  const deleteHypothesis = async (id: string) => {
+    try {
+      await api.deleteHypothesis(id)
+      setHypotheses((prev) => prev.filter((h) => h.id !== id))
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const loadHypotheses = () => {
     api.hypotheses().then(setHypotheses).catch((e) => setListError(String(e)))
@@ -72,16 +101,19 @@ export default function Hypotheses() {
       const r = await api.formalize(description.trim(), provider || null)
       setFormalizeResult(r)
       if (!r.error) {
-        // Switch to list tab and refresh
+        // Switch to list tab, refresh, and highlight the new hypothesis
+        setNewHypothesisId(r.hypothesis_id)
         loadHypotheses()
         setDescription('')
         setProvider('')
         setTab('list')
+        setTimeout(() => setNewHypothesisId(null), 5000)
       }
     } catch (e) {
       setFormalizeResult({
         message: '',
         error: e instanceof Error ? e.message : String(e),
+        hypothesis_id: null,
       })
     } finally {
       setLoading(false)
@@ -121,6 +153,44 @@ export default function Hypotheses() {
             </div>
           )}
 
+          {/* Filters */}
+          {hypotheses.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by name or ID..."
+                className="flex-1 min-w-[200px] rounded border border-gray-700 bg-gray-900 px-3 py-1.5 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+              {markets.length > 1 && (
+                <select
+                  value={marketFilter}
+                  onChange={(e) => setMarketFilter(e.target.value)}
+                  className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">All markets</option>
+                  {markets.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              )}
+              <div className="flex gap-1">
+                {statuses.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setStatusFilter(statusFilter === s ? '' : s)}
+                    className={`px-2 py-1 rounded text-xs transition-colors ${
+                      statusFilter === s
+                        ? 'bg-indigo-700 text-white'
+                        : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+                    }`}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {hypotheses.length === 0 && !listError && (
             <p className="text-sm text-gray-500">
               No hypotheses configured.{' '}
@@ -134,10 +204,14 @@ export default function Hypotheses() {
           )}
 
           <div className="space-y-3">
-            {hypotheses.map((h) => (
+            {filtered.map((h) => (
               <div
                 key={h.id}
-                className="rounded-lg border border-gray-800 bg-gray-900 px-5 py-4"
+                className={`rounded-lg border px-5 py-4 transition-colors duration-700 ${
+                  newHypothesisId === h.id
+                    ? 'border-indigo-500 bg-indigo-950/40'
+                    : 'border-gray-800 bg-gray-900'
+                }`}
               >
                 <div className="flex items-start justify-between gap-4">
                   <div>
@@ -152,13 +226,22 @@ export default function Hypotheses() {
                       </span>
                     </div>
                   </div>
-                  <button
-                    onClick={() => runAnalysis(h.id)}
-                    disabled={running[h.id]}
-                    className="shrink-0 px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-sm transition-colors"
-                  >
-                    {running[h.id] ? 'Running…' : 'Run Analysis'}
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {h.source === 'local' && (
+                      <ConfirmButton
+                        onConfirm={() => deleteHypothesis(h.id)}
+                        label="Delete"
+                        confirmText="Delete?"
+                      />
+                    )}
+                    <button
+                      onClick={() => runAnalysis(h.id)}
+                      disabled={running[h.id]}
+                      className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-sm transition-colors"
+                    >
+                      {running[h.id] ? 'Running…' : 'Run Analysis'}
+                    </button>
+                  </div>
                 </div>
 
                 {results[h.id] && (
@@ -175,6 +258,9 @@ export default function Hypotheses() {
                 )}
               </div>
             ))}
+            {hypotheses.length > 0 && filtered.length === 0 && (
+              <p className="text-sm text-gray-500">No hypotheses match your filters.</p>
+            )}
           </div>
         </>
       )}

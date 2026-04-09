@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, ResultDetail, ResultSummary } from '../api'
 import Badge from '../components/Badge'
+import ConfirmButton from '../components/ConfirmButton'
 
 type SortKey = keyof Pick<ResultSummary, 'run_timestamp' | 'hypothesis_id' | 'verdict'>
+
+const VERDICTS = ['EDGE_EXISTS', 'INCONCLUSIVE', 'NO_EDGE', 'EDGE_NOT_TRADEABLE', 'INSUFFICIENT_DATA'] as const
 
 function fmt(n: number | null | undefined, decimals = 4) {
   return n == null ? '—' : n.toFixed(decimals)
@@ -19,6 +22,12 @@ export default function Analyze() {
   const [sortAsc, setSortAsc] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Filters
+  const [hypFilter, setHypFilter] = useState('')
+  const [verdictFilter, setVerdictFilter] = useState('')
+
+  const hypothesisIds = useMemo(() => [...new Set(rows.map((r) => r.hypothesis_id))].sort(), [rows])
+
   useEffect(() => {
     api.results().then(setRows).catch((e) => setError(String(e)))
   }, [])
@@ -28,11 +37,27 @@ export default function Analyze() {
     else { setSortKey(key); setSortAsc(true) }
   }
 
-  const sorted = [...rows].sort((a, b) => {
+  const filtered = useMemo(() => rows.filter((r) => {
+    if (hypFilter && r.hypothesis_id !== hypFilter) return false
+    if (verdictFilter && r.verdict !== verdictFilter) return false
+    return true
+  }), [rows, hypFilter, verdictFilter])
+
+  const sorted = [...filtered].sort((a, b) => {
     const av = a[sortKey] ?? ''
     const bv = b[sortKey] ?? ''
     return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av))
   })
+
+  const deleteResult = async (run_id: string) => {
+    try {
+      await api.deleteResult(run_id)
+      setRows((prev) => prev.filter((r) => r.run_id !== run_id))
+      if (detail?.run_id === run_id) setDetail(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   const loadDetail = async (run_id: string) => {
     setSummary(null)
@@ -75,6 +100,37 @@ export default function Analyze() {
         </div>
       )}
 
+      {/* Filters */}
+      {rows.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3">
+          {hypothesisIds.length > 1 && (
+            <select
+              value={hypFilter}
+              onChange={(e) => setHypFilter(e.target.value)}
+              className="rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            >
+              <option value="">All hypotheses</option>
+              {hypothesisIds.map((id) => <option key={id} value={id}>{id}</option>)}
+            </select>
+          )}
+          <div className="flex gap-1">
+            {VERDICTS.map((v) => (
+              <button
+                key={v}
+                onClick={() => setVerdictFilter(verdictFilter === v ? '' : v)}
+                className={`px-2 py-1 rounded text-xs transition-colors ${
+                  verdictFilter === v
+                    ? 'bg-indigo-700 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {v.replace(/_/g, ' ')}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded-lg border border-gray-800">
         <table className="w-full text-sm">
           <thead className="border-b border-gray-800 bg-gray-900">
@@ -85,6 +141,7 @@ export default function Analyze() {
                 Fee-adj Edge
               </th>
               <Th col="run_timestamp" label="Timestamp" />
+              <th className="w-8" />
             </tr>
           </thead>
           <tbody>
@@ -104,12 +161,19 @@ export default function Analyze() {
                 <td className="px-4 py-3 text-gray-400 text-xs">
                   {new Date(r.run_timestamp).toLocaleString()}
                 </td>
+                <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
+                  <ConfirmButton
+                    onConfirm={() => deleteResult(r.run_id)}
+                    label="Delete"
+                    confirmText="Delete?"
+                  />
+                </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={4}
+                  colSpan={5}
                   className="px-4 py-8 text-center text-gray-500 text-sm"
                 >
                   No results yet.
