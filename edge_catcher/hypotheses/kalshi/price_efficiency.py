@@ -39,9 +39,7 @@ KEY STATISTICAL CONCEPTS USED HERE:
 from __future__ import annotations
 
 import json
-import math
 import uuid
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -49,6 +47,9 @@ from typing import Optional
 import yaml
 from statsmodels.stats.proportion import proportions_ztest
 
+from edge_catcher.research.stats_utils import (
+	clustered_z, wilson_ci, fee_adjusted_edge,
+)
 from edge_catcher.storage.models import BucketResult, HypothesisResult
 
 # ── Identity ──────────────────────────────────────────────────────────────────
@@ -126,70 +127,6 @@ def _bucket_for(prob: float) -> Optional[tuple]:
             return (lo, hi)
     return None
 
-
-def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score confidence interval — better than Wald near 0 and 1."""
-    if n == 0:
-        return (0.0, 0.0)
-    p = wins / n
-    denom = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / denom
-    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return (max(0.0, centre - margin), min(1.0, centre + margin))
-
-
-def _clustered_z(rows: list[tuple]) -> tuple[float, float, int]:
-    """Compute a clustered z-statistic grouped by expiration date.
-
-    WHY CLUSTER? Contracts expiring on the same day share the same underlying
-    market conditions. Treating them as independent observations overstates
-    your effective sample size. Clustering by date gives a conservative,
-    honest estimate of statistical significance.
-
-    Each row is (implied_prob, won: bool, close_date: str|None).
-    Returns (z_stat, p_value, n_clusters).
-    """
-    from scipy.stats import norm
-
-    clusters: dict = defaultdict(lambda: {"wins": 0, "n": 0, "implied": []})
-    for implied, won, close_date in rows:
-        key = close_date or "__no_date__"
-        clusters[key]["wins"] += int(won)
-        clusters[key]["n"] += 1
-        clusters[key]["implied"].append(implied)
-
-    if len(clusters) < 2:
-        return (0.0, 1.0, len(clusters))
-
-    excess = []
-    for c in clusters.values():
-        mean_implied = sum(c["implied"]) / len(c["implied"])
-        excess.append(c["wins"] / c["n"] - mean_implied)
-
-    k = len(excess)
-    mean_exc = sum(excess) / k
-    var = sum((x - mean_exc) ** 2 for x in excess) / (k - 1)
-    se = math.sqrt(var / k)
-    if se == 0:
-        return (0.0, 1.0, k)
-
-    z = mean_exc / se
-    p = 2 * (1 - norm.cdf(abs(z)))
-    return (z, p, k)
-
-
-def _fee_adjusted_edge(edge: float, implied: float, maker_fee: float) -> float:
-    """Subtract Kalshi's percent-of-profit maker fee from raw edge.
-
-    Kalshi charges fee * (1 - yes_price) per YES contract when you win.
-    For a contract priced at 5 cents, you risk 5 cents to win 95 cents,
-    and Kalshi takes maker_fee * 95 cents from your winnings.
-
-    NOTE: For longshots (low implied probability), the fee is large relative
-    to the potential win — (1 - implied) is close to 1.0. This makes fees
-    especially punishing in the longshot zone.
-    """
-    return edge - maker_fee * (1.0 - implied)
 
 
 # ── Main run function ─────────────────────────────────────────────────────────
@@ -295,9 +232,9 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
         edge = actual_win_rate - mean_implied
 
         z_naive, p_naive = proportions_ztest(wins, n, mean_implied)
-        z_clust, p_clust, n_clust = _clustered_z(rows)
-        fee_adj = _fee_adjusted_edge(edge, mean_implied, maker_fee)
-        ci_lo, ci_hi = _wilson_ci(wins, n)
+        z_clust, p_clust, n_clust = clustered_z(rows)
+        fee_adj = fee_adjusted_edge(edge, mean_implied, maker_fee)
+        ci_lo, ci_hi = wilson_ci(wins, n)
 
         bucket_results.append(BucketResult(
             bucket_lo=lo, bucket_hi=hi, n=n, n_clustered=n_clust,
@@ -333,9 +270,9 @@ def run(db_conn, config_path: Path = Path("config")) -> HypothesisResult:
     overall_z_naive, overall_p_naive = proportions_ztest(total_wins, total_n, overall_implied)
 
     all_rows = [row for b in bucket_results for row in bucket_data[(b.bucket_lo, b.bucket_hi)]]
-    overall_z_clust, overall_p_clust, _ = _clustered_z(all_rows)
-    overall_fee_adj = _fee_adjusted_edge(overall_edge, overall_implied, maker_fee)
-    ci_lo, ci_hi = _wilson_ci(total_wins, total_n)
+    overall_z_clust, overall_p_clust, _ = clustered_z(all_rows)
+    overall_fee_adj = fee_adjusted_edge(overall_edge, overall_implied, maker_fee)
+    ci_lo, ci_hi = wilson_ci(total_wins, total_n)
 
     # ── Verdict ────────────────────────────────────────────────────────────────
     if total_clusters < min_clusters:
