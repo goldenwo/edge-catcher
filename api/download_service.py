@@ -54,6 +54,8 @@ def run_kalshi_download(
 				conn.commit()
 				markets_count += len(page_markets)
 				state.progress = f"Markets: {markets_count} fetched"
+				if hasattr(state, 'markets_fetched'):
+					state.markets_fetched = markets_count
 
 			existing_tickers = {
 				r[0] for r in conn.execute("SELECT DISTINCT ticker FROM trades")
@@ -138,31 +140,21 @@ def run_coinbase_download(
 def run_legacy_download(download_state) -> None:
 	"""Wrapper for the legacy /api/download endpoint.
 
-	Creates an AdapterDownloadState and delegates to run_kalshi_download,
-	mirroring progress into the legacy download_state singleton.
+	Passes download_state directly to run_kalshi_download so progress updates
+	are reflected in real-time. The legacy state gains rows_fetched via
+	duck-typing; trades_fetched is mirrored from it after completion.
 	"""
-	from datetime import datetime, timezone
-
-	# Create a temporary adapter state to drive run_kalshi_download
-	adapter_state = AdapterDownloadState()
-
-	# Mirror initial state
 	download_state.running = True
 	download_state.progress = "Initializing..."
 	download_state.markets_fetched = 0
 	download_state.trades_fetched = 0
 	download_state.error = None
+	download_state.rows_fetched = 0  # duck-type compatibility with AdapterDownloadState
 
-	try:
-		run_kalshi_download("kalshi", adapter_state)
-	finally:
-		# Mirror final state back to the legacy singleton
-		download_state.running = adapter_state.running
-		download_state.progress = adapter_state.progress
-		download_state.error = adapter_state.error
-		download_state.trades_fetched = adapter_state.rows_fetched
-		if adapter_state.last_run:
-			download_state.last_run = adapter_state.last_run
+	run_kalshi_download("kalshi", download_state)
+
+	# Mirror adapter field name to legacy field name
+	download_state.trades_fetched = getattr(download_state, 'rows_fetched', 0)
 
 
 def adapter_has_data(meta) -> bool:
