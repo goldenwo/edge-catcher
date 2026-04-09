@@ -136,10 +136,11 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 		with open(result_path, "w") as f:
 			json.dump(result_dict, f, indent=2, default=str)
 
-		# Index in DB
+		# Index in primary DB (not the market-data DB) so history is centralized
 		from edge_catcher.storage.db import get_connection, init_db
-		init_db(db_path)
-		conn = get_connection(db_path)
+		results_db = _validate_db("kalshi.db")
+		init_db(results_db)
+		conn = get_connection(results_db)
 		try:
 			conn.execute(
 				"""INSERT OR REPLACE INTO backtest_results
