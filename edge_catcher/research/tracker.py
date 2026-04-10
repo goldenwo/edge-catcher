@@ -124,6 +124,9 @@ class Tracker:
 
     def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=timeout)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -555,11 +558,40 @@ class Tracker:
             conn.close()
         return row_id
 
+    def count_hypothesis_results(
+        self,
+        test_type: str | None = None,
+        series: str | None = None,
+        verdict: str | None = None,
+    ) -> int:
+        """Count hypothesis results with optional filters."""
+        conn = self._connect()
+        try:
+            query = "SELECT COUNT(*) FROM hypothesis_results"
+            clauses: list[str] = []
+            params: list = []
+            if test_type is not None:
+                clauses.append("test_type = ?")
+                params.append(test_type)
+            if series is not None:
+                clauses.append("series = ?")
+                params.append(series)
+            if verdict is not None:
+                clauses.append("verdict = ?")
+                params.append(verdict)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            return conn.execute(query, params).fetchone()[0]
+        finally:
+            conn.close()
+
     def list_hypothesis_results(
         self,
         test_type: str | None = None,
         series: str | None = None,
         verdict: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> list[dict]:
         """List hypothesis results with optional filters."""
         conn = self._connect()
@@ -579,6 +611,12 @@ class Tracker:
             if clauses:
                 query += " WHERE " + " AND ".join(clauses)
             query += " ORDER BY created_at DESC"
+            if limit is not None:
+                query += f" LIMIT {int(limit)}"
+            if offset is not None:
+                if limit is None:
+                    query += " LIMIT -1"
+                query += f" OFFSET {int(offset)}"
             rows = conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
         finally:

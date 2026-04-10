@@ -191,10 +191,9 @@ def list_results(
 ) -> dict:
     from edge_catcher.research.tracker import Tracker
     tracker = Tracker(str(_research_db_path()))
-    rows = tracker.list_hypothesis_results(series=hypothesis_id, verdict=verdict)
-    total = len(rows)
-    page = rows[offset:offset + limit]
-    return {"results": page, "total": total}
+    total = tracker.count_hypothesis_results(series=hypothesis_id, verdict=verdict)
+    rows = tracker.list_hypothesis_results(series=hypothesis_id, verdict=verdict, limit=limit, offset=offset)
+    return {"results": rows, "total": total}
 
 
 @app.get("/api/results/hypothesis-ids")
