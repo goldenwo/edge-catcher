@@ -6,6 +6,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from .agent import ResearchAgent
 from .tracker import Tracker
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class ExportCollector:
 
 		results = self._collect_results(verdicts)
 		strategies = self._group_by_strategy(results)
+		self._attach_source(strategies)
 
 		return {
 			"version": 1,
@@ -43,6 +45,11 @@ class ExportCollector:
 		for verdict in verdicts:
 			all_results.extend(self.tracker.list_results(verdict=verdict))
 		return all_results
+
+	def _attach_source(self, strategies: dict) -> None:
+		"""Read strategy source code from strategies_local.py."""
+		for name in strategies:
+			strategies[name]["source"] = ResearchAgent.read_strategy_code(name)
 
 	def _group_by_strategy(self, results: list[dict]) -> dict:
 		"""Group results by strategy name into the bundle format."""
