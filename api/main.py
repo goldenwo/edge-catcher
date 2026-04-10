@@ -283,7 +283,9 @@ def interpret_result(
 
     from edge_catcher.research.tracker import Tracker
     tracker = Tracker(str(_research_db_path()))
-    result = tracker.get_result_by_id(body.run_id)
+    result = tracker.get_hypothesis_result_by_id(body.run_id)
+    if not result:
+        result = tracker.get_result_by_id(body.run_id)
     if not result:
         raise HTTPException(status_code=404, detail=f"Run {body.run_id!r} not found")
     report_data = {body.run_id: result}
