@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -48,8 +49,17 @@ async def discord_notify(text: str) -> None:
 		pass
 
 
+_notify_fn: Callable[[str], Awaitable[None]] = discord_notify
+
+
+def set_notify_backend(fn: Callable[[str], Awaitable[None]]) -> None:
+	"""Replace the notification backend (default: discord_notify)."""
+	global _notify_fn
+	_notify_fn = fn
+
+
 def notify(text: str) -> None:
-	"""Schedule a Discord notification from sync context (requires a running event loop).
+	"""Schedule a notification from sync context (requires a running event loop).
 
 	Bounded: drops notifications if more than _MAX_PENDING are in flight.
 	"""
@@ -67,6 +77,6 @@ def notify(text: str) -> None:
 		logger.debug("Notification queue full (%d pending), dropping: %s", len(_pending_tasks), text[:80])
 		return
 
-	task = loop.create_task(discord_notify(text))
+	task = loop.create_task(_notify_fn(text))
 	_pending_tasks.add(task)
 	task.add_done_callback(_pending_tasks.discard)

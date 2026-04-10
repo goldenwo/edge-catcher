@@ -37,6 +37,21 @@ from edge_catcher.monitors.trade_store import TradeStore
 log = logging.getLogger(__name__)
 
 
+def _pnl_label(pnl: int | None) -> tuple[str, str]:
+	"""Return (outcome, pnl_str) for a trade's PnL value.
+
+	outcome: 'WIN', 'LOSS', or 'SCRATCH'
+	pnl_str: '+7¢', '-3¢', '0¢', or '?' if None
+	"""
+	if pnl is None:
+		return "?", "?"
+	if pnl > 0:
+		return "WIN", f"{pnl:+d}¢"
+	if pnl < 0:
+		return "LOSS", f"{pnl:+d}¢"
+	return "SCRATCH", "0¢"
+
+
 # ---------------------------------------------------------------------------
 # Part 1: Synchronous signal pipeline (testable)
 # ---------------------------------------------------------------------------
@@ -156,15 +171,13 @@ def _handle_exit(
 
 	# Read back PnL from DB (includes fee deduction)
 	exited = store.get_trade_by_id(signal.trade_id)
-	if exited:
-		pnl = exited.get("pnl_cents")
-		pnl_str = f" PnL={pnl:+d}¢" if pnl is not None else ""
-	else:
-		pnl_str = ""
+	pnl = exited.get("pnl_cents") if exited else None
+	_, pnl_str = _pnl_label(pnl)
+	pnl_part = f" PnL={pnl_str}" if pnl is not None else ""
 
 	msg = (
 		f"EXIT {signal.strategy} {signal.side} {signal.ticker} "
-		f"@ {exit_price}c{pnl_str} — {signal.reason} [id={signal.trade_id}]"
+		f"@ {exit_price}c{pnl_part} — {signal.reason} [id={signal.trade_id}]"
 	)
 	log.info(msg)
 	notify(msg)
@@ -193,12 +206,8 @@ async def _settlement_poller(
 					store.settle_trade(trade["id"], result)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
-					if settled:
-						pnl = settled.get("pnl_cents")
-						outcome = "WIN" if (pnl is not None and pnl > 0) else ("LOSS" if (pnl is not None and pnl < 0) else "SCRATCH")
-						pnl_str = f"{pnl:+d}¢" if pnl is not None else "?"
-					else:
-						outcome, pnl_str = result.upper(), "?"
+					pnl = settled.get("pnl_cents") if settled else None
+					outcome, pnl_str = _pnl_label(pnl)
 					msg = (
 						f"SETTLED {trade['strategy']} {trade.get('side', '?')} {trade['ticker']} "
 						f"→ {outcome} {pnl_str} [id={trade['id']}]"
@@ -233,19 +242,11 @@ async def _summary_logger(
 			log.exception("Summary logger error")
 
 
-# Strategies that have mutated state since last flush
-_dirty_strategies: set[str] = set()
-
-
-def mark_state_dirty(strategy_name: str) -> None:
-	"""Mark a strategy's state as needing a flush."""
-	_dirty_strategies.add(strategy_name)
-
-
 async def _state_flusher(
 	store: TradeStore,
 	strategies: list[PaperStrategy],
 	pending_states: dict[str, dict],
+	dirty: set[str],
 	interval: int = 5,
 ) -> None:
 	"""Periodically flush dirty strategy state to SQLite.
@@ -256,8 +257,8 @@ async def _state_flusher(
 	while True:
 		await asyncio.sleep(interval)
 		try:
-			to_flush = _dirty_strategies.copy()
-			_dirty_strategies.clear()
+			to_flush = dirty.copy()
+			dirty.clear()
 			for name in to_flush:
 				state = pending_states.get(name)
 				if state is not None:
@@ -388,6 +389,7 @@ async def run_engine(config_path: Path) -> None:
 
 		# 6. Start background tasks
 		ws_ref: list[Any] = [None]
+		dirty_strategies: set[str] = set()
 		tasks = [
 			asyncio.create_task(
 				_settlement_poller(store, client, strategies, pending_states),
@@ -398,7 +400,7 @@ async def run_engine(config_path: Path) -> None:
 				name="summary_logger",
 			),
 			asyncio.create_task(
-				_state_flusher(store, strategies, pending_states, interval=state_flush_interval),
+				_state_flusher(store, strategies, pending_states, dirty_strategies, interval=state_flush_interval),
 				name="state_flusher",
 			),
 			asyncio.create_task(
@@ -421,7 +423,7 @@ async def run_engine(config_path: Path) -> None:
 					await _ws_loop(
 						config, market_state, store, strategies,
 						strat_by_series, pending_states, active_series,
-						client, ws_ref,
+						client, ws_ref, dirty_strategies,
 					)
 				except (
 					websockets.ConnectionClosed,
@@ -462,6 +464,7 @@ async def _ws_loop(
 	active_series: list[str],
 	client: httpx.AsyncClient,
 	ws_ref: list,
+	dirty: set[str],
 ) -> None:
 	"""Single WS connection lifecycle — connect, subscribe, process messages."""
 	headers = make_auth_headers()
@@ -511,7 +514,7 @@ async def _ws_loop(
 				try:
 					_handle_ticker_msg(
 						msg, config, market_state, store,
-						strategies, strat_by_series, pending_states,
+						strategies, strat_by_series, pending_states, dirty,
 					)
 				except Exception:
 					log.exception("Error handling ticker msg")
@@ -520,7 +523,7 @@ async def _ws_loop(
 				try:
 					_handle_trade_msg(
 						msg, config, market_state, store,
-						strategies, strat_by_series, pending_states,
+						strategies, strat_by_series, pending_states, dirty,
 					)
 				except Exception:
 					log.exception("Error handling trade msg")
@@ -534,6 +537,7 @@ def _handle_trade_msg(
 	strategies: list[PaperStrategy],
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
+	dirty: set[str],
 ) -> None:
 	"""Handle a trade WS message — routes to flow-sensitive strategies."""
 	data = msg.get("msg", {})
@@ -601,6 +605,7 @@ def _handle_trade_msg(
 				trade_count=trade_count,
 			)
 			process_tick(ctx, [strat], store, config)
+			dirty.add(strat.name)
 
 
 def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
@@ -628,6 +633,7 @@ def _handle_ticker_msg(
 	strategies: list[PaperStrategy],
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
+	dirty: set[str],
 ) -> None:
 	"""Handle a ticker (price update) WS message."""
 	data = msg.get("msg", {})
@@ -693,4 +699,4 @@ def _handle_ticker_msg(
 				is_first_observation=is_first,
 			)
 			process_tick(ctx, [strat], store, config)
-			mark_state_dirty(strat.name)
+			dirty.add(strat.name)

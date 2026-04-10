@@ -196,7 +196,7 @@ class TradeStore:
 		effective_entry = blended_entry if blended_entry is not None else entry_price
 		exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
-		status = "won" if pnl > 0 else "lost"
+		status = "won" if pnl > 0 else ("lost" if pnl < 0 else "scratch")
 		now = datetime.now(timezone.utc).isoformat()
 		self._conn.execute(
 			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=? AND status='open'",
@@ -294,10 +294,14 @@ class TradeStore:
 # ---------------------------------------------------------------------------
 
 def _row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
-	"""Map a SELECT row (from get_open_trades queries) to a dict."""
+	"""Map a SELECT row to a dict.
+
+	Supports both the 14-column (open trades) and 17-column (full trade) variants.
+	"""
 	keys = (
 		"id", "ticker", "entry_price", "strategy", "side", "series_ticker",
 		"entry_fee_cents", "intended_size", "fill_size", "blended_entry",
 		"book_depth", "fill_pct", "slippage_cents", "status",
+		"exit_price", "exit_time", "pnl_cents",
 	)
 	return dict(zip(keys, row))
