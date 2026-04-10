@@ -243,7 +243,7 @@ class MarketState:
 		updated = False
 		new_levels: list[tuple[float, int]] = []
 		for p, q in levels:
-			if p == price:
+			if round(p * 100) == round(price * 100):  # compare in cents to avoid float issues
 				new_q = q + delta
 				if new_q > 0:
 					new_levels.append((p, new_q))
