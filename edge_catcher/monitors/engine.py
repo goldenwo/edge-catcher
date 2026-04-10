@@ -245,6 +245,9 @@ async def _ticker_refresh(
 			new_tickers: list[str] = []
 			for series in active_series:
 				tickers = await fetch_active_tickers_for_series(client, series)
+				fresh_set = set(tickers)
+
+				# Register new tickers
 				for ticker in tickers:
 					if market_state.get_price_history(ticker) is None:
 						market_state.register_ticker(ticker)
@@ -252,6 +255,11 @@ async def _ticker_refresh(
 						if snapshot is not None:
 							market_state.seed_orderbook(ticker, snapshot)
 						new_tickers.append(ticker)
+
+				# Purge stale tickers for this series
+				for existing in market_state.all_tickers():
+					if existing.startswith(series) and existing not in fresh_set:
+						market_state.unregister_ticker(existing)
 
 			if new_tickers and ws_ref and ws_ref[0] is not None:
 				try:
