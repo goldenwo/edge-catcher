@@ -79,14 +79,15 @@ def _make_ctx(
 	is_first: bool = False,
 	open_positions: list | None = None,
 	yes_ask: int = 50,
+	yes_bid: int = 48,
 ) -> TickContext:
 	return TickContext(
 		ticker="TEST-TICKER-T100",
 		event_ticker="TEST-TICKER",
-		yes_bid=48,
+		yes_bid=yes_bid,
 		yes_ask=yes_ask,
-		no_bid=48,
-		no_ask=100 - yes_ask,
+		no_bid=100 - yes_ask,
+		no_ask=100 - yes_bid,
 		orderbook=orderbook,
 		price_history=[50, 51],
 		open_positions=open_positions or [],
@@ -131,8 +132,7 @@ class TestProcessTick:
 		assert len(trades) == 0
 
 	def test_exit_signal_closes_trade(self, store, config):
-		"""ExitStrategy exits open positions."""
-		# Record a trade first
+		"""ExitStrategy exits open positions at the bid price (selling)."""
 		trade_id = store.record_trade(
 			ticker="TEST-TICKER-T100",
 			entry_price=50,
@@ -145,14 +145,18 @@ class TestProcessTick:
 		)
 		ob = OrderbookSnapshot(yes_levels=[(0.55, 20)], no_levels=[(0.45, 20)])
 		open_pos = [{"id": trade_id, "side": "yes", "ticker": "TEST-TICKER-T100"}]
-		ctx = _make_ctx(ob, open_positions=open_pos, yes_ask=55)
+		ctx = _make_ctx(ob, open_positions=open_pos, yes_ask=55, yes_bid=52)
 		strategies = [ExitStrategy()]
 
 		process_tick(ctx, strategies, store, config)
 
-		# Trade should now be closed (not open)
+		# Trade should be closed at the bid price (52c), not the ask (55c)
 		open_trades = store.get_open_trades()
 		assert len(open_trades) == 0
+		row = store._conn.execute(
+			"SELECT exit_price FROM paper_trades WHERE id=?", (trade_id,)
+		).fetchone()
+		assert row[0] == 52  # yes_bid, not yes_ask
 
 	def test_strategy_exception_does_not_crash(self, store, config):
 		"""A strategy that raises should not prevent other strategies from running."""
