@@ -253,6 +253,7 @@ async def _ticker_refresh(
 	market_state: MarketState,
 	active_series: list[str],
 	ws_ref: list,
+	config: dict | None = None,
 	interval: int = 300,
 ) -> None:
 	"""Periodically re-fetch tickers and subscribe new ones on WS."""
@@ -280,11 +281,12 @@ async def _ticker_refresh(
 
 			if new_tickers and ws_ref and ws_ref[0] is not None:
 				try:
+					ws_channels = (config or {}).get("ws", {}).get("channels", ["ticker", "orderbook_delta"])
 					sub_msg = {
 						"id": 2,
 						"cmd": "subscribe",
 						"params": {
-							"channels": ["ticker", "orderbook_delta"],
+							"channels": ws_channels,
 							"market_tickers": new_tickers,
 						},
 					}
@@ -382,7 +384,7 @@ async def run_engine(config_path: Path) -> None:
 				name="state_flusher",
 			),
 			asyncio.create_task(
-				_ticker_refresh(client, market_state, active_series, ws_ref),
+				_ticker_refresh(client, market_state, active_series, ws_ref, config=config),
 				name="ticker_refresh",
 			),
 		]
@@ -458,17 +460,18 @@ async def _ws_loop(
 		ws_ref[0] = ws
 
 		# Subscribe
+		ws_channels = config.get("ws", {}).get("channels", ["ticker", "orderbook_delta"])
 		if all_tickers:
 			sub_msg = {
 				"id": 1,
 				"cmd": "subscribe",
 				"params": {
-					"channels": ["ticker", "orderbook_delta"],
+					"channels": ws_channels,
 					"market_tickers": all_tickers,
 				},
 			}
 			await ws.send(json.dumps(sub_msg))
-			log.info("Subscribed to %d tickers", len(all_tickers))
+			log.info("Subscribed to %d tickers (channels: %s)", len(all_tickers), ws_channels)
 
 		# Process messages
 		async for raw in ws:
@@ -494,6 +497,92 @@ async def _ws_loop(
 					)
 				except Exception:
 					log.exception("Error handling ticker msg")
+
+			elif msg_type == "trade":
+				try:
+					_handle_trade_msg(
+						msg, config, market_state, store,
+						strategies, strat_by_series, pending_states,
+					)
+				except Exception:
+					log.exception("Error handling trade msg")
+
+
+def _handle_trade_msg(
+	msg: dict,
+	config: dict,
+	market_state: MarketState,
+	store: TradeStore,
+	strategies: list[PaperStrategy],
+	strat_by_series: dict[str, list[PaperStrategy]],
+	pending_states: dict[str, dict],
+) -> None:
+	"""Handle a trade WS message — routes to flow-sensitive strategies."""
+	data = msg.get("msg", {})
+	ticker = data.get("market_ticker", "")
+	if not ticker:
+		return
+
+	# Skip if ticker not registered (trade can arrive before recovery seeds it)
+	if market_state.get_price_history(ticker) is None:
+		return
+
+	yes_price_raw = data.get("yes_price")
+	if yes_price_raw is None:
+		return
+
+	try:
+		yes_ask_cents = int(round(float(yes_price_raw) * 100))
+	except (TypeError, ValueError):
+		return
+	if not (1 <= yes_ask_cents <= 99):
+		return
+
+	no_price_raw = data.get("no_price")
+	try:
+		no_ask_cents = int(round(float(no_price_raw) * 100)) if no_price_raw is not None else (100 - yes_ask_cents)
+	except (TypeError, ValueError):
+		no_ask_cents = 100 - yes_ask_cents
+
+	taker_side = data.get("taker_side")
+	count_raw = data.get("count")
+	try:
+		trade_count = int(float(count_raw)) if count_raw is not None else None
+	except (TypeError, ValueError):
+		trade_count = None
+
+	yes_bid_cents = 100 - no_ask_cents
+	no_bid_cents = 100 - yes_ask_cents
+
+	# Update market state so price history reflects trades
+	is_first = market_state.update_price(ticker, yes_ask_cents)
+	event_ticker = derive_event_ticker(ticker)
+	orderbook = market_state.get_orderbook(ticker) or OrderbookSnapshot([], [])
+	history = list(market_state.get_price_history(ticker) or [])
+
+	matched_series = [s for s in strat_by_series if ticker.startswith(s)]
+
+	for series in matched_series:
+		for strat in strat_by_series.get(series, []):
+			open_positions = store.get_open_trades_for(strat.name, ticker)
+			ctx = TickContext(
+				ticker=ticker,
+				event_ticker=event_ticker,
+				yes_bid=yes_bid_cents,
+				yes_ask=yes_ask_cents,
+				no_bid=no_bid_cents,
+				no_ask=no_ask_cents,
+				orderbook=orderbook,
+				price_history=history,
+				open_positions=open_positions,
+				persisted_state=pending_states.get(strat.name, {}),
+				market_metadata=market_state.get_metadata(ticker),
+				series=series,
+				is_first_observation=is_first,
+				taker_side=taker_side,
+				trade_count=trade_count,
+			)
+			process_tick(ctx, [strat], store, config)
 
 
 def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
