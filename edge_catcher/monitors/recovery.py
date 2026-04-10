@@ -121,9 +121,9 @@ async def fetch_orderbook_snapshot(
 
 			data = resp.json()
 			ob_fp = data.get("orderbook_fp", {})
-			# Kalshi REST returns prices as strings (e.g. ["0.1300", 197]) — cast to float
-			yes_levels = [(float(p), int(q)) for p, q in ob_fp.get("yes_dollars", [])]
-			no_levels = [(float(p), int(q)) for p, q in ob_fp.get("no_dollars", [])]
+			# Kalshi REST returns prices and quantities as strings (e.g. ["0.1300", "685.00"])
+			yes_levels = [(float(p), int(float(q))) for p, q in ob_fp.get("yes_dollars", [])]
+			no_levels = [(float(p), int(float(q))) for p, q in ob_fp.get("no_dollars", [])]
 
 			return OrderbookSnapshot(
 				yes_levels=yes_levels,  # type: ignore[arg-type]
