@@ -1,7 +1,7 @@
 """Pydantic request/response models for the Edge Catcher API."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel
 
@@ -26,37 +26,6 @@ class HypothesisItem(BaseModel):
     market: str
     status: str
     source: str  # "public" or "local"
-
-
-class ResultSummary(BaseModel):
-    run_id: str
-    hypothesis_id: str
-    verdict: Optional[str]
-    run_timestamp: str
-
-
-class ResultDetail(BaseModel):
-    run_id: str
-    hypothesis_id: str
-    run_timestamp: str
-    market: str
-    status: str
-    naive_n: Optional[int] = None
-    naive_z_stat: Optional[float] = None
-    naive_p_value: Optional[float] = None
-    naive_edge: Optional[float] = None
-    clustered_n: Optional[int] = None
-    clustered_z_stat: Optional[float] = None
-    clustered_p_value: Optional[float] = None
-    clustered_edge: Optional[float] = None
-    fee_adjusted_edge: Optional[float] = None
-    confidence_interval_low: Optional[float] = None
-    confidence_interval_high: Optional[float] = None
-    verdict: Optional[str] = None
-    warnings: Optional[Any] = None
-    total_markets_seen: Optional[int] = None
-    delisted_or_cancelled: Optional[int] = None
-    raw_bucket_data: Optional[Any] = None
 
 
 class FormalizeRequest(BaseModel):

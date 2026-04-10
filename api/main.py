@@ -48,8 +48,6 @@ from api.models import (
     HypothesisItem,
     InterpretRequest,
     InterpretResponse,
-    ResultDetail,
-    ResultSummary,
     StatusResponse,
     PipelineStatusResponse,
     StrategyInfo, StrategizeRequest, StrategizeResponse,
@@ -184,107 +182,44 @@ def delete_hypothesis(
 # ── results ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/results")
-def get_results(
+def list_results(
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
     hypothesis_id: Optional[str] = None,
     verdict: Optional[str] = None,
     _: None = Depends(check_auth),
 ) -> dict:
-    from edge_catcher.storage.db import get_connection
-
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        return {"results": [], "total": 0}
-    conn = get_connection(db)
-    try:
-        exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_results'"
-        ).fetchone()
-        if not exists:
-            return {"results": [], "total": 0}
-
-        where_clauses = []
-        params: list = []
-        if hypothesis_id:
-            where_clauses.append("hypothesis_id = ?")
-            params.append(hypothesis_id)
-        if verdict:
-            where_clauses.append("verdict = ?")
-            params.append(verdict)
-        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM analysis_results{where_sql}", params
-        ).fetchone()[0]
-        rows = conn.execute(
-            f"""
-            SELECT run_id, hypothesis_id, verdict, run_timestamp
-            FROM analysis_results{where_sql}
-            ORDER BY run_timestamp DESC
-            LIMIT ? OFFSET ?
-            """,
-            params + [limit, offset],
-        ).fetchall()
-        return {
-            "results": [ResultSummary(**dict(r)).model_dump() for r in rows],
-            "total": total,
-        }
-    finally:
-        conn.close()
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    rows = tracker.list_hypothesis_results(verdict=verdict)
+    if hypothesis_id:
+        rows = [r for r in rows if r.get("series") == hypothesis_id or r.get("id") == hypothesis_id]
+    total = len(rows)
+    page = rows[offset:offset + limit]
+    return {"results": page, "total": total}
 
 
 @app.get("/api/results/hypothesis-ids")
 def get_result_hypothesis_ids(_: None = Depends(check_auth)) -> list[str]:
-    from edge_catcher.storage.db import get_connection
-
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        return []
-    conn = get_connection(db)
-    try:
-        exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_results'"
-        ).fetchone()
-        if not exists:
-            return []
-        rows = conn.execute(
-            "SELECT DISTINCT hypothesis_id FROM analysis_results ORDER BY hypothesis_id"
-        ).fetchall()
-        return [r[0] for r in rows]
-    finally:
-        conn.close()
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    rows = tracker.list_hypothesis_results()
+    return sorted(set(r["series"] for r in rows if r.get("series")))
 
 
-@app.get("/api/results/{run_id}", response_model=ResultDetail)
+@app.get("/api/results/{run_id}")
 def get_result(
     run_id: str,
     _: None = Depends(check_auth),
-) -> ResultDetail:
-    from edge_catcher.storage.db import get_connection
-
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        raise HTTPException(status_code=404, detail="Database not found")
-    conn = get_connection(db)
-    try:
-        row = conn.execute(
-            "SELECT * FROM analysis_results WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-
-    d = dict(row)
-    for field in ("raw_bucket_data", "warnings"):
-        if d.get(field) and isinstance(d[field], str):
-            try:
-                d[field] = json.loads(d[field])
-            except (json.JSONDecodeError, TypeError):
-                pass
-    return ResultDetail(**d)
+) -> dict:
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    result = tracker.get_hypothesis_result_by_id(run_id)
+    if not result:
+        result = tracker.get_result_by_id(run_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Result {run_id!r} not found")
+    return result
 
 
 @app.delete("/api/results/{run_id}")
@@ -292,22 +227,9 @@ def delete_result(
     run_id: str,
     _: None = Depends(check_auth),
 ) -> dict:
-    from edge_catcher.storage.db import get_connection
-
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        raise HTTPException(status_code=404, detail="Database not found")
-    conn = get_connection(db)
-    try:
-        cur = conn.execute("DELETE FROM analysis_results WHERE run_id = ?", (run_id,))
-        try:
-            conn.execute("DELETE FROM hypothesis_runs WHERE run_id = ?", (run_id,))
-        except Exception:
-            pass  # table may not exist
-        conn.commit()
-    finally:
-        conn.close()
-    if cur.rowcount == 0:
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    if not tracker.delete_result(run_id):
         raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
     return {"ok": True}
 
@@ -361,27 +283,12 @@ def interpret_result(
             detail="AI deps missing. Run: pip install -e '.[ai]'",
         )
 
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        raise HTTPException(status_code=404, detail="Database not found")
-
-    from edge_catcher.storage.db import get_connection
-
-    conn = get_connection(db)
-    try:
-        row = conn.execute(
-            "SELECT * FROM analysis_results WHERE run_id = ?",
-            (body.run_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        raise HTTPException(
-            status_code=404, detail=f"Run {body.run_id!r} not found"
-        )
-
-    report_data = {body.run_id: dict(row)}
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    result = tracker.get_result_by_id(body.run_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Run {body.run_id!r} not found")
+    report_data = {body.run_id: result}
     temp_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
