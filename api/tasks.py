@@ -91,18 +91,3 @@ def is_backtest_running() -> bool:
     return any(s.running for s in backtest_states.values())
 
 
-@dataclass
-class AnalyzeTaskState:
-    task_id: str = ""
-    hypothesis_id: Optional[str] = None
-    running: bool = False
-    progress: str = ""
-    error: Optional[str] = None
-    result: Optional[dict] = None
-
-
-analyze_states: Dict[str, AnalyzeTaskState] = {}
-
-
-def get_analyze_state(task_id: str) -> Optional[AnalyzeTaskState]:
-    return analyze_states.get(task_id)

@@ -42,7 +42,6 @@ from api.models import (
     AdapterKeyRequest,
     AIKeyRequest,
     AISettingsResponse,
-    AnalyzeRequest,
     DownloadStatusResponse,
     FormalizeRequest,
     FormalizeResponse,
@@ -60,7 +59,7 @@ from api.models import (
     ModelOption, ModelSettingsResponse, ModelOverrideRequest,
     ResearchLoopStartRequest, ReviewRejectRequest,
 )
-from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState, analyze_states, get_analyze_state, AnalyzeTaskState
+from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
 from api.download_service import (
 	run_kalshi_download as _run_kalshi_download,
 	run_coinbase_download as _run_coinbase_download,
@@ -96,7 +95,6 @@ def get_status(_: None = Depends(check_auth)) -> StatusResponse:
         return StatusResponse(
             markets=0,
             trades=0,
-            results=0,
             db_size_mb=0.0,
             last_download=download_state.last_run,
         )
@@ -181,75 +179,6 @@ def delete_hypothesis(
     with open(local_file, "w") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
     return {"ok": True, "deleted": hypothesis_id}
-
-
-def _run_analyze_task(task_id: str, hypothesis_id: str | None) -> None:
-    """Background thread target for analysis."""
-    from edge_catcher.runner.backtest import run_backtest
-
-    state = analyze_states[task_id]
-    state.running = True
-    state.progress = "Running analysis..."
-    try:
-        result = run_backtest(
-            hypothesis_id=hypothesis_id,
-            db_path=_validate_db("kalshi.db"),
-            config_path=_config_path(),
-            output_path=None,
-        )
-        state.result = result
-        state.progress = "Complete"
-    except Exception as exc:
-        state.error = str(exc)
-        state.progress = "Failed"
-    finally:
-        state.running = False
-
-
-@app.post("/api/analyze")
-async def analyze(
-    body: AnalyzeRequest,
-    _: None = Depends(check_auth),
-) -> dict:
-    import threading
-
-    task_id = str(uuid.uuid4())
-    analyze_states[task_id] = AnalyzeTaskState(
-        task_id=task_id,
-        hypothesis_id=body.hypothesis_id,
-    )
-    threading.Thread(
-        target=_run_analyze_task,
-        args=(task_id, body.hypothesis_id),
-        daemon=True,
-    ).start()
-    return {"task_id": task_id}
-
-
-@app.get("/api/analyze/{task_id}/status")
-async def analyze_status(task_id: str) -> dict:
-    state = get_analyze_state(task_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
-    return {
-        "running": state.running,
-        "progress": state.progress,
-        "error": state.error,
-    }
-
-
-@app.get("/api/analyze/{task_id}/result")
-async def analyze_result(task_id: str) -> dict:
-    state = get_analyze_state(task_id)
-    if not state:
-        raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
-    if state.running:
-        raise HTTPException(status_code=409, detail="Analysis still running")
-    if state.error:
-        raise HTTPException(status_code=500, detail=state.error)
-    if not state.result:
-        raise HTTPException(status_code=404, detail="No result available")
-    return state.result
 
 
 # ── results ───────────────────────────────────────────────────────────────────
