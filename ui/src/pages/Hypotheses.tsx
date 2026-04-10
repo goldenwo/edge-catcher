@@ -1,14 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, FormalizeResponse, Hypothesis } from '../api'
-import Badge from '../components/Badge'
 import ConfirmButton from '../components/ConfirmButton'
-
-interface RunResult {
-  verdict?: string
-  error?: string
-  progress?: string
-}
 
 const providers = ['anthropic', 'openai', 'openrouter'] as const
 type Provider = (typeof providers)[number]
@@ -22,8 +15,6 @@ export default function Hypotheses() {
 
   // My Hypotheses state
   const [hypotheses, setHypotheses] = useState<Hypothesis[]>([])
-  const [running, setRunning] = useState<Record<string, boolean>>({})
-  const [results, setResults] = useState<Record<string, RunResult>>({})
   const [listError, setListError] = useState<string | null>(null)
 
   // Create New state
@@ -71,53 +62,6 @@ export default function Hypotheses() {
       setSearchParams({})
     } else {
       setSearchParams({ tab: 'create' })
-    }
-  }
-
-  const pollRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({})
-
-  // Cleanup polling on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(pollRefs.current).forEach(clearInterval)
-    }
-  }, [])
-
-  const runAnalysis = async (id: string) => {
-    setRunning((r) => ({ ...r, [id]: true }))
-    setResults((prev) => ({ ...prev, [id]: { progress: 'Starting...' } }))
-    try {
-      const { task_id } = await api.analyze(id)
-      // Poll for completion
-      pollRefs.current[id] = setInterval(async () => {
-        try {
-          const status = await api.analyzeStatus(task_id)
-          setResults((prev) => ({ ...prev, [id]: { progress: status.progress } }))
-          if (!status.running) {
-            clearInterval(pollRefs.current[id])
-            delete pollRefs.current[id]
-            if (status.error) {
-              setResults((prev) => ({ ...prev, [id]: { error: status.error! } }))
-            } else {
-              const data = await api.analyzeResult(task_id)
-              const result = data[id] as Record<string, unknown> | undefined
-              setResults((prev) => ({
-                ...prev,
-                [id]: { verdict: result?.verdict as string | undefined },
-              }))
-            }
-            setRunning((r) => ({ ...r, [id]: false }))
-          }
-        } catch {
-          // Keep polling on transient errors
-        }
-      }, 1000)
-    } catch (e) {
-      setResults((prev) => ({
-        ...prev,
-        [id]: { error: e instanceof Error ? e.message : String(e) },
-      }))
-      setRunning((r) => ({ ...r, [id]: false }))
     }
   }
 
@@ -263,33 +207,8 @@ export default function Hypotheses() {
                         confirmText="Delete?"
                       />
                     )}
-                    <button
-                      onClick={() => runAnalysis(h.id)}
-                      disabled={running[h.id]}
-                      className="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 text-sm transition-colors"
-                    >
-                      {running[h.id] ? 'Running…' : 'Run Analysis'}
-                    </button>
                   </div>
                 </div>
-
-                {results[h.id] && (
-                  <div className="mt-3 pt-3 border-t border-gray-800">
-                    {results[h.id].error ? (
-                      <p className="text-sm text-red-400">{results[h.id].error}</p>
-                    ) : results[h.id].progress && !results[h.id].verdict ? (
-                      <div className="flex items-center gap-2">
-                        <div className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
-                        <span className="text-xs text-gray-400">{results[h.id].progress}</span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-500">Verdict:</span>
-                        <Badge verdict={results[h.id].verdict ?? null} />
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             ))}
             {hypotheses.length > 0 && filtered.length === 0 && (

@@ -5,13 +5,9 @@ import Badge from '../components/Badge'
 import ConfirmButton from '../components/ConfirmButton'
 import Pagination from '../components/Pagination'
 
-type SortKey = keyof Pick<ResultSummary, 'run_timestamp' | 'hypothesis_id' | 'verdict'>
+type SortKey = keyof Pick<ResultSummary, 'created_at' | 'series' | 'verdict'>
 
 const VERDICTS = ['EDGE_EXISTS', 'INCONCLUSIVE', 'NO_EDGE', 'EDGE_NOT_TRADEABLE', 'INSUFFICIENT_DATA'] as const
-
-function fmt(n: number | null | undefined, decimals = 4) {
-  return n == null ? '—' : n.toFixed(decimals)
-}
 
 export default function Analyze() {
   const navigate = useNavigate()
@@ -19,7 +15,7 @@ export default function Analyze() {
   const [detail, setDetail] = useState<ResultDetail | null>(null)
   const [summary, setSummary] = useState<string | null>(null)
   const [interpreting, setInterpreting] = useState(false)
-  const [sortKey, setSortKey] = useState<SortKey>('run_timestamp')
+  const [sortKey, setSortKey] = useState<SortKey>('created_at')
   const [sortAsc, setSortAsc] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,20 +61,20 @@ export default function Analyze() {
     return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av))
   })
 
-  const deleteResult = async (run_id: string) => {
+  const deleteResult = async (id: string) => {
     try {
-      await api.deleteResult(run_id)
-      if (detail?.run_id === run_id) setDetail(null)
+      await api.deleteResult(id)
+      if (detail?.id === id) setDetail(null)
       loadResults(offset, hypFilter, verdictFilter)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
-  const loadDetail = async (run_id: string) => {
+  const loadDetail = async (id: string) => {
     setSummary(null)
     try {
-      setDetail(await api.result(run_id))
+      setDetail(await api.result(id))
     } catch (e) {
       setError(String(e))
     }
@@ -88,7 +84,7 @@ export default function Analyze() {
     if (!detail) return
     setInterpreting(true)
     try {
-      const r = await api.interpret(detail.run_id, null)
+      const r = await api.interpret(detail.id, null)
       setSummary(r.summary)
     } catch (e) {
       setSummary(`Error: ${e instanceof Error ? e.message : String(e)}`)
@@ -151,35 +147,35 @@ export default function Analyze() {
         <table className="w-full text-sm">
           <thead className="border-b border-gray-800 bg-gray-900">
             <tr>
-              <Th col="hypothesis_id" label="Hypothesis" />
+              <Th col="series" label="Series" />
               <Th col="verdict" label="Verdict" />
               <th className="px-4 py-2 text-left text-xs text-gray-400 font-medium">
                 Fee-adj Edge
               </th>
-              <Th col="run_timestamp" label="Timestamp" />
+              <Th col="created_at" label="Timestamp" />
               <th className="w-8" />
             </tr>
           </thead>
           <tbody>
             {sorted.map((r) => (
               <tr
-                key={r.run_id}
+                key={r.id}
                 className={`border-b border-gray-800/50 cursor-pointer transition-colors ${
-                  detail?.run_id === r.run_id ? 'bg-gray-800' : 'hover:bg-gray-900'
+                  detail?.id === r.id ? 'bg-gray-800' : 'hover:bg-gray-900'
                 }`}
-                onClick={() => loadDetail(r.run_id)}
+                onClick={() => loadDetail(r.id)}
               >
-                <td className="px-4 py-3 font-mono">{r.hypothesis_id}</td>
+                <td className="px-4 py-3 font-mono">{r.series}</td>
                 <td className="px-4 py-3">
                   <Badge verdict={r.verdict} />
                 </td>
-                <td className="px-4 py-3 font-mono text-gray-400">—</td>
+                <td className="px-4 py-3 font-mono text-gray-400">{r.fee_adjusted_edge?.toFixed(4) ?? '—'}</td>
                 <td className="px-4 py-3 text-gray-400 text-xs">
-                  {new Date(r.run_timestamp).toLocaleString()}
+                  {new Date(r.created_at).toLocaleString()}
                 </td>
                 <td className="px-2 py-3" onClick={(e) => e.stopPropagation()}>
                   <ConfirmButton
-                    onConfirm={() => deleteResult(r.run_id)}
+                    onConfirm={() => deleteResult(r.id)}
                     label="Delete"
                     confirmText="Delete?"
                   />
@@ -210,24 +206,19 @@ export default function Analyze() {
       {detail && (
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="font-medium">{detail.hypothesis_id}</h2>
+            <h2 className="font-medium">{detail.series}</h2>
             <Badge verdict={detail.verdict} />
           </div>
 
           <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3 text-sm">
             {(
               [
-                ['Market', detail.market],
-                ['N (naive)', detail.naive_n],
-                ['N (clustered)', detail.clustered_n],
-                ['Z-stat (naive)', fmt(detail.naive_z_stat, 3)],
-                ['Z-stat (clustered)', fmt(detail.clustered_z_stat, 3)],
-                ['Naive edge', fmt(detail.naive_edge)],
-                ['Clustered edge', fmt(detail.clustered_edge)],
-                ['Fee-adj edge', fmt(detail.fee_adjusted_edge)],
-                ['CI low', fmt(detail.confidence_interval_low)],
-                ['CI high', fmt(detail.confidence_interval_high)],
-                ['Markets seen', detail.total_markets_seen],
+                ['Test type', detail.test_type],
+                ['Series', detail.series],
+                ['Database', detail.db],
+                ['Z-stat', detail.z_stat?.toFixed(3)],
+                ['Fee-adj edge', detail.fee_adjusted_edge?.toFixed(4)],
+                ['Rationale', detail.rationale],
               ] as [string, unknown][]
             ).map(([label, value]) => (
               <div key={label}>
@@ -236,39 +227,6 @@ export default function Analyze() {
               </div>
             ))}
           </dl>
-
-          {Array.isArray(detail.raw_bucket_data) &&
-            (detail.raw_bucket_data as Record<string, unknown>[]).length > 0 && (
-              <div>
-                <h3 className="text-xs text-gray-400 uppercase tracking-wider mb-2">
-                  Buckets
-                </h3>
-                <div className="space-y-1">
-                  {(detail.raw_bucket_data as Record<string, unknown>[]).map((b, i) => {
-                    const edge = Number(b.fee_adjusted_edge ?? 0)
-                    const width = Math.min(Math.abs(edge) * 500, 100)
-                    return (
-                      <div key={i} className="flex items-center gap-3 text-xs">
-                        <span className="text-gray-500 w-20 shrink-0 font-mono">
-                          {String(b.bucket_lo)}–{String(b.bucket_hi)}
-                        </span>
-                        <div className="flex-1 bg-gray-800 rounded h-2 overflow-hidden">
-                          <div
-                            className={`h-full rounded ${
-                              edge >= 0 ? 'bg-green-600' : 'bg-red-600'
-                            }`}
-                            style={{ width: `${width}%` }}
-                          />
-                        </div>
-                        <span className="font-mono w-16 text-right text-gray-400">
-                          {fmt(edge)}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
 
           <div>
             <div className="flex flex-wrap gap-2">
@@ -282,7 +240,7 @@ export default function Analyze() {
               <button
                 onClick={() =>
                   navigate(
-                    `/strategize?hypothesis_id=${encodeURIComponent(detail.hypothesis_id)}&run_id=${encodeURIComponent(detail.run_id)}`
+                    `/strategize?hypothesis_id=${encodeURIComponent(detail.series)}&run_id=${encodeURIComponent(detail.id)}`
                   )
                 }
                 className="px-3 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-sm transition-colors"
