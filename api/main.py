@@ -17,7 +17,7 @@ except ImportError:
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.auth import check_auth
@@ -836,6 +836,35 @@ def research_verdict_counts(_: None = Depends(check_auth)) -> dict:
         "explore": counts.get("explore", 0),
         "kill": counts.get("kill", 0),
     }
+
+
+# ── research export ──────────────────────────────────────────────────────────
+
+@app.get("/api/research/export")
+def research_export(_: None = Depends(check_auth)):
+	import io
+	import zipfile
+	from datetime import datetime, timezone
+	from edge_catcher.research.export import ExportCollector
+	research_db = str(_research_db_path())
+	if not Path(research_db).exists():
+		raise HTTPException(status_code=404, detail="Research database not found")
+	collector = ExportCollector(db_path=research_db)
+	bundle = collector.collect()
+	if not bundle["strategies"]:
+		raise HTTPException(status_code=404, detail="No promoted/reviewed results to export")
+
+	buf = io.BytesIO()
+	with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+		import json
+		zf.writestr("manifest.json", json.dumps(bundle, indent=2, default=str))
+	buf.seek(0)
+	date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+	return StreamingResponse(
+		buf,
+		media_type="application/zip",
+		headers={"Content-Disposition": f"attachment; filename=research-export-{date_str}.zip"},
+	)
 
 
 # ── research review actions ──────────────────────────────────────────────────
