@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 
+from edge_catcher.monitors.sizing import validate_sizing_config
 from edge_catcher.monitors.strategy_base import PaperStrategy
 
 logger = logging.getLogger(__name__)
@@ -36,58 +37,6 @@ def load_config(config_path: Path) -> dict:
 		raise FileNotFoundError(f"Config file not found: {config_path}")
 	with config_path.open("r", encoding="utf-8") as fh:
 		return yaml.safe_load(fh) or {}
-
-
-# ---------------------------------------------------------------------------
-# Sizing resolution
-# ---------------------------------------------------------------------------
-
-def _unwrap_sizing_value(value: int | dict) -> int:
-	"""Extract an int from a sizing value (may be int or dict with base/default)."""
-	if isinstance(value, dict):
-		if "base" in value:
-			return int(value["base"])
-		if "default" in value:
-			return int(value["default"])
-		raise ValueError(f"Sizing dict has neither 'base' nor 'default' key: {value!r}")
-	return int(value)
-
-
-def resolve_sizing(config: dict, strategy_name: str, series: str) -> int:
-	"""Resolve the trade sizing for a strategy + series combination.
-
-	Resolution order:
-	1. ``strategies.<name>.sizing.<series>``  (most specific)
-	2. ``sizing.default``                      (global fallback)
-
-	Both levels support a plain int or a dict with a ``base`` or ``default`` key.
-
-	Args:
-		config:        Full config dict.
-		strategy_name: Strategy name string.
-		series:        Series identifier.
-
-	Returns:
-		Resolved sizing as an int.
-
-	Raises:
-		ValueError: If no sizing can be resolved.
-	"""
-	# 1. Strategy-specific series sizing
-	strat_cfg = config.get("strategies", {}).get(strategy_name, {})
-	strat_sizing = strat_cfg.get("sizing", {})
-	if series in strat_sizing:
-		return _unwrap_sizing_value(strat_sizing[series])
-
-	# 2. Global default
-	global_sizing = config.get("sizing", {})
-	if "default" in global_sizing:
-		return _unwrap_sizing_value(global_sizing["default"])
-
-	raise ValueError(
-		f"No sizing found for strategy '{strategy_name}' series '{series}'. "
-		"Set sizing.default or strategies.<name>.sizing.<series> in your config."
-	)
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +96,7 @@ def get_enabled_strategies(
 	config: dict,
 	all_strategies: list[PaperStrategy],
 ) -> list[PaperStrategy]:
-	"""Filter to enabled strategies and apply config param/sizing overrides.
-
-	For each strategy found in ``config.strategies`` with ``enabled: true``:
-	- Merges ``params`` overrides into ``strategy.default_params``
-	- Validates that sizing can be resolved for every configured series
+	"""Filter to enabled strategies and apply config param overrides.
 
 	Args:
 		config:         Full config dict.
@@ -161,8 +106,10 @@ def get_enabled_strategies(
 		Filtered, merged list of enabled strategies.
 
 	Raises:
-		ValueError: If sizing cannot be resolved for any enabled strategy/series.
+		ValueError: If sizing config is missing or invalid.
 	"""
+	validate_sizing_config(config)
+
 	strats_cfg: dict = config.get("strategies", {})
 	by_name: dict[str, PaperStrategy] = {s.name: s for s in all_strategies}
 
@@ -180,11 +127,6 @@ def get_enabled_strategies(
 		params_override: dict = scfg.get("params", {}) or {}
 		if params_override:
 			strat.default_params = {**strat.default_params, **params_override}
-
-		# Validate sizing for every configured series
-		series_list: list[str] = scfg.get("series", []) or []
-		for series in series_list:
-			resolve_sizing(config, name, series)  # raises ValueError if unresolvable
 
 		enabled.append(strat)
 

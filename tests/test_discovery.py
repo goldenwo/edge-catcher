@@ -12,7 +12,6 @@ from edge_catcher.monitors.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
 	load_config,
-	resolve_sizing,
 )
 from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
 
@@ -41,7 +40,11 @@ def _write_strategies_file(tmp_path: Path, src: str) -> Path:
 
 def _make_config(extra: dict | None = None) -> dict:
 	cfg = {
-		"sizing": {"default": 10},
+		"sizing": {
+			"risk_per_trade_cents": 200,
+			"max_slippage_cents": 2,
+			"min_fill": 3,
+		},
 		"strategies": {
 			"my-strat": {
 				"enabled": True,
@@ -79,55 +82,6 @@ class TestLoadConfig:
 		missing = tmp_path / "nonexistent.yaml"
 		with pytest.raises(FileNotFoundError):
 			load_config(missing)
-
-
-# ---------------------------------------------------------------------------
-# resolve_sizing
-# ---------------------------------------------------------------------------
-
-class TestResolveSizing:
-	def test_strategy_specific_sizing(self) -> None:
-		config = {
-			"sizing": {"default": 5},
-			"strategies": {
-				"my-strat": {"sizing": {"SERIES_A": 20}},
-			},
-		}
-		assert resolve_sizing(config, "my-strat", "SERIES_A") == 20
-
-	def test_falls_back_to_default(self) -> None:
-		config = {
-			"sizing": {"default": 7},
-			"strategies": {"my-strat": {}},
-		}
-		assert resolve_sizing(config, "my-strat", "SERIES_A") == 7
-
-	def test_sizing_dict_with_base_key(self) -> None:
-		config = {
-			"sizing": {"default": {"base": 15}},
-			"strategies": {"my-strat": {}},
-		}
-		assert resolve_sizing(config, "my-strat", "SERIES_A") == 15
-
-	def test_sizing_dict_with_default_key(self) -> None:
-		config = {
-			"sizing": {"default": {"default": 12}},
-			"strategies": {"my-strat": {}},
-		}
-		assert resolve_sizing(config, "my-strat", "SERIES_A") == 12
-
-	def test_raises_when_no_sizing(self) -> None:
-		config: dict = {"strategies": {}}
-		with pytest.raises(ValueError, match="sizing"):
-			resolve_sizing(config, "my-strat", "SERIES_A")
-
-	def test_strategy_specific_dict_sizing(self) -> None:
-		config = {
-			"strategies": {
-				"my-strat": {"sizing": {"SERIES_A": {"base": 8}}},
-			},
-		}
-		assert resolve_sizing(config, "my-strat", "SERIES_A") == 8
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +154,7 @@ class TestGetEnabledStrategies:
 
 	def test_filters_disabled_strategies(self) -> None:
 		config = {
-			"sizing": {"default": 5},
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
 			"strategies": {
 				"stub": {"enabled": False, "series": ["SERIES_A"]},
 			},
@@ -210,7 +164,7 @@ class TestGetEnabledStrategies:
 
 	def test_returns_enabled_strategies(self) -> None:
 		config = {
-			"sizing": {"default": 5},
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
 			"strategies": {
 				"stub": {"enabled": True, "series": ["SERIES_A"]},
 			},
@@ -222,7 +176,7 @@ class TestGetEnabledStrategies:
 
 	def test_merges_param_overrides(self) -> None:
 		config = {
-			"sizing": {"default": 5},
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
 			"strategies": {
 				"stub": {
 					"enabled": True,
@@ -251,23 +205,19 @@ class TestGetEnabledStrategies:
 	def test_ignores_strategies_not_in_config(self) -> None:
 		"""Strategies present in all_strategies but not in config are skipped."""
 		config = {
-			"sizing": {"default": 5},
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
 			"strategies": {},
 		}
 		result = get_enabled_strategies(config, [self._strat()])
 		assert result == []
 
-	def test_raises_on_missing_sizing_for_specific_series(self) -> None:
-		"""Validates sizing for each series listed in config."""
+	def test_raises_on_invalid_sizing_config(self) -> None:
+		"""Validates sizing config has required keys."""
 		config = {
-			# no top-level sizing.default
+			"sizing": {"risk_per_trade_cents": 0},  # invalid: must be > 0
 			"strategies": {
-				"stub": {
-					"enabled": True,
-					"series": ["SERIES_A"],
-					"sizing": {},  # empty — no series-specific either
-				},
+				"stub": {"enabled": True, "series": ["SERIES_A"]},
 			},
 		}
-		with pytest.raises(ValueError, match="sizing"):
+		with pytest.raises(ValueError, match="risk_per_trade_cents"):
 			get_enabled_strategies(config, [self._strat()])

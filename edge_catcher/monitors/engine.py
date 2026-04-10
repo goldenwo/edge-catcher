@@ -16,8 +16,8 @@ from edge_catcher.monitors.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
 	load_config,
-	resolve_sizing,
 )
+from edge_catcher.monitors.sizing import resolve_fill
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -94,18 +94,17 @@ def _handle_enter(
 	config: dict,
 ) -> None:
 	"""Process an entry signal: resolve sizing, walk orderbook, record trade."""
-	size = resolve_sizing(config, signal.strategy, signal.series)
-	fill = ctx.orderbook.walk_book(signal.side, size)
-
-	if fill.fill_size == 0:
-		log.info(
-			"No liquidity for %s %s %s (size=%d) — skipping",
-			signal.strategy, signal.side, signal.ticker, size,
-		)
-		return
-
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
 	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
+
+	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
+
+	if fill is None:
+		log.info(
+			"No fill for %s %s %s (entry=%dc) — skipping",
+			signal.strategy, signal.side, signal.ticker, entry_price,
+		)
+		return
 
 	trade_id = store.record_trade(
 		ticker=signal.ticker,
@@ -113,7 +112,7 @@ def _handle_enter(
 		strategy=signal.strategy,
 		side=signal.side,
 		series_ticker=signal.series,
-		intended_size=size,
+		intended_size=fill.intended_size,
 		fill_size=fill.fill_size,
 		blended_entry=fill.blended_price_cents,
 		book_depth=ctx.orderbook.depth,
@@ -124,7 +123,7 @@ def _handle_enter(
 	msg = (
 		f"ENTER {signal.strategy} {signal.side} {signal.ticker} "
 		f"@ {entry_price}c (blended {fill.blended_price_cents}c, "
-		f"fill {fill.fill_size}/{size}, slip {fill.slippage_cents}c) "
+		f"fill {fill.fill_size}/{fill.intended_size}, slip {fill.slippage_cents}c) "
 		f"— {signal.reason} [id={trade_id}]"
 	)
 	log.info(msg)

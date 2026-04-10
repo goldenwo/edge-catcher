@@ -66,7 +66,7 @@ def store(tmp_path):
 @pytest.fixture
 def config():
 	return {
-		"sizing": {"default": 10},
+		"sizing": {"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1},
 		"strategies": {
 			"stub": {"enabled": True, "series": ["TEST"]},
 			"exit-stub": {"enabled": True, "series": ["TEST"]},
@@ -195,7 +195,7 @@ class TestHandleTickerMsg:
 		strat = StubStrategy()
 		strat.supported_series = ["KXBTC15M"]
 		config = {
-			"sizing": {"default": 10},
+			"sizing": {"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1},
 			"strategies": {"stub": {"enabled": True, "series": ["KXBTC15M"]}},
 		}
 		strat_by_series = {"KXBTC15M": [strat]}
