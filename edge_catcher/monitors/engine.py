@@ -617,21 +617,25 @@ def _handle_ticker_msg(
 	if not ticker:
 		return
 
-	yes_ask_raw = data.get("yes_ask")
+	# Kalshi WS sends prices as 'yes_ask_dollars' (string) or 'yes_ask' (legacy float)
+	yes_ask_raw = data.get("yes_ask_dollars") or data.get("yes_ask")
 	if yes_ask_raw is None:
 		return
 
 	# Validate price range
-	yes_ask_cents = int(round(yes_ask_raw * 100)) if isinstance(yes_ask_raw, float) else int(yes_ask_raw)
+	try:
+		yes_ask_cents = int(round(float(yes_ask_raw) * 100))
+	except (TypeError, ValueError):
+		return
 	if not (1 <= yes_ask_cents <= 99):
 		return
 
 	# Read yes_bid separately (may differ from yes_ask)
-	yes_bid_raw = data.get("yes_bid")
-	yes_bid_cents = (
-		int(round(yes_bid_raw * 100)) if isinstance(yes_bid_raw, float)
-		else int(yes_bid_raw)
-	) if yes_bid_raw is not None else yes_ask_cents
+	yes_bid_raw = data.get("yes_bid_dollars") or data.get("yes_bid")
+	try:
+		yes_bid_cents = int(round(float(yes_bid_raw) * 100)) if yes_bid_raw is not None else yes_ask_cents
+	except (TypeError, ValueError):
+		yes_bid_cents = yes_ask_cents
 
 	# Update market state
 	is_first = market_state.update_price(ticker, yes_ask_cents)
