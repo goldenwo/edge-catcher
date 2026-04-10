@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api, Hypothesis, ResultSummary } from '../api'
+import { api, Hypothesis } from '../api'
 import { usePipeline } from '../components/PipelineStatus'
 
 const providers = ['anthropic', 'openai', 'openrouter'] as const
