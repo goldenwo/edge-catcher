@@ -215,6 +215,15 @@ async def _summary_logger(
 			log.exception("Summary logger error")
 
 
+# Strategies that have mutated state since last flush
+_dirty_strategies: set[str] = set()
+
+
+def mark_state_dirty(strategy_name: str) -> None:
+	"""Mark a strategy's state as needing a flush."""
+	_dirty_strategies.add(strategy_name)
+
+
 async def _state_flusher(
 	store: TradeStore,
 	strategies: list[PaperStrategy],
@@ -223,16 +232,18 @@ async def _state_flusher(
 ) -> None:
 	"""Periodically flush dirty strategy state to SQLite.
 
-	IMPORTANT: Do NOT clear pending_states — strategies continue mutating
-	the same dicts.
+	Only writes strategies that have been marked dirty since last flush.
+	Reduces SD card writes on Pi.
 	"""
 	while True:
 		await asyncio.sleep(interval)
 		try:
-			for strat in strategies:
-				state = pending_states.get(strat.name)
+			to_flush = _dirty_strategies.copy()
+			_dirty_strategies.clear()
+			for name in to_flush:
+				state = pending_states.get(name)
 				if state is not None:
-					store.save_state(strat.name, state)
+					store.save_state(name, state)
 		except Exception:
 			log.exception("State flusher error")
 
@@ -571,3 +582,4 @@ def _handle_ticker_msg(
 				is_first_observation=is_first,
 			)
 			process_tick(ctx, [strat], store, config)
+			mark_state_dirty(strat.name)
