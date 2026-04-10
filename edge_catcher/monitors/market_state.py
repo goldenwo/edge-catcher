@@ -130,6 +130,8 @@ class TickContext:
 	market_metadata: dict[str, Any]
 	series: str = ""
 	is_first_observation: bool = False
+	taker_side: str | None = None
+	trade_count: int | None = None
 
 
 # ---------------------------------------------------------------------------
