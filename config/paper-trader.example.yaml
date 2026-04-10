@@ -1,0 +1,26 @@
+# Paper Trader Configuration
+# Copy to config.local/paper-trader.yaml and customize.
+
+db_path: data/paper_trades_v2.db
+
+ws:
+	channels: [ticker, orderbook_delta]
+	ping_interval: 20
+	reconnect_delay: 30
+	price_history_limit: 100
+
+recovery:
+	rest_sweep_on_startup: true
+	state_flush_interval: 5
+
+strategies:
+	my-strategy:
+		enabled: true
+		series: [SERIES_A, SERIES_B]
+		sizing:
+			SERIES_A: 10
+			SERIES_B: 20
+		params: {}
+
+sizing:
+	default: 10
