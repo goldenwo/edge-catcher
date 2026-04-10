@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,6 +54,26 @@ class ExportCollector:
 		self._attach_series_mapping(bundle, strategies, series_mapping_path)
 		self._attach_hypothesis_config(strategies, hypotheses_path)
 		return bundle
+
+	def write_zip(self, bundle: dict, output_dir: str = "exports") -> Path:
+		"""Write bundle to a zip file containing manifest.json."""
+		out = Path(output_dir)
+		out.mkdir(parents=True, exist_ok=True)
+		date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+		zip_path = out / f"research-export-{date_str}.zip"
+
+		# Avoid overwriting: append counter if needed
+		counter = 1
+		while zip_path.exists():
+			counter += 1
+			zip_path = out / f"research-export-{date_str}-{counter}.zip"
+
+		with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+			manifest = json.dumps(bundle, indent=2, default=str)
+			zf.writestr("manifest.json", manifest)
+
+		logger.info("Export written to %s", zip_path)
+		return zip_path
 
 	def _collect_results(self, verdicts: list[str]) -> list[dict]:
 		"""Query tracker for results matching any of the given verdicts."""
