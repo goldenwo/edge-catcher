@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import zipfile
 from pathlib import Path
@@ -244,3 +245,26 @@ class TestWriteZip:
 		assert zip1 != zip2
 		assert zip1.exists()
 		assert zip2.exists()
+
+
+class TestExportCLI:
+	def test_export_handler_creates_zip(self, tmp_path):
+		"""Test the CLI handler function directly."""
+		from edge_catcher.cli.research import _run_export
+
+		db_path = str(tmp_path / "research.db")
+		tracker = Tracker(db_path)
+		_insert_result(tracker, strategy="alpha", series="S1", verdict="promote")
+
+		output_dir = str(tmp_path / "exports")
+		args = argparse.Namespace(
+			research_db=db_path,
+			export_output_dir=output_dir,
+		)
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			_run_export(args)
+
+		exports = list(Path(output_dir).glob("*.zip"))
+		assert len(exports) == 1
