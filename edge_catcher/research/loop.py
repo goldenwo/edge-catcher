@@ -73,6 +73,16 @@ class LoopOrchestrator:
 		self.run_id = str(uuid.uuid4())
 		self._cached_results: list[dict] | None = None
 
+	@property
+	def _is_iterative(self) -> bool:
+		"""True when running the full ideate→expand→refine loop.
+
+		Single-pass modes (grid-only, refine-only, llm-only) skip trajectory
+		tracking, budget shifting, and the circuit breaker since those are
+		designed for multi-invocation convergence detection.
+		"""
+		return not (self.grid_only or self.refine_only or self.llm_only)
+
 	def _list_results(self, refresh: bool = False) -> list[dict]:
 		"""Return cached tracker results, refreshing if requested."""
 		if self._cached_results is None or refresh:
@@ -143,9 +153,13 @@ class LoopOrchestrator:
 		llm_calls_used = 0
 
 		# ── Read previous trajectory for stuck detection ──────────────────
-		prev_trajectory = journal.get_latest_trajectory()
-		prev_content = prev_trajectory  # already a dict or None
-		self._consecutive_stuck = (prev_content or {}).get("consecutive_stuck", 0)
+		if self._is_iterative:
+			prev_trajectory = journal.get_latest_trajectory()
+			prev_content = prev_trajectory  # already a dict or None
+			self._consecutive_stuck = (prev_content or {}).get("consecutive_stuck", 0)
+		else:
+			prev_content = None
+			self._consecutive_stuck = 0
 
 		# ── Budget allocation ────────────────────────────────────────────
 		budgets = self._compute_budgets(self.max_runs, self.grid_only, self._consecutive_stuck)
@@ -153,7 +167,7 @@ class LoopOrchestrator:
 		budget_expand = budgets["expand"]
 		budget_refine = budgets["refine"]
 
-		if self._consecutive_stuck >= 2:
+		if self._is_iterative and self._consecutive_stuck >= 2:
 			logger.info(
 				"Stuck detected (%d consecutive) — shifting to exploration-heavy budget",
 				self._consecutive_stuck,
@@ -256,15 +270,16 @@ class LoopOrchestrator:
 				observer.update_kill_registry()
 				self._report_progress("refine", len(all_results), self.max_runs)
 
-		# ── Journal summary ───────────────────────────────────────────────
-		trajectory_status = observer.write_journal_summary(journal, all_results, prev_content)
-
-		# ── Circuit breaker check ────────────────────────────────────────
-		new_stuck_count = self._compute_consecutive_stuck(trajectory_status, prev_content)
-		circuit_breaker_tripped = (
-			self.max_stuck_runs > 0
-			and new_stuck_count >= self.max_stuck_runs + 2
-		)
+		# ── Journal summary + circuit breaker (iterative mode only) ──────
+		circuit_breaker_tripped = False
+		if self._is_iterative:
+			trajectory_status = observer.write_journal_summary(journal, all_results, prev_content)
+			new_stuck_count = self._compute_consecutive_stuck(trajectory_status, prev_content)
+			circuit_breaker_tripped = (
+				self.max_stuck_runs > 0
+				and new_stuck_count >= self.max_stuck_runs + 2
+			)
+			observer.cleanup_dead_strategies()
 
 		# ── Report ────────────────────────────────────────────────────────
 		end_results = self._list_results(refresh=True)
@@ -278,10 +293,6 @@ class LoopOrchestrator:
 			reporter = Reporter()
 			report = reporter.generate_report(all_results)
 			reporter.save(report, self.output_path)
-
-		# Dead code cleanup
-		if not self.grid_only:
-			observer.cleanup_dead_strategies()
 
 		if circuit_breaker_tripped:
 			# +2 because the budget shift kicks in at 2, then we allow max_stuck_runs more
