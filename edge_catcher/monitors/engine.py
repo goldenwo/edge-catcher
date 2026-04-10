@@ -183,10 +183,20 @@ async def _settlement_poller(
 				result = await check_market_result(client, trade["ticker"])
 				if result is not None:
 					store.settle_trade(trade["id"], result)
-					log.info(
-						"Settled trade %d (%s %s) → %s",
-						trade["id"], trade["strategy"], trade["ticker"], result,
+					# Read back PnL from DB (settle_trade computes it including fees)
+					settled = store.get_trade_by_id(trade["id"])
+					if settled:
+						pnl = settled.get("pnl_cents")
+						outcome = "WIN" if (pnl is not None and pnl > 0) else ("LOSS" if (pnl is not None and pnl < 0) else "SCRATCH")
+						pnl_str = f"{pnl:+d}¢" if pnl is not None else "?"
+					else:
+						outcome, pnl_str = result.upper(), "?"
+					msg = (
+						f"SETTLED {trade['strategy']} {trade.get('side', '?')} {trade['ticker']} "
+						f"→ {outcome} {pnl_str} [id={trade['id']}]"
 					)
+					log.info(msg)
+					notify(msg)
 					# Call on_settle on matching strategy
 					strat = strat_by_name.get(trade["strategy"])
 					if strat is not None:
