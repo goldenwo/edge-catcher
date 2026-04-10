@@ -6,6 +6,7 @@ import logging
 import os
 import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -177,6 +178,97 @@ def delete_hypothesis(
     with open(local_file, "w") as f:
         yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
     return {"ok": True, "deleted": hypothesis_id}
+
+
+# ── analyze (run hypothesis) ─────────────────────────────────────────────────
+
+@dataclass
+class AnalyzeTaskState:
+	task_id: str = ""
+	hypothesis_id: str | None = None
+	running: bool = False
+	progress: str = ""
+	error: str | None = None
+	result: dict | None = None
+
+_analyze_states: dict[str, AnalyzeTaskState] = {}
+
+
+def _run_analyze_task(task_id: str, hypothesis_id: str) -> None:
+	"""Background thread: run a statistical hypothesis test and save results."""
+	import sqlite3
+	from edge_catcher.hypotheses.registry import run_hypothesis
+	from edge_catcher.research.tracker import Tracker
+
+	state = _analyze_states[task_id]
+	state.running = True
+	state.progress = "Running analysis..."
+	try:
+		db_path = _validate_db("kalshi.db")
+		conn = sqlite3.connect(str(db_path))
+		conn.row_factory = sqlite3.Row
+		result = run_hypothesis(hypothesis_id, conn, _config_path())
+		conn.close()
+
+		# Save to hypothesis_results via tracker
+		tracker = Tracker(str(_research_db_path()))
+		verdict = getattr(result, "verdict", None) or result.get("verdict", "UNKNOWN") if isinstance(result, dict) else str(result)
+		tracker.save_hypothesis_result(
+			test_type=getattr(result, "test_type", "unknown"),
+			series=hypothesis_id,
+			db="kalshi.db",
+			params=getattr(result, "params", {}) if hasattr(result, "params") else {},
+			thresholds=getattr(result, "thresholds", {}) if hasattr(result, "thresholds") else {},
+			verdict=verdict if isinstance(verdict, str) else str(verdict),
+			z_stat=getattr(result, "z_stat", 0.0) if hasattr(result, "z_stat") else 0.0,
+			fee_adjusted_edge=getattr(result, "fee_adjusted_edge", 0.0) if hasattr(result, "fee_adjusted_edge") else 0.0,
+			detail=result if isinstance(result, dict) else (result.__dict__ if hasattr(result, "__dict__") else {"raw": str(result)}),
+			rationale=getattr(result, "rationale", "") if hasattr(result, "rationale") else "",
+		)
+
+		state.result = {"verdict": verdict}
+		state.progress = "Complete"
+	except Exception as exc:
+		state.error = str(exc)
+		state.progress = "Failed"
+	finally:
+		state.running = False
+
+
+@app.post("/api/analyze")
+def analyze_start(
+	body: dict,
+	background_tasks: BackgroundTasks,
+	_: None = Depends(check_auth),
+) -> dict:
+	import threading
+	hypothesis_id = body.get("hypothesis_id")
+	if not hypothesis_id:
+		raise HTTPException(status_code=400, detail="hypothesis_id is required")
+	task_id = str(uuid.uuid4())
+	_analyze_states[task_id] = AnalyzeTaskState(task_id=task_id, hypothesis_id=hypothesis_id)
+	threading.Thread(target=_run_analyze_task, args=(task_id, hypothesis_id), daemon=True).start()
+	return {"task_id": task_id}
+
+
+@app.get("/api/analyze/{task_id}/status")
+def analyze_status(task_id: str, _: None = Depends(check_auth)) -> dict:
+	state = _analyze_states.get(task_id)
+	if not state:
+		raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+	return {"running": state.running, "progress": state.progress, "error": state.error}
+
+
+@app.get("/api/analyze/{task_id}/result")
+def analyze_result(task_id: str, _: None = Depends(check_auth)) -> dict:
+	state = _analyze_states.get(task_id)
+	if not state:
+		raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+	if state.running:
+		raise HTTPException(status_code=409, detail="Analysis still running")
+	if state.error:
+		raise HTTPException(status_code=500, detail=state.error)
+	return {state.hypothesis_id: state.result}
 
 
 # ── results ───────────────────────────────────────────────────────────────────
