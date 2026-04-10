@@ -14,6 +14,7 @@ from edge_catcher.monitors.engine import (
 	_handle_orderbook_delta,
 	_handle_ticker_msg,
 	_handle_trade_msg,
+	_pnl_label,
 	_series_for_strategy,
 	process_tick,
 )
@@ -219,7 +220,7 @@ class TestHandleTickerMsg:
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 		msg = self._make_msg("KXBTC15M-26APR10-T100", yes_ask=50)
 
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		# StubStrategy fires on first observation
 		trades = store.get_open_trades()
@@ -232,7 +233,7 @@ class TestHandleTickerMsg:
 		ms.register_ticker("KXXRP-26APR10-T200")
 		msg = self._make_msg("KXXRP-26APR10-T200", yes_ask=50)
 
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		# No strategy matched KXXRP
 		assert len(store.get_open_trades()) == 0
@@ -241,7 +242,7 @@ class TestHandleTickerMsg:
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 		msg = self._make_msg("KXBTC15M-26APR10-T100", yes_ask=0)
 
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		assert len(store.get_open_trades()) == 0
 
@@ -250,7 +251,7 @@ class TestHandleTickerMsg:
 		msg = {"type": "ticker", "msg": {"market_ticker": "KXBTC15M-26APR10-T100"}}
 
 		# Should not raise
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		assert len(store.get_open_trades()) == 0
 
@@ -278,7 +279,7 @@ class TestHandleTickerMsg:
 		msg = self._make_msg("KXBTC15M-26APR10-T100", yes_ask=60, yes_bid=55)
 
 		# Should not raise (assertions inside on_tick verify correctness)
-		_handle_ticker_msg(msg, config, ms, store, [no_strat], strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, [no_strat], strat_by_series, pending_states, set())
 
 	def test_derives_event_ticker(self, setup):
 		"""TickContext.event_ticker should strip the -Tnnnn suffix."""
@@ -297,18 +298,18 @@ class TestHandleTickerMsg:
 		pending_states["event-check"] = {}
 		msg = self._make_msg("KXBTC15M-26APR10-T100", yes_ask=50)
 
-		_handle_ticker_msg(msg, config, ms, store, [strat], strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, [strat], strat_by_series, pending_states, set())
 
 	def test_second_tick_not_first_observation(self, setup):
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 		msg = self._make_msg("KXBTC15M-26APR10-T100", yes_ask=50)
 
 		# First tick — StubStrategy enters
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 		assert len(store.get_open_trades()) == 1
 
 		# Second tick — StubStrategy should NOT enter again (not first observation)
-		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 		assert len(store.get_open_trades()) == 1
 
 
@@ -422,7 +423,7 @@ class TestHandleTradeMsg:
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.60, taker_side="yes", count=3)
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		assert len(strat.observed) == 1
 		assert strat.observed[0] == ("yes", 3)
@@ -432,7 +433,7 @@ class TestHandleTradeMsg:
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.40, taker_side="no", count=7)
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		assert strat.observed[0] == ("no", 7)
 
@@ -441,7 +442,7 @@ class TestHandleTradeMsg:
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.55, taker_side="yes", count=1)
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		history = list(ms.get_price_history("KXBTC15M-26APR10-T100") or [])
 		assert 55 in history
@@ -452,7 +453,7 @@ class TestHandleTradeMsg:
 		msg = self._make_trade_msg("KXBTC15M-26APR10-T999", yes_price=0.50, taker_side="yes", count=1)
 
 		# Should not raise
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 		assert strat.observed == []
 
 	def test_ignores_missing_yes_price(self, setup):
@@ -460,7 +461,7 @@ class TestHandleTradeMsg:
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 		msg = {"type": "trade", "msg": {"market_ticker": "KXBTC15M-26APR10-T100", "taker_side": "yes"}}
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 		assert strat.observed == []
 
 	def test_ignores_price_outside_range(self, setup):
@@ -468,7 +469,7 @@ class TestHandleTradeMsg:
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.0, taker_side="yes", count=1)
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 		assert strat.observed == []
 
 	def test_handles_string_price_and_count(self, setup):
@@ -482,7 +483,7 @@ class TestHandleTradeMsg:
 			count="136.00",
 		)
 
-		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set())
 
 		assert len(strat.observed) == 1
 		assert strat.observed[0] == ("no", 136)
@@ -509,7 +510,7 @@ class TestHandleTradeMsg:
 		msg = self._make_trade_msg(
 			"KXBTC15M-26APR10-T100", yes_price=0.60, no_price=0.38, taker_side="yes",
 		)
-		_handle_trade_msg(msg, config, ms, store, [check_strat], strat_by_series, pending_states)
+		_handle_trade_msg(msg, config, ms, store, [check_strat], strat_by_series, pending_states, set())
 
 		assert check_strat.seen_ctx is not None
 		assert check_strat.seen_ctx.yes_ask == 60
@@ -520,6 +521,63 @@ class TestHandleTradeMsg:
 # ---------------------------------------------------------------------------
 # Helper function tests
 # ---------------------------------------------------------------------------
+
+class TestPnlLabel:
+	def test_positive_pnl(self):
+		assert _pnl_label(7) == ("WIN", "+7¢")
+
+	def test_negative_pnl(self):
+		assert _pnl_label(-3) == ("LOSS", "-3¢")
+
+	def test_zero_pnl(self):
+		assert _pnl_label(0) == ("SCRATCH", "0¢")
+
+	def test_none_pnl(self):
+		assert _pnl_label(None) == ("?", "?")
+
+
+class TestDirtyTracking:
+	"""Verify that ticker and trade handlers mark strategies as dirty."""
+
+	@pytest.fixture
+	def setup(self, tmp_path):
+		ms = MarketState()
+		ms.register_ticker("KXBTC15M-26APR10-T100")
+		ms.seed_orderbook("KXBTC15M-26APR10-T100", OrderbookSnapshot(
+			yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)],
+		))
+		store = TradeStore(tmp_path / "test.db")
+		strat = StubStrategy()
+		strat.supported_series = ["KXBTC15M"]
+		config = {
+			"sizing": {"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1},
+			"strategies": {"stub": {"enabled": True, "series": ["KXBTC15M"]}},
+		}
+		strat_by_series = {"KXBTC15M": [strat]}
+		pending_states = {"stub": {}}
+		yield ms, store, [strat], strat_by_series, pending_states, config
+		store.close()
+
+	def test_ticker_msg_marks_dirty(self, setup):
+		ms, store, strategies, strat_by_series, pending_states, config = setup
+		dirty: set[str] = set()
+		msg = {"type": "ticker", "msg": {
+			"market_ticker": "KXBTC15M-26APR10-T100",
+			"yes_ask_dollars": "0.5000",
+		}}
+		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, dirty)
+		assert "stub" in dirty
+
+	def test_trade_msg_marks_dirty(self, setup):
+		ms, store, strategies, strat_by_series, pending_states, config = setup
+		dirty: set[str] = set()
+		msg = {"type": "trade", "msg": {
+			"market_ticker": "KXBTC15M-26APR10-T100",
+			"yes_price": 0.50, "taker_side": "yes", "count": 1,
+		}}
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, dirty)
+		assert "stub" in dirty
+
 
 class TestCollectActiveSeries:
 	def test_collects_from_enabled_strategies(self):
