@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -205,3 +207,40 @@ class TestCollectConfig:
 			)
 		assert bundle["series_mapping"] == {}
 		assert bundle["strategies"]["alpha"]["hypothesis_config"] is None
+
+
+class TestWriteZip:
+	def test_creates_zip_with_manifest(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect()
+		output_dir = tmp_path / "exports"
+		zip_path = collector.write_zip(bundle, output_dir=str(output_dir))
+
+		assert zip_path.exists()
+		assert zip_path.suffix == ".zip"
+		with zipfile.ZipFile(zip_path) as zf:
+			assert "manifest.json" in zf.namelist()
+			manifest = json.loads(zf.read("manifest.json"))
+			assert manifest["version"] == 1
+			assert "alpha" in manifest["strategies"]
+
+	def test_creates_output_dir_if_missing(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		bundle = collector.collect()
+		output_dir = tmp_path / "new" / "nested" / "dir"
+		zip_path = collector.write_zip(bundle, output_dir=str(output_dir))
+		assert zip_path.exists()
+
+	def test_avoids_overwriting_existing_zip(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		bundle = collector.collect()
+		output_dir = str(tmp_path / "exports")
+		zip1 = collector.write_zip(bundle, output_dir=output_dir)
+		zip2 = collector.write_zip(bundle, output_dir=output_dir)
+		assert zip1 != zip2
+		assert zip1.exists()
+		assert zip2.exists()
