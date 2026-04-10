@@ -5,7 +5,11 @@ Pure functions that convert a risk budget + orderbook state into a fill decision
 
 from __future__ import annotations
 
+import logging
+
 from edge_catcher.monitors.market_state import FillResult, OrderbookSnapshot
+
+log = logging.getLogger(__name__)
 
 
 def compute_raw_size(risk_cents: int, entry_price_cents: int) -> int:
@@ -19,8 +23,12 @@ def compute_raw_size(risk_cents: int, entry_price_cents: int) -> int:
 		Number of contracts (floor division). May be 0 if budget < price.
 
 	Raises:
-		ValueError: If entry_price_cents <= 0.
+		ValueError: If entry_price_cents <= 0 or risk_cents < 0.
 	"""
+	if risk_cents < 0:
+		raise ValueError(
+			f"risk_cents must be >= 0, got {risk_cents}"
+		)
 	if entry_price_cents <= 0:
 		raise ValueError(
 			f"entry_price_cents must be > 0, got {entry_price_cents}"
@@ -159,11 +167,16 @@ def resolve_fill(
 
 	raw_size = compute_raw_size(risk_cents, entry_price_cents)
 	if raw_size == 0:
+		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
 		return None
 
 	fill = walk_book_with_ceiling(book, side, raw_size, max_slippage)
 
 	if fill.fill_size < min_fill_threshold:
+		log.debug(
+			"Skip: fill %d < min_fill %d (wanted %d %s)",
+			fill.fill_size, min_fill_threshold, raw_size, side,
+		)
 		return None
 
 	return fill
