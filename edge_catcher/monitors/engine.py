@@ -52,6 +52,15 @@ def _pnl_label(pnl: int | None) -> tuple[str, str]:
 	return "SCRATCH", "0¢"
 
 
+# Per-strategy color indicator (emoji bullet)
+_STRATEGY_EMOJI: dict[str, str] = {
+	"strategy_a":    "🔵",
+	"strategy_b":       "🟣",
+	"strategy_c":     "🟠",
+	"strategy_d": "🟡",
+}
+
+
 # ---------------------------------------------------------------------------
 # Part 1: Synchronous signal pipeline (testable)
 # ---------------------------------------------------------------------------
@@ -142,9 +151,11 @@ def _handle_enter(
 	)
 
 	side_label = "YES" if signal.side == "yes" else "NO"
+	bullet = _STRATEGY_EMOJI.get(signal.strategy, "🔵")
+	tag = f"{signal.strategy} | {signal.series}"
 	msg = (
-		f"🔵 **[{signal.strategy}] PAPER BUY {side_label}** — "
-		f"`{signal.ticker}` ({signal.series}) @ {fill.blended_price_cents}¢"
+		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
+		f"`{signal.ticker}` @ {fill.blended_price_cents}¢"
 	)
 	log.info("ENTER %s %s %s @ %dc [id=%d]", signal.strategy, signal.side, signal.ticker, fill.blended_price_cents, trade_id)
 	notify(msg)
@@ -173,9 +184,11 @@ def _handle_exit(
 	pnl = exited.get("pnl_cents") if exited else None
 	outcome, pnl_str = _pnl_label(pnl)
 	emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+	bullet = _STRATEGY_EMOJI.get(signal.strategy, "🔵")
+	tag = f"{signal.strategy} | {signal.series}"
 	entry_price_display = exited.get("blended_entry") or exited.get("entry_price", "?") if exited else "?"
 	msg = (
-		f"{emoji} **[{signal.strategy}] {outcome}** — "
+		f"{emoji}{bullet} **[{tag}] {outcome}** — "
 		f"`{signal.ticker}` @ {entry_price_display}¢ → {pnl_str}"
 	)
 	log.info("EXIT %s %s %s @ %dc pnl=%s [id=%d]", signal.strategy, signal.side, signal.ticker, exit_price, pnl_str, signal.trade_id)
@@ -208,9 +221,12 @@ async def _settlement_poller(
 					pnl = settled.get("pnl_cents") if settled else None
 					outcome, pnl_str = _pnl_label(pnl)
 					emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+					bullet = _STRATEGY_EMOJI.get(trade["strategy"], "🔵")
+					series = trade.get("series_ticker", "?")
+					tag = f"{trade['strategy']} | {series}"
 					entry_display = settled.get("blended_entry") or settled.get("entry_price", "?") if settled else "?"
 					msg = (
-						f"{emoji} **[{trade['strategy']}] {outcome}** — "
+						f"{emoji}{bullet} **[{tag}] {outcome}** — "
 						f"`{trade['ticker']}` @ {entry_display}¢ → {pnl_str}"
 					)
 					log.info("SETTLED %s %s %s %s pnl=%s [id=%d]", trade['strategy'], trade.get('side','?'), trade['ticker'], outcome, pnl_str, trade['id'])
