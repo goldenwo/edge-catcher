@@ -301,6 +301,7 @@ function OverviewTab({ running }: { running: boolean }) {
   const [feed, setFeed] = useState<AuditExecution[]>([])
   const [sortCol, setSortCol] = useState<string>('completed_at')
   const [verdictFilter, setVerdictFilter] = useState<string | undefined>()
+  const [exporting, setExporting] = useState(false)
   const feedRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
 
@@ -343,6 +344,23 @@ function OverviewTab({ running }: { running: boolean }) {
     }
   }, [feed, autoScroll])
 
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      const blob = await research.exportBundle()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `research-export-${new Date().toISOString().slice(0, 10)}.zip`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      console.error('Export failed:', e)
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const verdictCards = [
     { label: 'Promote', key: 'promote', count: counts.promote, color: 'text-emerald-400' },
     { label: 'Review', key: 'review', count: counts.review, color: 'text-amber-400' },
@@ -377,6 +395,17 @@ function OverviewTab({ running }: { running: boolean }) {
           </button>
         ))}
       </div>
+
+      {/* Export button */}
+      {(counts.promote + counts.review) > 0 && (
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="mb-4 px-4 py-1.5 text-sm bg-emerald-700 text-white rounded hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {exporting ? 'Exporting...' : `Export Promotes (${counts.promote + counts.review})`}
+        </button>
+      )}
 
       {/* Live feed toggle */}
       <button
