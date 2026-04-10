@@ -86,7 +86,9 @@ class TestCollectResults:
 		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
 		_insert_result(collector.tracker, strategy="beta", series="S1", verdict="kill")
 
-		bundle = collector.collect(verdicts=["kill"])
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect(verdicts=["kill"])
 		assert set(bundle["strategies"].keys()) == {"beta"}
 		assert bundle["filter"]["verdicts"] == ["kill"]
 
@@ -268,3 +270,36 @@ class TestExportCLI:
 
 		exports = list(Path(output_dir).glob("*.zip"))
 		assert len(exports) == 1
+
+
+class TestIntegration:
+	def test_full_export_roundtrip(self, tmp_path):
+		"""Insert multiple strategies, export, unzip, verify manifest."""
+		collector = _make_collector(tmp_path)
+
+		# Insert diverse results
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote", sharpe=5.0)
+		_insert_result(collector.tracker, strategy="alpha", series="S2", verdict="review", sharpe=2.5)
+		_insert_result(collector.tracker, strategy="beta", series="S1", verdict="promote", sharpe=3.0)
+		_insert_result(collector.tracker, strategy="gamma", series="S1", verdict="kill", sharpe=0.5)
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           side_effect=lambda name: f"class {name.title()}(Strategy): pass" if name != "gamma" else None):
+			bundle = collector.collect()
+
+		zip_path = collector.write_zip(bundle, output_dir=str(tmp_path / "out"))
+
+		# Roundtrip: unzip and parse
+		with zipfile.ZipFile(zip_path) as zf:
+			assert zf.namelist() == ["manifest.json"]
+			manifest = json.loads(zf.read("manifest.json"))
+
+		assert manifest["version"] == 1
+		assert set(manifest["strategies"].keys()) == {"alpha", "beta"}
+		assert len(manifest["strategies"]["alpha"]["results"]) == 2
+		assert len(manifest["strategies"]["beta"]["results"]) == 1
+		# gamma (kill) excluded
+		assert "gamma" not in manifest["strategies"]
+		# Source attached
+		assert manifest["strategies"]["alpha"]["source"] is not None
+		assert manifest["strategies"]["beta"]["source"] is not None
