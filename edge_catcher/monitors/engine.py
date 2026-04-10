@@ -296,8 +296,14 @@ async def run_engine(config_path: Path) -> None:
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
 	db_path = Path(config.get("db_path", "data/paper_trades.db"))
+	ws_cfg = config.get("ws", {})
+	recovery_cfg = config.get("recovery", {})
+	reconnect_delay = ws_cfg.get("reconnect_delay", 30)
+	ping_interval = ws_cfg.get("ping_interval", 20)
+	price_history_limit = ws_cfg.get("price_history_limit", 100)
+	state_flush_interval = recovery_cfg.get("state_flush_interval", 5)
 	store = TradeStore(db_path)
-	market_state = MarketState()
+	market_state = MarketState(price_history_limit=price_history_limit)
 
 	# 2. Discover and filter strategies
 	all_strategies = discover_strategies()
@@ -319,30 +325,17 @@ async def run_engine(config_path: Path) -> None:
 	log.info("Active series: %s", active_series)
 
 	# 4. Run recovery
-	reconnect_delay = config.get("reconnect_delay", 5)
-	auth_path = config.get("auth_path", WS_PATH)
-
-	async with httpx.AsyncClient(
-		headers=make_auth_headers(f"{auth_path.rstrip('/')}/"),
-		timeout=30.0,
-	) as client:
+	async with httpx.AsyncClient(timeout=30.0) as client:
 		await run_recovery(client, market_state, active_series)
 
 		# 5. Call on_startup for each strategy
+		all_open = store.get_open_trades()
 		for strat in strategies:
-			series_set = _series_for_strategy(config, strat.name)
-			open_positions = []
-			for series in series_set:
-				open_positions.extend(store.get_open_trades())
-			active_tickers: list[str] = []
-			for series in series_set:
-				active_tickers.extend(
-					await fetch_active_tickers_for_series(client, series)
-				)
+			strat_open = [t for t in all_open if t["strategy"] == strat.name]
 			try:
 				strat.on_startup({
-					"open_positions": open_positions,
-					"active_tickers": active_tickers,
+					"open_positions": strat_open,
+					"active_tickers": market_state.all_tickers(),
 					"state": pending_states[strat.name],
 				})
 			except Exception:
@@ -360,7 +353,7 @@ async def run_engine(config_path: Path) -> None:
 				name="summary_logger",
 			),
 			asyncio.create_task(
-				_state_flusher(store, strategies, pending_states),
+				_state_flusher(store, strategies, pending_states, interval=state_flush_interval),
 				name="state_flusher",
 			),
 			asyncio.create_task(
@@ -393,12 +386,12 @@ async def run_engine(config_path: Path) -> None:
 				) as exc:
 					log.warning("WS disconnected: %s — reconnecting in %ds", exc, reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
-					market_state = MarketState()
+					market_state.clear()
 					await run_recovery(client, market_state, active_series)
 				except Exception:
 					log.exception("Unexpected WS error — reconnecting in %ds", reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
-					market_state = MarketState()
+					market_state.clear()
 					await run_recovery(client, market_state, active_series)
 
 		finally:
@@ -438,7 +431,7 @@ async def _ws_loop(
 	async with websockets.connect(
 		KALSHI_WS_URL,
 		additional_headers=headers,
-		ping_interval=20,
+		ping_interval=config.get("ws", {}).get("ping_interval", 20),
 		ping_timeout=10,
 	) as ws:
 		ws_ref[0] = ws
@@ -508,17 +501,24 @@ def _handle_ticker_msg(
 	if not ticker:
 		return
 
-	yes_ask = data.get("yes_ask")
-	if yes_ask is None:
+	yes_ask_raw = data.get("yes_ask")
+	if yes_ask_raw is None:
 		return
 
 	# Validate price range
-	price_cents = int(round(yes_ask * 100)) if isinstance(yes_ask, float) else int(yes_ask)
-	if not (1 <= price_cents <= 99):
+	yes_ask_cents = int(round(yes_ask_raw * 100)) if isinstance(yes_ask_raw, float) else int(yes_ask_raw)
+	if not (1 <= yes_ask_cents <= 99):
 		return
 
+	# Read yes_bid separately (may differ from yes_ask)
+	yes_bid_raw = data.get("yes_bid")
+	yes_bid_cents = (
+		int(round(yes_bid_raw * 100)) if isinstance(yes_bid_raw, float)
+		else int(yes_bid_raw)
+	) if yes_bid_raw is not None else yes_ask_cents
+
 	# Update market state
-	is_first = market_state.update_price(ticker, price_cents)
+	is_first = market_state.update_price(ticker, yes_ask_cents)
 	event_ticker = derive_event_ticker(ticker)
 	orderbook = market_state.get_orderbook(ticker) or OrderbookSnapshot([], [])
 	history = list(market_state.get_series(ticker) or [])
@@ -542,10 +542,10 @@ def _handle_ticker_msg(
 			ctx = TickContext(
 				ticker=ticker,
 				event_ticker=event_ticker,
-				yes_bid=price_cents,
-				yes_ask=price_cents,
-				no_bid=100 - price_cents,
-				no_ask=100 - price_cents,
+				yes_bid=yes_bid_cents,
+				yes_ask=yes_ask_cents,
+				no_bid=100 - yes_ask_cents,
+				no_ask=100 - yes_bid_cents,
 				orderbook=orderbook,
 				price_history=history,
 				open_positions=open_positions,
