@@ -83,3 +83,6 @@ tests/test_flow_strategy.py
 
 # Export bundles (Pi handoff zips)
 exports/
+
+# Deploy config (machine-specific)
+deploy/paper-trader.service

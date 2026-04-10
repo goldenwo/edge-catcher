@@ -4,23 +4,22 @@
 db_path: data/paper_trades_v2.db
 
 ws:
-	channels: [ticker, orderbook_delta]
-	ping_interval: 20
-	reconnect_delay: 30
-	price_history_limit: 100
+  channels: [ticker, orderbook_delta]
+  ping_interval: 20
+  reconnect_delay: 30
+  price_history_limit: 100
 
 recovery:
-	rest_sweep_on_startup: true
-	state_flush_interval: 5
+  rest_sweep_on_startup: true
+  state_flush_interval: 5
 
 strategies:
-	my-strategy:
-		enabled: true
-		series: [SERIES_A, SERIES_B]
-		sizing:
-			SERIES_A: 10
-			SERIES_B: 20
-		params: {}
+  my-strategy:
+    enabled: true
+    series: [SERIES_A, SERIES_B]
+    params: {}
 
 sizing:
-	default: 10
+  risk_per_trade_cents: 200    # $2.00 max risk per trade
+  max_slippage_cents: 2        # stop filling beyond best + 2c
+  min_fill: 3                  # skip if < 3 contracts fillable

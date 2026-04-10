@@ -21,6 +21,7 @@ class FillResult:
 	blended_price_cents: int
 	slippage_cents: int
 	fill_pct: float
+	intended_size: int = 0
 
 
 @dataclass
@@ -71,6 +72,7 @@ class OrderbookSnapshot:
 				blended_price_cents=0,
 				slippage_cents=0,
 				fill_pct=0.0,
+				intended_size=size,
 			)
 
 		best_price_cents = round(levels[0][0] * 100)
@@ -93,6 +95,7 @@ class OrderbookSnapshot:
 				blended_price_cents=0,
 				slippage_cents=0,
 				fill_pct=0.0,
+				intended_size=size,
 			)
 
 		blended = round(total_cost_cents / total_filled)
@@ -104,6 +107,7 @@ class OrderbookSnapshot:
 			blended_price_cents=blended,
 			slippage_cents=slippage,
 			fill_pct=fill_pct,
+			intended_size=size,
 		)
 
 
