@@ -121,9 +121,11 @@ class TickContext:
 	no_ask: int
 	orderbook: OrderbookSnapshot
 	price_history: list[int]
-	open_positions: dict[str, Any]
+	open_positions: list[dict[str, Any]]
 	persisted_state: dict[str, Any]
 	market_metadata: dict[str, Any]
+	series: str = ""
+	is_first_observation: bool = False
 
 
 # ---------------------------------------------------------------------------
