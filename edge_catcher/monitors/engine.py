@@ -106,6 +106,11 @@ def _handle_enter(
 		)
 		return
 
+	side_levels = (
+		ctx.orderbook.yes_levels if signal.side == "yes"
+		else ctx.orderbook.no_levels
+	)
+
 	trade_id = store.record_trade(
 		ticker=signal.ticker,
 		entry_price=entry_price,
@@ -118,6 +123,7 @@ def _handle_enter(
 		book_depth=ctx.orderbook.depth,
 		fill_pct=fill.fill_pct,
 		slippage_cents=fill.slippage_cents,
+		book_snapshot=json.dumps(side_levels),
 	)
 
 	msg = (
