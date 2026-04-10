@@ -530,7 +530,7 @@ def strategize_endpoint(
 
     model_override = os.getenv("EDGE_CATCHER_LLM_MODEL") or None
     client = LLMClient(provider=body.provider, model=model_override)
-    result = strategize(body.hypothesis_id, body.run_id, client, _validate_db("kalshi.db"), _config_path())
+    result = strategize(body.hypothesis_id, body.run_id, client, _config_path(), str(_research_db_path()))
     return StrategizeResponse(**result)
 
 
