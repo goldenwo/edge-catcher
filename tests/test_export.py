@@ -105,3 +105,55 @@ class TestCollectSource:
 		           return_value=None):
 			bundle = collector.collect()
 		assert bundle["strategies"]["gone-strat"]["source"] is None
+
+
+class TestCollectJournalAndAudit:
+	def test_attaches_journal_entries(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		from edge_catcher.research.journal import ResearchJournal
+		journal = ResearchJournal(db_path=str(tmp_path / "research.db"))
+		journal.write_entry("run-1", "outcome", {
+			"phase": "grid", "strategy": "alpha",
+			"series": ["S1"], "best_sharpe": 5.0,
+		})
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect()
+		entries = bundle["strategies"]["alpha"]["journal_entries"]
+		assert len(entries) >= 1
+		assert entries[0]["entry_type"] == "outcome"
+
+	def test_journal_skips_entries_without_strategy(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		from edge_catcher.research.journal import ResearchJournal
+		journal = ResearchJournal(db_path=str(tmp_path / "research.db"))
+		journal.write_entry("run-1", "trajectory", {"status": "stuck", "total_sessions": 3})
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect()
+		assert bundle["strategies"]["alpha"]["journal_entries"] == []
+
+	def test_attaches_audit_records(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		hid = _insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		from edge_catcher.research.audit import AuditLog
+		audit = AuditLog(str(tmp_path / "research.db"))
+		audit.record_execution(
+			hypothesis_id=hid, phase="grid", queue_position=0,
+			verdict="promote", status="ok",
+		)
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect()
+		result = bundle["strategies"]["alpha"]["results"][0]
+		assert len(result["audit"]) == 1
+		assert result["audit"][0]["phase"] == "grid"
+		assert result["audit"][0]["verdict"] == "promote"
