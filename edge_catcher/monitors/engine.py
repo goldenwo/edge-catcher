@@ -16,8 +16,8 @@ from edge_catcher.monitors.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
 	load_config,
-	resolve_sizing,
 )
+from edge_catcher.monitors.sizing import resolve_fill
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -94,18 +94,22 @@ def _handle_enter(
 	config: dict,
 ) -> None:
 	"""Process an entry signal: resolve sizing, walk orderbook, record trade."""
-	size = resolve_sizing(config, signal.strategy, signal.series)
-	fill = ctx.orderbook.walk_book(signal.side, size)
+	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
+	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
-	if fill.fill_size == 0:
+	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
+
+	if fill is None:
 		log.info(
-			"No liquidity for %s %s %s (size=%d) — skipping",
-			signal.strategy, signal.side, signal.ticker, size,
+			"No fill for %s %s %s (entry=%dc) — skipping",
+			signal.strategy, signal.side, signal.ticker, entry_price,
 		)
 		return
 
-	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
-	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
+	side_levels = (
+		ctx.orderbook.yes_levels if signal.side == "yes"
+		else ctx.orderbook.no_levels
+	)
 
 	trade_id = store.record_trade(
 		ticker=signal.ticker,
@@ -113,18 +117,19 @@ def _handle_enter(
 		strategy=signal.strategy,
 		side=signal.side,
 		series_ticker=signal.series,
-		intended_size=size,
+		intended_size=fill.intended_size,
 		fill_size=fill.fill_size,
 		blended_entry=fill.blended_price_cents,
 		book_depth=ctx.orderbook.depth,
 		fill_pct=fill.fill_pct,
 		slippage_cents=fill.slippage_cents,
+		book_snapshot=json.dumps(side_levels),
 	)
 
 	msg = (
 		f"ENTER {signal.strategy} {signal.side} {signal.ticker} "
 		f"@ {entry_price}c (blended {fill.blended_price_cents}c, "
-		f"fill {fill.fill_size}/{size}, slip {fill.slippage_cents}c) "
+		f"fill {fill.fill_size}/{fill.intended_size}, slip {fill.slippage_cents}c) "
 		f"— {signal.reason} [id={trade_id}]"
 	)
 	log.info(msg)
@@ -144,7 +149,8 @@ def _handle_exit(
 		)
 		return
 
-	exit_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
+	# Selling hits the bid, not the ask
+	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
 	store.exit_trade(signal.trade_id, exit_price)
 

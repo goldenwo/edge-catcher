@@ -17,9 +17,9 @@ class Signal:
 	side: str           # "yes" or "no"
 	series: str
 	strategy: str
-	intended_size: int  # from config sizing (ignored for exits)
 	reason: str
 	trade_id: Optional[int] = None  # required for "exit" signals
+	intended_size: Optional[int] = None  # deprecated: engine resolves sizing via pipeline
 
 
 class PaperStrategy(ABC):
