@@ -88,6 +88,10 @@ def register(subparsers) -> None:
 	rs_killreg.add_argument("--strategy", default=None, dest="kill_registry_strategy",
 	                        help="Strategy name (required for reset)")
 
+	rs_export = rs_sub.add_parser("export", help="Export promoted results as a zip bundle for Pi handoff")
+	rs_export.add_argument("--output-dir", default="exports", dest="export_output_dir",
+	                       help="Output directory for zip (default: exports)")
+
 	rs.set_defaults(func=run)
 
 
@@ -103,13 +107,14 @@ def run(args) -> None:
 		'loop': _run_loop,
 		'audit': _run_audit,
 		'kill-registry': _run_kill_registry,
+		'export': _run_export,
 	}
 	handler = handlers.get(subcmd)
 	if handler:
 		handler(args)
 	else:
 		print("Usage: python -m edge_catcher research "
-		      "{run|sweep|sweep-all|status|report|loop|audit|kill-registry}")
+		      "{run|sweep|sweep-all|status|report|loop|audit|kill-registry|export}")
 		sys.exit(1)
 
 
@@ -337,3 +342,18 @@ def _run_kill_registry(args) -> None:
 			sys.exit(1)
 		tracker.reset_kill_registry(name)
 		print(f"Reset '{name}' — it can now be re-proposed by the ideator.")
+
+
+def _run_export(args) -> None:
+	from edge_catcher.research.export import ExportCollector
+	research_db = getattr(args, 'research_db', 'data/research.db')
+	output_dir = getattr(args, 'export_output_dir', 'exports')
+	collector = ExportCollector(db_path=research_db)
+	bundle = collector.collect()
+	strat_count = len(bundle["strategies"])
+	result_count = sum(len(s["results"]) for s in bundle["strategies"].values())
+	if strat_count == 0:
+		print("No promoted/reviewed results to export.")
+		return
+	zip_path = collector.write_zip(bundle, output_dir=output_dir)
+	print(f"Exported {result_count} results across {strat_count} strategies to {zip_path}")
