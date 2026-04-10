@@ -209,9 +209,10 @@ class TestHandleTickerMsg:
 		store.close()
 
 	def _make_msg(self, ticker: str, yes_ask: int, yes_bid: int | None = None) -> dict:
-		msg_data = {"market_ticker": ticker, "yes_ask": yes_ask}
+		# Match real Kalshi WS format: prices as 'yes_ask_dollars' strings
+		msg_data = {"market_ticker": ticker, "yes_ask_dollars": f"{yes_ask / 100:.4f}"}
 		if yes_bid is not None:
-			msg_data["yes_bid"] = yes_bid
+			msg_data["yes_bid_dollars"] = f"{yes_bid / 100:.4f}"
 		return {"type": "ticker", "msg": msg_data}
 
 	def test_routes_tick_to_matching_strategy(self, setup):
