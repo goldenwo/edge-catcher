@@ -196,9 +196,19 @@ class MarketState:
 			return True
 		return False
 
-	def get_series(self, ticker: str) -> deque[int] | None:
+	def get_price_history(self, ticker: str) -> deque[int] | None:
 		"""Return the price history deque for *ticker*, or None if unknown."""
 		return self._series.get(ticker)
+
+	def all_tickers(self) -> list[str]:
+		"""Return all registered ticker strings."""
+		return list(self._series.keys())
+
+	def clear(self) -> None:
+		"""Remove all ticker state (used on WS reconnect before re-seeding)."""
+		self._series.clear()
+		self._first_seen.clear()
+		self._orderbooks.clear()
 
 	# ------------------------------------------------------------------
 	# Orderbook management

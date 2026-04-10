@@ -145,10 +145,10 @@ class TestDeriveEventTicker:
 
 
 class TestMarketState:
-	def test_register_and_get_series(self):
+	def test_register_and_get_price_history(self):
 		ms = MarketState()
 		ms.register_ticker("KXBTC15M-26APR10-T1234")
-		series = ms.get_series("KXBTC15M-26APR10-T1234")
+		series = ms.get_price_history("KXBTC15M-26APR10-T1234")
 		assert series is not None
 		assert len(series) == 0
 
@@ -170,7 +170,7 @@ class TestMarketState:
 		ms.register_ticker("TICKER-B")
 		for i in range(10):
 			ms.update_price("TICKER-B", i)
-		series = ms.get_series("TICKER-B")
+		series = ms.get_price_history("TICKER-B")
 		assert len(series) == 5
 		# Should contain the last 5 values
 		assert list(series) == [5, 6, 7, 8, 9]
@@ -180,7 +180,7 @@ class TestMarketState:
 		ms.register_ticker("TICKER-C")
 		ms.update_price("TICKER-C", 50)
 		ms.unregister_ticker("TICKER-C")
-		assert ms.get_series("TICKER-C") is None
+		assert ms.get_price_history("TICKER-C") is None
 
 	def test_seed_orderbook(self):
 		ms = MarketState()
