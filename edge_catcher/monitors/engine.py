@@ -149,7 +149,8 @@ def _handle_exit(
 		)
 		return
 
-	exit_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
+	# Selling hits the bid, not the ask
+	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
 	store.exit_trade(signal.trade_id, exit_price)
 
