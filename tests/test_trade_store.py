@@ -40,6 +40,37 @@ def test_init_sizing_columns_present(store: TradeStore) -> None:
 		assert col in cols, f"Missing column: {col}"
 
 
+def test_init_book_snapshot_column_present(store: TradeStore) -> None:
+	cols = {
+		row[1]
+		for row in store._conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+	}
+	assert "book_snapshot" in cols
+
+
+def test_record_trade_with_book_snapshot(store: TradeStore) -> None:
+	snapshot = '[[0.03, 12], [0.04, 25]]'
+	trade_id = store.record_trade(
+		ticker="T1", entry_price=3, strategy="test", side="no",
+		series_ticker="SERIES", book_snapshot=snapshot,
+	)
+	row = store._conn.execute(
+		"SELECT book_snapshot FROM paper_trades WHERE id=?", (trade_id,)
+	).fetchone()
+	assert row[0] == snapshot
+
+
+def test_record_trade_book_snapshot_default_null(store: TradeStore) -> None:
+	trade_id = store.record_trade(
+		ticker="T1", entry_price=3, strategy="test", side="no",
+		series_ticker="SERIES",
+	)
+	row = store._conn.execute(
+		"SELECT book_snapshot FROM paper_trades WHERE id=?", (trade_id,)
+	).fetchone()
+	assert row[0] is None
+
+
 # ---------------------------------------------------------------------------
 # 2. record_trade: record and retrieve, fee auto-calculated (> 0 for price=50 size=10)
 # ---------------------------------------------------------------------------
@@ -196,7 +227,9 @@ def test_exit_trade_profit(store: TradeStore) -> None:
 	entry_fee = store._conn.execute(
 		"SELECT entry_fee_cents FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()[0]
-	expected_pnl = 2 * (50 - 40) - entry_fee
+	from edge_catcher.fees import STANDARD_FEE
+	exit_fee = int(STANDARD_FEE.calculate(50, 2))
+	expected_pnl = 2 * (50 - 40) - entry_fee - exit_fee
 	assert row[2] == expected_pnl
 
 
