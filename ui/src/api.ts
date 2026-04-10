@@ -334,4 +334,18 @@ export const research = {
     req<AuditExecution[]>(`/api/research/audit/executions?limit=${limit}`),
   auditDecisions: (limit = 100) =>
     req<AuditDecision[]>(`/api/research/audit/decisions?limit=${limit}`),
+  exportBundle: async (): Promise<Blob> => {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 60_000)
+    try {
+      const res = await fetch(`${BASE}/api/research/export`, { signal: controller.signal })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error((body as { detail?: string }).detail ?? res.statusText)
+      }
+      return res.blob()
+    } finally {
+      clearTimeout(timeout)
+    }
+  },
 }
