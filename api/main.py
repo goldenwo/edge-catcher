@@ -588,10 +588,7 @@ def backtest_history(
     _: None = Depends(check_auth),
 ) -> dict:
     from api.backtest_service import query_backtest_history
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        return {"results": [], "total": 0}
-    rows, total = query_backtest_history(db, limit=limit, offset=offset)
+    rows, total = query_backtest_history(limit=limit, offset=offset)
     return {
         "results": [BacktestHistoryItem(**r).model_dump() for r in rows],
         "total": total,
@@ -603,18 +600,9 @@ def delete_backtest(
     task_id: str,
     _: None = Depends(check_auth),
 ) -> dict:
-    from edge_catcher.storage.db import get_connection
-
-    db = _validate_db("kalshi.db")
-    if not db.exists():
-        raise HTTPException(status_code=404, detail="Database not found")
-    conn = get_connection(db)
-    try:
-        cur = conn.execute("DELETE FROM backtest_results WHERE task_id = ?", (task_id,))
-        conn.commit()
-    finally:
-        conn.close()
-    if cur.rowcount == 0:
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(str(_research_db_path()))
+    if not tracker.delete_ui_backtest(task_id):
         raise HTTPException(status_code=404, detail=f"Backtest {task_id!r} not found")
     return {"ok": True}
 
