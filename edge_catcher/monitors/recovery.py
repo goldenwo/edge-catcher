@@ -235,8 +235,8 @@ async def run_recovery(
 		total += len(tickers)
 
 		for ticker in tickers:
-			_meta = await fetch_market_meta(client, ticker)
-			market_state.register_ticker(ticker)
+			meta = await fetch_market_meta(client, ticker)
+			market_state.register_ticker(ticker, meta=meta)
 
 			snapshot = await fetch_orderbook_snapshot(client, ticker)
 			if snapshot is not None:
