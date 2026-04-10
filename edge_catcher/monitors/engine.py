@@ -104,8 +104,8 @@ def _handle_enter(
 		)
 		return
 
-	# Raw tick price for the side
-	entry_price = ctx.yes_ask if signal.side == "yes" else (100 - ctx.yes_ask)
+	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
+	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
 	trade_id = store.record_trade(
 		ticker=signal.ticker,
@@ -144,7 +144,7 @@ def _handle_exit(
 		)
 		return
 
-	exit_price = ctx.yes_ask if signal.side == "yes" else (100 - ctx.yes_ask)
+	exit_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
 	store.exit_trade(signal.trade_id, exit_price)
 
@@ -246,7 +246,7 @@ async def _ticker_refresh(
 			for series in active_series:
 				tickers = await fetch_active_tickers_for_series(client, series)
 				for ticker in tickers:
-					if market_state.get_series(ticker) is None:
+					if market_state.get_price_history(ticker) is None:
 						market_state.register_ticker(ticker)
 						snapshot = await fetch_orderbook_snapshot(client, ticker)
 						if snapshot is not None:
@@ -421,11 +421,8 @@ async def _ws_loop(
 	"""Single WS connection lifecycle — connect, subscribe, process messages."""
 	headers = make_auth_headers()
 
-	# Collect all registered tickers for subscription
-	all_tickers: list[str] = []
-	for series in active_series:
-		tickers = await fetch_active_tickers_for_series(client, series)
-		all_tickers.extend(tickers)
+	# Use tickers already registered in market_state (seeded by recovery)
+	all_tickers = market_state.all_tickers()
 
 	async with websockets.connect(
 		KALSHI_WS_URL,
@@ -555,7 +552,7 @@ def _handle_ticker_msg(
 				price_history=history,
 				open_positions=open_positions,
 				persisted_state=pending_states.get(strat.name, {}),
-				market_metadata={},
+				market_metadata=market_state.get_metadata(ticker),
 				series=series,
 				is_first_observation=is_first,
 			)
