@@ -69,13 +69,12 @@ def test_strategize_success():
     mock_client = MagicMock()
     mock_client.complete.return_value = SAMPLE_RESPONSE
 
-    # Mock the DB lookups for hypothesis config and analysis results
     with patch("edge_catcher.ai.strategizer._get_hypothesis_config") as mock_hyp, \
-         patch("edge_catcher.ai.strategizer._get_analysis_result") as mock_result:
+         patch("edge_catcher.ai.strategizer._get_tracker_result") as mock_result:
         mock_hyp.return_value = {"name": "Test Hyp", "market": "kalshi"}
         mock_result.return_value = {"verdict": "EDGE_EXISTS", "fee_adjusted_edge": 0.05}
 
-        result = strategize("test_hyp", None, mock_client, Path("data/test.db"))
+        result = strategize("test_hyp", None, mock_client, research_db="data/test.db")
 
     assert result["error"] is None
     assert "class TimedDecay" in result["code"]

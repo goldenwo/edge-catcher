@@ -32,25 +32,21 @@ def _get_hypothesis_config(hypothesis_id: str, config_path: Path = Path("config"
     return merged.get(hypothesis_id)
 
 
-def _get_analysis_result(hypothesis_id: str, run_id: Optional[str], db_path: Path) -> Optional[dict]:
-    """Fetch analysis result from DB. Uses latest run if run_id is None."""
-    if not db_path.exists():
-        return None
-    from edge_catcher.storage.db import get_connection
-    conn = get_connection(db_path)
-    try:
-        if run_id:
-            row = conn.execute(
-                "SELECT * FROM analysis_results WHERE run_id = ?", (run_id,)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT * FROM analysis_results WHERE hypothesis_id = ? ORDER BY run_timestamp DESC LIMIT 1",
-                (hypothesis_id,),
-            ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+def _get_tracker_result(hypothesis_id: str, run_id: Optional[str] = None, db_path: str = "data/research.db") -> Optional[dict]:
+    """Fetch result from Tracker (research.db).
+
+    Checks research loop results first, then statistical hypothesis_results.
+    Uses hypothesis_id as lookup key unless run_id is provided.
+    """
+    from edge_catcher.research.tracker import Tracker
+    tracker = Tracker(db_path)
+    lookup = run_id if run_id else hypothesis_id
+    # Try research loop results (hypotheses + results tables)
+    result = tracker.get_result_by_id(lookup)
+    if not result:
+        # Fall back to statistical hypothesis_results table
+        result = tracker.get_hypothesis_result_by_id(lookup)
+    return result
 
 
 def _build_user_prompt(hypothesis_config: dict, analysis_result: Optional[dict]) -> str:
@@ -164,8 +160,8 @@ def strategize(
     hypothesis_id: str,
     run_id: Optional[str],
     client: LLMClient,
-    db_path: Path,
     config_path: Path = Path("config"),
+    research_db: str = "data/research.db",
 ) -> dict:
     """Generate a strategy class from a hypothesis + analysis results.
 
@@ -175,7 +171,7 @@ def strategize(
     if not hyp_config:
         return {"code": "", "strategy_name": "", "error": f"Hypothesis {hypothesis_id!r} not found"}
 
-    analysis = _get_analysis_result(hypothesis_id, run_id, db_path)
+    analysis = _get_tracker_result(hypothesis_id, run_id, research_db)
 
     system_prompt = _load_system_prompt()
     user_prompt = _build_user_prompt(hyp_config, analysis)
