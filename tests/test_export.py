@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from edge_catcher.research.export import ExportCollector
 from edge_catcher.research.tracker import Tracker
 from edge_catcher.research.data_source_config import make_ds
@@ -157,3 +159,49 @@ class TestCollectJournalAndAudit:
 		assert len(result["audit"]) == 1
 		assert result["audit"][0]["phase"] == "grid"
 		assert result["audit"][0]["verdict"] == "promote"
+
+
+class TestCollectConfig:
+	def test_attaches_series_mapping(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="KXXRP15M", verdict="promote")
+
+		mapping = {"series_to_asset": {"KXXRP": ["xrp", "ohlc.db", "xrp_ohlc"]}}
+		mapping_path = tmp_path / "series_mapping.yaml"
+		mapping_path.write_text(yaml.dump(mapping))
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect(series_mapping_path=mapping_path)
+		assert "KXXRP" in bundle["series_mapping"]
+		assert bundle["series_mapping"]["KXXRP"]["asset"] == "xrp"
+
+	def test_attaches_hypothesis_config(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		hyp_config = {"hypotheses": {"alpha_edge": {
+			"name": "Alpha Edge", "module": "edge_catcher.hypotheses.alpha",
+			"status": "exploratory",
+		}}}
+		hyp_path = tmp_path / "hypotheses.yaml"
+		hyp_path.write_text(yaml.dump(hyp_config))
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect(hypotheses_path=hyp_path)
+		assert bundle["strategies"]["alpha"]["hypothesis_config"] is not None
+		assert bundle["strategies"]["alpha"]["hypothesis_config"]["status"] == "exploratory"
+
+	def test_missing_config_files_graceful(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="alpha", series="S1", verdict="promote")
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect(
+				series_mapping_path=tmp_path / "nonexistent.yaml",
+				hypotheses_path=tmp_path / "also_nonexistent.yaml",
+			)
+		assert bundle["series_mapping"] == {}
+		assert bundle["strategies"]["alpha"]["hypothesis_config"] is None

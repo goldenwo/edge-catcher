@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .agent import ResearchAgent
 from .audit import AuditLog
@@ -21,7 +22,12 @@ class ExportCollector:
 		self.db_path = db_path
 		self.tracker = Tracker(db_path)
 
-	def collect(self, verdicts: list[str] | None = None) -> dict:
+	def collect(
+		self,
+		verdicts: list[str] | None = None,
+		series_mapping_path: Path | None = None,
+		hypotheses_path: Path | None = None,
+	) -> dict:
 		"""Collect all artifacts matching the given verdict filter.
 
 		Returns a bundle dict ready for serialization to manifest.json.
@@ -37,13 +43,16 @@ class ExportCollector:
 		self._attach_journal(strategies, journal)
 		self._attach_audit(strategies, audit)
 
-		return {
+		bundle = {
 			"version": 1,
 			"exported_at": datetime.now(timezone.utc).isoformat(),
 			"filter": {"verdicts": verdicts},
 			"strategies": strategies,
 			"series_mapping": {},
 		}
+		self._attach_series_mapping(bundle, strategies, series_mapping_path)
+		self._attach_hypothesis_config(strategies, hypotheses_path)
+		return bundle
 
 	def _collect_results(self, verdicts: list[str]) -> list[dict]:
 		"""Query tracker for results matching any of the given verdicts."""
@@ -129,3 +138,53 @@ class ExportCollector:
 			for result in strat_data["results"]:
 				hid = result["hypothesis_id"]
 				result["audit"] = exec_by_hid.get(hid, [])
+
+	def _attach_series_mapping(
+		self, bundle: dict, strategies: dict, config_path: Path | None,
+	) -> None:
+		"""Load series mapping and include entries relevant to exported results."""
+		path = config_path or Path("config.local/series_mapping.yaml")
+		if not path.exists():
+			return
+		try:
+			import yaml
+			with open(path) as f:
+				data = yaml.safe_load(f) or {}
+		except (ImportError, OSError):
+			return
+
+		s2a = data.get("series_to_asset") or {}
+		all_series: set[str] = set()
+		for strat_data in strategies.values():
+			for result in strat_data["results"]:
+				all_series.add(result["series"])
+
+		# Match series to prefixes (keyed by prefix, same format as config.local)
+		for prefix, vals in s2a.items():
+			if any(s.startswith(prefix) for s in all_series):
+				if isinstance(vals, list) and len(vals) == 3:
+					bundle["series_mapping"][prefix] = {
+						"asset": vals[0], "db": vals[1], "table": vals[2],
+					}
+
+	def _attach_hypothesis_config(
+		self, strategies: dict, config_path: Path | None,
+	) -> None:
+		"""Load hypothesis YAML and attach matching entries to strategies."""
+		path = config_path or Path("config.local/hypotheses.yaml")
+		if not path.exists():
+			return
+		try:
+			import yaml
+			with open(path) as f:
+				data = yaml.safe_load(f) or {}
+		except (ImportError, OSError):
+			return
+
+		hypotheses = data.get("hypotheses") or {}
+		strategy_names = set(strategies.keys())
+		for hyp_key, hyp_val in hypotheses.items():
+			for strat_name in strategy_names:
+				if strat_name in hyp_key or strat_name == hyp_val.get("name", "").lower():
+					strategies[strat_name]["hypothesis_config"] = hyp_val
+					break
