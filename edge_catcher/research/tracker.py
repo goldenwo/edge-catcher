@@ -162,6 +162,8 @@ class Tracker:
         conn = self._connect()
         # Normalize db_path to forward slashes for cross-platform consistency
         db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
+        start = h.start_date or ""
+        end = h.end_date or ""
         try:
             conn.execute(
                 """INSERT OR IGNORE INTO hypotheses
@@ -170,7 +172,7 @@ class Tracker:
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     h.id, h.strategy, h.series, db_path,
-                    h.start_date, h.end_date, h.fee_pct,
+                    start, end, h.fee_pct,
                     h.parent_id,
                     json.dumps(h.tags),
                     h.notes,
@@ -188,6 +190,8 @@ class Tracker:
             h = result.hypothesis
             # Normalize db_path to forward slashes for cross-platform consistency
             db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
+            start = h.start_date or ""
+            end = h.end_date or ""
             conn.execute(
                 """INSERT OR IGNORE INTO hypotheses
                    (id, strategy, series, db_path, start_date, end_date, fee_pct,
@@ -195,7 +199,7 @@ class Tracker:
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     h.id, h.strategy, h.series, db_path,
-                    h.start_date, h.end_date, h.fee_pct,
+                    start, end, h.fee_pct,
                     h.parent_id,
                     json.dumps(h.tags),
                     h.notes,
@@ -210,7 +214,7 @@ class Tracker:
                 """SELECT id FROM hypotheses
                    WHERE strategy=? AND series=? AND REPLACE(db_path, '\\', '/')=?
                      AND start_date=? AND end_date=? AND fee_pct=?""",
-                (h.strategy, h.series, normalized_db, h.start_date, h.end_date, h.fee_pct),
+                (h.strategy, h.series, normalized_db, start, end, h.fee_pct),
             ).fetchone()
             if row:
                 actual_id = row["id"]
@@ -223,8 +227,8 @@ class Tracker:
                         parent_id, tags, notes, created_at)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        h.id, h.strategy, h.series, h.db_path,
-                        h.start_date, h.end_date, h.fee_pct,
+                        h.id, h.strategy, h.series, db_path,
+                        start, end, h.fee_pct,
                         h.parent_id,
                         json.dumps(h.tags),
                         h.notes,
