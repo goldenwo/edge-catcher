@@ -216,6 +216,20 @@ class TradeStore:
 		).fetchall()
 		return [_row_to_dict(r) for r in rows]
 
+	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None:
+		"""Return a single trade by id, or None if not found."""
+		row = self._conn.execute(
+			"""
+			SELECT id, ticker, entry_price, strategy, side, series_ticker,
+			       entry_fee_cents, intended_size, fill_size, blended_entry,
+			       book_depth, fill_pct, slippage_cents, status,
+			       exit_price, exit_time, pnl_cents
+			FROM paper_trades WHERE id=?
+			""",
+			(trade_id,),
+		).fetchone()
+		return _row_to_dict(row) if row else None
+
 	def get_open_trades_for(self, strategy: str, ticker: str) -> list[dict[str, Any]]:
 		"""Return open trades filtered by strategy and ticker."""
 		rows = self._conn.execute(
