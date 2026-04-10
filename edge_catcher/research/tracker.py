@@ -160,6 +160,8 @@ class Tracker:
     def save_hypothesis(self, h: Hypothesis) -> None:
         """Insert hypothesis record (ignore if duplicate)."""
         conn = self._connect()
+        # Normalize db_path to forward slashes for cross-platform consistency
+        db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
         try:
             conn.execute(
                 """INSERT OR IGNORE INTO hypotheses
@@ -167,7 +169,7 @@ class Tracker:
                     parent_id, tags, notes, created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    h.id, h.strategy, h.series, h.db_path,
+                    h.id, h.strategy, h.series, db_path,
                     h.start_date, h.end_date, h.fee_pct,
                     h.parent_id,
                     json.dumps(h.tags),
@@ -184,13 +186,15 @@ class Tracker:
         conn = self._connect()
         try:
             h = result.hypothesis
+            # Normalize db_path to forward slashes for cross-platform consistency
+            db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
             conn.execute(
                 """INSERT OR IGNORE INTO hypotheses
                    (id, strategy, series, db_path, start_date, end_date, fee_pct,
                     parent_id, tags, notes, created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    h.id, h.strategy, h.series, h.db_path,
+                    h.id, h.strategy, h.series, db_path,
                     h.start_date, h.end_date, h.fee_pct,
                     h.parent_id,
                     json.dumps(h.tags),
@@ -199,15 +203,35 @@ class Tracker:
                 ),
             )
             # Resolve the actual hypothesis ID — if the dedup index caused
-            # INSERT OR IGNORE to skip, h.id won't exist in the table and
-            # the result would become an orphan.
+            # INSERT OR IGNORE to skip, look up the existing row.
+            # Normalize db_path separators to forward slashes for cross-platform matching.
+            normalized_db = h.db_path.replace("\\", "/") if h.db_path else h.db_path
             row = conn.execute(
                 """SELECT id FROM hypotheses
-                   WHERE strategy=? AND series=? AND db_path=?
+                   WHERE strategy=? AND series=? AND REPLACE(db_path, '\\', '/')=?
                      AND start_date=? AND end_date=? AND fee_pct=?""",
-                (h.strategy, h.series, h.db_path, h.start_date, h.end_date, h.fee_pct),
+                (h.strategy, h.series, normalized_db, h.start_date, h.end_date, h.fee_pct),
             ).fetchone()
-            actual_id = row["id"] if row else h.id
+            if row:
+                actual_id = row["id"]
+            else:
+                # Dedup lookup failed — force insert with INSERT OR REPLACE
+                # to prevent orphaned results.
+                conn.execute(
+                    """INSERT OR REPLACE INTO hypotheses
+                       (id, strategy, series, db_path, start_date, end_date, fee_pct,
+                        parent_id, tags, notes, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        h.id, h.strategy, h.series, h.db_path,
+                        h.start_date, h.end_date, h.fee_pct,
+                        h.parent_id,
+                        json.dumps(h.tags),
+                        h.notes,
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                actual_id = h.id
             conn.execute(
                 """INSERT OR REPLACE INTO results
                    (hypothesis_id, status, total_trades, wins, losses, win_rate,
