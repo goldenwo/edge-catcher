@@ -22,12 +22,8 @@ def get_pipeline_status() -> PipelineStatusResponse:
 
 	db = validate_db("kalshi.db")
 
-	# Data + Analysis + Backtest — single DB connection
+	# Data status — from market DB
 	data_status = PipelineDataStatus(has_data=False, markets=0, trades=0)
-	analysis_count = 0
-	latest_verdict = None
-	bt_count = 0
-	latest_sharpe = None
 	if db.exists():
 		from edge_catcher.storage.db import get_connection
 		conn = get_connection(db)
@@ -35,28 +31,28 @@ def get_pipeline_status() -> PipelineStatusResponse:
 			m = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
 			t = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
 			data_status = PipelineDataStatus(has_data=t > 0, markets=m, trades=t)
-
-			analysis_count = conn.execute("SELECT COUNT(*) FROM analysis_results").fetchone()[0]
-			row = conn.execute(
-				"SELECT verdict FROM analysis_results ORDER BY run_timestamp DESC LIMIT 1"
-			).fetchone()
-			if row:
-				latest_verdict = row["verdict"]
-
-			bt_exists = conn.execute(
-				"SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
-			).fetchone()
-			if bt_exists:
-				bt_count = conn.execute("SELECT COUNT(*) FROM backtest_results").fetchone()[0]
-				bt_row = conn.execute(
-					"SELECT sharpe FROM backtest_results ORDER BY run_timestamp DESC LIMIT 1"
-				).fetchone()
-				if bt_row:
-					latest_sharpe = bt_row["sharpe"]
 		finally:
 			conn.close()
 
-	# Hypotheses — merge config/ and config.local/, using dict to deduplicate
+	# Analysis + Backtest status — from Tracker (research.db)
+	from edge_catcher.research.tracker import Tracker
+	from api.config_helpers import research_db_path as _research_db_path
+	tracker = Tracker(str(_research_db_path()))
+	tracker_stats = tracker.stats()
+	analysis_count = tracker_stats.get("total", 0)
+	latest_verdict = None
+	if analysis_count > 0:
+		latest = tracker.list_results(limit=1)
+		if latest:
+			latest_verdict = latest[0].get("verdict")
+
+	bt_count = tracker.count_ui_backtests()
+	latest_sharpe = None
+	latest_bt = tracker.latest_ui_backtest()
+	if latest_bt:
+		latest_sharpe = latest_bt.get("sharpe")
+
+	# Hypotheses
 	hyp_count = len(load_merged_hypotheses())
 
 	# Strategies
