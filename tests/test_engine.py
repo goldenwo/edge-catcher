@@ -13,6 +13,7 @@ from edge_catcher.monitors.engine import (
 	_collect_active_series,
 	_handle_orderbook_delta,
 	_handle_ticker_msg,
+	_handle_trade_msg,
 	_series_for_strategy,
 	process_tick,
 )
@@ -358,6 +359,161 @@ class TestHandleOrderbookDelta:
 
 		# Should not raise
 		_handle_orderbook_delta(ms, msg)
+
+
+# ---------------------------------------------------------------------------
+# _handle_trade_msg tests
+# ---------------------------------------------------------------------------
+
+class TestHandleTradeMsg:
+	"""Tests for the synchronous WS trade message handler."""
+
+	@pytest.fixture
+	def setup(self, tmp_path):
+		ms = MarketState()
+		ms.register_ticker("KXBTC15M-26APR10-T100")
+		ms.seed_orderbook("KXBTC15M-26APR10-T100", OrderbookSnapshot(
+			yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)],
+		))
+		store = TradeStore(tmp_path / "test.db")
+		config = {
+			"sizing": {"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1},
+			"strategies": {"stub": {"enabled": True, "series": ["KXBTC15M"]}},
+		}
+
+		class TradeAwareStub(PaperStrategy):
+			"""Records taker_side and trade_count seen on each tick."""
+			name = "trade-stub"
+			supported_series = ["KXBTC15M"]
+			default_params = {}
+			observed: list[tuple] = []
+
+			def on_tick(self, ctx: TickContext) -> list[Signal]:
+				self.observed.append((ctx.taker_side, ctx.trade_count))
+				return []
+
+		strat = TradeAwareStub()
+		strat_by_series = {"KXBTC15M": [strat]}
+		pending_states = {"trade-stub": {}}
+		yield ms, store, [strat], strat_by_series, pending_states, config, strat
+		store.close()
+
+	def _make_trade_msg(
+		self,
+		ticker: str,
+		yes_price: float | str,
+		no_price: float | str | None = None,
+		taker_side: str = "yes",
+		count: int | str = 5,
+	) -> dict:
+		msg_data: dict = {
+			"market_ticker": ticker,
+			"yes_price": yes_price,
+			"taker_side": taker_side,
+			"count": count,
+		}
+		if no_price is not None:
+			msg_data["no_price"] = no_price
+		return {"type": "trade", "msg": msg_data}
+
+	def test_routes_trade_to_strategy(self, setup):
+		"""Trade message is dispatched to matching strategies."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.60, taker_side="yes", count=3)
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+
+		assert len(strat.observed) == 1
+		assert strat.observed[0] == ("yes", 3)
+
+	def test_trade_populates_taker_side_and_count(self, setup):
+		"""TickContext passed to strategy has correct taker_side and trade_count."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.40, taker_side="no", count=7)
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+
+		assert strat.observed[0] == ("no", 7)
+
+	def test_trade_updates_price_history(self, setup):
+		"""Trade message updates market state price history."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.55, taker_side="yes", count=1)
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+
+		history = list(ms.get_price_history("KXBTC15M-26APR10-T100") or [])
+		assert 55 in history
+
+	def test_ignores_unregistered_ticker(self, setup):
+		"""Trade for a ticker not in market_state is silently skipped."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T999", yes_price=0.50, taker_side="yes", count=1)
+
+		# Should not raise
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		assert strat.observed == []
+
+	def test_ignores_missing_yes_price(self, setup):
+		"""Trade without yes_price is silently skipped."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = {"type": "trade", "msg": {"market_ticker": "KXBTC15M-26APR10-T100", "taker_side": "yes"}}
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		assert strat.observed == []
+
+	def test_ignores_price_outside_range(self, setup):
+		"""yes_price of 0 or 100 is rejected."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T100", yes_price=0.0, taker_side="yes", count=1)
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+		assert strat.observed == []
+
+	def test_handles_string_price_and_count(self, setup):
+		"""Kalshi sends prices as strings like '0.360' and count as '136.00'."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = self._make_trade_msg(
+			"KXBTC15M-26APR10-T100",
+			yes_price="0.360",
+			no_price="0.640",
+			taker_side="no",
+			count="136.00",
+		)
+
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states)
+
+		assert len(strat.observed) == 1
+		assert strat.observed[0] == ("no", 136)
+
+	def test_derives_no_ask_from_no_price(self, setup):
+		"""When no_price is provided, no_ask is derived from it (not 100-yes_ask)."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+
+		class BidAskCheckStub(PaperStrategy):
+			name = "bid-check"
+			supported_series = ["KXBTC15M"]
+			default_params = {}
+			seen_ctx: TickContext | None = None
+
+			def on_tick(self, ctx: TickContext) -> list[Signal]:
+				self.seen_ctx = ctx
+				return []
+
+		check_strat = BidAskCheckStub()
+		strat_by_series["KXBTC15M"] = [check_strat]
+		pending_states["bid-check"] = {}
+
+		# yes_price=0.60, no_price=0.38 → no_ask=38, yes_bid=100-38=62
+		msg = self._make_trade_msg(
+			"KXBTC15M-26APR10-T100", yes_price=0.60, no_price=0.38, taker_side="yes",
+		)
+		_handle_trade_msg(msg, config, ms, store, [check_strat], strat_by_series, pending_states)
+
+		assert check_strat.seen_ctx is not None
+		assert check_strat.seen_ctx.yes_ask == 60
+		assert check_strat.seen_ctx.no_ask == 38
+		assert check_strat.seen_ctx.yes_bid == 62  # 100 - no_ask
 
 
 # ---------------------------------------------------------------------------
