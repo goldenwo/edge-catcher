@@ -154,9 +154,17 @@ def _handle_exit(
 
 	store.exit_trade(signal.trade_id, exit_price)
 
+	# Read back PnL from DB (includes fee deduction)
+	exited = store.get_trade_by_id(signal.trade_id)
+	if exited:
+		pnl = exited.get("pnl_cents")
+		pnl_str = f" PnL={pnl:+d}¢" if pnl is not None else ""
+	else:
+		pnl_str = ""
+
 	msg = (
 		f"EXIT {signal.strategy} {signal.side} {signal.ticker} "
-		f"@ {exit_price}c — {signal.reason} [id={signal.trade_id}]"
+		f"@ {exit_price}c{pnl_str} — {signal.reason} [id={signal.trade_id}]"
 	)
 	log.info(msg)
 	notify(msg)
