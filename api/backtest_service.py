@@ -136,28 +136,27 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 		with open(result_path, "w") as f:
 			json.dump(result_dict, f, indent=2, default=str)
 
-		# Index in primary DB (not the market-data DB) so history is centralized
-		from edge_catcher.storage.db import get_connection, init_db
-		results_db = _validate_db("kalshi.db")
-		init_db(results_db)
-		conn = get_connection(results_db)
-		try:
-			conn.execute(
-				"""INSERT OR REPLACE INTO backtest_results
-				   (task_id, series, strategies, start_date, end_date, run_timestamp,
-				    total_trades, wins, losses, net_pnl_cents, sharpe, max_drawdown_pct,
-				    win_rate, result_path, hypothesis_id)
-				   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-				(task_id, body.series, json.dumps(body.strategies),
-				 body.start, body.end, datetime.now(timezone.utc).isoformat(),
-				 result_dict["total_trades"], result_dict["wins"], result_dict["losses"],
-				 result_dict["net_pnl_cents"], result_dict["sharpe"],
-				 result_dict["max_drawdown_pct"], result_dict["win_rate"],
-				 str(result_path), body.hypothesis_id),
-			)
-			conn.commit()
-		finally:
-			conn.close()
+		# Persist to research.db via Tracker
+		from edge_catcher.research.tracker import Tracker
+		from api.config_helpers import research_db_path as _research_db_path
+		tracker = Tracker(str(_research_db_path()))
+		tracker.save_ui_backtest(
+			task_id=task_id,
+			series=body.series,
+			strategies=json.dumps(body.strategies),
+			db_path=str(db_path),
+			start_date=body.start,
+			end_date=body.end,
+			total_trades=result_dict["total_trades"],
+			wins=result_dict["wins"],
+			losses=result_dict["losses"],
+			net_pnl_cents=result_dict["net_pnl_cents"],
+			sharpe=result_dict["sharpe"],
+			max_drawdown_pct=result_dict["max_drawdown_pct"],
+			win_rate=result_dict["win_rate"],
+			result_path=str(result_path),
+			hypothesis_id=body.hypothesis_id,
+		)
 
 		state.progress = "Complete"
 	except Exception as e:
@@ -168,38 +167,26 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 		state.running = False
 
 
-def query_backtest_history(db_path: Path, limit: int = 25, offset: int = 0) -> tuple[list[dict], int]:
-	"""Query backtest_results table, return (rows, total_count)."""
+def query_backtest_history(limit: int = 25, offset: int = 0) -> tuple[list[dict], int]:
+	"""Query UI backtest history from research.db via Tracker."""
 	import json
-	from edge_catcher.storage.db import get_connection
+	from edge_catcher.research.tracker import Tracker
+	from api.config_helpers import research_db_path as _research_db_path
 
-	conn = get_connection(db_path)
-	try:
-		# Check table exists
-		exists = conn.execute(
-			"SELECT name FROM sqlite_master WHERE type='table' AND name='backtest_results'"
-		).fetchone()
-		if not exists:
-			return [], 0
-		total = conn.execute("SELECT COUNT(*) FROM backtest_results").fetchone()[0]
-		rows = conn.execute(
-			"SELECT * FROM backtest_results ORDER BY run_timestamp DESC LIMIT ? OFFSET ?",
-			(limit, offset),
-		).fetchall()
-		results = [
-			dict(
-				task_id=r["task_id"],
-				series=r["series"],
-				strategies=json.loads(r["strategies"]),
-				hypothesis_id=r["hypothesis_id"] if "hypothesis_id" in r.keys() else None,
-				timestamp=r["run_timestamp"],
-				total_trades=r["total_trades"] or 0,
-				net_pnl_cents=int(r["net_pnl_cents"] or 0),
-				sharpe=r["sharpe"] or 0.0,
-				win_rate=r["win_rate"] or 0.0,
-			)
-			for r in rows
-		]
-		return results, total
-	finally:
-		conn.close()
+	tracker = Tracker(str(_research_db_path()))
+	rows, total = tracker.list_ui_backtests(limit=limit, offset=offset)
+	results = [
+		dict(
+			task_id=r["task_id"],
+			series=r["series"],
+			strategies=json.loads(r["strategies"]) if isinstance(r["strategies"], str) else r["strategies"],
+			hypothesis_id=r.get("hypothesis_id"),
+			timestamp=r["run_timestamp"],
+			total_trades=r["total_trades"] or 0,
+			net_pnl_cents=int(r["net_pnl_cents"] or 0),
+			sharpe=r["sharpe"] or 0.0,
+			win_rate=r["win_rate"] or 0.0,
+		)
+		for r in rows
+	]
+	return results, total
