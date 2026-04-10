@@ -41,7 +41,7 @@ export default function Strategize() {
       const matching = page.results
       if (matching.length > 0) {
         setLatestVerdict(matching[0].verdict)
-        if (!selectedRunId) setSelectedRunId(matching[0].run_id)
+        if (!selectedRunId) setSelectedRunId(matching[0].id)
       } else {
         setLatestVerdict(null)
       }

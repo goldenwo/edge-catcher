@@ -44,7 +44,6 @@ const json = (body: unknown) => ({
 export interface Status {
   markets: number
   trades: number
-  results: number
   db_size_mb: number
   last_download: string | null
 }
@@ -65,30 +64,29 @@ export interface Hypothesis {
 }
 
 export interface ResultSummary {
-  run_id: string
-  hypothesis_id: string
-  verdict: string | null
-  run_timestamp: string
+  id: string
+  test_type: string
+  series: string
+  db: string
+  verdict: string
+  z_stat: number
+  fee_adjusted_edge: number
+  created_at: string
 }
 
-export interface ResultDetail extends ResultSummary {
-  market: string
-  status: string
-  naive_n: number | null
-  naive_z_stat: number | null
-  naive_p_value: number | null
-  naive_edge: number | null
-  clustered_n: number | null
-  clustered_z_stat: number | null
-  clustered_p_value: number | null
-  clustered_edge: number | null
-  fee_adjusted_edge: number | null
-  confidence_interval_low: number | null
-  confidence_interval_high: number | null
-  warnings: string[] | null
-  total_markets_seen: number | null
-  delisted_or_cancelled: number | null
-  raw_bucket_data: unknown
+export interface ResultDetail {
+  id: string
+  test_type: string
+  series: string
+  db: string
+  params: string
+  thresholds: string
+  verdict: string
+  z_stat: number
+  fee_adjusted_edge: number
+  detail: string
+  rationale: string
+  created_at: string
 }
 
 export interface Paginated<T> {
@@ -199,27 +197,21 @@ export const api = {
   deleteHypothesis: (id: string) =>
     req<{ ok: boolean }>(`/api/hypotheses/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   resultHypothesisIds: () => req<string[]>('/api/results/hypothesis-ids'),
-  deleteResult: (run_id: string) =>
-    req<{ ok: boolean }>(`/api/results/${encodeURIComponent(run_id)}`, { method: 'DELETE' }),
+  deleteResult: (id: string) =>
+    req<{ ok: boolean }>(`/api/results/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   deleteBacktest: (task_id: string) =>
     req<{ ok: boolean }>(`/api/backtest/history/${encodeURIComponent(task_id)}`, { method: 'DELETE' }),
-  analyze: (hypothesis_id: string | null) =>
-    req<{ task_id: string }>('/api/analyze', json({ hypothesis_id })),
-  analyzeStatus: (taskId: string) =>
-    req<{ running: boolean; progress: string; error: string | null }>(`/api/analyze/${taskId}/status`),
-  analyzeResult: (taskId: string) =>
-    req<Record<string, unknown>>(`/api/analyze/${taskId}/result`),
   results: (limit = 25, offset = 0, filters?: { hypothesis_id?: string; verdict?: string }) => {
     const p = new URLSearchParams({ limit: String(limit), offset: String(offset) })
     if (filters?.hypothesis_id) p.set('hypothesis_id', filters.hypothesis_id)
     if (filters?.verdict) p.set('verdict', filters.verdict)
     return req<Paginated<ResultSummary>>(`/api/results?${p}`)
   },
-  result: (run_id: string) => req<ResultDetail>(`/api/results/${run_id}`),
+  result: (id: string) => req<ResultDetail>(`/api/results/${id}`),
   formalize: (description: string, provider: string | null) =>
     req<FormalizeResponse>('/api/formalize', json({ description, provider })),
-  interpret: (run_id: string, provider: string | null) =>
-    req<{ summary: string }>('/api/interpret', json({ run_id, provider })),
+  interpret: (id: string, provider: string | null) =>
+    req<{ summary: string }>('/api/interpret', json({ run_id: id, provider })),
   aiSettings: () => req<AISettings>('/api/settings/ai'),
   saveAiKey: (provider: string, api_key: string) =>
     req<{ ok: boolean }>('/api/settings/ai', json({ provider, api_key })),

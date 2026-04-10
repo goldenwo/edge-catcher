@@ -30,11 +30,11 @@ export default function Dashboard() {
       setStatus(s)
 
       const analysisItems: ActivityItem[] = (resultsPage.results as ResultSummary[]).map((r) => ({
-        id: `a-${r.run_id}`,
+        id: `a-${r.id}`,
         type: 'analysis',
-        label: r.hypothesis_id,
-        sub: 'Analysis run',
-        timestamp: r.run_timestamp,
+        label: r.series,
+        sub: r.test_type,
+        timestamp: r.created_at,
         verdict: r.verdict,
       }))
 
@@ -146,11 +146,10 @@ export default function Dashboard() {
         <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">
           Database
         </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           {[
             { label: 'Markets', value: status?.markets ?? '—' },
             { label: 'Trades', value: status?.trades ?? '—' },
-            { label: 'Results', value: status?.results ?? '—' },
             { label: 'DB Size', value: status ? `${status.db_size_mb} MB` : '—' },
           ].map(({ label, value }) => (
             <div
