@@ -7,6 +7,8 @@ import logging
 from datetime import datetime, timezone
 
 from .agent import ResearchAgent
+from .audit import AuditLog
+from .journal import ResearchJournal
 from .tracker import Tracker
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,10 @@ class ExportCollector:
 		results = self._collect_results(verdicts)
 		strategies = self._group_by_strategy(results)
 		self._attach_source(strategies)
+		journal = ResearchJournal(db_path=self.db_path)
+		audit = AuditLog(self.db_path)
+		self._attach_journal(strategies, journal)
+		self._attach_audit(strategies, audit)
 
 		return {
 			"version": 1,
@@ -89,3 +95,37 @@ class ExportCollector:
 				"audit": [],
 			})
 		return strategies
+
+	def _attach_journal(self, strategies: dict, journal: ResearchJournal) -> None:
+		"""Attach relevant journal entries for each strategy."""
+		all_entries = journal.read_recent(limit=10000)
+		for entry in all_entries:
+			content = entry["content"]
+			strategy_name = content.get("strategy")
+			if strategy_name and strategy_name in strategies:
+				strategies[strategy_name]["journal_entries"].append({
+					"entry_type": entry["entry_type"],
+					"run_id": entry["run_id"],
+					"content": content,
+					"created_at": entry["created_at"],
+				})
+
+	def _attach_audit(self, strategies: dict, audit: AuditLog) -> None:
+		"""Attach audit execution records to their corresponding results."""
+		executions = audit.list_executions()
+		exec_by_hid: dict[str, list[dict]] = {}
+		for ex in executions:
+			hid = ex["hypothesis_id"]
+			exec_by_hid.setdefault(hid, []).append({
+				"phase": ex["phase"],
+				"verdict": ex["verdict"],
+				"status": ex["status"],
+				"queue_position": ex["queue_position"],
+				"started_at": ex["started_at"],
+				"completed_at": ex["completed_at"],
+			})
+
+		for strat_data in strategies.values():
+			for result in strat_data["results"]:
+				hid = result["hypothesis_id"]
+				result["audit"] = exec_by_hid.get(hid, [])
