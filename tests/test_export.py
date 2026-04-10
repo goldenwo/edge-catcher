@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from edge_catcher.research.export import ExportCollector
 from edge_catcher.research.tracker import Tracker
@@ -83,3 +84,24 @@ class TestCollectResults:
 		bundle = collector.collect(verdicts=["kill"])
 		assert set(bundle["strategies"].keys()) == {"beta"}
 		assert bundle["filter"]["verdicts"] == ["kill"]
+
+
+class TestCollectSource:
+	def test_attaches_strategy_source(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="my-strat", series="S1", verdict="promote")
+
+		fake_code = 'class MyStrat(Strategy):\n\tname = "my-strat"\n\tdef evaluate(self): pass'
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=fake_code):
+			bundle = collector.collect()
+		assert bundle["strategies"]["my-strat"]["source"] == fake_code
+
+	def test_missing_source_is_none(self, tmp_path):
+		collector = _make_collector(tmp_path)
+		_insert_result(collector.tracker, strategy="gone-strat", series="S1", verdict="promote")
+
+		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
+		           return_value=None):
+			bundle = collector.collect()
+		assert bundle["strategies"]["gone-strat"]["source"] is None
