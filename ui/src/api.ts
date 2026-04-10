@@ -196,6 +196,12 @@ export const api = {
   hypotheses: () => req<Hypothesis[]>('/api/hypotheses'),
   deleteHypothesis: (id: string) =>
     req<{ ok: boolean }>(`/api/hypotheses/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  analyze: (hypothesisId: string) =>
+    req<{ task_id: string }>('/api/analyze', json({ hypothesis_id: hypothesisId })),
+  analyzeStatus: (taskId: string) =>
+    req<{ running: boolean; progress: string; error: string | null }>(`/api/analyze/${taskId}/status`),
+  analyzeResult: (taskId: string) =>
+    req<Record<string, { verdict?: string }>>(`/api/analyze/${taskId}/result`),
   resultHypothesisIds: () => req<string[]>('/api/results/hypothesis-ids'),
   deleteResult: (id: string) =>
     req<{ ok: boolean }>(`/api/results/${encodeURIComponent(id)}`, { method: 'DELETE' }),
