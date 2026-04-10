@@ -303,7 +303,7 @@ async def run_engine(config_path: Path) -> None:
 	price_history_limit = ws_cfg.get("price_history_limit", 100)
 	state_flush_interval = recovery_cfg.get("state_flush_interval", 5)
 	store = TradeStore(db_path)
-	market_state = MarketState(price_history_limit=price_history_limit)
+	market_state = MarketState(limit=price_history_limit)
 
 	# 2. Discover and filter strategies
 	all_strategies = discover_strategies()
@@ -376,7 +376,7 @@ async def run_engine(config_path: Path) -> None:
 					await _ws_loop(
 						config, market_state, store, strategies,
 						strat_by_series, pending_states, active_series,
-						client, ws_ref, auth_path,
+						client, ws_ref,
 					)
 				except (
 					websockets.ConnectionClosed,
@@ -417,10 +417,9 @@ async def _ws_loop(
 	active_series: list[str],
 	client: httpx.AsyncClient,
 	ws_ref: list,
-	auth_path: str,
 ) -> None:
 	"""Single WS connection lifecycle — connect, subscribe, process messages."""
-	headers = make_auth_headers(auth_path)
+	headers = make_auth_headers()
 
 	# Collect all registered tickers for subscription
 	all_tickers: list[str] = []
@@ -460,13 +459,19 @@ async def _ws_loop(
 			msg_type = msg.get("type")
 
 			if msg_type == "orderbook_delta":
-				_handle_orderbook_delta(market_state, msg)
+				try:
+					_handle_orderbook_delta(market_state, msg)
+				except Exception:
+					log.exception("Error handling orderbook_delta")
 
 			elif msg_type == "ticker":
-				_handle_ticker_msg(
-					msg, config, market_state, store,
-					strategies, strat_by_series, pending_states,
-				)
+				try:
+					_handle_ticker_msg(
+						msg, config, market_state, store,
+						strategies, strat_by_series, pending_states,
+					)
+				except Exception:
+					log.exception("Error handling ticker msg")
 
 
 def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
@@ -521,7 +526,7 @@ def _handle_ticker_msg(
 	is_first = market_state.update_price(ticker, yes_ask_cents)
 	event_ticker = derive_event_ticker(ticker)
 	orderbook = market_state.get_orderbook(ticker) or OrderbookSnapshot([], [])
-	history = list(market_state.get_series(ticker) or [])
+	history = list(market_state.get_price_history(ticker) or [])
 
 	# Determine which series this ticker belongs to
 	# Convention: series ticker is the prefix before the date segment

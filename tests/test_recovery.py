@@ -315,7 +315,7 @@ class TestRunRecovery:
 		asyncio.run(run_recovery(mock_client, market_state, active_series))
 
 		# Ticker should be registered
-		assert market_state.get_series("EVT1-T10") is not None
+		assert market_state.get_price_history("EVT1-T10") is not None
 		# Orderbook should be seeded
 		ob = market_state.get_orderbook("EVT1-T10")
 		assert ob is not None
