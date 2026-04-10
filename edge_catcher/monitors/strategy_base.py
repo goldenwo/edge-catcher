@@ -28,6 +28,7 @@ class PaperStrategy(ABC):
 	name: str
 	supported_series: list[str]
 	default_params: dict
+	emoji: str = "🔵"  # color bullet shown in notifications
 
 	@abstractmethod
 	def on_tick(self, ctx: TickContext) -> list[Signal]:

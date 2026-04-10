@@ -52,14 +52,6 @@ def _pnl_label(pnl: int | None) -> tuple[str, str]:
 	return "SCRATCH", "0¢"
 
 
-# Per-strategy color indicator (emoji bullet)
-_STRATEGY_EMOJI: dict[str, str] = {
-	"strategy_a":    "🔵",
-	"strategy_b":       "🟣",
-	"strategy_c":     "🟠",
-	"strategy_d": "🟡",
-}
-
 
 # ---------------------------------------------------------------------------
 # Part 1: Synchronous signal pipeline (testable)
@@ -88,7 +80,7 @@ def process_tick(
 
 		for signal in signals:
 			try:
-				_handle_signal(signal, ctx, store, config)
+				_handle_signal(signal, ctx, store, config, strategy.emoji)
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -101,12 +93,13 @@ def _handle_signal(
 	ctx: TickContext,
 	store: TradeStore,
 	config: dict,
+	bullet: str = "🔵",
 ) -> None:
 	"""Dispatch a single signal — enter or exit."""
 	if signal.action == "enter":
-		_handle_enter(signal, ctx, store, config)
+		_handle_enter(signal, ctx, store, config, bullet)
 	elif signal.action == "exit":
-		_handle_exit(signal, ctx, store)
+		_handle_exit(signal, ctx, store, bullet)
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
@@ -116,6 +109,7 @@ def _handle_enter(
 	ctx: TickContext,
 	store: TradeStore,
 	config: dict,
+	bullet: str = "🔵",
 ) -> None:
 	"""Process an entry signal: resolve sizing, walk orderbook, record trade."""
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
@@ -151,7 +145,6 @@ def _handle_enter(
 	)
 
 	side_label = "YES" if signal.side == "yes" else "NO"
-	bullet = _STRATEGY_EMOJI.get(signal.strategy, "🔵")
 	tag = f"{signal.strategy} | {signal.series}"
 	msg = (
 		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
@@ -165,6 +158,7 @@ def _handle_exit(
 	signal: Signal,
 	ctx: TickContext,
 	store: TradeStore,
+	bullet: str = "🔵",
 ) -> None:
 	"""Process an exit signal: compute exit price, close trade."""
 	if signal.trade_id is None:
@@ -184,7 +178,6 @@ def _handle_exit(
 	pnl = exited.get("pnl_cents") if exited else None
 	outcome, pnl_str = _pnl_label(pnl)
 	emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
-	bullet = _STRATEGY_EMOJI.get(signal.strategy, "🔵")
 	tag = f"{signal.strategy} | {signal.series}"
 	entry_price_display = exited.get("blended_entry") or exited.get("entry_price", "?") if exited else "?"
 	msg = (
@@ -221,7 +214,8 @@ async def _settlement_poller(
 					pnl = settled.get("pnl_cents") if settled else None
 					outcome, pnl_str = _pnl_label(pnl)
 					emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
-					bullet = _STRATEGY_EMOJI.get(trade["strategy"], "🔵")
+					strat_obj = strat_by_name.get(trade["strategy"])
+					bullet = strat_obj.emoji if strat_obj else "🔵"
 					series = trade.get("series_ticker", "?")
 					tag = f"{trade['strategy']} | {series}"
 					entry_display = settled.get("blended_entry") or settled.get("entry_price", "?") if settled else "?"

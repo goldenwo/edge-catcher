@@ -75,8 +75,10 @@ edge_catcher/hypotheses/custom/
 # Private research scripts and analysis (entire folder)
 scripts/
 
-# Flow strategy tests (reveals strategy logic)
-tests/test_flow_strategy.py
+# Strategy-specific tests (reveals strategy logic)
+tests/test_flow_*.py
+tests/test_local_*.py
+tests/test_strategies_paper.py
 
 .superpowers/
 .claude/settings.local.json
