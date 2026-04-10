@@ -29,6 +29,10 @@ class TestComputeRawSize:
 		with pytest.raises(ValueError, match="entry_price_cents"):
 			compute_raw_size(200, -5)
 
+	def test_negative_risk_raises(self) -> None:
+		with pytest.raises(ValueError, match="risk_cents"):
+			compute_raw_size(-100, 5)
+
 
 class TestWalkBookWithCeiling:
 	def test_fills_within_ceiling(self) -> None:

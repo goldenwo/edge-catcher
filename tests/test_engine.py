@@ -116,7 +116,7 @@ class TestProcessTick:
 		assert t["ticker"] == "TEST-TICKER-T100"
 		assert t["strategy"] == "stub"
 		assert t["side"] == "yes"
-		assert t["fill_size"] == 10
+		assert t["fill_size"] == 10  # 500c risk / 50c price = 10, book has 20 at 50c
 		assert t["series_ticker"] == "TEST"
 
 	def test_enter_skips_on_no_liquidity(self, store, config):
