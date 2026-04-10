@@ -96,3 +96,74 @@ def walk_book_with_ceiling(
 		fill_pct=fill_pct,
 		intended_size=size,
 	)
+
+
+def validate_sizing_config(config: dict) -> None:
+	"""Validate that the sizing config section has all required keys.
+
+	Raises:
+		ValueError: If any key is missing or invalid.
+	"""
+	sizing = config.get("sizing")
+	if not sizing or not isinstance(sizing, dict):
+		raise ValueError(
+			"Config missing 'sizing' section. Add:\n"
+			"sizing:\n"
+			"  risk_per_trade_cents: 200\n"
+			"  max_slippage_cents: 2\n"
+			"  min_fill: 3"
+		)
+
+	risk = sizing.get("risk_per_trade_cents")
+	if risk is None or risk <= 0:
+		raise ValueError(
+			f"sizing.risk_per_trade_cents must be > 0, got {risk!r}. "
+			"This is the max cents to risk per trade (e.g. 200 = $2.00)."
+		)
+
+	slippage = sizing.get("max_slippage_cents")
+	if slippage is None or slippage < 0:
+		raise ValueError(
+			f"sizing.max_slippage_cents must be >= 0, got {slippage!r}. "
+			"This caps how far above best price the fill can walk."
+		)
+
+	min_fill = sizing.get("min_fill")
+	if min_fill is None or min_fill < 1:
+		raise ValueError(
+			f"sizing.min_fill must be >= 1, got {min_fill!r}. "
+			"Trades with fewer fillable contracts are skipped."
+		)
+
+
+def resolve_fill(
+	config: dict,
+	entry_price_cents: int,
+	side: str,
+	book: OrderbookSnapshot,
+) -> FillResult | None:
+	"""Run the sizing pipeline: risk budget → book walk → min-fill gate.
+
+	Reads from config["sizing"]:
+	  - risk_per_trade_cents: passed to compute_raw_size
+	  - max_slippage_cents: passed to walk_book_with_ceiling
+	  - min_fill: gate check on fill_size
+
+	Returns:
+		FillResult if trade should proceed, None to skip.
+	"""
+	sizing = config["sizing"]
+	risk_cents = sizing["risk_per_trade_cents"]
+	max_slippage = sizing["max_slippage_cents"]
+	min_fill_threshold = sizing["min_fill"]
+
+	raw_size = compute_raw_size(risk_cents, entry_price_cents)
+	if raw_size == 0:
+		return None
+
+	fill = walk_book_with_ceiling(book, side, raw_size, max_slippage)
+
+	if fill.fill_size < min_fill_threshold:
+		return None
+
+	return fill
