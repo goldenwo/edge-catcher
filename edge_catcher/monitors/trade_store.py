@@ -151,13 +151,15 @@ class TradeStore:
 		No exit fee at settlement since P*(1-P)=0 at prices 0 and 100.
 		"""
 		row = self._conn.execute(
-			"SELECT entry_price, side, fill_size, entry_fee_cents, blended_entry "
+			"SELECT entry_price, side, fill_size, entry_fee_cents, blended_entry, status "
 			"FROM paper_trades WHERE id=?",
 			(trade_id,),
 		).fetchone()
 		if row is None:
 			return
-		entry_price, side, fill_size, entry_fee_cents, blended_entry = row
+		entry_price, side, fill_size, entry_fee_cents, blended_entry, current_status = row
+		if current_status != "open":
+			return  # already exited or settled — avoid race with exit_trade
 		effective_entry = blended_entry if blended_entry is not None else entry_price
 		if side == "yes":
 			exit_price = 100 if result == "yes" else 0
@@ -169,7 +171,7 @@ class TradeStore:
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents
 		now = datetime.now(timezone.utc).isoformat()
 		self._conn.execute(
-			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=?",
+			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=? AND status='open'",
 			(exit_price, now, pnl, status, trade_id),
 		)
 		self._conn.commit()
@@ -182,20 +184,22 @@ class TradeStore:
 		Exit fee applies because TP/SL exits sell at a mid-price.
 		"""
 		row = self._conn.execute(
-			"SELECT entry_price, fill_size, entry_fee_cents, blended_entry, side "
+			"SELECT entry_price, fill_size, entry_fee_cents, blended_entry, side, status "
 			"FROM paper_trades WHERE id=?",
 			(trade_id,),
 		).fetchone()
 		if row is None:
 			return
-		entry_price, fill_size, entry_fee_cents, blended_entry, side = row
+		entry_price, fill_size, entry_fee_cents, blended_entry, side, current_status = row
+		if current_status != "open":
+			return  # already settled or exited — avoid race with settle_trade
 		effective_entry = blended_entry if blended_entry is not None else entry_price
 		exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
 		status = "won" if pnl > 0 else "lost"
 		now = datetime.now(timezone.utc).isoformat()
 		self._conn.execute(
-			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=?",
+			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=? AND status='open'",
 			(exit_price, now, pnl, status, trade_id),
 		)
 		self._conn.commit()

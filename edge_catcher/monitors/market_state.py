@@ -193,11 +193,13 @@ class MarketState:
 	# ------------------------------------------------------------------
 
 	def update_price(self, ticker: str, price_cents: int) -> bool:
-		"""Append a price observation.
+		"""Append a price observation. Auto-registers if unknown.
 
 		Returns:
 			True if this is the first observation for the ticker.
 		"""
+		if ticker not in self._series:
+			self._series[ticker] = deque(maxlen=self._limit)
 		self._series[ticker].append(price_cents)
 		if ticker not in self._first_seen:
 			self._first_seen.add(ticker)
