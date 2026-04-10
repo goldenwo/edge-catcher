@@ -1,0 +1,182 @@
+"""Sizing pipeline for the paper trading engine.
+
+Pure functions that convert a risk budget + orderbook state into a fill decision.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from edge_catcher.monitors.market_state import FillResult, OrderbookSnapshot
+
+log = logging.getLogger(__name__)
+
+
+def compute_raw_size(risk_cents: int, entry_price_cents: int) -> int:
+	"""Convert a dollar risk budget to a contract count.
+
+	Args:
+		risk_cents:        Maximum cents to risk on this trade.
+		entry_price_cents: Entry price per contract in cents.
+
+	Returns:
+		Number of contracts (floor division). May be 0 if budget < price.
+
+	Raises:
+		ValueError: If entry_price_cents <= 0 or risk_cents < 0.
+	"""
+	if risk_cents < 0:
+		raise ValueError(
+			f"risk_cents must be >= 0, got {risk_cents}"
+		)
+	if entry_price_cents <= 0:
+		raise ValueError(
+			f"entry_price_cents must be > 0, got {entry_price_cents}"
+		)
+	return risk_cents // entry_price_cents
+
+
+def walk_book_with_ceiling(
+	book: OrderbookSnapshot,
+	side: str,
+	size: int,
+	max_slippage_cents: int,
+) -> FillResult:
+	"""Walk the book with a slippage ceiling.
+
+	Same as OrderbookSnapshot.walk_book but stops consuming levels once
+	the price exceeds best_price + max_slippage_cents.  The ceiling is
+	inclusive — the best price is always eligible.
+
+	Args:
+		book:               Orderbook snapshot.
+		side:               'yes' or 'no'.
+		size:               Target number of contracts.
+		max_slippage_cents: Maximum allowed price above best in cents.
+
+	Returns:
+		FillResult with intended_size set to *size*.
+	"""
+	levels = book.yes_levels if side == "yes" else book.no_levels
+	if not levels or size <= 0:
+		return FillResult(
+			fill_size=0,
+			blended_price_cents=0,
+			slippage_cents=0,
+			fill_pct=0.0,
+			intended_size=size,
+		)
+
+	best_price_cents = round(levels[0][0] * 100)
+	ceiling_cents = best_price_cents + max_slippage_cents
+	remaining = size
+	total_cost_cents = 0
+	total_filled = 0
+
+	for price_dollars, qty in levels:
+		if remaining <= 0:
+			break
+		price_cents = round(price_dollars * 100)
+		if price_cents > ceiling_cents:
+			break
+		take = min(qty, remaining)
+		total_cost_cents += take * price_cents
+		total_filled += take
+		remaining -= take
+
+	if total_filled == 0:
+		return FillResult(
+			fill_size=0,
+			blended_price_cents=0,
+			slippage_cents=0,
+			fill_pct=0.0,
+			intended_size=size,
+		)
+
+	blended = round(total_cost_cents / total_filled)
+	slippage = blended - best_price_cents
+	fill_pct = total_filled / size
+
+	return FillResult(
+		fill_size=total_filled,
+		blended_price_cents=blended,
+		slippage_cents=slippage,
+		fill_pct=fill_pct,
+		intended_size=size,
+	)
+
+
+def validate_sizing_config(config: dict) -> None:
+	"""Validate that the sizing config section has all required keys.
+
+	Raises:
+		ValueError: If any key is missing or invalid.
+	"""
+	sizing = config.get("sizing")
+	if not sizing or not isinstance(sizing, dict):
+		raise ValueError(
+			"Config missing 'sizing' section. Add:\n"
+			"sizing:\n"
+			"  risk_per_trade_cents: 200\n"
+			"  max_slippage_cents: 2\n"
+			"  min_fill: 3"
+		)
+
+	risk = sizing.get("risk_per_trade_cents")
+	if risk is None or risk <= 0:
+		raise ValueError(
+			f"sizing.risk_per_trade_cents must be > 0, got {risk!r}. "
+			"This is the max cents to risk per trade (e.g. 200 = $2.00)."
+		)
+
+	slippage = sizing.get("max_slippage_cents")
+	if slippage is None or slippage < 0:
+		raise ValueError(
+			f"sizing.max_slippage_cents must be >= 0, got {slippage!r}. "
+			"This caps how far above best price the fill can walk."
+		)
+
+	min_fill = sizing.get("min_fill")
+	if min_fill is None or min_fill < 1:
+		raise ValueError(
+			f"sizing.min_fill must be >= 1, got {min_fill!r}. "
+			"Trades with fewer fillable contracts are skipped."
+		)
+
+
+def resolve_fill(
+	config: dict,
+	entry_price_cents: int,
+	side: str,
+	book: OrderbookSnapshot,
+) -> FillResult | None:
+	"""Run the sizing pipeline: risk budget → book walk → min-fill gate.
+
+	Reads from config["sizing"]:
+	  - risk_per_trade_cents: passed to compute_raw_size
+	  - max_slippage_cents: passed to walk_book_with_ceiling
+	  - min_fill: gate check on fill_size
+
+	Returns:
+		FillResult if trade should proceed, None to skip.
+	"""
+	sizing = config["sizing"]
+	risk_cents = sizing["risk_per_trade_cents"]
+	max_slippage = sizing["max_slippage_cents"]
+	min_fill_threshold = sizing["min_fill"]
+
+	raw_size = compute_raw_size(risk_cents, entry_price_cents)
+	if raw_size == 0:
+		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
+		return None
+
+	fill = walk_book_with_ceiling(book, side, raw_size, max_slippage)
+
+	if fill.fill_size < min_fill_threshold:
+		log.debug(
+			"Skip: fill %d < min_fill %d (wanted %d %s)",
+			fill.fill_size, min_fill_threshold, raw_size, side,
+		)
+		return None
+
+	return fill

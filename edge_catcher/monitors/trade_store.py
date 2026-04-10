@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 	blended_entry INTEGER,
 	book_depth INTEGER,
 	fill_pct REAL,
-	slippage_cents REAL
+	slippage_cents REAL,
+	book_snapshot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_ticker ON paper_trades (ticker);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades (status);
@@ -60,6 +61,7 @@ _MIGRATION_COLUMNS: list[tuple[str, str]] = [
 	("book_depth", "INTEGER"),
 	("fill_pct", "REAL"),
 	("slippage_cents", "REAL"),
+	("book_snapshot", "TEXT"),
 ]
 
 
@@ -114,6 +116,7 @@ class TradeStore:
 		book_depth: Optional[int] = None,
 		fill_pct: Optional[float] = None,
 		slippage_cents: Optional[float] = None,
+		book_snapshot: Optional[str] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id."""
 		effective_price = blended_entry if blended_entry is not None else entry_price
@@ -126,14 +129,14 @@ class TradeStore:
 				ticker, entry_price, entry_time, status,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,
-				fill_pct, slippage_cents
-			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				fill_pct, slippage_cents, book_snapshot
+			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			(
 				ticker, entry_price, now,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,
-				fill_pct, slippage_cents,
+				fill_pct, slippage_cents, book_snapshot,
 			),
 		)
 		self._conn.commit()
@@ -143,15 +146,19 @@ class TradeStore:
 		"""Settle a trade by market resolution result ('yes' or 'no').
 
 		exit_price = 100 when side wins, 0 otherwise.
-		pnl = fill_size * (exit_price - entry) - entry_fee
+		pnl = fill_size * (exit_price - effective_entry) - entry_fee
+		Uses blended_entry (post-slippage fill price) when available.
+		No exit fee at settlement since P*(1-P)=0 at prices 0 and 100.
 		"""
 		row = self._conn.execute(
-			"SELECT entry_price, side, fill_size, entry_fee_cents FROM paper_trades WHERE id=?",
+			"SELECT entry_price, side, fill_size, entry_fee_cents, blended_entry "
+			"FROM paper_trades WHERE id=?",
 			(trade_id,),
 		).fetchone()
 		if row is None:
 			return
-		entry_price, side, fill_size, entry_fee_cents = row
+		entry_price, side, fill_size, entry_fee_cents, blended_entry = row
+		effective_entry = blended_entry if blended_entry is not None else entry_price
 		if side == "yes":
 			exit_price = 100 if result == "yes" else 0
 			status = "won" if result == "yes" else "lost"
@@ -159,7 +166,7 @@ class TradeStore:
 			exit_price = 100 if result == "no" else 0
 			status = "won" if result == "no" else "lost"
 
-		pnl = fill_size * (exit_price - entry_price) - entry_fee_cents
+		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents
 		now = datetime.now(timezone.utc).isoformat()
 		self._conn.execute(
 			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=?",
@@ -170,17 +177,21 @@ class TradeStore:
 	def exit_trade(self, trade_id: int, exit_price: int) -> None:
 		"""Exit a trade at a specific price (TP/SL).
 
-		pnl = fill_size * (exit_price - entry) - entry_fee
-		status = 'won' if pnl > 0 else 'lost'
+		pnl = fill_size * (exit_price - effective_entry) - entry_fee - exit_fee
+		Uses blended_entry (post-slippage fill price) when available.
+		Exit fee applies because TP/SL exits sell at a mid-price.
 		"""
 		row = self._conn.execute(
-			"SELECT entry_price, fill_size, entry_fee_cents FROM paper_trades WHERE id=?",
+			"SELECT entry_price, fill_size, entry_fee_cents, blended_entry, side "
+			"FROM paper_trades WHERE id=?",
 			(trade_id,),
 		).fetchone()
 		if row is None:
 			return
-		entry_price, fill_size, entry_fee_cents = row
-		pnl = fill_size * (exit_price - entry_price) - entry_fee_cents
+		entry_price, fill_size, entry_fee_cents, blended_entry, side = row
+		effective_entry = blended_entry if blended_entry is not None else entry_price
+		exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
+		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
 		status = "won" if pnl > 0 else "lost"
 		now = datetime.now(timezone.utc).isoformat()
 		self._conn.execute(
