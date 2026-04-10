@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
 from edge_catcher.research.tracker import Tracker
 
 
@@ -58,6 +57,49 @@ def test_delete_ui_backtest(tracker):
 
 def test_delete_nonexistent_returns_false(tracker):
 	assert tracker.delete_ui_backtest("nope") is False
+
+
+def test_get_hypothesis_result_by_id(tracker):
+	row_id = tracker.save_hypothesis_result(
+		test_type="price_efficiency",
+		series="KXBTC",
+		db="kalshi.db",
+		params={"bucket_size": 5},
+		thresholds={"min_z": 2.0},
+		verdict="EDGE_EXISTS",
+		z_stat=2.5,
+		fee_adjusted_edge=0.03,
+		detail={"buckets": 10},
+		rationale="strong signal",
+	)
+	result = tracker.get_hypothesis_result_by_id(row_id)
+	assert result is not None
+	assert result["verdict"] == "EDGE_EXISTS"
+	assert result["series"] == "KXBTC"
+
+
+def test_get_hypothesis_result_by_id_not_found(tracker):
+	assert tracker.get_hypothesis_result_by_id("nonexistent") is None
+
+
+def test_delete_result_from_hypothesis_results(tracker):
+	row_id = tracker.save_hypothesis_result(
+		test_type="price_efficiency",
+		series="KXBTC",
+		db="kalshi.db",
+		params={},
+		thresholds={},
+		verdict="NO_EDGE",
+		z_stat=0.5,
+		fee_adjusted_edge=0.0,
+		detail={},
+	)
+	assert tracker.delete_result(row_id) is True
+	assert tracker.get_hypothesis_result_by_id(row_id) is None
+
+
+def test_delete_result_nonexistent(tracker):
+	assert tracker.delete_result("nonexistent") is False
 
 
 def test_count_and_latest(tracker):
