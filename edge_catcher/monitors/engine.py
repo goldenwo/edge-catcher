@@ -141,13 +141,12 @@ def _handle_enter(
 		book_snapshot=json.dumps(side_levels),
 	)
 
+	side_label = "YES" if signal.side == "yes" else "NO"
 	msg = (
-		f"ENTER {signal.strategy} {signal.side} {signal.ticker} "
-		f"@ {entry_price}c (blended {fill.blended_price_cents}c, "
-		f"fill {fill.fill_size}/{fill.intended_size}, slip {fill.slippage_cents}c) "
-		f"— {signal.reason} [id={trade_id}]"
+		f"🔵 **[{signal.strategy}] PAPER BUY {side_label}** — "
+		f"`{signal.ticker}` ({signal.series}) @ {fill.blended_price_cents}¢"
 	)
-	log.info(msg)
+	log.info("ENTER %s %s %s @ %dc [id=%d]", signal.strategy, signal.side, signal.ticker, fill.blended_price_cents, trade_id)
 	notify(msg)
 
 
@@ -172,14 +171,14 @@ def _handle_exit(
 	# Read back PnL from DB (includes fee deduction)
 	exited = store.get_trade_by_id(signal.trade_id)
 	pnl = exited.get("pnl_cents") if exited else None
-	_, pnl_str = _pnl_label(pnl)
-	pnl_part = f" PnL={pnl_str}" if pnl is not None else ""
-
+	outcome, pnl_str = _pnl_label(pnl)
+	emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+	entry_price_display = exited.get("blended_entry") or exited.get("entry_price", "?") if exited else "?"
 	msg = (
-		f"EXIT {signal.strategy} {signal.side} {signal.ticker} "
-		f"@ {exit_price}c{pnl_part} — {signal.reason} [id={signal.trade_id}]"
+		f"{emoji} **[{signal.strategy}] {outcome}** — "
+		f"`{signal.ticker}` @ {entry_price_display}¢ → {pnl_str}"
 	)
-	log.info(msg)
+	log.info("EXIT %s %s %s @ %dc pnl=%s [id=%d]", signal.strategy, signal.side, signal.ticker, exit_price, pnl_str, signal.trade_id)
 	notify(msg)
 
 
@@ -208,11 +207,13 @@ async def _settlement_poller(
 					settled = store.get_trade_by_id(trade["id"])
 					pnl = settled.get("pnl_cents") if settled else None
 					outcome, pnl_str = _pnl_label(pnl)
+					emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+					entry_display = settled.get("blended_entry") or settled.get("entry_price", "?") if settled else "?"
 					msg = (
-						f"SETTLED {trade['strategy']} {trade.get('side', '?')} {trade['ticker']} "
-						f"→ {outcome} {pnl_str} [id={trade['id']}]"
+						f"{emoji} **[{trade['strategy']}] {outcome}** — "
+						f"`{trade['ticker']}` @ {entry_display}¢ → {pnl_str}"
 					)
-					log.info(msg)
+					log.info("SETTLED %s %s %s %s pnl=%s [id=%d]", trade['strategy'], trade.get('side','?'), trade['ticker'], outcome, pnl_str, trade['id'])
 					notify(msg)
 					# Call on_settle on matching strategy
 					strat = strat_by_name.get(trade["strategy"])
