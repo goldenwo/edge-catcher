@@ -118,7 +118,7 @@ class TestTickContext:
 			no_ask=45,
 			orderbook=snap,
 			price_history=[50, 51, 52],
-			open_positions={},
+			open_positions=[],
 			persisted_state={},
 			market_metadata={},
 		)

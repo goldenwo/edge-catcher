@@ -164,19 +164,23 @@ class MarketState:
 		self._series: dict[str, deque[int]] = {}
 		self._first_seen: set[str] = set()
 		self._orderbooks: dict[str, OrderbookSnapshot] = {}
+		self._metadata: dict[str, dict] = {}
 
 	# ------------------------------------------------------------------
 	# Ticker registration
 	# ------------------------------------------------------------------
 
-	def register_ticker(self, ticker: str) -> None:
+	def register_ticker(self, ticker: str, meta: dict | None = None) -> None:
 		"""Register a ticker so it can receive updates."""
 		if ticker not in self._series:
 			self._series[ticker] = deque(maxlen=self._limit)
+		if meta:
+			self._metadata[ticker] = meta
 
 	def unregister_ticker(self, ticker: str) -> None:
 		"""Remove all state associated with *ticker*."""
 		self._series.pop(ticker, None)
+		self._metadata.pop(ticker, None)
 		self._first_seen.discard(ticker)
 		self._orderbooks.pop(ticker, None)
 
@@ -200,6 +204,10 @@ class MarketState:
 		"""Return the price history deque for *ticker*, or None if unknown."""
 		return self._series.get(ticker)
 
+	def get_metadata(self, ticker: str) -> dict:
+		"""Return metadata for *ticker*, or empty dict if unknown."""
+		return self._metadata.get(ticker, {})
+
 	def all_tickers(self) -> list[str]:
 		"""Return all registered ticker strings."""
 		return list(self._series.keys())
@@ -209,6 +217,7 @@ class MarketState:
 		self._series.clear()
 		self._first_seen.clear()
 		self._orderbooks.clear()
+		self._metadata.clear()
 
 	# ------------------------------------------------------------------
 	# Orderbook management
