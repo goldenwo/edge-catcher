@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 async def fetch_active_tickers_for_series(
 	client,
 	series_ticker: str,
-) -> list[str]:
+) -> tuple[list[str], bool]:
 	"""Fetch all active market tickers for a given series.
 
 	Calls GET /events?series_ticker=...&status=open, then for each event
@@ -28,7 +28,9 @@ async def fetch_active_tickers_for_series(
 		series_ticker: The series to query, e.g. "KXBTC15M".
 
 	Returns:
-		List of active market ticker strings, or [] on any error.
+		(tickers, reliable) — *reliable* is False when the result may be
+		incomplete due to rate-limiting or errors (caller should not purge
+		existing tickers in that case).
 	"""
 	try:
 		resp = await client.get(
@@ -41,10 +43,11 @@ async def fetch_active_tickers_for_series(
 				resp.status_code,
 				series_ticker,
 			)
-			return []
+			return [], False
 
 		events = resp.json().get("events", [])
 		tickers: list[str] = []
+		hit_error = False
 
 		for event in events:
 			event_ticker = event.get("event_ticker", "")
@@ -64,6 +67,7 @@ async def fetch_active_tickers_for_series(
 						mresp.status_code,
 						event_ticker,
 					)
+					hit_error = True
 					break
 
 				data = mresp.json()
@@ -76,11 +80,11 @@ async def fetch_active_tickers_for_series(
 				if not cursor:
 					break
 
-		return tickers
+		return tickers, not hit_error
 
 	except Exception:
 		log.exception("fetch_active_tickers_for_series failed for %s", series_ticker)
-		return []
+		return [], False
 
 
 async def fetch_orderbook_snapshot(
@@ -234,7 +238,7 @@ async def run_recovery(
 		if i > 0:
 			# Small delay between series to avoid Kalshi API rate limits (429)
 			await asyncio.sleep(1.0)
-		tickers = await fetch_active_tickers_for_series(client, series)
+		tickers, _reliable = await fetch_active_tickers_for_series(client, series)
 		log.info("run_recovery: series %s → %d tickers", series, len(tickers))
 		total += len(tickers)
 
