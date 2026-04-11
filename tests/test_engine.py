@@ -184,6 +184,37 @@ class TestProcessTick:
 		trades = store.get_open_trades()
 		assert len(trades) == 1
 
+	def test_rejects_100c_no_entry(self, store, config):
+		"""Entry at no_ask=100 (yes_bid=0) should be silently skipped."""
+		# yes_bid=0 → no_ask=100 — degenerate entry with zero upside
+		ob = OrderbookSnapshot(yes_levels=[(0.90, 20)], no_levels=[(1.00, 20)])
+
+		class NoSideStub(PaperStrategy):
+			name = "no-stub"
+			supported_series = ["TEST"]
+			default_params = {}
+			def on_tick(self, ctx):
+				from edge_catcher.monitors.strategy_base import Signal
+				if ctx.is_first_observation:
+					return [Signal(action="enter", ticker=ctx.ticker, side="no",
+						series=ctx.series, strategy=self.name, reason="test")]
+				return []
+
+		ctx = _make_ctx(ob, is_first=True, yes_ask=90, yes_bid=0)
+		strategies = [NoSideStub()]
+
+		process_tick(ctx, strategies, store, config)
+		assert len(store.get_open_trades()) == 0
+
+	def test_rejects_0c_yes_entry(self, store, config):
+		"""Entry at yes_ask=0 should be silently skipped."""
+		ob = OrderbookSnapshot(yes_levels=[(0.0, 20)], no_levels=[(0.90, 20)])
+		ctx = _make_ctx(ob, is_first=True, yes_ask=0, yes_bid=0)
+		strategies = [StubStrategy()]
+
+		process_tick(ctx, strategies, store, config)
+		assert len(store.get_open_trades()) == 0
+
 
 # ---------------------------------------------------------------------------
 # _handle_ticker_msg tests

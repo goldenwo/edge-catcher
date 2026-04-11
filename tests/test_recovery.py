@@ -40,21 +40,23 @@ class TestFetchActiveTickersForSeries:
 			markets_evt2_response,
 		])
 
-		result = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
-		assert sorted(result) == ["EVT1-T10", "EVT1-T20", "EVT2-T30"]
+		tickers, reliable = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
+		assert sorted(tickers) == ["EVT1-T10", "EVT1-T20", "EVT2-T30"]
+		assert reliable is True
 
 	def test_handles_api_error_returns_empty(self):
-		"""Should return [] gracefully when the API call fails."""
+		"""Should return ([], False) gracefully when the API call fails."""
 		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=Exception("network error"))
 
-		result = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
-		assert result == []
+		tickers, reliable = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
+		assert tickers == []
+		assert reliable is False
 
 	def test_handles_non_200_status_returns_empty(self):
-		"""Should return [] when events endpoint returns non-200."""
+		"""Should return ([], False) when events endpoint returns non-200."""
 		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
 
 		mock_client = AsyncMock()
@@ -63,8 +65,37 @@ class TestFetchActiveTickersForSeries:
 			json=lambda: {},
 		))
 
-		result = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
-		assert result == []
+		tickers, reliable = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
+		assert tickers == []
+		assert reliable is False
+
+	def test_partial_market_error_returns_unreliable(self):
+		"""When events succeeds but one market call fails, reliable should be False."""
+		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+
+		events_response = MagicMock(
+			status_code=200,
+			json=lambda: {"events": [{"event_ticker": "EVT1"}, {"event_ticker": "EVT2"}]},
+		)
+		markets_evt1_ok = MagicMock(
+			status_code=200,
+			json=lambda: {"markets": [{"ticker": "EVT1-T10"}], "cursor": ""},
+		)
+		markets_evt2_fail = MagicMock(
+			status_code=429,
+			json=lambda: {},
+		)
+
+		mock_client = AsyncMock()
+		mock_client.get = AsyncMock(side_effect=[
+			events_response, markets_evt1_ok, markets_evt2_fail,
+		])
+
+		tickers, reliable = asyncio.run(
+			fetch_active_tickers_for_series(mock_client, "SERIES_A")
+		)
+		assert tickers == ["EVT1-T10"]
+		assert reliable is False
 
 	def test_paginates_markets_via_cursor(self):
 		"""Should follow cursor to fetch additional pages of markets."""
@@ -92,8 +123,9 @@ class TestFetchActiveTickersForSeries:
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=[events_response, page1, page2])
 
-		result = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
-		assert sorted(result) == ["EVT1-T10", "EVT1-T20"]
+		tickers, reliable = asyncio.run(fetch_active_tickers_for_series(mock_client, "SERIES_A"))
+		assert sorted(tickers) == ["EVT1-T10", "EVT1-T20"]
+		assert reliable is True
 
 
 class TestFetchOrderbookSnapshot:
