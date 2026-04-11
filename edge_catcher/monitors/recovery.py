@@ -230,7 +230,10 @@ async def run_recovery(
 	"""
 	total = 0
 
-	for series in active_series:
+	for i, series in enumerate(active_series):
+		if i > 0:
+			# Small delay between series to avoid Kalshi API rate limits (429)
+			await asyncio.sleep(1.0)
 		tickers = await fetch_active_tickers_for_series(client, series)
 		log.info("run_recovery: series %s → %d tickers", series, len(tickers))
 		total += len(tickers)

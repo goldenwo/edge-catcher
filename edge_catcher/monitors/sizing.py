@@ -94,6 +94,17 @@ def walk_book_with_ceiling(
 		)
 
 	blended = round(total_cost_cents / total_filled)
+	# Guard: if the book has sub-cent prices that round to 0, the blended
+	# price is unusable as a cost basis. Treat as no fill so the trade is
+	# skipped rather than entered with a corrupt 0¢ price.
+	if blended == 0:
+		return FillResult(
+			fill_size=0,
+			blended_price_cents=0,
+			slippage_cents=0,
+			fill_pct=0.0,
+			intended_size=size,
+		)
 	slippage = blended - best_price_cents
 	fill_pct = total_filled / size
 
@@ -157,6 +168,10 @@ def resolve_fill(
 	  - max_slippage_cents: passed to walk_book_with_ceiling
 	  - min_fill: gate check on fill_size
 
+	When the book is empty or stale (best book price diverges from entry_price
+	by more than 10¢), falls back to entry_price as the fill price so that
+	debut-style first-tick entries are not blocked by stale orderbook data.
+
 	Returns:
 		FillResult if trade should proceed, None to skip.
 	"""
@@ -169,6 +184,33 @@ def resolve_fill(
 	if raw_size == 0:
 		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
 		return None
+
+	# Check if the book is usable: empty or best price wildly diverges from tick price.
+	# Kalshi orderbook NO levels can lag or contain sub-cent stale prices; in that case
+	# use entry_price as a market-order proxy (no slippage modelled).
+	levels = book.yes_levels if side == "yes" else book.no_levels
+	book_is_stale = False
+	if not levels:
+		book_is_stale = True
+	else:
+		best_book_cents = round(levels[0][0] * 100)
+		if abs(best_book_cents - entry_price_cents) > 10:
+			log.debug(
+				"Book stale: best=%dc entry=%dc — using entry_price fallback",
+				best_book_cents, entry_price_cents,
+			)
+			book_is_stale = True
+
+	if book_is_stale:
+		if raw_size < min_fill_threshold:
+			return None
+		return FillResult(
+			fill_size=raw_size,
+			blended_price_cents=0,   # signals stale book; trade_store uses entry_price for PnL
+			slippage_cents=0.0,
+			fill_pct=1.0,
+			intended_size=raw_size,
+		)
 
 	fill = walk_book_with_ceiling(book, side, raw_size, max_slippage)
 

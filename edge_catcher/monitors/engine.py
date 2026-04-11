@@ -146,11 +146,12 @@ def _handle_enter(
 
 	side_label = "YES" if signal.side == "yes" else "NO"
 	tag = f"{signal.strategy} | {signal.series}"
+	display_price = fill.blended_price_cents if fill.blended_price_cents else entry_price
 	msg = (
 		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
-		f"`{signal.ticker}` @ {fill.blended_price_cents}¢"
+		f"`{signal.ticker}` @ {display_price}¢"
 	)
-	log.info("ENTER %s %s %s @ %dc [id=%d]", signal.strategy, signal.side, signal.ticker, fill.blended_price_cents, trade_id)
+	log.info("ENTER %s %s %s @ %dc [id=%d]", signal.strategy, signal.side, signal.ticker, display_price, trade_id)
 	notify(msg)
 
 
