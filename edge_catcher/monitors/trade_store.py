@@ -119,6 +119,9 @@ class TradeStore:
 		book_snapshot: Optional[str] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id."""
+		# Treat blended_entry=0 as None — sub-cent book levels round to 0¢ and must
+		# not be used as cost basis; fall back to entry_price instead.
+		blended_entry = blended_entry if blended_entry else None
 		effective_price = blended_entry if blended_entry is not None else entry_price
 		entry_fee_cents = int(STANDARD_FEE.calculate(effective_price, fill_size))
 		now = datetime.now(timezone.utc).isoformat()
@@ -135,7 +138,7 @@ class TradeStore:
 			(
 				ticker, entry_price, now,
 				strategy, side, series_ticker, entry_fee_cents,
-				intended_size, fill_size, blended_entry, book_depth,
+				intended_size, fill_size, blended_entry, book_depth,  # blended_entry already sanitised above
 				fill_pct, slippage_cents, book_snapshot,
 			),
 		)
@@ -160,7 +163,8 @@ class TradeStore:
 		entry_price, side, fill_size, entry_fee_cents, blended_entry, current_status = row
 		if current_status != "open":
 			return  # already exited or settled — avoid race with exit_trade
-		effective_entry = blended_entry if blended_entry is not None else entry_price
+		# blended_entry=0 is a corrupt book walk — fall back to entry_price
+		effective_entry = blended_entry if blended_entry else entry_price
 		if side == "yes":
 			exit_price = 100 if result == "yes" else 0
 			status = "won" if result == "yes" else "lost"
@@ -193,7 +197,8 @@ class TradeStore:
 		entry_price, fill_size, entry_fee_cents, blended_entry, side, current_status = row
 		if current_status != "open":
 			return  # already settled or exited — avoid race with settle_trade
-		effective_entry = blended_entry if blended_entry is not None else entry_price
+		# blended_entry=0 is a corrupt book walk — fall back to entry_price
+		effective_entry = blended_entry if blended_entry else entry_price
 		exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
 		status = "won" if pnl > 0 else ("lost" if pnl < 0 else "scratch")

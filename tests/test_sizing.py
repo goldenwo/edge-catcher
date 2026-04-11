@@ -151,9 +151,19 @@ class TestResolveFill:
 		assert fill.fill_size == 40  # book has 40 within ceiling
 		assert fill.blended_price_cents == 6  # (20*5 + 20*6) / 40 = 5.5 → round(5.5) = 6
 
-	def test_empty_book_returns_none(self, config) -> None:
+	def test_empty_book_uses_entry_price_fallback(self, config) -> None:
+		"""Empty book → stale-book fallback: returns fill at entry_price (blended=0)."""
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
+		assert fill is not None
+		assert fill.blended_price_cents == 0  # signals stale book; trade_store uses entry_price
+		assert fill.fill_size == 40  # 200 // 5
+
+	def test_empty_book_below_min_fill_returns_none(self, config) -> None:
+		"""Empty book + entry too expensive to meet min_fill → None."""
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
+		# 200 // 99 = 2, below min_fill=3
+		fill = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
 		assert fill is None
 
 	def test_min_fill_gate(self, config) -> None:
