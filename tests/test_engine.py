@@ -122,8 +122,8 @@ class TestProcessTick:
 		assert t["fill_size"] == 10  # 500c risk / 50c price = 10, book has 20 at 50c
 		assert t["series_ticker"] == "TEST"
 
-	def test_enter_skips_on_no_liquidity(self, store, config):
-		"""Empty orderbook means fill_size=0 — no trade recorded."""
+	def test_enter_uses_entry_price_on_empty_book(self, store, config):
+		"""Empty orderbook triggers stale-book fallback: trade enters at entry_price."""
 		ob = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
@@ -131,7 +131,10 @@ class TestProcessTick:
 		process_tick(ctx, strategies, store, config)
 
 		trades = store.get_open_trades()
-		assert len(trades) == 0
+		# Stale-book fallback: trade is recorded with blended_entry=None (entry_price used for PnL)
+		assert len(trades) == 1
+		assert trades[0]['blended_entry'] is None
+		assert trades[0]['entry_price'] == 50  # ctx default yes_ask=50
 
 	def test_exit_signal_closes_trade(self, store, config):
 		"""ExitStrategy exits open positions at the bid price (selling)."""
