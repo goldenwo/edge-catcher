@@ -396,7 +396,7 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="slippage">Slippage</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="slippage">Slippage (¢)</label>
                 <input
                   id="slippage"
                   type="number"
@@ -406,7 +406,7 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="tp">Take Profit</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="tp">Take Profit (¢)</label>
                 <input
                   id="tp"
                   type="number"
@@ -417,7 +417,7 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="sl">Stop Loss</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="sl">Stop Loss (¢)</label>
                 <input
                   id="sl"
                   type="number"
@@ -428,7 +428,7 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="min-price">Min Price</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="min-price">Min Price (¢)</label>
                 <input
                   id="min-price"
                   type="number"
@@ -439,7 +439,7 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1" htmlFor="max-price">Max Price</label>
+                <label className="block text-xs text-gray-400 mb-1" htmlFor="max-price">Max Price (¢)</label>
                 <input
                   id="max-price"
                   type="number"
