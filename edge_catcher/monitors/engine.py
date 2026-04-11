@@ -115,6 +115,11 @@ def _handle_enter(
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
 	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
+	# Reject degenerate prices on binary contracts (0c or 100c have zero upside)
+	if not (1 <= entry_price <= 99):
+		log.debug("Skip: entry_price %dc out of range for %s %s", entry_price, signal.side, signal.ticker)
+		return
+
 	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
 
 	if fill is None:
@@ -292,8 +297,10 @@ async def _ticker_refresh(
 		await asyncio.sleep(interval)
 		try:
 			new_tickers: list[str] = []
-			for series in active_series:
-				tickers = await fetch_active_tickers_for_series(client, series)
+			for i, series in enumerate(active_series):
+				if i > 0:
+					await asyncio.sleep(1.0)
+				tickers, reliable = await fetch_active_tickers_for_series(client, series)
 				fresh_set = set(tickers)
 
 				# Register new tickers
@@ -305,10 +312,13 @@ async def _ticker_refresh(
 							market_state.seed_orderbook(ticker, snapshot)
 						new_tickers.append(ticker)
 
-				# Purge stale tickers for this series
-				for existing in market_state.all_tickers():
-					if existing.startswith(series) and existing not in fresh_set:
-						market_state.unregister_ticker(existing)
+				# Purge stale tickers only when the API response was complete
+				if reliable:
+					for existing in market_state.all_tickers():
+						if existing.startswith(series) and existing not in fresh_set:
+							market_state.unregister_ticker(existing)
+				else:
+					log.warning("Skipping ticker purge for %s: API response unreliable (got %d partial tickers)", series, len(tickers))
 
 			if new_tickers and ws_ref and ws_ref[0] is not None:
 				try:
