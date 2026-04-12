@@ -235,30 +235,61 @@ class ParameterSensitivityGate(Gate):
 
 
 def _extract_numeric_params(code: str) -> list[tuple[str, int | float]]:
-	"""Extract numeric class attribute assignments from strategy source."""
+	"""Extract numeric parameters from a strategy's ``__init__`` defaults.
+
+	Strategies in this codebase declare tunable parameters as ``__init__``
+	arguments with numeric defaults (e.g. ``min_price: int = 5``). This
+	function walks the AST of a single class definition and returns
+	``(param_name, default_value)`` for every positional-or-keyword arg
+	whose default is a real numeric constant.
+
+	Booleans are excluded (via both type annotation and ``type(v) is bool``),
+	but legitimate int defaults of ``0`` or ``1`` are kept.
+	"""
 	try:
 		tree = ast.parse(code)
 	except SyntaxError:
 		return []
 
 	params: list[tuple[str, int | float]] = []
-	for node in ast.walk(tree):
-		if not isinstance(node, ast.ClassDef):
+	for class_node in ast.walk(tree):
+		if not isinstance(class_node, ast.ClassDef):
 			continue
-		for item in node.body:
-			if not isinstance(item, ast.Assign):
+		for item in class_node.body:
+			if not isinstance(item, ast.FunctionDef) or item.name != "__init__":
 				continue
-			for target in item.targets:
-				if not isinstance(target, ast.Name):
+			args = item.args
+			pos_args = args.args[1:]  # drop ``self``
+			pos_defaults = args.defaults
+			offset = len(pos_args) - len(pos_defaults)
+			for idx, arg in enumerate(pos_args):
+				if idx < offset:
 					continue
-				if target.id == "name":
-					continue  # skip the strategy name attribute
-				if isinstance(item.value, ast.Constant) and isinstance(item.value.value, (int, float)):
-					val = item.value.value
-					if val in (0, 1, True, False):
-						continue  # skip booleans/flags
-					params.append((target.id, val))
+				_maybe_add_numeric_param(params, arg, pos_defaults[idx - offset])
+			for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+				if default is None:
+					continue
+				_maybe_add_numeric_param(params, arg, default)
 	return params
+
+
+def _maybe_add_numeric_param(
+	out: list[tuple[str, int | float]],
+	arg: ast.arg,
+	default_node: ast.AST,
+) -> None:
+	"""Append ``(name, value)`` to ``out`` if ``arg`` is a numeric parameter."""
+	if arg.annotation is not None:
+		ann = arg.annotation
+		if isinstance(ann, ast.Name) and ann.id == "bool":
+			return
+	if not isinstance(default_node, ast.Constant):
+		return
+	val = default_node.value
+	if type(val) is bool:
+		return
+	if isinstance(val, (int, float)):
+		out.append((arg.arg, val))
 
 
 def _perturb(value: int | float, pct: float) -> int | float:
@@ -275,42 +306,69 @@ def _replace_param(
 	code: str, original_name: str, param_name: str,
 	new_value: int | float, new_strategy_name: str,
 ) -> str:
-	"""Generate modified strategy code with one param changed and a new name."""
-	lines = code.splitlines()
-	result_lines: list[str] = []
+	"""Generate modified strategy code with one ``__init__`` default changed.
 
-	for line in lines:
-		# Replace strategy name
-		if re.match(r'\s*name\s*=\s*["\']', line):
-			line = re.sub(
-				r'(name\s*=\s*["\'])([^"\']+)(["\'])',
-				rf'\g<1>{new_strategy_name}\g<3>',
-				line,
-			)
-		# Replace class name
-		elif re.match(r'\s*class\s+\w+', line):
-			line = re.sub(
-				r'(class\s+)\w+',
-				rf'\g<1>{new_strategy_name.replace("-", "_")}',
-				line,
-			)
-		# Replace the target param
-		elif re.match(rf'\s*{re.escape(param_name)}\s*=\s*', line):
-			if isinstance(new_value, int):
-				line = re.sub(
-					rf'({re.escape(param_name)}\s*=\s*)[\d.]+',
-					rf'\g<1>{new_value}',
-					line,
-				)
-			else:
-				line = re.sub(
-					rf'({re.escape(param_name)}\s*=\s*)[\d.]+',
-					rf'\g<1>{new_value:.6g}',
-					line,
-				)
-		result_lines.append(line)
+	Also renames the class itself (hyphens replaced with underscores to keep
+	it a valid Python identifier) and rewrites the class-level ``name``
+	attribute so the strategy registers under ``new_strategy_name``.
+	"""
+	tree = ast.parse(code)
+	new_class_name = new_strategy_name.replace("-", "_")
 
-	return "\n".join(result_lines)
+	for class_node in ast.walk(tree):
+		if not isinstance(class_node, ast.ClassDef):
+			continue
+		class_node.name = new_class_name
+		for item in class_node.body:
+			if (
+				isinstance(item, ast.Assign)
+				and any(isinstance(t, ast.Name) and t.id == "name" for t in item.targets)
+			):
+				item.value = ast.Constant(value=new_strategy_name)
+				continue
+			if isinstance(item, ast.FunctionDef) and item.name == "__init__":
+				_replace_init_default(item, param_name, new_value)
+
+	ast.fix_missing_locations(tree)
+	return ast.unparse(tree)
+
+
+def _replace_init_default(
+	init_node: ast.FunctionDef,
+	param_name: str,
+	new_value: int | float,
+) -> None:
+	"""Mutate ``init_node`` to set ``param_name``'s default to ``new_value``.
+
+	Logs a warning if ``param_name`` is not present in the signature or
+	has no default — that shouldn't happen if the caller is feeding names
+	from ``_extract_numeric_params``, but drift between the two could
+	silently produce unchanged neighbor code which would then look
+	identical to the original in backtest results.
+	"""
+	args = init_node.args
+	pos_args = args.args[1:]  # drop ``self``
+	pos_defaults = args.defaults
+	offset = len(pos_args) - len(pos_defaults)
+	for idx, arg in enumerate(pos_args):
+		if arg.arg != param_name:
+			continue
+		if idx < offset:
+			logger.warning(
+				"_replace_init_default: '%s' has no default — skipping",
+				param_name,
+			)
+			return
+		pos_defaults[idx - offset] = ast.Constant(value=new_value)
+		return
+	for idx, arg in enumerate(args.kwonlyargs):
+		if arg.arg == param_name and args.kw_defaults[idx] is not None:
+			args.kw_defaults[idx] = ast.Constant(value=new_value)
+			return
+	logger.warning(
+		"_replace_init_default: param '%s' not found in __init__ signature",
+		param_name,
+	)
 
 
 def _sanitize(value: int | float) -> str:

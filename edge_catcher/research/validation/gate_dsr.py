@@ -76,7 +76,21 @@ class DeflatedSharpeGate(Gate):
 		skew = _skewness(pnl)
 		kurt = _kurtosis(pnl)  # excess kurtosis: normal = 0
 
-		# Count distinct strategy families for N (independent research ideas)
+		# N for the Bailey multiple-testing correction = number of distinct
+		# experimental trials in the tracker. A trial is a unique
+		# (strategy family, series, fee_pct) tuple: each one is an
+		# independent pull from the null Sharpe distribution we're
+		# implicitly selecting the best from.
+		#
+		# Rationale for family collapsing: LLM-generated variants (FooV1,
+		# FooV2, ...) tested on the same series are closer to repeat
+		# refinements of one idea than independent trials, so they collapse
+		# into one trial via _strategy_family().
+		#
+		# Note: N is cumulative over the tracker's lifetime, so it grows
+		# monotonically during a sweep. This means hypotheses evaluated
+		# later in a sweep see a slightly larger N than earlier ones —
+		# a known limitation; fixing it would require pre-snapshotting N.
 		if context.tracker is None:
 			return GateResult(
 				passed=False, gate_name=self.name,
@@ -84,17 +98,28 @@ class DeflatedSharpeGate(Gate):
 				details={},
 			)
 		all_results = context.tracker.list_results()
-		ok_results = [r for r in all_results if r.get("status") == "ok"]
-		families: set[str] = set()
-		for r in ok_results:
-			if r.get("total_trades", 0) >= 1:
-				families.add(_strategy_family(r["strategy"]))
-		N = len(families)
+		trials: set[tuple] = set()
+		for r in all_results:
+			if r.get("status") != "ok":
+				continue
+			trades = r.get("total_trades") or 0  # None → 0
+			if trades < 1:
+				continue
+			strat = r.get("strategy")
+			if not strat:
+				continue
+			trial_key = (
+				_strategy_family(strat),
+				r.get("series"),
+				r.get("fee_pct"),
+			)
+			trials.add(trial_key)
+		N = len(trials)
 
 		if N < 2:
 			return GateResult(
 				passed=False, gate_name=self.name,
-				reason=f"only {N} strategy families tested, need >=2 for DSR",
+				reason=f"only {N} distinct trials tested, need >=2 for DSR",
 				details={"n_strategies": N},
 			)
 
@@ -110,10 +135,12 @@ class DeflatedSharpeGate(Gate):
 			+ _GAMMA * norm.ppf(1 - 1 / (N * math.e))
 		)
 
-		# DSR formula (kurt is excess kurtosis, so raw kurtosis = kurt + 3)
-		# denominator = sqrt(1 - skew*SR0 + (raw_kurt - 1)/4 * SR0^2)
-		#             = sqrt(1 - skew*SR0 + (kurt + 2)/4 * SR0^2)
-		denom_inner = 1 - skew * sr0 + (kurt + 2) / 4 * sr0 ** 2
+		# Bailey & Lopez de Prado (2014), Eq. 9 — the standard error of the
+		# Sharpe estimator under non-normality uses the *observed* Sharpe:
+		#     denom = sqrt(1 - skew*SR_hat + ((raw_kurt - 1)/4) * SR_hat^2)
+		#           = sqrt(1 - skew*SR_hat + ((kurt + 2)/4) * SR_hat^2)
+		# (``kurt`` is excess kurtosis, raw kurtosis = kurt + 3.)
+		denom_inner = 1 - skew * sr_observed + (kurt + 2) / 4 * sr_observed ** 2
 		if denom_inner <= 0:
 			# Pathological case: extreme skew makes SE undefined.
 			# The DSR statistic has no valid interpretation here.
@@ -129,7 +156,7 @@ class DeflatedSharpeGate(Gate):
 					"n_strategies": N,
 					"skewness": round(skew, 4),
 					"kurtosis": round(kurt, 4),
-					"denom_inner": round(denom_inner, 4),
+					"denom_inner": round(denom_inner, 6),
 					"T": T,
 				},
 			)
@@ -144,6 +171,7 @@ class DeflatedSharpeGate(Gate):
 			"sr_std": round(sr_std, 4),
 			"skewness": round(skew, 4),
 			"kurtosis": round(kurt, 4),
+			"denom_inner": round(denom_inner, 6),
 			"T": T,
 		}
 
