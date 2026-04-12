@@ -167,10 +167,19 @@ def resolve_fill(
 	  - risk_per_trade_cents: passed to compute_raw_size
 	  - max_slippage_cents: passed to walk_book_with_ceiling
 	  - min_fill: gate check on fill_size
+	  - require_fresh_book: (optional, default False) if True, skip entries
+	    when the orderbook is populated but the best price diverges from
+	    entry_price by > 10¢. Empty books are still treated as a legitimate
+	    startup case and fall through to the entry-price fallback.
 
-	When the book is empty or stale (best book price diverges from entry_price
-	by more than 10¢), falls back to entry_price as the fill price so that
-	debut-style first-tick entries are not blocked by stale orderbook data.
+	Two stale-book cases, handled differently:
+	  1. Empty book → legitimate startup (strategy_a fires on the first
+	     tick before the orderbook has been seeded). Falls back to
+	     entry_price regardless of require_fresh_book.
+	  2. Populated but best diverges > 10¢ from entry_price → phantom
+	     liquidity / WS orderbook lag. By default, falls back to
+	     entry_price for backward compat; with require_fresh_book=True,
+	     the entry is skipped so we don't book phantom fills.
 
 	Returns:
 		FillResult if trade should proceed, None to skip.
@@ -179,29 +188,33 @@ def resolve_fill(
 	risk_cents = sizing["risk_per_trade_cents"]
 	max_slippage = sizing["max_slippage_cents"]
 	min_fill_threshold = sizing["min_fill"]
+	require_fresh_book = sizing.get("require_fresh_book", False)
 
 	raw_size = compute_raw_size(risk_cents, entry_price_cents)
 	if raw_size == 0:
 		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
 		return None
 
-	# Check if the book is usable: empty or best price wildly diverges from tick price.
-	# Kalshi orderbook NO levels can lag or contain sub-cent stale prices; in that case
-	# use entry_price as a market-order proxy (no slippage modelled).
 	levels = book.yes_levels if side == "yes" else book.no_levels
-	book_is_stale = False
-	if not levels:
-		book_is_stale = True
-	else:
+	book_empty = not levels
+	book_populated_but_stale = False
+	if not book_empty:
 		best_book_cents = round(levels[0][0] * 100)
 		if abs(best_book_cents - entry_price_cents) > 10:
 			log.debug(
-				"Book stale: best=%dc entry=%dc — using entry_price fallback",
+				"Book populated but stale: best=%dc entry=%dc",
 				best_book_cents, entry_price_cents,
 			)
-			book_is_stale = True
+			book_populated_but_stale = True
 
-	if book_is_stale:
+	if book_populated_but_stale and require_fresh_book:
+		log.info(
+			"Skip: populated-but-stale book (best diverges from entry_price) "
+			"with require_fresh_book=true",
+		)
+		return None
+
+	if book_empty or book_populated_but_stale:
 		if raw_size < min_fill_threshold:
 			return None
 		return FillResult(

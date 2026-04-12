@@ -221,3 +221,70 @@ class TestGetEnabledStrategies:
 		}
 		with pytest.raises(ValueError, match="risk_per_trade_cents"):
 			get_enabled_strategies(config, [self._strat()])
+
+	def test_rejects_unsupported_series_by_default(self) -> None:
+		"""If a strategy declares supported_series, config must use only those.
+
+		Prevents the strategy_b-on-KXDOGED class of bug where a strategy is
+		enabled on a series it was never validated on.
+		"""
+		config = {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"strategies": {
+				"stub": {"enabled": True, "series": ["SERIES_A", "UNSUPPORTED_SERIES"]},
+			},
+		}
+		with pytest.raises(ValueError, match="UNSUPPORTED_SERIES"):
+			get_enabled_strategies(config, [self._strat()])
+
+	def test_allows_all_supported_series(self) -> None:
+		"""All requested series are in supported_series → no error."""
+		class MultiSeries(PaperStrategy):
+			name = "multi"
+			supported_series = ["SERIES_A", "SERIES_B", "SERIES_C"]
+			default_params = {}
+			def on_tick(self, ctx):
+				return []
+
+		config = {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"strategies": {
+				"multi": {"enabled": True, "series": ["SERIES_A", "SERIES_B"]},
+			},
+		}
+		result = get_enabled_strategies(config, [MultiSeries()])
+		assert len(result) == 1
+
+	def test_empty_supported_series_means_no_restriction(self) -> None:
+		"""A strategy with supported_series=[] has no allow-list, so any
+		config series is permitted. This is the opt-out for strategies
+		that genuinely work on any series (e.g. framework test fixtures).
+		"""
+		class AnySeries(PaperStrategy):
+			name = "any"
+			supported_series: list[str] = []
+			default_params = {}
+			def on_tick(self, ctx):
+				return []
+
+		config = {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"strategies": {
+				"any": {"enabled": True, "series": ["WHATEVER"]},
+			},
+		}
+		result = get_enabled_strategies(config, [AnySeries()])
+		assert len(result) == 1
+
+	def test_supported_series_validation_can_be_disabled(self) -> None:
+		"""``strict_series_validation: false`` turns the error into a warning."""
+		config = {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"strict_series_validation": False,
+			"strategies": {
+				"stub": {"enabled": True, "series": ["UNSUPPORTED_SERIES"]},
+			},
+		}
+		# Should NOT raise; strategy loads with warning
+		result = get_enabled_strategies(config, [self._strat()])
+		assert len(result) == 1

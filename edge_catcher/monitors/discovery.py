@@ -98,6 +98,12 @@ def get_enabled_strategies(
 ) -> list[PaperStrategy]:
 	"""Filter to enabled strategies and apply config param overrides.
 
+	Enforces ``supported_series`` on each strategy: if the strategy
+	declares a non-empty whitelist, the config's series list must be a
+	subset of it. Prevents enabling a strategy on a series it was never
+	validated on. Set ``strict_series_validation: false`` at the top
+	level of config to downgrade the error to a warning.
+
 	Args:
 		config:         Full config dict.
 		all_strategies: All discovered strategy instances.
@@ -106,12 +112,15 @@ def get_enabled_strategies(
 		Filtered, merged list of enabled strategies.
 
 	Raises:
-		ValueError: If sizing config is missing or invalid.
+		ValueError: If sizing config is missing or invalid, or if a
+		            strategy is enabled on an unsupported series under
+		            strict validation.
 	"""
 	validate_sizing_config(config)
 
 	strats_cfg: dict = config.get("strategies", {})
 	by_name: dict[str, PaperStrategy] = {s.name: s for s in all_strategies}
+	strict = config.get("strict_series_validation", True)
 
 	enabled: list[PaperStrategy] = []
 
@@ -122,6 +131,21 @@ def get_enabled_strategies(
 		if strat is None:
 			logger.warning("Config references strategy '%s' but it was not discovered", name)
 			continue
+
+		supported = list(getattr(strat, "supported_series", []) or [])
+		requested = list(scfg.get("series", []) or [])
+		if supported and requested:
+			unsupported = [s for s in requested if s not in supported]
+			if unsupported:
+				msg = (
+					f"Strategy '{name}' is enabled on series not in its supported_series "
+					f"whitelist: {unsupported}. Declared supported: {supported}. "
+					f"Either add the series to the strategy's supported_series, or set "
+					f"'strict_series_validation: false' in config to downgrade this to a warning."
+				)
+				if strict:
+					raise ValueError(msg)
+				logger.warning(msg)
 
 		# Merge param overrides
 		params_override: dict = scfg.get("params", {}) or {}

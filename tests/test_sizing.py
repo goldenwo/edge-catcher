@@ -152,7 +152,11 @@ class TestResolveFill:
 		assert fill.blended_price_cents == 6  # (20*5 + 20*6) / 40 = 5.5 → round(5.5) = 6
 
 	def test_empty_book_uses_entry_price_fallback(self, config) -> None:
-		"""Empty book → stale-book fallback: returns fill at entry_price (blended=0)."""
+		"""Empty book → startup fallback: returns fill at entry_price (blended=0).
+
+		An empty book is the legitimate startup case (strategy_a fires on
+		the first tick of a new market before the orderbook has been seeded).
+		"""
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert fill is not None
@@ -165,6 +169,68 @@ class TestResolveFill:
 		# 200 // 99 = 2, below min_fill=3
 		fill = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
 		assert fill is None
+
+	def test_populated_but_stale_book_falls_back_by_default(self, config) -> None:
+		"""Populated book whose best is > 10c from entry_price → stale.
+
+		Default behavior (backward compat): return the fallback FillResult
+		with blended=0 so the trade enters at the tick price. This preserves
+		the Apr 11 fix semantics for users who want to keep trading when
+		the WS orderbook diverges from the trade tick stream.
+		"""
+		# Book has real liquidity at 1c but strategy sees entry_price=42
+		book = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.01, 500), (0.02, 100)],
+		)
+		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
+		assert fill is not None
+		assert fill.blended_price_cents == 0  # stale fallback
+		assert fill.fill_size > 0
+
+	def test_populated_but_stale_book_skipped_when_require_fresh_book(self) -> None:
+		"""With ``require_fresh_book: true``, a populated-but-stale book
+		returns None so the trade is skipped entirely.
+
+		This prevents the bookkeeping-artifact wins we saw in the Apr 11-12
+		paper trader run where 94% of crypto 15m / KXXRP entries filled
+		against phantom 1c liquidity that didn't reflect the tradeable market.
+		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		book = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.01, 500), (0.02, 100)],
+		)
+		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
+		assert fill is None, "stale populated book must be skipped when require_fresh_book is set"
+
+	def test_empty_book_still_allowed_under_require_fresh_book(self) -> None:
+		"""require_fresh_book only filters populated-but-stale books.
+
+		Empty books are the legitimate startup case for strategy_a's first-tick
+		entries and must still fall back to entry_price even when strict
+		fresh-book checking is enabled.
+		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
+		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
+		assert fill is not None
+		assert fill.blended_price_cents == 0
+		assert fill.fill_size == 40
 
 	def test_min_fill_gate(self, config) -> None:
 		"""Book has only 2 contracts, min_fill is 3 → None."""
