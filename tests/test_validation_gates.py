@@ -168,25 +168,30 @@ class TestDeflatedSharpeGate:
 		assert sr0 < 1.0, f"sr0 ({sr0:.4f}) should be per-trade scale (< 1.0)"
 		assert abs(sr_observed) < 1.0, f"sr_observed ({sr_observed:.4f}) should be per-trade scale"
 
-	def test_dsr_groups_sharpes_by_strategy(self):
-		"""Same strategy tested on multiple series should count as one trial.
+	def test_dsr_n_counts_trials_not_families(self):
+		"""For the Bailey multiple-testing correction, N should equal the
+		number of distinct experimental trials (strategy × series × fee
+		cells) — not the number of distinct strategy family names.
 
-		Before the fix, 1 strategy × 10 series = 10 data points for sr_var
-		but N=1, causing "only 1 strategies tested" failure or inflated variance.
-		After the fix, the 10 Sharpes are averaged into 1 representative value.
+		Before the fix, 3 strategies × 5 series = 15 trials were counted
+		as N=3. After the fix they count as N=15 because each (strategy,
+		series) combo is an independent pull from the null Sharpe
+		distribution for multiple-testing purposes.
 		"""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
 
-		# 3 strategies, each tested on 5 series — 15 total rows
 		tracker = MagicMock()
 		rows = []
 		for s_idx in range(3):
 			for series_idx in range(5):
 				rows.append({
 					"strategy": f"Strat{s_idx}",
+					"series": f"SER_{series_idx}",
+					"db_path": "data/kalshi.db",
+					"fee_pct": 1.0,
 					"status": "ok",
 					"sharpe": 0.3 + s_idx * 0.1 + series_idx * 0.02,
-					"total_trades": 1,
+					"total_trades": 100,
 				})
 		tracker.list_results.return_value = rows
 
@@ -197,8 +202,122 @@ class TestDeflatedSharpeGate:
 		gate = DeflatedSharpeGate()
 		gr = gate.check(result, ctx)
 
-		# Should see 3 strategy families, not 15 or 1
-		assert gr.details["n_strategies"] == 3
+		assert gr.details["n_strategies"] == 15
+
+	def test_dsr_n_dedupes_identical_trials(self):
+		"""Two identical (strategy, series, fee) rows in the tracker are
+		one trial, not two. Re-evaluation of the same hypothesis in a later
+		run should not inflate N."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = [
+			{"strategy": "S", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": 100},
+			{"strategy": "S", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": 100},
+			{"strategy": "S", "series": "Y", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.3, "total_trades": 100},
+		]
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+		assert gr.details["n_strategies"] == 2
+
+	def test_dsr_n_tolerates_null_total_trades(self):
+		"""sqlite NULL total_trades should not crash the gate.
+
+		Regression: the tracker's ``results`` table allows NULL
+		total_trades, and ``r.get("total_trades", 0)`` returns None (not 0)
+		when the key exists with a None value. ``None < 1`` was a TypeError.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = [
+			{"strategy": "S", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": None},  # NULL
+			{"strategy": "T", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": 100},
+			{"strategy": "U", "series": "Y", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": 50},
+		]
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		# Should not crash. NULL row excluded, so N=2 (T/X and U/Y).
+		assert gr.details["n_strategies"] == 2
+
+	def test_dsr_n_family_collapsing_still_applied(self):
+		"""V1/V2/V3 variants of a strategy on the same series collapse to
+		one family for trial counting, so the trial key is
+		(family, series, fee), not (strategy_name, series, fee).
+
+		Otherwise, LLM-generated refinements would inflate N artificially
+		for strategies that have been refined many times."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		tracker = MagicMock()
+		tracker.list_results.return_value = [
+			{"strategy": "FooV1", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.4, "total_trades": 100},
+			{"strategy": "FooV2", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.5, "total_trades": 100},
+			{"strategy": "FooV3", "series": "X", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.3, "total_trades": 100},
+			{"strategy": "Bar", "series": "Y", "db_path": "d.db", "fee_pct": 1.0,
+			 "status": "ok", "sharpe": 0.6, "total_trades": 100},
+		]
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+		# (Foo family, X) = 1 trial; (Bar family, Y) = 1 trial → N=2
+		assert gr.details["n_strategies"] == 2
+
+	def test_dsr_groups_sharpes_by_strategy(self):
+		"""Legacy behavior: the details key is still called n_strategies and
+		the field is populated, even though it now counts (family, series,
+		fee) trials. Kept for API stability."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		tracker = MagicMock()
+		rows = []
+		for s_idx in range(3):
+			for series_idx in range(5):
+				rows.append({
+					"strategy": f"Strat{s_idx}",
+					"series": f"SER_{series_idx}",
+					"db_path": "data/kalshi.db",
+					"fee_pct": 1.0,
+					"status": "ok",
+					"sharpe": 0.3 + s_idx * 0.1 + series_idx * 0.02,
+					"total_trades": 100,
+				})
+		tracker.list_results.return_value = rows
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		# 3 families × 5 series = 15 trials
+		assert "n_strategies" in gr.details
+		assert gr.details["n_strategies"] == 15
 
 	def test_strategy_family_helper(self):
 		"""_strategy_family strips trailing V\\d+ suffixes."""
@@ -290,6 +409,80 @@ class TestDeflatedSharpeGate:
 		gate = DeflatedSharpeGate(threshold=0.95, review_floor=0.80)
 		gr = gate.check(result, ctx)
 		assert not gr.passed
+
+	def test_dsr_denom_uses_observed_sharpe_per_bailey_eq9(self):
+		"""Bailey & Lopez de Prado (2014), Eq. 9: the DSR denominator is
+
+		    sqrt(1 - skew * SR_hat + ((kurt_raw - 1) / 4) * SR_hat^2)
+
+		— where SR_hat is the *observed* per-trade Sharpe, not the null
+		cutoff SR0. Previous code mistakenly used sr0 in the denominator,
+		which makes denom_inner ≈ 1 regardless of distribution shape.
+
+		We verify by expanding the expected Bailey denominator from the
+		fat-tailed test distribution and checking it appears in the gate's
+		details.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+		from scipy.stats import skew as _skew, kurtosis as _kurt
+
+		# Fat-tailed: 98 small wins, 2 large losses — skewed & leptokurtic
+		pnl = [2.0] * 98 + [-50.0] * 2
+		sr_hat = statistics.mean(pnl) / statistics.stdev(pnl)
+		skew_val = float(_skew(pnl, bias=False))
+		exkurt = float(_kurt(pnl, bias=False))  # excess kurtosis
+		expected_denom_inner = 1 - skew_val * sr_hat + (exkurt + 2) / 4 * sr_hat ** 2
+
+		tracker = self._make_tracker_with_results([0.1, 0.2, -0.1])
+
+		result = _make_result(
+			pnl_values=pnl, sharpe=sr_hat * math.sqrt(len(pnl)), total_trades=len(pnl),
+		)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr = gate.check(result, ctx)
+
+		assert "denom_inner" in gr.details, "gate must expose denom_inner for auditability"
+		assert gr.details["denom_inner"] == pytest.approx(expected_denom_inner, abs=1e-3)
+
+	def test_dsr_symmetric_vs_fat_tail_dsr_differs(self):
+		"""Two strategies with identical observed per-trade Sharpe should
+		produce different DSR scores when their return distributions differ
+		in skew/kurt. With sr0 in the denominator (old bug), kurtosis is
+		ignored and both score the same."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		# Symmetric: mean≈1, near-normal
+		symmetric = []
+		rng = __import__("random").Random(1)
+		for _ in range(200):
+			symmetric.append(1.0 + rng.gauss(0, 5))
+		# Fat-tailed: lots of small wins, a few huge losses, same T
+		fat = [1.5] * 180 + [-10.0] * 20  # mean=0.35, strong negative skew
+
+		tracker = self._make_tracker_with_results([0.1, 0.2, 0.3])
+
+		res_sym = _make_result(
+			pnl_values=symmetric,
+			sharpe=statistics.mean(symmetric) / statistics.stdev(symmetric) * math.sqrt(len(symmetric)),
+			total_trades=len(symmetric),
+		)
+		res_fat = _make_result(
+			pnl_values=fat,
+			sharpe=statistics.mean(fat) / statistics.stdev(fat) * math.sqrt(len(fat)),
+			total_trades=len(fat),
+		)
+		ctx_sym = GateContext(tracker=tracker, pnl_values=symmetric, hypothesis=res_sym.hypothesis)
+		ctx_fat = GateContext(tracker=tracker, pnl_values=fat, hypothesis=res_fat.hypothesis)
+
+		gate = DeflatedSharpeGate()
+		gr_sym = gate.check(res_sym, ctx_sym)
+		gr_fat = gate.check(res_fat, ctx_fat)
+
+		# The fat-tailed distribution has a larger denom_inner (due to kurtosis),
+		# shrinking its z-stat. It should get a meaningfully lower DSR.
+		assert gr_sym.details["denom_inner"] != gr_fat.details["denom_inner"]
 
 	def test_dsr_negative_denominator_fails_gracefully(self):
 		"""Extreme skew that makes the SE denominator negative should fail
@@ -546,20 +739,188 @@ class TestTemporalConsistencyGate:
 # Parameter Sensitivity Gate
 # ---------------------------------------------------------------------------
 
-class TestParameterSensitivityGate:
-	SAMPLE_STRATEGY = '''
-class TestStrategy(Strategy):
-	name = "TestStrat"
-	lookback = 20
-	threshold = 0.85
-	max_hold = 60
+class TestExtractNumericParams:
+	"""Direct unit tests for _extract_numeric_params helper.
 
-	def on_trade(self, market, trade):
-		pass
-'''
+	Real strategies in strategies_local.py define parameters as __init__
+	defaults with type annotations, not class-level attributes. The extractor
+	must read __init__ signatures.
+	"""
+
+	def test_extracts_init_default_ints(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class DebutFade(Strategy):\n"
+			"\tname = 'strategy_a'\n"
+			"\tdef __init__(self, threshold_high: int = 60, threshold_low: int = 40,\n"
+			"\t             take_profit: int = 8, stop_loss: int = 5) -> None:\n"
+			"\t\tpass\n"
+		)
+		params = dict(_extract_numeric_params(code))
+		assert params == {
+			"threshold_high": 60,
+			"threshold_low": 40,
+			"take_profit": 8,
+			"stop_loss": 5,
+		}
+
+	def test_extracts_init_default_floats(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class FlowFade(Strategy):\n"
+			"\tname = 'strategy_c'\n"
+			"\tdef __init__(self, flow_threshold: float = 0.5, max_move_pct: float = 1.5) -> None:\n"
+			"\t\tpass\n"
+		)
+		params = dict(_extract_numeric_params(code))
+		assert params == {"flow_threshold": 0.5, "max_move_pct": 1.5}
+
+	def test_skips_strategy_name_attribute(self):
+		"""The class-level `name = ...` attribute must never be treated as a param."""
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class TestStrat(Strategy):\n"
+			"\tname = 'test-strat'\n"
+			"\tdef __init__(self, lookback: int = 20) -> None:\n"
+			"\t\tpass\n"
+		)
+		names = [p[0] for p in _extract_numeric_params(code)]
+		assert "name" not in names
+		assert "lookback" in names
+
+	def test_skips_self_and_untyped_non_numeric_defaults(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class TestStrat(Strategy):\n"
+			"\tname = 't'\n"
+			"\tdef __init__(self, x: int = 5, label: str = 'foo', bucket: list = None) -> None:\n"
+			"\t\tpass\n"
+		)
+		names = [p[0] for p in _extract_numeric_params(code)]
+		assert names == ["x"]
+
+	def test_boolean_defaults_are_skipped_but_int_zero_and_one_are_kept(self):
+		"""A param with default True/False is not numeric, but an int param
+		with default 0 or 1 is a legitimate numeric parameter that must not
+		be skipped."""
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class TestStrat(Strategy):\n"
+			"\tname = 't'\n"
+			"\tdef __init__(self, enabled: bool = True, offset: int = 0, toggle: int = 1) -> None:\n"
+			"\t\tpass\n"
+		)
+		params = dict(_extract_numeric_params(code))
+		assert "enabled" not in params
+		assert params.get("offset") == 0
+		assert params.get("toggle") == 1
+
+	def test_handles_unparseable_code(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		assert _extract_numeric_params("not valid python )(") == []
+
+	def test_no_init_returns_empty(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class NoInit(Strategy):\n"
+			"\tname = 'no-init'\n"
+			"\tdef on_trade(self, trade, market, portfolio):\n"
+			"\t\treturn []\n"
+		)
+		assert _extract_numeric_params(code) == []
+
+	def test_ignores_non_init_method_params(self):
+		"""Only __init__ defaults are parameters; other methods' defaults are not."""
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+
+		code = (
+			"class TestStrat(Strategy):\n"
+			"\tname = 't'\n"
+			"\tdef __init__(self, real_param: int = 5) -> None:\n"
+			"\t\tpass\n"
+			"\tdef helper(self, fake_param: int = 99) -> None:\n"
+			"\t\tpass\n"
+		)
+		names = [p[0] for p in _extract_numeric_params(code)]
+		assert names == ["real_param"]
+
+
+class TestReplaceParam:
+	"""Direct unit tests for _replace_param helper.
+
+	Must rewrite __init__ default values, strategy name attribute, and
+	class name without corrupting type annotations or adjacent parameters.
+	"""
+
+	SAMPLE = (
+		"class DebutFade(Strategy):\n"
+		"\tname = 'strategy_a'\n"
+		"\tdef __init__(self, threshold_high: int = 60, threshold_low: int = 40) -> None:\n"
+		"\t\tself.threshold_high = threshold_high\n"
+	)
+
+	def _reparse_params(self, code: str) -> dict:
+		"""Helper: re-extract numeric params from generated code."""
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+		return dict(_extract_numeric_params(code))
+
+	def test_replaces_int_default(self):
+		from edge_catcher.research.validation.gate_sensitivity import _replace_param
+
+		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 72, "strategy_a__sens_72")
+		params = self._reparse_params(out)
+		assert params == {"threshold_high": 72, "threshold_low": 40}
+		assert "strategy_a__sens_72" in out
+
+	def test_replaces_float_default(self):
+		from edge_catcher.research.validation.gate_sensitivity import _replace_param
+
+		code = (
+			"class FlowFade(Strategy):\n"
+			"\tname = 'strategy_c'\n"
+			"\tdef __init__(self, flow_threshold: float = 0.5, max_count: int = 10) -> None:\n"
+			"\t\tpass\n"
+		)
+		out = _replace_param(code, "FlowFade", "flow_threshold", 0.575, "strategy_c__sens_0_575")
+		params = self._reparse_params(out)
+		assert params == {"flow_threshold": 0.575, "max_count": 10}
+
+	def test_replaces_class_and_name_even_when_values_nonmatching(self):
+		from edge_catcher.research.validation.gate_sensitivity import _replace_param
+
+		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 60, "strategy_a__sens_unchanged")
+		# name attribute rewritten
+		assert "name = 'strategy_a__sens_unchanged'" in out or \
+			'name = "strategy_a__sens_unchanged"' in out
+		# class renamed (sanitized — hyphens → underscores)
+		assert "class debut_fade__sens_unchanged(Strategy)" in out
+
+
+class TestParameterSensitivityGate:
+	# Realistic strategy code: __init__ defaults with type hints.
+	SAMPLE_STRATEGY = (
+		"class TestStrategy(Strategy):\n"
+		"\tname = \"TestStrat\"\n"
+		"\tdef __init__(self, lookback: int = 20, threshold: float = 0.85, max_hold: int = 60) -> None:\n"
+		"\t\tself.lookback = lookback\n"
+		"\tdef on_trade(self, market, trade):\n"
+		"\t\tpass\n"
+	)
 
 	def test_robust_strategy_passes(self):
-		"""Strategy where neighbors also perform well should pass."""
+		"""Strategy where neighbors also perform well should pass.
+
+		Asserts not only the pass verdict but also that the perturbation
+		path was exercised — guards against silently regressing to the
+		"no numeric parameters to perturb" early return.
+		"""
 		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
 
 		mock_agent = MagicMock()
@@ -574,12 +935,19 @@ class TestStrategy(Strategy):
 		gate = ParameterSensitivityGate()
 		# Mock _run_neighbor to avoid filesystem/import side effects
 		# Original Sharpe = 2.5. All neighbors return 1.8 (>= 50% of 2.5)
-		with patch.object(gate, "_run_neighbor", return_value=1.8):
+		with patch.object(gate, "_run_neighbor", return_value=1.8) as m:
 			gr = gate.check(result, ctx)
 		assert gr.passed
+		# Perturbation actually happened — sample strategy has 3 params,
+		# each perturbed ±15%, so 6 neighbor runs
+		assert gr.details["neighbors_total"] == 6
+		assert m.call_count == 6
 
 	def test_fragile_strategy_fails(self):
-		"""Strategy where most neighbors collapse should fail."""
+		"""Strategy where most neighbors collapse should fail.
+
+		Asserts the perturbation path was exercised before failing.
+		"""
 		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
 
 		mock_agent = MagicMock()
@@ -593,9 +961,11 @@ class TestStrategy(Strategy):
 
 		gate = ParameterSensitivityGate()
 		# All neighbors return very low Sharpe
-		with patch.object(gate, "_run_neighbor", return_value=0.1):
+		with patch.object(gate, "_run_neighbor", return_value=0.1) as m:
 			gr = gate.check(result, ctx)
 		assert not gr.passed
+		assert gr.details["neighbors_total"] == 6
+		assert m.call_count == 6
 
 	def test_no_params_passes(self):
 		"""Strategy with no numeric params should pass (nothing to perturb)."""
@@ -681,6 +1051,150 @@ class MinimalStrategy(Strategy):
 		gate_a = ParameterSensitivityGate()
 		gate_b = ParameterSensitivityGate()
 		assert gate_a._file_lock is gate_b._file_lock
+
+
+# ---------------------------------------------------------------------------
+# Tail-risk gate (vol-seller / deep-OTM detector)
+# ---------------------------------------------------------------------------
+
+class TestTailRiskGate:
+	"""Catches strategies with a selling-deep-OTM payoff signature:
+	very high win rate + asymmetric average loss >> average win.
+	The Apr 11 run had fade-long-vol/KXETH (88% WR, avg_loss/avg_win=6.6x)
+	pass all other gates; this gate must flag it.
+	"""
+
+	def test_selling_vol_pattern_fails(self):
+		"""88% tiny wins + 12% huge losses → classic vol-seller → FAIL."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		# Reproduce fade-long-vol/KXETH-ish shape: mean ≈ 1.1
+		pnl = [12] * 88 + [-82] * 12
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		assert not gr.passed
+		assert "tail" in gr.reason.lower() or "loss" in gr.reason.lower() or "asym" in gr.reason.lower()
+
+	def test_high_win_rate_alone_passes(self):
+		"""A 90% win rate with symmetric-magnitude losses is not vol-selling."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		# 90% wins and 10% losses but ratio is only 1.2x — a genuine edge
+		pnl = [10] * 90 + [-12] * 10
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+
+	def test_asymmetric_losses_alone_passes(self):
+		"""A lottery-ticket strategy (few big wins, many small losses) is
+		not vol-selling, even though avg win >> avg loss in magnitude."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		# 20% wins that average 50, 80% losses that average 5 — upside skew
+		pnl = [50] * 20 + [-5] * 80
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+
+	def test_balanced_strategy_passes(self):
+		"""A normal 55/45 strategy with comparable win/loss magnitudes passes."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		pnl = [8] * 55 + [-6] * 45
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		assert gr.passed
+
+	def test_losing_strategy_handled(self):
+		"""A strategy with zero wins must not crash (edge case)."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		pnl = [-5] * 100
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		# A strategy with no wins isn't vol-selling — it's just bad.
+		# Shouldn't crash, and tail-risk gate shouldn't be the gate that
+		# kills it (other gates handle negative expectancy).
+		assert gr.details is not None
+
+	def test_zero_losses_handled(self):
+		"""A perfect strategy (100% wins) must not crash on division."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		pnl = [10] * 100
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		# No losses means no asymmetric-loss risk
+		assert gr.passed
+
+	def test_custom_thresholds(self):
+		"""Thresholds should be configurable."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		# Strict gate: any win_rate >= 50% with ratio >= 1.5x fails.
+		# 60% wins at 10, 40% losses at -18 → ratio 1.8x, WR 60%
+		pnl = [10] * 60 + [-18] * 40
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		lenient = TailRiskGate(max_win_rate=0.85, max_loss_win_ratio=3.0)
+		gr_l = lenient.check(result, ctx)
+		assert gr_l.passed
+
+		strict = TailRiskGate(max_win_rate=0.50, max_loss_win_ratio=1.5)
+		gr_s = strict.check(result, ctx)
+		assert not gr_s.passed
+
+	def test_low_trade_count_skips(self):
+		"""With fewer than N trades, skip the gate — insufficient statistics."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		pnl = [10] * 8 + [-50] * 2  # 80% wr, huge ratio, only 10 trades
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate(min_trades=50)
+		gr = gate.check(result, ctx)
+		assert gr.passed
+		assert gr.details.get("skipped") is True
+
+	def test_worst_single_loss_vs_median_win_reaches_review_tier(self):
+		"""A strategy that passes the vol-seller check (moderate win rate, ok
+		avg ratio) but has ONE catastrophic worst-case loss >= 10x median win
+		should be flagged as review tier (soft-pass with tier='review')."""
+		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
+
+		# 60% wins (< 75% so NOT a vol-seller by win rate), small avg loss,
+		# but one devastating worst-case loss
+		pnl = [20] * 60 + [-10] * 39 + [-500]
+		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = TailRiskGate()
+		gr = gate.check(result, ctx)
+		# Passes the vol-seller check (WR 60% < 75%) but worst loss is
+		# 25x median win → review tier
+		assert gr.passed, f"should pass vol-seller check: {gr.reason}"
+		assert gr.tier == "review", f"expected review tier, got {gr.tier}: {gr.reason}"
+		assert gr.details["worst_loss_to_median_win"] >= 10.0
 
 
 # ---------------------------------------------------------------------------
