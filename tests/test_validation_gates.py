@@ -836,6 +836,18 @@ class TestExtractNumericParams:
 		)
 		assert _extract_numeric_params(code) == []
 
+	def test_extract_skips_size_param(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+		code = (
+			"class Strat(Strategy):\n"
+			"\tname = 's'\n"
+			"\tdef __init__(self, threshold: int = 60, size: int = 1) -> None:\n"
+			"\t\tpass\n"
+		)
+		params = dict(_extract_numeric_params(code))
+		assert "threshold" in params
+		assert "size" not in params
+
 	def test_ignores_non_init_method_params(self):
 		"""Only __init__ defaults are parameters; other methods' defaults are not."""
 		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
