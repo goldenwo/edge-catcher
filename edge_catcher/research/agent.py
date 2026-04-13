@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .data_source_config import make_ds
 from .evaluator import Evaluator, Thresholds
+from .grid_planner import slippage_for_series
 from .hypothesis import Hypothesis, HypothesisResult
 from .reporter import Reporter
 from .tracker import Tracker
@@ -283,14 +284,15 @@ class ResearchAgent:
             return adjacent
 
         if result.verdict in ("promote", "review"):
-            # Discover other (db, series) pairs and try the same winning strategy
+            # Discover other (db, series) pairs and try the same winning strategy.
+            # Each target series gets its own realistic slippage default — the
+            # parent hypothesis's slippage was calibrated for h.series, not for
+            # the series we're about to explore, so inheriting it would lie.
             tag = f"adjacent-{result.verdict}"
             for db_path, series_list in self._discover_all_series().items():
                 for series in series_list:
                     if series == h.series and db_path == h.db_path:
                         continue  # skip the one we just ran
-                    # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
-                    # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                     adjacent.append(
                         Hypothesis(
                             strategy=h.strategy,
@@ -298,18 +300,24 @@ class ResearchAgent:
                             start_date=h.start_date,
                             end_date=h.end_date,
                             fee_pct=h.fee_pct,
+                            slippage_cents=slippage_for_series(series),
                             parent_id=h.id,
                             tags=h.tags + [tag],
                         )
                     )
 
         elif result.verdict == "explore":
-            # Try related strategies (same core idea, different filters) on same data
+            # Try related strategies (same core idea, different filters) on same data.
+            # Same series → inherit the parent's slippage so the cousin is
+            # evaluated under the identical cost assumption as its parent.
+            inherited_slippage = (
+                h.slippage_cents
+                if h.slippage_cents is not None
+                else slippage_for_series(h.series)
+            )
             families = _build_strategy_families()
             cousins = families.get(h.strategy, [])
             for cousin in cousins:
-                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
-                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 adjacent.append(
                     Hypothesis(
                         strategy=cousin,
@@ -317,6 +325,7 @@ class ResearchAgent:
                         start_date=h.start_date,
                         end_date=h.end_date,
                         fee_pct=h.fee_pct,
+                        slippage_cents=inherited_slippage,
                         parent_id=h.id,
                         tags=h.tags + ["adjacent-explore"],
                     )
@@ -413,8 +422,6 @@ class ResearchAgent:
         hypotheses: list[Hypothesis] = []
         for db_path, series_list in self._discover_all_series().items():
             for series in series_list:
-                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
-                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 hypotheses.append(
                     Hypothesis(
                         strategy=strategy,
@@ -422,6 +429,7 @@ class ResearchAgent:
                         start_date=start,
                         end_date=end,
                         fee_pct=fee_pct,
+                        slippage_cents=slippage_for_series(series),
                         tags=["sweep-all-series"],
                     )
                 )

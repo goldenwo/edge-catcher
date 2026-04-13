@@ -508,6 +508,96 @@ class TestResearchAgent:
             assert h.strategy == "test-strategy-a"
             assert h.parent_id == r.hypothesis.id
 
+    def test_generate_adjacent_promote_threads_per_series_slippage(self, tmp_path):
+        """Each adjacent (promote/review) hypothesis gets slippage for its
+        OWN target series, not the parent's. Inheriting the parent's value
+        would lie about cost structure once we cross into a different
+        liquidity regime.
+        """
+        agent = self._make_agent(tmp_path)
+        r = _make_result(strategy="test-strategy-a", series="SERIES_OLD", verdict="promote", verdict_reason="great")
+
+        mock_discovery = {"data/kalshi.db": ["KXBNB15M", "KXBTC", "RANDOM_SERIES"]}
+        with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
+            adjacent = agent.generate_adjacent(r)
+
+        by_series = {h.series: h.slippage_cents for h in adjacent}
+        assert by_series["KXBNB15M"] == 8  # 15m crypto: wide spreads
+        assert by_series["KXBTC"] == 4     # hourly crypto: tighter
+        assert by_series["RANDOM_SERIES"] == 2  # fallback default
+
+    def test_generate_adjacent_explore_inherits_parent_slippage(self, tmp_path):
+        """Cousins run on the SAME series as parent — they must inherit the
+        parent's calibrated slippage so the comparison is apples-to-apples.
+        """
+        agent = self._make_agent(tmp_path)
+        h_parent = Hypothesis(
+            strategy="test-strategy-a",
+            data_sources=_ds(series="KXBNB15M"),
+            start_date="2025-01-01", end_date="2025-12-31",
+            slippage_cents=12,  # non-default, prove we inherit it
+        )
+        r = HypothesisResult(
+            hypothesis=h_parent, status="ok", total_trades=100, wins=50, losses=50,
+            win_rate=0.5, net_pnl_cents=100.0, sharpe=1.5, max_drawdown_pct=5.0,
+            fees_paid_cents=10.0, avg_win_cents=2.0, avg_loss_cents=-1.0,
+            per_strategy={}, verdict="explore", verdict_reason="borderline",
+            raw_json={},
+        )
+
+        mock_families = {"test-strategy-a": ["test-strategy-a-vol", "test-strategy-a-mom"]}
+        with patch("edge_catcher.research.agent._build_strategy_families", return_value=mock_families):
+            adjacent = agent.generate_adjacent(r)
+
+        assert len(adjacent) == 2
+        for cousin in adjacent:
+            assert cousin.slippage_cents == 12  # inherited from parent
+
+    def test_generate_adjacent_explore_falls_back_to_per_series_default(self, tmp_path):
+        """If the parent was created without explicit slippage (pre-Task-2
+        hypothesis, or a hand-built result), fall back to the per-series
+        default instead of leaving slippage_cents=None (which would silently
+        collapse to the CLI's optimistic 1c).
+        """
+        agent = self._make_agent(tmp_path)
+        r = _make_result(strategy="test-strategy-a", series="KXBTC15M", verdict="explore", verdict_reason="borderline")
+        assert r.hypothesis.slippage_cents is None  # sanity: fixture doesn't set one
+
+        mock_families = {"test-strategy-a": ["test-strategy-a-vol"]}
+        with patch("edge_catcher.research.agent._build_strategy_families", return_value=mock_families):
+            adjacent = agent.generate_adjacent(r)
+
+        assert len(adjacent) == 1
+        assert adjacent[0].slippage_cents == 8  # KXBTC15M default
+
+    def test_sweep_all_series_threads_per_series_slippage(self, tmp_path):
+        """sweep_all_series builds root hypotheses with no parent. Each one
+        must carry its own per-series slippage default — without this, the
+        whole sweep re-runs at the CLI's optimistic 1c floor and the results
+        disagree with grid-generated hypotheses for the same (strategy, series).
+        """
+        agent = self._make_agent(tmp_path)
+        mock_discovery = {"data/kalshi.db": ["KXBNB15M", "KXETH", "UNKNOWN"]}
+
+        captured: list[Hypothesis] = []
+
+        def _capture_sweep(hypotheses, max_runs):
+            captured.extend(hypotheses)
+            return []
+
+        with patch.object(agent, "_discover_all_series", return_value=mock_discovery), \
+             patch.object(agent, "sweep", side_effect=_capture_sweep):
+            agent.sweep_all_series(strategy="test-strategy-a")
+
+        by_series = {h.series: h.slippage_cents for h in captured}
+        assert by_series["KXBNB15M"] == 8  # 15m crypto
+        assert by_series["KXETH"] == 4     # hourly crypto
+        assert by_series["UNKNOWN"] == 2   # fallback default
+        # All should be tagged as sweep-all-series roots (no parent)
+        for h in captured:
+            assert "sweep-all-series" in h.tags
+            assert h.parent_id is None
+
     def test_sweep_respects_max_runs(self, tmp_path):
         agent = self._make_agent(tmp_path)
 
