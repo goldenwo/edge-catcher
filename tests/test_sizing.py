@@ -175,14 +175,22 @@ class TestResolveFill:
 		fill = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
 		assert isinstance(fill, FillSkip)
 
-	def test_populated_but_stale_book_falls_back_by_default(self, config) -> None:
+	def test_populated_but_stale_book_falls_back_by_default(self) -> None:
 		"""Populated book whose best is > 10c from entry_price → stale.
 
-		Default behavior (backward compat): return the fallback FillResult
-		with blended=0 so the trade enters at the tick price. This preserves
-		the Apr 11 fix semantics for users who want to keep trading when
-		the WS orderbook diverges from the trade tick stream.
+		With ``require_fresh_book: false`` explicitly set, the fallback
+		path returns a FillResult with blended=0 so the trade enters at
+		the tick price. This preserves the Apr 11 fix semantics for users
+		who explicitly opt out of strict fresh-book checking.
 		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": False,
+			}
+		}
 		# Book has real liquidity at 1c but strategy sees entry_price=42
 		book = OrderbookSnapshot(
 			yes_levels=[],
@@ -192,6 +200,16 @@ class TestResolveFill:
 		assert fill is not None
 		assert fill.blended_price_cents == 0  # stale fallback
 		assert fill.fill_size > 0
+
+	def test_require_fresh_book_defaults_to_true(self) -> None:
+		"""Flag should default True — stale books must be skipped by default."""
+		config = {"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3}}
+		# Note: no require_fresh_book key at all
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[(0.01, 500)])
+		result = resolve_fill(config, entry_price_cents=42, side="no", book=book)
+		# Default is now True → stale book → FillSkip(reason="stale_book")
+		assert isinstance(result, FillSkip)
+		assert result.reason == "stale_book"
 
 	def test_populated_but_stale_book_skipped_when_require_fresh_book(self) -> None:
 		"""With ``require_fresh_book: true``, a populated-but-stale book
