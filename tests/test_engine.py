@@ -7,6 +7,7 @@ from edge_catcher.monitors.market_state import (
 	OrderbookSnapshot,
 	TickContext,
 )
+from edge_catcher.monitors.metrics import Metrics
 from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
 from edge_catcher.monitors.trade_store import TradeStore
 from edge_catcher.monitors.engine import (
@@ -637,3 +638,44 @@ class TestSeriesForStrategy:
 	def test_missing_strategy_returns_empty(self):
 		config = {"strategies": {}}
 		assert _series_for_strategy(config, "nonexistent") == set()
+
+
+class TestProcessTickMetrics:
+	"""Engine-level integration tests for the operational metrics counter."""
+
+	def test_entry_increments_attempted_and_filled(self, store, config):
+		"""Happy path: a fillable entry bumps attempted and filled by one each."""
+		metrics = Metrics()
+		config["_metrics"] = metrics
+		ob = OrderbookSnapshot(yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)])
+		ctx = _make_ctx(ob, is_first=True)
+		strategies = [StubStrategy()]
+
+		process_tick(ctx, strategies, store, config)
+
+		snap = metrics.snapshot()
+		assert snap["entries_attempted"] == 1
+		assert snap["entries_filled"] == 1
+		assert snap["entries_skipped_stale"] == 0
+		assert snap["entries_skipped_other"] == 0
+
+	def test_stale_book_skip_increments_counter(self, store, config):
+		"""require_fresh_book=true + populated-but-stale book → stale_skipped."""
+		metrics = Metrics()
+		config["_metrics"] = metrics
+		# Opt into the fresh-book gate so divergence becomes a hard skip
+		config["sizing"] = {**config["sizing"], "require_fresh_book": True}
+		# Best yes level (80c) diverges from entry_price (50c) by >10c → stale
+		ob = OrderbookSnapshot(yes_levels=[(0.80, 20)], no_levels=[(0.45, 20)])
+		ctx = _make_ctx(ob, is_first=True, yes_ask=50, yes_bid=48)
+		strategies = [StubStrategy()]
+
+		process_tick(ctx, strategies, store, config)
+
+		snap = metrics.snapshot()
+		assert snap["entries_attempted"] == 1
+		assert snap["entries_filled"] == 0
+		assert snap["entries_skipped_stale"] == 1
+		assert snap["entries_skipped_other"] == 0
+		# And no trade was recorded
+		assert len(store.get_open_trades()) == 0

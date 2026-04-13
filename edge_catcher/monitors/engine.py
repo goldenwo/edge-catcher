@@ -17,7 +17,8 @@ from edge_catcher.monitors.discovery import (
 	get_enabled_strategies,
 	load_config,
 )
-from edge_catcher.monitors.sizing import resolve_fill
+from edge_catcher.monitors.metrics import Metrics
+from edge_catcher.monitors.sizing import FillSkip, resolve_fill
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -115,17 +116,28 @@ def _handle_enter(
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
 	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
-	# Reject degenerate prices on binary contracts (0c or 100c have zero upside)
+	# Reject degenerate prices on binary contracts (0c or 100c have zero upside).
+	# Placed BEFORE the attempt counter so the invariant
+	# attempted == filled + skipped_stale + skipped_other holds.
 	if not (1 <= entry_price <= 99):
 		log.debug("Skip: entry_price %dc out of range for %s %s", entry_price, signal.side, signal.ticker)
 		return
 
+	metrics = config.get("_metrics")
+	if metrics is None:
+		metrics = Metrics()
+	metrics.inc("entries_attempted")
+
 	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
 
-	if fill is None:
+	if isinstance(fill, FillSkip):
+		if fill.reason == "stale_book":
+			metrics.inc("entries_skipped_stale")
+		else:
+			metrics.inc("entries_skipped_other")
 		log.info(
-			"No fill for %s %s %s (entry=%dc) — skipping",
-			signal.strategy, signal.side, signal.ticker, entry_price,
+			"No fill for %s %s %s (entry=%dc) — skipping (reason=%s)",
+			signal.strategy, signal.side, signal.ticker, entry_price, fill.reason,
 		)
 		return
 
@@ -148,6 +160,7 @@ def _handle_enter(
 		slippage_cents=fill.slippage_cents,
 		book_snapshot=json.dumps(side_levels),
 	)
+	metrics.inc("entries_filled")
 
 	side_label = "YES" if signal.side == "yes" else "NO"
 	tag = f"{signal.strategy} | {signal.series}"
@@ -203,10 +216,13 @@ async def _settlement_poller(
 	client: httpx.AsyncClient,
 	strategies: list[PaperStrategy],
 	pending_states: dict[str, dict],
+	metrics: Metrics | None = None,
 	interval: int = 60,
 ) -> None:
 	"""Periodically check open trades for settlement."""
 	strat_by_name = {s.name: s for s in strategies}
+	if metrics is None:
+		metrics = Metrics()
 	while True:
 		await asyncio.sleep(interval)
 		try:
@@ -217,6 +233,13 @@ async def _settlement_poller(
 					store.settle_trade(trade["id"], result)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
+					# Branch settlement counters on DB 'status' (won/lost only),
+					# NOT on _pnl_label's three-way outcome (which includes SCRATCH).
+					status = settled.get("status") if settled else None
+					if status == "won":
+						metrics.inc("trades_settled_won")
+					elif status == "lost":
+						metrics.inc("trades_settled_lost")
 					pnl = settled.get("pnl_cents") if settled else None
 					outcome, pnl_str = _pnl_label(pnl)
 					emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
@@ -247,14 +270,36 @@ async def _settlement_poller(
 
 async def _summary_logger(
 	store: TradeStore,
+	metrics: Metrics | None = None,
 	interval: int = 300,
 ) -> None:
-	"""Periodically log open trade count."""
+	"""Periodically log open trade count and per-interval metrics snapshot.
+
+	The unsupported-skip value is a persistent gauge (set at startup), so it
+	stays non-zero across resets. Counters reset after each snapshot so the
+	next interval reflects fresh activity.
+	"""
+	if metrics is None:
+		metrics = Metrics()
 	while True:
 		await asyncio.sleep(interval)
 		try:
 			count = len(store.get_open_trades())
-			log.info("Open trades: %d", count)
+			snap = metrics.reset_and_snapshot()
+			log.info(
+				"Summary interval=%ds open=%d attempted=%d filled=%d "
+				"stale_skipped=%d other_skipped=%d settled_won=%d "
+				"settled_lost=%d unsupported=%d",
+				interval,
+				count,
+				snap["entries_attempted"],
+				snap["entries_filled"],
+				snap["entries_skipped_stale"],
+				snap["entries_skipped_other"],
+				snap["trades_settled_won"],
+				snap["trades_settled_lost"],
+				snap["entries_skipped_unsupported"],
+			)
 		except Exception:
 			log.exception("Summary logger error")
 
@@ -363,6 +408,11 @@ async def run_engine(config_path: Path) -> None:
 	"""
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
+	# Operational metrics counter — stashed in config so tick-path functions
+	# (_handle_enter) that already receive config can read it without adding
+	# a new parameter to every handler. The underscore signals "internal".
+	metrics = Metrics()
+	config["_metrics"] = metrics
 	db_path = Path(config.get("db_path", "data/paper_trades.db"))
 	ws_cfg = config.get("ws", {})
 	recovery_cfg = config.get("recovery", {})
@@ -414,11 +464,11 @@ async def run_engine(config_path: Path) -> None:
 		dirty_strategies: set[str] = set()
 		tasks = [
 			asyncio.create_task(
-				_settlement_poller(store, client, strategies, pending_states),
+				_settlement_poller(store, client, strategies, pending_states, metrics=metrics),
 				name="settlement_poller",
 			),
 			asyncio.create_task(
-				_summary_logger(store),
+				_summary_logger(store, metrics=metrics),
 				name="summary_logger",
 			),
 			asyncio.create_task(

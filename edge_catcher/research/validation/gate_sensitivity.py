@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 # protecting concurrent writes to strategies_local.py.
 _FILE_LOCK = threading.Lock()
 
+# Parameters that are not tunable "strategy edge" knobs — perturbation
+# is meaningless or destructive. Matches the CLI's skip set at
+# cli/backtest.py:53.
+SKIP_PARAMS: set[str] = {"size", "btc_closes", "ohlc_provider"}
+
 
 class ParameterSensitivityGate(Gate):
 	"""Fail strategies whose performance is fragile to small parameter changes."""
@@ -279,6 +284,8 @@ def _maybe_add_numeric_param(
 	default_node: ast.AST,
 ) -> None:
 	"""Append ``(name, value)`` to ``out`` if ``arg`` is a numeric parameter."""
+	if arg.arg in SKIP_PARAMS:
+		return
 	if arg.annotation is not None:
 		ann = arg.annotation
 		if isinstance(ann, ast.Name) and ann.id == "bool":
@@ -300,6 +307,11 @@ def _perturb(value: int | float, pct: float) -> int | float:
 		if result == value:  # ensure it actually changed
 			result += 1 if pct > 0 else -1
 	return result
+
+
+def _tabify(code: str) -> str:
+	"""Convert ast.unparse 4-space indentation to tabs to match strategies_local.py."""
+	return code.replace("    ", "\t")
 
 
 def _replace_param(
@@ -330,7 +342,7 @@ def _replace_param(
 				_replace_init_default(item, param_name, new_value)
 
 	ast.fix_missing_locations(tree)
-	return ast.unparse(tree)
+	return _tabify(ast.unparse(tree))
 
 
 def _replace_init_default(

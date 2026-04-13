@@ -36,9 +36,11 @@ class DeflatedSharpeGate(Gate):
 		self,
 		threshold: float = 0.95,
 		review_floor: float = 0.80,
+		sweep_N_override: int | None = None,
 	) -> None:
 		self.threshold = threshold
 		self.review_floor = review_floor
+		self.sweep_N_override = sweep_N_override
 
 	def check(self, result: HypothesisResult, context: GateContext) -> GateResult:
 		pnl = context.pnl_values
@@ -87,34 +89,38 @@ class DeflatedSharpeGate(Gate):
 		# refinements of one idea than independent trials, so they collapse
 		# into one trial via _strategy_family().
 		#
-		# Note: N is cumulative over the tracker's lifetime, so it grows
-		# monotonically during a sweep. This means hypotheses evaluated
-		# later in a sweep see a slightly larger N than earlier ones —
-		# a known limitation; fixing it would require pre-snapshotting N.
-		if context.tracker is None:
-			return GateResult(
-				passed=False, gate_name=self.name,
-				reason="no tracker available for DSR computation",
-				details={},
-			)
-		all_results = context.tracker.list_results()
-		trials: set[tuple] = set()
-		for r in all_results:
-			if r.get("status") != "ok":
-				continue
-			trades = r.get("total_trades") or 0  # None → 0
-			if trades < 1:
-				continue
-			strat = r.get("strategy")
-			if not strat:
-				continue
-			trial_key = (
-				_strategy_family(strat),
-				r.get("series"),
-				r.get("fee_pct"),
-			)
-			trials.add(trial_key)
-		N = len(trials)
+		# Note: when sweep_N_override is None, N is cumulative over the tracker's
+		# lifetime and grows monotonically during a sweep — hypotheses evaluated
+		# later see a slightly larger N than earlier ones. Callers that need
+		# identical multiple-testing corrections across a sweep should pass
+		# sweep_N_override (see loop.py grid phase for an example).
+		if self.sweep_N_override is not None:
+			N = self.sweep_N_override
+		else:
+			if context.tracker is None:
+				return GateResult(
+					passed=False, gate_name=self.name,
+					reason="no tracker available for DSR computation",
+					details={},
+				)
+			all_results = context.tracker.list_results()
+			trials: set[tuple] = set()
+			for r in all_results:
+				if r.get("status") != "ok":
+					continue
+				trades = r.get("total_trades") or 0  # None → 0
+				if trades < 1:
+					continue
+				strat = r.get("strategy")
+				if not strat:
+					continue
+				trial_key = (
+					_strategy_family(strat),
+					r.get("series"),
+					r.get("fee_pct"),
+				)
+				trials.add(trial_key)
+			N = len(trials)
 
 		if N < 2:
 			return GateResult(
