@@ -6,10 +6,25 @@ Pure functions that convert a risk budget + orderbook state into a fill decision
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Literal
 
 from edge_catcher.monitors.market_state import FillResult, OrderbookSnapshot
 
 log = logging.getLogger(__name__)
+
+
+FillSkipReason = Literal["stale_book", "budget_too_small", "below_min_fill"]
+
+
+@dataclass(frozen=True)
+class FillSkip:
+	"""Returned by resolve_fill when a trade should not be booked.
+
+	The reason distinguishes skip categories so operational metrics can
+	answer questions like "how many entries got skipped as stale this hour".
+	"""
+	reason: FillSkipReason
 
 
 def compute_raw_size(risk_cents: int, entry_price_cents: int) -> int:
@@ -160,7 +175,7 @@ def resolve_fill(
 	entry_price_cents: int,
 	side: str,
 	book: OrderbookSnapshot,
-) -> FillResult | None:
+) -> FillResult | FillSkip:
 	"""Run the sizing pipeline: risk budget → book walk → min-fill gate.
 
 	Reads from config["sizing"]:
@@ -182,7 +197,7 @@ def resolve_fill(
 	     the entry is skipped so we don't book phantom fills.
 
 	Returns:
-		FillResult if trade should proceed, None to skip.
+		FillResult if trade should proceed, FillSkip with a reason if not.
 	"""
 	sizing = config["sizing"]
 	risk_cents = sizing["risk_per_trade_cents"]
@@ -193,7 +208,7 @@ def resolve_fill(
 	raw_size = compute_raw_size(risk_cents, entry_price_cents)
 	if raw_size == 0:
 		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
-		return None
+		return FillSkip(reason="budget_too_small")
 
 	levels = book.yes_levels if side == "yes" else book.no_levels
 	book_empty = not levels
@@ -212,11 +227,11 @@ def resolve_fill(
 			"Skip: populated-but-stale book (best diverges from entry_price) "
 			"with require_fresh_book=true",
 		)
-		return None
+		return FillSkip(reason="stale_book")
 
 	if book_empty or book_populated_but_stale:
 		if raw_size < min_fill_threshold:
-			return None
+			return FillSkip(reason="below_min_fill")
 		return FillResult(
 			fill_size=raw_size,
 			blended_price_cents=0,   # signals stale book; trade_store uses entry_price for PnL
@@ -232,6 +247,6 @@ def resolve_fill(
 			"Skip: fill %d < min_fill %d (wanted %d %s)",
 			fill.fill_size, min_fill_threshold, raw_size, side,
 		)
-		return None
+		return FillSkip(reason="below_min_fill")
 
 	return fill

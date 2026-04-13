@@ -2,7 +2,12 @@
 
 import pytest
 
-from edge_catcher.monitors.sizing import compute_raw_size, validate_sizing_config, resolve_fill
+from edge_catcher.monitors.sizing import (
+	compute_raw_size,
+	validate_sizing_config,
+	resolve_fill,
+	FillSkip,
+)
 from edge_catcher.monitors.market_state import OrderbookSnapshot, FillResult
 from edge_catcher.monitors.sizing import walk_book_with_ceiling
 
@@ -163,12 +168,12 @@ class TestResolveFill:
 		assert fill.blended_price_cents == 0  # signals stale book; trade_store uses entry_price
 		assert fill.fill_size == 40  # 200 // 5
 
-	def test_empty_book_below_min_fill_returns_none(self, config) -> None:
-		"""Empty book + entry too expensive to meet min_fill → None."""
+	def test_empty_book_below_min_fill_returns_skip(self, config) -> None:
+		"""Empty book + entry too expensive to meet min_fill → FillSkip."""
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		# 200 // 99 = 2, below min_fill=3
 		fill = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
-		assert fill is None
+		assert isinstance(fill, FillSkip)
 
 	def test_populated_but_stale_book_falls_back_by_default(self, config) -> None:
 		"""Populated book whose best is > 10c from entry_price → stale.
@@ -209,7 +214,7 @@ class TestResolveFill:
 			no_levels=[(0.01, 500), (0.02, 100)],
 		)
 		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
-		assert fill is None, "stale populated book must be skipped when require_fresh_book is set"
+		assert isinstance(fill, FillSkip), "stale populated book must be skipped when require_fresh_book is set"
 
 	def test_empty_book_still_allowed_under_require_fresh_book(self) -> None:
 		"""require_fresh_book only filters populated-but-stale books.
@@ -233,13 +238,13 @@ class TestResolveFill:
 		assert fill.fill_size == 40
 
 	def test_min_fill_gate(self, config) -> None:
-		"""Book has only 2 contracts, min_fill is 3 → None."""
+		"""Book has only 2 contracts, min_fill is 3 → FillSkip."""
 		book = OrderbookSnapshot(
 			yes_levels=[(0.05, 2)],
 			no_levels=[],
 		)
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
-		assert fill is None
+		assert isinstance(fill, FillSkip)
 
 	def test_slippage_caps_fill(self, config) -> None:
 		"""Book has 100 contracts but spread across wide prices."""
@@ -252,14 +257,14 @@ class TestResolveFill:
 		# Ceiling = 5+2 = 7c, so fills 10@5 + 10@6 + 10@7 = 30
 		assert fill.fill_size == 30
 
-	def test_budget_too_small_returns_none(self, config) -> None:
-		"""risk=200c, price=201c → raw_size=0 → None."""
+	def test_budget_too_small_returns_skip(self, config) -> None:
+		"""risk=200c, price=201c → raw_size=0 → FillSkip."""
 		book = OrderbookSnapshot(
 			yes_levels=[(2.01, 100)],
 			no_levels=[],
 		)
 		fill = resolve_fill(config, entry_price_cents=201, side="yes", book=book)
-		assert fill is None
+		assert isinstance(fill, FillSkip)
 
 	def test_no_side(self, config) -> None:
 		book = OrderbookSnapshot(
@@ -270,3 +275,50 @@ class TestResolveFill:
 		assert fill is not None
 		assert fill.intended_size == 66  # 200 // 3
 		assert fill.fill_size == 50  # book only has 50
+
+	def test_fillskip_stale_book(self) -> None:
+		"""Populated-but-stale book with require_fresh_book → FillSkip(stale_book)."""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			},
+		}
+		book = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.01, 500)],
+		)
+		result = resolve_fill(config, entry_price_cents=42, side="no", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "stale_book"
+
+	def test_fillskip_budget_too_small(self, config) -> None:
+		"""Risk budget smaller than entry price → FillSkip(budget_too_small)."""
+		book = OrderbookSnapshot(
+			yes_levels=[(2.01, 100)],
+			no_levels=[],
+		)
+		result = resolve_fill(config, entry_price_cents=201, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "budget_too_small"
+
+	def test_fillskip_below_min_fill_walk_book(self, config) -> None:
+		"""Walked fill below min_fill → FillSkip(below_min_fill)."""
+		book = OrderbookSnapshot(
+			yes_levels=[(0.05, 2)],
+			no_levels=[],
+		)
+		result = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "below_min_fill"
+
+	def test_fillskip_below_min_fill_empty_book(self) -> None:
+		"""Empty book with raw_size < min_fill → FillSkip(below_min_fill)."""
+		config = {"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3}}
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
+		# 200 // 99 = 2, below min_fill=3
+		result = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "below_min_fill"
