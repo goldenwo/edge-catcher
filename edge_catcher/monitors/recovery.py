@@ -9,7 +9,11 @@ import logging
 from typing import Optional
 
 from edge_catcher.monitors.auth import KALSHI_REST_BASE
-from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.monitors.market_state import (
+	MarketState,
+	OrderbookSnapshot,
+	_is_tradeable_cents,
+)
 
 log = logging.getLogger(__name__)
 
@@ -126,8 +130,25 @@ async def fetch_orderbook_snapshot(
 			data = resp.json()
 			ob_fp = data.get("orderbook_fp", {})
 			# Kalshi REST returns prices and quantities as strings (e.g. ["0.1300", "685.00"])
-			yes_levels = [(float(p), int(float(q))) for p, q in ob_fp.get("yes_dollars", [])]
-			no_levels = [(float(p), int(float(q))) for p, q in ob_fp.get("no_dollars", [])]
+			# Kalshi markets trade only at integer cents (1¢–99¢); sub-cent
+			# ghost levels (0.1¢, 0.7¢, 0.9¢, …) have been observed in the
+			# REST /orderbook response for 15m crypto series but are never
+			# tradeable. Drop them at ingest so downstream code (walk_book,
+			# stale-fallback detection) doesn't see a "best price" of 0c.
+			# Symmetric upper bound guards against a hypothetical >=100c
+			# level. We require the price to be an integer number of cents
+			# (tolerance 1e-3) — naive round() alone lets 0.7¢ and 0.9¢
+			# through because 0.007*100 → 0.70000000000001 rounds to 1.
+			yes_levels = [
+				(float(p), int(float(q)))
+				for p, q in ob_fp.get("yes_dollars", [])
+				if _is_tradeable_cents(float(p))
+			]
+			no_levels = [
+				(float(p), int(float(q)))
+				for p, q in ob_fp.get("no_dollars", [])
+				if _is_tradeable_cents(float(p))
+			]
 
 			return OrderbookSnapshot(
 				yes_levels=yes_levels,  # type: ignore[arg-type]
