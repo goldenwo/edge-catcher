@@ -35,6 +35,8 @@ _DEFAULT_SLIPPAGE = 2
 
 
 def slippage_for_series(series: str) -> int:
+	"""Return one-sided slippage in cents for a series, falling back to the
+	conservative default. See `_SERIES_SLIPPAGE` above for provenance."""
 	return _SERIES_SLIPPAGE.get(series, _DEFAULT_SLIPPAGE)
 
 
