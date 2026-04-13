@@ -289,6 +289,8 @@ class ResearchAgent:
                 for series in series_list:
                     if series == h.series and db_path == h.db_path:
                         continue  # skip the one we just ran
+                    # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                    # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                     adjacent.append(
                         Hypothesis(
                             strategy=h.strategy,
@@ -306,6 +308,8 @@ class ResearchAgent:
             families = _build_strategy_families()
             cousins = families.get(h.strategy, [])
             for cousin in cousins:
+                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 adjacent.append(
                     Hypothesis(
                         strategy=cousin,
@@ -409,6 +413,8 @@ class ResearchAgent:
         hypotheses: list[Hypothesis] = []
         for db_path, series_list in self._discover_all_series().items():
             for series in series_list:
+                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 hypotheses.append(
                     Hypothesis(
                         strategy=strategy,
