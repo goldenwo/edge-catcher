@@ -182,7 +182,7 @@ def resolve_fill(
 	  - risk_per_trade_cents: passed to compute_raw_size
 	  - max_slippage_cents: passed to walk_book_with_ceiling
 	  - min_fill: gate check on fill_size
-	  - require_fresh_book: (optional, default False) if True, skip entries
+	  - require_fresh_book: (optional, default True) if True, skip entries
 	    when the orderbook is populated but the best price diverges from
 	    entry_price by > 10¢. Empty books are still treated as a legitimate
 	    startup case and fall through to the entry-price fallback.
@@ -192,9 +192,10 @@ def resolve_fill(
 	     tick before the orderbook has been seeded). Falls back to
 	     entry_price regardless of require_fresh_book.
 	  2. Populated but best diverges > 10¢ from entry_price → phantom
-	     liquidity / WS orderbook lag. By default, falls back to
-	     entry_price for backward compat; with require_fresh_book=True,
-	     the entry is skipped so we don't book phantom fills.
+	     liquidity / WS orderbook lag. By default (require_fresh_book=True),
+	     the entry is skipped so we don't book phantom fills. Configs
+	     that explicitly set require_fresh_book=False fall back to
+	     entry_price for backward compat.
 
 	Returns:
 		FillResult if trade should proceed, FillSkip with a reason if not.
@@ -203,7 +204,7 @@ def resolve_fill(
 	risk_cents = sizing["risk_per_trade_cents"]
 	max_slippage = sizing["max_slippage_cents"]
 	min_fill_threshold = sizing["min_fill"]
-	require_fresh_book = sizing.get("require_fresh_book", False)
+	require_fresh_book = sizing.get("require_fresh_book", True)
 
 	raw_size = compute_raw_size(risk_cents, entry_price_cents)
 	if raw_size == 0:
