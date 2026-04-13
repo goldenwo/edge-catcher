@@ -88,3 +88,5 @@ exports/
 
 # Deploy config (machine-specific)
 deploy/paper-trader.service
+
+paper-trader.yaml

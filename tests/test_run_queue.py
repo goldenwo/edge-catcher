@@ -89,7 +89,7 @@ class TestRunQueueSubmit:
 
         hypotheses = [_make_hypothesis(series=f"SER{i}") for i in range(100)]
 
-        def slow_run(h):
+        def slow_run(h, sweep_N_override=None):
             time.sleep(0.05)
             return _make_mock_result(h, "kill")
 

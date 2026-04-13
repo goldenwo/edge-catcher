@@ -100,6 +100,38 @@ class TestGridPlannerGenerate:
         assert hypotheses == []
 
 
+class TestGridPlannerSlippage:
+    def test_assigns_per_series_slippage(self, tmp_path):
+        """Known-series hypotheses should carry the hand-set slippage value."""
+        from edge_catcher.research.grid_planner import _SERIES_SLIPPAGE
+        tracker = Tracker(tmp_path / "research.db")
+        planner = GridPlanner(tracker=tracker)
+        hypotheses = planner.generate(
+            strategies=["A"],
+            series_map={"data/kalshi.db": ["KXDOGED"]},
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+            fee_pct=1.0,
+        )
+        assert len(hypotheses) == 1
+        assert hypotheses[0].series == "KXDOGED"
+        assert hypotheses[0].slippage_cents == _SERIES_SLIPPAGE["KXDOGED"]
+
+    def test_unknown_series_gets_default_slippage(self, tmp_path):
+        from edge_catcher.research.grid_planner import _DEFAULT_SLIPPAGE
+        tracker = Tracker(tmp_path / "research.db")
+        planner = GridPlanner(tracker=tracker)
+        hypotheses = planner.generate(
+            strategies=["A"],
+            series_map={"data/kalshi.db": ["UNKNOWN_SERIES_XYZ"]},
+            start_date="2025-01-01",
+            end_date="2025-12-31",
+            fee_pct=1.0,
+        )
+        assert len(hypotheses) == 1
+        assert hypotheses[0].slippage_cents == _DEFAULT_SLIPPAGE
+
+
 class TestGridPlannerOrdering:
     def test_warm_leads_first(self, tmp_path):
         """Strategies with prior promote/explore results should come first."""
