@@ -914,6 +914,12 @@ class TestReplaceParam:
 		# class renamed (sanitized — hyphens → underscores)
 		assert "class debut_fade__sens_unchanged(Strategy)" in out
 
+	def test_replace_param_outputs_tab_indented(self):
+		from edge_catcher.research.validation.gate_sensitivity import _replace_param
+		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 72, "strategy_a__sens_72")
+		# No 4-space indentation runs should appear
+		assert "    " not in out, f"ast.unparse 4-space indentation leaked: {out[:200]}"
+
 
 class TestParameterSensitivityGate:
 	# Realistic strategy code: __init__ defaults with type hints.
