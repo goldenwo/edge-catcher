@@ -74,7 +74,7 @@ class ResearchAgent:
     # Core: run a single hypothesis
     # ------------------------------------------------------------------
 
-    def run_hypothesis(self, h: Hypothesis) -> HypothesisResult:
+    def run_hypothesis(self, h: Hypothesis, sweep_N_override: int | None = None) -> HypothesisResult:
         """Run a single hypothesis via CLI subprocess, evaluate, track, return result."""
         # Dedup check: skip if already tested with identical parameters
         if not self.force:
@@ -181,7 +181,7 @@ class ResearchAgent:
         preliminary_verdict = verdict
         if verdict in ("candidate", "validate"):
             try:
-                pipeline = ValidationPipeline(default_gates())
+                pipeline = ValidationPipeline(default_gates(sweep_N_override=sweep_N_override))
                 context = GateContext(
                     tracker=self.tracker,
                     pnl_values=data.get("pnl_values", []),

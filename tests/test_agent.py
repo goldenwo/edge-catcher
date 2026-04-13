@@ -97,3 +97,24 @@ def test_run_hypothesis_passes_slippage_when_set():
 		assert "--slippage" in cmd
 		slippage_idx = cmd.index("--slippage")
 		assert cmd[slippage_idx + 1] == "8"
+
+
+def test_default_gates_forwards_sweep_n_override():
+	"""Smoke test: sweep_N_override reaches DeflatedSharpeGate via default_gates().
+
+	This catches regressions where a parameter is added to the outer API but
+	not plumbed through to the gate constructor.
+	"""
+	from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+	from edge_catcher.research.validation.pipeline import default_gates
+
+	gates = default_gates(sweep_N_override=500)
+	dsr_gates = [g for g in gates if isinstance(g, DeflatedSharpeGate)]
+	assert len(dsr_gates) == 1
+	assert dsr_gates[0].sweep_N_override == 500
+
+	# Default (no override) should yield None, preserving live-tracker behavior
+	# for non-grid phases (LLM, expand, refine).
+	default = default_gates()
+	default_dsr = [g for g in default if isinstance(g, DeflatedSharpeGate)][0]
+	assert default_dsr.sweep_N_override is None
