@@ -58,13 +58,14 @@ def register(subparsers) -> None:
 	rs_loop.add_argument("--parallel", type=int, default=1,
 	                     help="Concurrent backtests (default: 1)")
 	rs_loop.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
-	# Defaults match `sweep-all` so that TemporalConsistencyGate sees a
-	# concrete date range on every hypothesis. Passing None propagates
-	# through GridPlanner and causes the gate to query DB ranges per-series,
-	# which silently fails with "0 windows possible" on series with < 35
-	# days of data. Discovered during Task 5 sweep analysis.
-	rs_loop.add_argument("--start", default="2025-01-01", help="Start date ISO (default: 2025-01-01)")
-	rs_loop.add_argument("--end", default="2025-12-31", help="End date ISO (default: 2025-12-31)")
+	# Defaults to None so the backtester runs on all available data per
+	# series. The data in these DBs is a rolling recent window, not a full
+	# year — hardcoding a 2025 range silently excludes real data for series
+	# whose history starts in late 2025 / 2026. The temporal_consistency
+	# gate handles None-date hypotheses by querying the DB for the series
+	# range itself.
+	rs_loop.add_argument("--start", default=None, help="Start date ISO (default: all data)")
+	rs_loop.add_argument("--end", default=None, help="End date ISO (default: all data)")
 	rs_loop.add_argument("--max-llm-calls", type=int, default=10, dest="max_llm_calls",
 	                     help="Cap on LLM API calls in ideation phase (default: 10)")
 	rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",

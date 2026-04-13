@@ -52,10 +52,25 @@ class TemporalConsistencyGate(Gate):
 
 		windows = self._make_windows(start, end)
 		if len(windows) < 3:
+			# Pass as a review-tier soft pass rather than hard-fail. A
+			# strategy running against a series with <15 days of history
+			# shouldn't be demoted just because we can't meaningfully
+			# partition time yet — let it through for downstream gates
+			# and human review. Discovered during Task 5 sweep v2 analysis:
+			# many crypto 15m series have 9-22 days of data, which were
+			# being silently failed even with strong per-trade Sharpes.
+			from datetime import datetime
+			try:
+				total_days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days
+			except Exception:
+				total_days = 0
 			return GateResult(
-				passed=False, gate_name=self.name,
-				reason=f"only {len(windows)} windows possible, need >= 3",
-				details={},
+				passed=True, gate_name=self.name, tier="review",
+				reason=(
+					f"insufficient data for temporal consistency "
+					f"({total_days} days, need >= 15) — passed as review"
+				),
+				details={"total_days": total_days, "windows_possible": len(windows)},
 			)
 
 		sharpes: list[float] = []
@@ -151,18 +166,39 @@ class TemporalConsistencyGate(Gate):
 	def _make_windows(
 		self, start_str: str, end_str: str,
 	) -> list[tuple[str, str]]:
-		"""Split date range into N non-overlapping (start, end) windows."""
+		"""Split date range into non-overlapping (start, end) windows.
+
+		Aims for ``self.n_windows`` windows of ``>= 7`` days each, but
+		scales down to fewer, shorter windows on series with limited
+		history so the gate can still meaningfully partition time.
+		Requires at least 15 days total and ``>= 3`` windows of
+		``>= 5`` days each — below that, returns an empty list and the
+		caller short-circuits to a review-tier soft pass.
+		"""
 		start = datetime.fromisoformat(start_str)
 		end = datetime.fromisoformat(end_str)
 		total_days = (end - start).days
 
-		if total_days < self.n_windows * 7:
+		MIN_TOTAL_DAYS = 15
+		MIN_WINDOW_DAYS = 5
+		MIN_WINDOWS = 3
+
+		if total_days < MIN_TOTAL_DAYS:
 			return []
 
-		window_days = total_days / self.n_windows
+		# Pick the largest window count that still gives each window
+		# at least MIN_WINDOW_DAYS. Preserves the default n_windows=5
+		# for year-long ranges while allowing n=3 on 15-34 day ranges.
+		target_n = self.n_windows
+		while target_n > MIN_WINDOWS and total_days / target_n < MIN_WINDOW_DAYS:
+			target_n -= 1
+		if total_days / target_n < MIN_WINDOW_DAYS:
+			return []
+
+		window_days = total_days / target_n
 		windows: list[tuple[str, str]] = []
 
-		for i in range(self.n_windows):
+		for i in range(target_n):
 			w_start = start + timedelta(days=i * window_days)
 			w_end = start + timedelta(days=(i + 1) * window_days)
 			if w_start >= w_end:

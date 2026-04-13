@@ -764,6 +764,60 @@ class TestTemporalConsistencyGate:
 		# One window has deeply negative per-trade Sharpe, should fail
 		assert not gate_result.passed
 
+	def test_short_range_15_to_34_days_still_partitions(self):
+		"""Ranges of 15-34 days should produce 3 windows (not the default 5)
+		so the gate can still run on series with limited history. Before
+		this behavior, the hard 35-day minimum meant crypto 15m series
+		with 9-22 days of data were silently failing even with strong
+		per-trade Sharpes. Discovered during Task 5 sweep v2 analysis.
+		"""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
+
+		gate = TemporalConsistencyGate()
+		# 20 days, well above the new 15-day minimum
+		h = _make_hypothesis(start_date="2026-03-14", end_date="2026-04-03")
+		result = _make_result(sharpe=3.0, total_trades=200, hypothesis=h)
+
+		agent = MagicMock()
+		agent.run_backtest_only.return_value = {
+			"sharpe": 3.0, "total_trades": 40, "net_pnl_cents": 100.0,
+		}
+
+		ctx = GateContext(
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=h, agent=agent,
+		)
+		gate_result = gate.check(result, ctx)
+		assert gate_result.passed
+		assert len(gate_result.details.get("sharpes", [])) >= 3
+
+	def test_very_short_range_below_15_days_is_review_soft_pass(self):
+		"""Ranges below 15 days don't have enough data for temporal
+		partitioning — the gate should soft-pass with tier='review'
+		rather than hard-fail, so short-history strategies aren't
+		silently demoted. The old behavior failed with 'only 0 windows
+		possible' which blocked real candidates in Task 5 v1 sweep.
+		"""
+		from edge_catcher.research.validation.gate_temporal_consistency import TemporalConsistencyGate
+
+		gate = TemporalConsistencyGate()
+		# 9 days — below the 15-day floor
+		h = _make_hypothesis(start_date="2026-03-24", end_date="2026-04-02")
+		result = _make_result(sharpe=3.0, total_trades=200, hypothesis=h)
+
+		agent = MagicMock()
+		ctx = GateContext(
+			tracker=None, pnl_values=[10]*200,
+			hypothesis=h, agent=agent,
+		)
+		gate_result = gate.check(result, ctx)
+
+		assert gate_result.passed  # soft-pass, not fail
+		assert gate_result.tier == "review"
+		assert "insufficient data" in gate_result.reason
+		# Gate should not have tried to run any sub-backtests
+		agent.run_backtest_only.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Parameter Sensitivity Gate
