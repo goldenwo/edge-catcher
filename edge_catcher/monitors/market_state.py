@@ -11,6 +11,27 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# Tradeable-price guard
+# ---------------------------------------------------------------------------
+
+def _is_tradeable_cents(price_dollars: float) -> bool:
+	"""Return True iff *price_dollars* is an integer cent in [1¢, 99¢].
+
+	Kalshi markets trade only at integer cents; sub-cent ghost levels
+	(0.1¢–0.9¢) have been observed in REST /orderbook responses for 15m
+	crypto series and must be filtered before they reach the in-memory
+	book. A 1e-3 tolerance is required because float representations of
+	decimal sub-cents (e.g. 0.007 * 100 = 0.70000000000001) otherwise
+	round to 1 and would be falsely accepted as "1¢".
+	"""
+	price_cents_float = price_dollars * 100
+	price_cents = round(price_cents_float)
+	if not (1 <= price_cents <= 99):
+		return False
+	return abs(price_cents_float - price_cents) < 1e-3
+
+
+# ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
 
@@ -260,6 +281,10 @@ class MarketState:
 			price:  Price in dollars (Kalshi format).
 			delta:  Quantity change (positive = add, negative = remove).
 		"""
+		# Reject sub-cent / out-of-range ghost deltas — see _is_tradeable_cents.
+		if not _is_tradeable_cents(price):
+			return
+
 		ob = self._orderbooks.get(ticker)
 		if ob is None:
 			return
