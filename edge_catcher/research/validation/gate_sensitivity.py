@@ -205,7 +205,12 @@ class ParameterSensitivityGate(Gate):
 		if not STRATEGIES_LOCAL_PATH.exists():
 			return
 
-		source = STRATEGIES_LOCAL_PATH.read_text()
+		# encoding="utf-8" is load-bearing on Windows: the default locale
+		# codec (cp1252) raises UnicodeDecodeError on any non-ASCII byte
+		# in strategies_local.py, and agent.run_hypothesis catches the
+		# exception as a "validation pipeline error", silently demoting
+		# real candidates to "explore". Discovered during Task 5 sweep.
+		source = STRATEGIES_LOCAL_PATH.read_text(encoding="utf-8")
 		try:
 			tree = ast.parse(source)
 		except SyntaxError:

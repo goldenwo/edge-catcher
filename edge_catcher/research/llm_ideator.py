@@ -679,4 +679,4 @@ class LLMIdeator:
 		return data.get("hypotheses", [])
 
 	def _load_system_prompt(self) -> str:
-		return (_PROMPTS_DIR / "ideator_system.txt").read_text()
+		return (_PROMPTS_DIR / "ideator_system.txt").read_text(encoding="utf-8")

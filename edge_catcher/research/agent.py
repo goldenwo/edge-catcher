@@ -56,6 +56,13 @@ def _build_strategy_families() -> dict[str, list[str]]:
 
 
 class ResearchAgent:
+    # Per-hypothesis subprocess timeout. 300s was too tight for BTC series
+    # in kalshi.db (17M trades on KXBTC15M, 15M on KXBTCD) — every BTC
+    # hypothesis in the 2026-04-13 sweep timed out. 1800s (30min) aligns
+    # with the validation gate timeouts and gives the backtester enough
+    # headroom for the biggest series without blocking small ones.
+    SUBPROCESS_TIMEOUT_SECONDS: int = 1800
+
     def __init__(
         self,
         tracker: Tracker | None = None,
@@ -125,10 +132,12 @@ class ResearchAgent:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5-minute timeout per hypothesis
+                timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
-            result = HypothesisResult.error(h, "subprocess timed out after 300s")
+            result = HypothesisResult.error(
+                h, f"subprocess timed out after {self.SUBPROCESS_TIMEOUT_SECONDS}s"
+            )
             self.tracker.save_result(result)
             return result
         except Exception as exc:
@@ -245,7 +254,10 @@ class ResearchAgent:
 
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
             logger.warning("run_backtest_only: timed out for %s/%s", h.strategy, h.series)
@@ -346,7 +358,8 @@ class ResearchAgent:
 
         if not STRATEGIES_LOCAL_PATH.exists():
             return None
-        source = STRATEGIES_LOCAL_PATH.read_text()
+        # encoding="utf-8" load-bearing on Windows — see Task 5 charmap bug note.
+        source = STRATEGIES_LOCAL_PATH.read_text(encoding="utf-8")
         try:
             tree = ast.parse(source)
         except SyntaxError:

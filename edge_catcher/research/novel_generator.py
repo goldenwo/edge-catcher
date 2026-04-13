@@ -51,7 +51,7 @@ class NovelStrategyGenerator:
 		# Use the strategizer prompt directly with the client
 		system_prompt = (
 			Path(__file__).parent.parent / "ai" / "prompts" / "strategizer_system.txt"
-		).read_text()
+		).read_text(encoding="utf-8")
 		user_prompt = (
 			f"Generate a trading strategy based on this idea:\n\n"
 			f"**Name:** {proposal['name']}\n"

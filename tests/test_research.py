@@ -774,6 +774,67 @@ class TestValidationIntegration:
         assert len(rows) == 1
         assert rows[0]["verdict"] == "explore"
 
+    def test_read_strategy_code_handles_non_ascii_utf8(self, tmp_path, monkeypatch):
+        """Regression: read_strategy_code must read strategies_local.py as
+        UTF-8, not the OS default (cp1252 on Windows). Non-ASCII bytes in
+        user comments caused `UnicodeDecodeError: 'charmap' codec can't
+        decode byte…` in the 2026-04-13 sweep, which agent.run_hypothesis
+        caught and silently demoted real candidates to 'explore'.
+        """
+        from edge_catcher.research.agent import ResearchAgent
+
+        # Write a strategies_local.py with a non-cp1252 byte. U+2192 "→"
+        # is valid UTF-8 but undefined in cp1252 — exactly the shape of
+        # the real-world failure.
+        fake_path = tmp_path / "strategies_local.py"
+        fake_path.write_text(
+            "# trend → reversion marker\n"
+            "class MyStrat:\n"
+            "    name = 'my-strat'\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "edge_catcher.runner.strategy_parser.STRATEGIES_LOCAL_PATH",
+            fake_path,
+        )
+
+        # Should return the class source without raising
+        src = ResearchAgent.read_strategy_code("my-strat")
+        assert src is not None
+        assert "class MyStrat" in src
+
+    def test_subprocess_timeout_respects_class_attribute(self, tmp_path):
+        """run_hypothesis must pass ResearchAgent.SUBPROCESS_TIMEOUT_SECONDS
+        to subprocess.run. The default (1800s) was raised from 300s after
+        the 2026-04-13 sweep timed out on every BTC hypothesis in kalshi.db
+        (17M trades on KXBTC15M, 15M on KXBTCD).
+        """
+        import json as _json
+        tracker = Tracker(tmp_path / "research.db")
+        agent = ResearchAgent(tracker=tracker)
+        h = Hypothesis(strategy="C", data_sources=_ds(),
+                       start_date="2025-01-01", end_date="2025-12-31")
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = _json.dumps({
+            "status": "ok",
+            "total_trades": 10, "wins": 5, "losses": 5,
+            "win_rate": 0.5, "net_pnl_cents": 0.0,
+            "sharpe": 0.1, "max_drawdown_pct": 1.0,
+            "total_fees_paid": 0.0,
+            "avg_win_cents": 1.0, "avg_loss_cents": -1.0,
+            "per_strategy": {},
+        })
+        mock_proc.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_proc) as mock_sub:
+            agent.run_hypothesis(h)
+
+        mock_sub.assert_called_once()
+        assert mock_sub.call_args.kwargs["timeout"] == ResearchAgent.SUBPROCESS_TIMEOUT_SECONDS
+        assert ResearchAgent.SUBPROCESS_TIMEOUT_SECONDS >= 1800  # locked-in lower bound
+
 
 # ---------------------------------------------------------------------------
 # ResearchJournal
