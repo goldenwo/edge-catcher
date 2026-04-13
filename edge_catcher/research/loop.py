@@ -189,9 +189,17 @@ class LoopOrchestrator:
 				force=self.force,
 			)
 			grid_batch = grid_hypotheses[:budget_expand]
+			# Snapshot DSR N at sweep start so every hypothesis in this grid
+			# sees the same multiple-testing correction (instead of a count
+			# that grows monotonically as earlier runs land in the tracker).
+			# Use len(grid_batch) — the number of trials actually run — so
+			# N reflects the true null-distribution size, not the planner's
+			# pre-budget plan.
+			grid_n_override = len(grid_batch)
 			remaining_time = self._remaining_time(start_time)
 			grid_results = queue.submit(
 				grid_batch, phase="grid", max_time_seconds=remaining_time,
+				sweep_N_override=grid_n_override,
 			)
 			all_results.extend(grid_results)
 			runs_used += len(grid_results)

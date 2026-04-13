@@ -96,6 +96,19 @@ class TestDeflatedSharpeGate:
 		assert gr.passed
 		assert gr.details["dsr"] > 0.95
 
+	def test_dsr_respects_sweep_n_override(self):
+		"""Passing sweep_N_override=500 makes N=500 regardless of tracker count."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+		tracker = self._make_tracker_with_results([0.1, 0.2, 0.3])  # only 3 trials
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate(sweep_N_override=500)
+		gr = gate.check(result, ctx)
+		assert gr.details["n_strategies"] == 500
+
 	def test_low_dsr_fails(self):
 		"""Strategy with weak per-trade Sharpe among many families should fail DSR."""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate

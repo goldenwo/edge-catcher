@@ -41,6 +41,7 @@ class RunQueue:
 		hypotheses: list[Hypothesis],
 		phase: str,
 		max_time_seconds: float | None = None,
+		sweep_N_override: int | None = None,
 	) -> list[HypothesisResult]:
 		"""Execute hypotheses through the agent, recording each in the audit log.
 
@@ -48,6 +49,9 @@ class RunQueue:
 			hypotheses: Ordered list of hypotheses to run.
 			phase: 'grid' or 'llm' — recorded in audit log.
 			max_time_seconds: Wall-clock timeout. Finishes in-flight runs, skips rest.
+			sweep_N_override: If set, forwarded to each hypothesis run so DSR's
+				multiple-testing N is a sweep-start snapshot (same for every
+				hypothesis) rather than the monotonically growing tracker count.
 
 		Returns:
 			List of results for completed runs.
@@ -56,14 +60,15 @@ class RunQueue:
 			return []
 
 		if self.parallel <= 1:
-			return self._run_sequential(hypotheses, phase, max_time_seconds)
-		return self._run_parallel(hypotheses, phase, max_time_seconds)
+			return self._run_sequential(hypotheses, phase, max_time_seconds, sweep_N_override)
+		return self._run_parallel(hypotheses, phase, max_time_seconds, sweep_N_override)
 
 	def _run_sequential(
 		self,
 		hypotheses: list[Hypothesis],
 		phase: str,
 		max_time_seconds: float | None,
+		sweep_N_override: int | None = None,
 	) -> list[HypothesisResult]:
 		results: list[HypothesisResult] = []
 		start_time = time.monotonic()
@@ -78,7 +83,7 @@ class RunQueue:
 					)
 					break
 
-			result = self._run_one(h, phase, i)
+			result = self._run_one(h, phase, i, sweep_N_override)
 			results.append(result)
 
 		return results
@@ -88,6 +93,7 @@ class RunQueue:
 		hypotheses: list[Hypothesis],
 		phase: str,
 		max_time_seconds: float | None,
+		sweep_N_override: int | None = None,
 	) -> list[HypothesisResult]:
 		results: list[HypothesisResult] = []
 		start_time = time.monotonic()
@@ -106,7 +112,7 @@ class RunQueue:
 				queue = queue[self.parallel:]
 
 				futures = {
-					executor.submit(self._run_one, h, phase, i): i
+					executor.submit(self._run_one, h, phase, i, sweep_N_override): i
 					for i, h in batch
 				}
 
@@ -124,9 +130,10 @@ class RunQueue:
 		h: Hypothesis,
 		phase: str,
 		queue_position: int,
+		sweep_N_override: int | None = None,
 	) -> HypothesisResult:
 		started_at = datetime.now(timezone.utc).isoformat()
-		result = self.agent.run_hypothesis(h)
+		result = self.agent.run_hypothesis(h, sweep_N_override=sweep_N_override)
 		self.audit.record_execution(
 			hypothesis_id=h.id,
 			phase=phase,
