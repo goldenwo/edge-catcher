@@ -172,6 +172,42 @@ class TestFetchOrderbookSnapshot:
 		result = asyncio.run(fetch_orderbook_snapshot(mock_client, "EVT1-T10"))
 		assert result is None
 
+	def test_fetch_orderbook_snapshot_filters_sub_cent_levels(self):
+		"""Sub-cent levels from Kalshi REST must be dropped at ingest.
+
+		Kalshi REST /markets/{ticker}/orderbook has been observed returning
+		ghost levels at 0.1¢/0.2¢/etc for 15m crypto series. Those prices are
+		not tradeable on Kalshi (integer cents only) and must not reach the
+		in-memory book or downstream walk_book/stale-fallback logic.
+		"""
+		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+
+		mock_client = AsyncMock()
+		mock_client.get = AsyncMock(return_value=MagicMock(
+			status_code=200,
+			json=lambda: {
+				"orderbook_fp": {
+					"yes_dollars": [
+						["0.0010", "52.00"],
+						["0.0100", "156.00"],
+					],
+					"no_dollars": [
+						["0.0010", "1052.00"],
+						["0.0020", "500.00"],
+						["0.0030", "333.00"],
+						["0.0040", "250.00"],
+						["0.0090", "111.00"],
+						["0.0100", "267.00"],
+					],
+				}
+			},
+		))
+
+		result = asyncio.run(fetch_orderbook_snapshot(mock_client, "TEST-TICKER"))
+		assert result is not None
+		assert result.yes_levels == [(0.01, 156)]
+		assert result.no_levels == [(0.01, 267)]
+
 	def test_retries_on_429(self):
 		"""Should retry once on 429 and succeed on second attempt."""
 		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot

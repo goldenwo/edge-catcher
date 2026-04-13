@@ -206,6 +206,29 @@ class TestMarketState:
 		prices = [p for p, _ in ob.yes_levels]
 		assert 0.55 in prices
 
+	def test_apply_orderbook_delta_ignores_sub_cent_prices(self):
+		"""Sub-cent WS deltas must be silently dropped.
+
+		Kalshi trades only at integer cents (1¢–99¢); a delta at 0.1¢/0.7¢
+		is never tradeable and must not enter the in-memory book, or the
+		first-level "best price" seen by downstream logic would be 0c.
+		"""
+		ms = MarketState()
+		ms.register_ticker("TEST-TICKER")
+		seeded = OrderbookSnapshot(
+			yes_levels=[(0.50, 10)],
+			no_levels=[(0.50, 10)],
+		)
+		ms.seed_orderbook("TEST-TICKER", seeded)
+
+		ms.apply_orderbook_delta("TEST-TICKER", side="yes", price=0.001, delta=100)
+		ms.apply_orderbook_delta("TEST-TICKER", side="no", price=0.007, delta=50)
+
+		ob = ms.get_orderbook("TEST-TICKER")
+		assert ob is not None
+		assert ob.yes_levels == [(0.50, 10)]
+		assert ob.no_levels == [(0.50, 10)]
+
 	def test_apply_orderbook_delta_remove(self):
 		ms = MarketState()
 		ms.register_ticker("TICKER-F")
