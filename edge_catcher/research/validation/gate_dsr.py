@@ -89,10 +89,11 @@ class DeflatedSharpeGate(Gate):
 		# refinements of one idea than independent trials, so they collapse
 		# into one trial via _strategy_family().
 		#
-		# Note: N is cumulative over the tracker's lifetime, so it grows
-		# monotonically during a sweep. This means hypotheses evaluated
-		# later in a sweep see a slightly larger N than earlier ones —
-		# a known limitation; fixing it would require pre-snapshotting N.
+		# Note: when sweep_N_override is None, N is cumulative over the tracker's
+		# lifetime and grows monotonically during a sweep — hypotheses evaluated
+		# later see a slightly larger N than earlier ones. Callers that need
+		# identical multiple-testing corrections across a sweep should pass
+		# sweep_N_override (see loop.py grid phase for an example).
 		if self.sweep_N_override is not None:
 			N = self.sweep_N_override
 		else:
