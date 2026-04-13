@@ -288,3 +288,70 @@ class TestGetEnabledStrategies:
 		# Should NOT raise; strategy loads with warning
 		result = get_enabled_strategies(config, [self._strat()])
 		assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Manifest-based supported_series loading
+# ---------------------------------------------------------------------------
+
+def _write_manifest(tmp_path: Path, strategies: dict) -> Path:
+	import json
+	p = tmp_path / "supported_series_manifest.json"
+	p.write_text(json.dumps({
+		"generated_at": "2026-04-12T00:00:00Z",
+		"source": "data/research.db",
+		"strategies": strategies,
+	}))
+	return p
+
+
+class TestManifestSupportedSeries:
+	"""Manifest merges into each strategy's effective supported_series."""
+
+	def _base_cfg(self, manifest_path: Path, series: list[str]) -> dict:
+		return {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"supported_series_manifest": str(manifest_path),
+			"strategies": {
+				"my-strat": {"enabled": True, "series": series},
+			},
+		}
+
+	def _strat_with_whitelist(self, whitelist: list[str]) -> PaperStrategy:
+		class _S(PaperStrategy):
+			name = "my-strat"
+			supported_series = whitelist
+			default_params: dict = {}
+
+			def on_tick(self, ctx):
+				return []
+
+		return _S()
+
+	def test_manifest_supplies_whitelist_when_class_is_empty(self, tmp_path: Path) -> None:
+		"""Class opts out (supported_series=[]) but manifest provides the list."""
+		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_A"]}})
+		cfg = self._base_cfg(manifest, ["SERIES_A"])
+		result = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+		assert len(result) == 1
+
+	def test_manifest_rejects_out_of_list_when_class_is_empty(self, tmp_path: Path) -> None:
+		"""Empty class whitelist + manifest: manifest still enforces membership."""
+		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_A"]}})
+		cfg = self._base_cfg(manifest, ["SERIES_B"])
+		with pytest.raises(ValueError, match="SERIES_B"):
+			get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+
+	def test_class_and_manifest_union(self, tmp_path: Path) -> None:
+		"""Effective whitelist is union(class.supported_series, manifest[name].series)."""
+		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_B"]}})
+		cfg = self._base_cfg(manifest, ["SERIES_A", "SERIES_B"])
+		result = get_enabled_strategies(cfg, [self._strat_with_whitelist(["SERIES_A"])])
+		assert len(result) == 1
+
+	def test_union_still_rejects_series_in_neither(self, tmp_path: Path) -> None:
+		"""Union is not permissive — a series in neither set still fails."""
+		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_B"]}})
+		cfg = self._base_cfg(manifest, ["SERIES_C"])
+		with pytest.raises(ValueError, match="SERIES_C"):
+			get_enabled_strategies(cfg, [self._strat_with_whitelist(["SERIES_A"])])
