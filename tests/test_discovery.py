@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -295,7 +296,6 @@ class TestGetEnabledStrategies:
 # ---------------------------------------------------------------------------
 
 def _write_manifest(tmp_path: Path, strategies: dict) -> Path:
-	import json
 	p = tmp_path / "supported_series_manifest.json"
 	p.write_text(json.dumps({
 		"generated_at": "2026-04-12T00:00:00Z",
@@ -355,3 +355,39 @@ class TestManifestSupportedSeries:
 		cfg = self._base_cfg(manifest, ["SERIES_C"])
 		with pytest.raises(ValueError, match="SERIES_C"):
 			get_enabled_strategies(cfg, [self._strat_with_whitelist(["SERIES_A"])])
+
+	def test_missing_manifest_file_raises(self, tmp_path: Path) -> None:
+		"""Operator points at a manifest that doesn't exist → startup fails loudly.
+
+		A silent fallback here would collapse the whitelist to {} for every
+		strategy whose class declares supported_series=[], re-introducing the
+		pre-Task-4 opt-out-everything regime without any signal.
+		"""
+		missing = tmp_path / "does_not_exist.json"
+		cfg = self._base_cfg(missing, ["SERIES_A"])
+		with pytest.raises(ValueError, match=str(missing.name)):
+			get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+
+	def test_malformed_manifest_json_raises(self, tmp_path: Path) -> None:
+		"""Malformed JSON → startup fails loudly (same rationale as missing file)."""
+		bad = tmp_path / "supported_series_manifest.json"
+		bad.write_text("{not valid json")
+		cfg = self._base_cfg(bad, ["SERIES_A"])
+		with pytest.raises(ValueError, match="JSON"):
+			get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+
+	def test_unknown_strategy_in_manifest_is_ignored(self, tmp_path: Path) -> None:
+		"""Manifest entries for strategies not discovered are no-ops.
+
+		Regression guard: by_name.get(name) already skips unknown strategies,
+		so a manifest listing a retired or renamed strategy must not break
+		startup — real strategies that ARE discovered still load normally.
+		"""
+		manifest = _write_manifest(tmp_path, {
+			"my-strat": {"series": ["SERIES_A"]},
+			"ghost-strategy": {"series": ["SERIES_Z"]},
+		})
+		cfg = self._base_cfg(manifest, ["SERIES_A"])
+		result = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+		assert len(result) == 1
+		assert result[0].name == "my-strat"

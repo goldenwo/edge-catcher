@@ -96,21 +96,26 @@ def discover_strategies(module_path: Path | None = None) -> list[PaperStrategy]:
 def _load_manifest_series(manifest_path: str | Path | None) -> dict[str, list[str]]:
 	"""Load ``{strategy: [series,...]}`` from the supported-series manifest.
 
-	Returns an empty dict when no path is configured or the file cannot be
-	read — a missing manifest must never break startup, because the class
-	whitelist is still authoritative under the union semantics below.
+	Returns an empty dict silently only when no path is configured (opt-out).
+	If a path *is* configured but the file is missing or malformed, raise
+	``ValueError`` — silently falling back to ``{}`` would collapse the
+	effective whitelist to empty for every strategy whose class declares
+	``supported_series = []``, re-introducing the pre-manifest
+	opt-out-everything regime without any operator signal.
 	"""
 	if not manifest_path:
 		return {}
 	path = Path(manifest_path)
 	if not path.exists():
-		logger.warning("supported_series_manifest not found: %s", path)
-		return {}
+		raise ValueError(
+			f"supported_series_manifest configured but not found: {path}"
+		)
 	try:
 		data = json.loads(path.read_text(encoding="utf-8"))
-	except (OSError, json.JSONDecodeError):
-		logger.exception("Failed to parse supported_series_manifest: %s", path)
-		return {}
+	except json.JSONDecodeError as exc:
+		raise ValueError(
+			f"supported_series_manifest at {path} is not valid JSON: {exc}"
+		) from exc
 
 	out: dict[str, list[str]] = {}
 	for name, entry in (data.get("strategies") or {}).items():
