@@ -123,7 +123,9 @@ def _handle_enter(
 		log.debug("Skip: entry_price %dc out of range for %s %s", entry_price, signal.side, signal.ticker)
 		return
 
-	metrics = config.get("_metrics") or Metrics()
+	metrics = config.get("_metrics")
+	if metrics is None:
+		metrics = Metrics()
 	metrics.inc("entries_attempted")
 
 	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
