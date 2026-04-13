@@ -78,7 +78,7 @@ class RefinementExecutor:
 
 		refiner_system = (
 			Path(__file__).parent.parent / "ai" / "prompts" / "refiner_system.txt"
-		).read_text()
+		).read_text(encoding="utf-8")
 
 		for strategy_name in candidates:
 			if budget <= 0 or llm_calls_used >= llm_budget:

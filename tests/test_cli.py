@@ -324,3 +324,22 @@ def test_research_loop_help(capsys):
     assert "--grid-only" in proc.stdout
     assert "--llm-only" in proc.stdout
     assert "--max-llm-calls" in proc.stdout
+
+
+def test_research_loop_start_end_defaults():
+    """Regression: `research loop` must default --start and --end to a
+    concrete date range. Passing None propagates through GridPlanner into
+    every hypothesis, and TemporalConsistencyGate then fails with
+    "0 windows possible" on any series whose DB-resolved range is < 35
+    days. Discovered during the 2026-04-13 Task 5 sweep.
+    """
+    import argparse
+    from edge_catcher.cli import research as research_cli
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    research_cli.register(sub)
+
+    args = parser.parse_args(["research", "loop"])
+    assert args.start == "2025-01-01"
+    assert args.end == "2025-12-31"

@@ -17,7 +17,7 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 def _load_system_prompt() -> str:
-    return (_PROMPTS_DIR / "strategizer_system.txt").read_text()
+    return (_PROMPTS_DIR / "strategizer_system.txt").read_text(encoding="utf-8")
 
 
 def _get_hypothesis_config(hypothesis_id: str, config_path: Path = Path("config")) -> Optional[dict]:

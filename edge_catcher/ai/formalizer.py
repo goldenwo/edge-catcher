@@ -15,7 +15,7 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 # ── prompt builders ───────────────────────────────────────────────────────────
 
 def _load_system_prompt() -> str:
-    return (_PROMPTS_DIR / "formalizer_system.txt").read_text()
+    return (_PROMPTS_DIR / "formalizer_system.txt").read_text(encoding="utf-8")
 
 
 def _build_user_prompt(description: str) -> str:
