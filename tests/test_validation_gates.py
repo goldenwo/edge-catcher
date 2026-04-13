@@ -109,6 +109,23 @@ class TestDeflatedSharpeGate:
 		gr = gate.check(result, ctx)
 		assert gr.details["n_strategies"] == 500
 
+	def test_dsr_override_works_without_tracker(self):
+		"""tracker=None + sweep_N_override → override wins, no early return.
+
+		Locks in the Task 8 reordering: the override check must come BEFORE
+		the tracker-None guard in check(), otherwise override+null-tracker
+		would fail on the internal check and never reach the computation.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate(sweep_N_override=500)
+		gr = gate.check(result, ctx)
+		assert gr.details["n_strategies"] == 500
+
 	def test_low_dsr_fails(self):
 		"""Strategy with weak per-trade Sharpe among many families should fail DSR."""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
