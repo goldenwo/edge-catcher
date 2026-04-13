@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import logging
 from pathlib import Path
 
@@ -92,6 +93,33 @@ def discover_strategies(module_path: Path | None = None) -> list[PaperStrategy]:
 # Filtering + merging
 # ---------------------------------------------------------------------------
 
+def _load_manifest_series(manifest_path: str | Path | None) -> dict[str, list[str]]:
+	"""Load ``{strategy: [series,...]}`` from the supported-series manifest.
+
+	Returns an empty dict when no path is configured or the file cannot be
+	read — a missing manifest must never break startup, because the class
+	whitelist is still authoritative under the union semantics below.
+	"""
+	if not manifest_path:
+		return {}
+	path = Path(manifest_path)
+	if not path.exists():
+		logger.warning("supported_series_manifest not found: %s", path)
+		return {}
+	try:
+		data = json.loads(path.read_text(encoding="utf-8"))
+	except (OSError, json.JSONDecodeError):
+		logger.exception("Failed to parse supported_series_manifest: %s", path)
+		return {}
+
+	out: dict[str, list[str]] = {}
+	for name, entry in (data.get("strategies") or {}).items():
+		series = list((entry or {}).get("series") or [])
+		if series:
+			out[name] = series
+	return out
+
+
 def get_enabled_strategies(
 	config: dict,
 	all_strategies: list[PaperStrategy],
@@ -121,6 +149,7 @@ def get_enabled_strategies(
 	strats_cfg: dict = config.get("strategies", {})
 	by_name: dict[str, PaperStrategy] = {s.name: s for s in all_strategies}
 	strict = config.get("strict_series_validation", True)
+	manifest_series = _load_manifest_series(config.get("supported_series_manifest"))
 
 	enabled: list[PaperStrategy] = []
 
@@ -132,14 +161,22 @@ def get_enabled_strategies(
 			logger.warning("Config references strategy '%s' but it was not discovered", name)
 			continue
 
-		supported = list(getattr(strat, "supported_series", []) or [])
+		class_supported = list(getattr(strat, "supported_series", []) or [])
+		manifest_supported = manifest_series.get(name, [])
+		# Union preserves class-declared order first, then appends manifest-only entries,
+		# so error messages stay deterministic across runs.
+		effective: list[str] = list(class_supported)
+		for s in manifest_supported:
+			if s not in effective:
+				effective.append(s)
+
 		requested = list(scfg.get("series", []) or [])
-		if supported and requested:
-			unsupported = [s for s in requested if s not in supported]
+		if effective and requested:
+			unsupported = [s for s in requested if s not in effective]
 			if unsupported:
 				msg = (
 					f"Strategy '{name}' is enabled on series not in its supported_series "
-					f"whitelist: {unsupported}. Declared supported: {supported}. "
+					f"whitelist: {unsupported}. Declared supported: {effective}. "
 					f"Either add the series to the strategy's supported_series, or set "
 					f"'strict_series_validation: false' in config to downgrade this to a warning."
 				)
