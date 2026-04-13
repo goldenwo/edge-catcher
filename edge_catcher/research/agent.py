@@ -106,6 +106,8 @@ class ResearchAgent:
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
+        if h.slippage_cents is not None:
+            cmd.extend(["--slippage", str(h.slippage_cents)])
         if h.start_date:
             cmd += ["--start", h.start_date]
         if h.end_date:
@@ -227,6 +229,8 @@ class ResearchAgent:
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
+        if h.slippage_cents is not None:
+            cmd.extend(["--slippage", str(h.slippage_cents)])
         if h.start_date:
             cmd += ["--start", h.start_date]
         if h.end_date:
