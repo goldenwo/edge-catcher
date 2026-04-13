@@ -576,6 +576,11 @@ async def _ws_loop(
 
 			msg_type = msg.get("type")
 
+			# TODO(task-1-followup): Kalshi sends orderbook_snapshot messages
+			# as the initial subscribe response AND (possibly) for full-book
+			# refreshes mid-session. The engine currently drops these; REST
+			# recovery compensates on reconnect but quiet markets may drift
+			# mid-session. See Step 1.3 evidence in the audit-followups plan.
 			if msg_type == "orderbook_delta":
 				try:
 					_handle_orderbook_delta(market_state, msg)
