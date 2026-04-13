@@ -17,7 +17,7 @@ from edge_catcher.monitors.discovery import (
 	get_enabled_strategies,
 	load_config,
 )
-from edge_catcher.monitors.sizing import resolve_fill
+from edge_catcher.monitors.sizing import FillSkip, resolve_fill
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -122,10 +122,10 @@ def _handle_enter(
 
 	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
 
-	if fill is None:
+	if isinstance(fill, FillSkip):
 		log.info(
-			"No fill for %s %s %s (entry=%dc) — skipping",
-			signal.strategy, signal.side, signal.ticker, entry_price,
+			"No fill for %s %s %s (entry=%dc) — skipping (reason=%s)",
+			signal.strategy, signal.side, signal.ticker, entry_price, fill.reason,
 		)
 		return
 
