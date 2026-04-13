@@ -128,7 +128,7 @@ def _load_manifest_series(manifest_path: str | Path | None) -> dict[str, list[st
 def get_enabled_strategies(
 	config: dict,
 	all_strategies: list[PaperStrategy],
-) -> list[PaperStrategy]:
+) -> tuple[list[PaperStrategy], list[tuple[str, str]]]:
 	"""Filter to enabled strategies and apply config param overrides.
 
 	Enforces ``supported_series`` on each strategy: if the strategy
@@ -137,23 +137,19 @@ def get_enabled_strategies(
 	validated on. Set ``strict_series_validation: false`` at the top
 	level of config to downgrade the error to a warning.
 
-	TODO(metrics-follow-up): this function doesn't currently return the
-	set of (strategy, series) pairs that were rejected during filtering.
-	The paper trader's ``entries_skipped_unsupported`` gauge exists in
-	metrics.py but is populated with 0 because there's nowhere to count
-	the rejected pairs at startup. To close that gap, reshape this
-	function to return ``(enabled, rejected_pairs)`` and have
-	``run_engine`` call ``metrics.set_gauge("entries_skipped_unsupported",
-	len(rejected_pairs))``. Deferred from Task 6a of the audit-followups
-	plan — gauge infrastructure is fully wired end-to-end, just needs a
-	population source.
-
 	Args:
 		config:         Full config dict.
 		all_strategies: All discovered strategy instances.
 
 	Returns:
-		Filtered, merged list of enabled strategies.
+		``(enabled, rejected_pairs)`` tuple. ``enabled`` is the merged
+		list of enabled strategies. ``rejected_pairs`` is the list of
+		``(strategy_name, series)`` pairs that failed the
+		``supported_series`` check. Under strict validation an exception
+		is raised before return, so ``rejected_pairs`` is only non-empty
+		under ``strict_series_validation: false`` — where the paper
+		trader needs the count to populate the
+		``entries_skipped_unsupported`` gauge.
 
 	Raises:
 		ValueError: If sizing config is missing or invalid, or if a
@@ -168,6 +164,7 @@ def get_enabled_strategies(
 	manifest_series = _load_manifest_series(config.get("supported_series_manifest"))
 
 	enabled: list[PaperStrategy] = []
+	rejected_pairs: list[tuple[str, str]] = []
 
 	for name, scfg in strats_cfg.items():
 		if not scfg.get("enabled", False):
@@ -199,6 +196,7 @@ def get_enabled_strategies(
 				if strict:
 					raise ValueError(msg)
 				logger.warning(msg)
+				rejected_pairs.extend((name, s) for s in unsupported)
 
 		# Merge param overrides
 		params_override: dict = scfg.get("params", {}) or {}
@@ -207,4 +205,4 @@ def get_enabled_strategies(
 
 		enabled.append(strat)
 
-	return enabled
+	return enabled, rejected_pairs

@@ -160,8 +160,9 @@ class TestGetEnabledStrategies:
 				"stub": {"enabled": False, "series": ["SERIES_A"]},
 			},
 		}
-		result = get_enabled_strategies(config, [self._strat()])
+		result, rejected = get_enabled_strategies(config, [self._strat()])
 		assert result == []
+		assert rejected == []
 
 	def test_returns_enabled_strategies(self) -> None:
 		config = {
@@ -171,9 +172,10 @@ class TestGetEnabledStrategies:
 			},
 		}
 		strat = self._strat()
-		result = get_enabled_strategies(config, [strat])
+		result, rejected = get_enabled_strategies(config, [strat])
 		assert len(result) == 1
 		assert result[0] is strat
+		assert rejected == []
 
 	def test_merges_param_overrides(self) -> None:
 		config = {
@@ -187,7 +189,7 @@ class TestGetEnabledStrategies:
 			},
 		}
 		strat = self._strat()
-		result = get_enabled_strategies(config, [strat])
+		result, _ = get_enabled_strategies(config, [strat])
 		assert result[0].default_params["foo"] == 99
 
 	def test_raises_on_missing_sizing(self) -> None:
@@ -209,8 +211,9 @@ class TestGetEnabledStrategies:
 			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
 			"strategies": {},
 		}
-		result = get_enabled_strategies(config, [self._strat()])
+		result, rejected = get_enabled_strategies(config, [self._strat()])
 		assert result == []
+		assert rejected == []
 
 	def test_raises_on_invalid_sizing_config(self) -> None:
 		"""Validates sizing config has required keys."""
@@ -253,8 +256,9 @@ class TestGetEnabledStrategies:
 				"multi": {"enabled": True, "series": ["SERIES_A", "SERIES_B"]},
 			},
 		}
-		result = get_enabled_strategies(config, [MultiSeries()])
+		result, rejected = get_enabled_strategies(config, [MultiSeries()])
 		assert len(result) == 1
+		assert rejected == []
 
 	def test_empty_supported_series_means_no_restriction(self) -> None:
 		"""A strategy with supported_series=[] has no allow-list, so any
@@ -274,8 +278,9 @@ class TestGetEnabledStrategies:
 				"any": {"enabled": True, "series": ["WHATEVER"]},
 			},
 		}
-		result = get_enabled_strategies(config, [AnySeries()])
+		result, rejected = get_enabled_strategies(config, [AnySeries()])
 		assert len(result) == 1
+		assert rejected == []
 
 	def test_supported_series_validation_can_be_disabled(self) -> None:
 		"""``strict_series_validation: false`` turns the error into a warning."""
@@ -286,9 +291,29 @@ class TestGetEnabledStrategies:
 				"stub": {"enabled": True, "series": ["UNSUPPORTED_SERIES"]},
 			},
 		}
-		# Should NOT raise; strategy loads with warning
-		result = get_enabled_strategies(config, [self._strat()])
+		# Should NOT raise; strategy loads with warning, rejected pair surfaced
+		result, rejected = get_enabled_strategies(config, [self._strat()])
 		assert len(result) == 1
+		assert rejected == [("stub", "UNSUPPORTED_SERIES")]
+
+	def test_rejected_pairs_include_every_unsupported_series(self) -> None:
+		"""Non-strict mode: rejected_pairs lists every unsupported series,
+		not just the first. The ``entries_skipped_unsupported`` gauge needs
+		the full count to be meaningful on the Pi's summary log.
+		"""
+		config = {
+			"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3},
+			"strict_series_validation": False,
+			"strategies": {
+				"stub": {
+					"enabled": True,
+					"series": ["SERIES_A", "BAD_1", "BAD_2"],
+				},
+			},
+		}
+		result, rejected = get_enabled_strategies(config, [self._strat()])
+		assert len(result) == 1
+		assert rejected == [("stub", "BAD_1"), ("stub", "BAD_2")]
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +357,7 @@ class TestManifestSupportedSeries:
 		"""Class opts out (supported_series=[]) but manifest provides the list."""
 		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_A"]}})
 		cfg = self._base_cfg(manifest, ["SERIES_A"])
-		result = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+		result, _ = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
 		assert len(result) == 1
 
 	def test_manifest_rejects_out_of_list_when_class_is_empty(self, tmp_path: Path) -> None:
@@ -346,7 +371,7 @@ class TestManifestSupportedSeries:
 		"""Effective whitelist is union(class.supported_series, manifest[name].series)."""
 		manifest = _write_manifest(tmp_path, {"my-strat": {"series": ["SERIES_B"]}})
 		cfg = self._base_cfg(manifest, ["SERIES_A", "SERIES_B"])
-		result = get_enabled_strategies(cfg, [self._strat_with_whitelist(["SERIES_A"])])
+		result, _ = get_enabled_strategies(cfg, [self._strat_with_whitelist(["SERIES_A"])])
 		assert len(result) == 1
 
 	def test_union_still_rejects_series_in_neither(self, tmp_path: Path) -> None:
@@ -388,6 +413,6 @@ class TestManifestSupportedSeries:
 			"ghost-strategy": {"series": ["SERIES_Z"]},
 		})
 		cfg = self._base_cfg(manifest, ["SERIES_A"])
-		result = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
+		result, _ = get_enabled_strategies(cfg, [self._strat_with_whitelist([])])
 		assert len(result) == 1
 		assert result[0].name == "my-strat"
