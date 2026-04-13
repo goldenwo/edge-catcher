@@ -221,7 +221,8 @@ async def _settlement_poller(
 ) -> None:
 	"""Periodically check open trades for settlement."""
 	strat_by_name = {s.name: s for s in strategies}
-	metrics = metrics or Metrics()
+	if metrics is None:
+		metrics = Metrics()
 	while True:
 		await asyncio.sleep(interval)
 		try:
@@ -278,7 +279,8 @@ async def _summary_logger(
 	stays non-zero across resets. Counters reset after each snapshot so the
 	next interval reflects fresh activity.
 	"""
-	metrics = metrics or Metrics()
+	if metrics is None:
+		metrics = Metrics()
 	while True:
 		await asyncio.sleep(interval)
 		try:
