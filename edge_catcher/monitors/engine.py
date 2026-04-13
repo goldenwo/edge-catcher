@@ -426,13 +426,21 @@ async def run_engine(config_path: Path) -> None:
 
 	# 2. Discover and filter strategies
 	all_strategies = discover_strategies()
-	strategies = get_enabled_strategies(config, all_strategies)
+	strategies, rejected_pairs = get_enabled_strategies(config, all_strategies)
 	if not strategies:
 		log.error("No enabled strategies found — exiting")
 		store.close()
 		return
 
 	log.info("Enabled strategies: %s", [s.name for s in strategies])
+	if rejected_pairs:
+		log.warning(
+			"Startup: %d (strategy, series) pair(s) flagged unsupported under "
+			"non-strict validation: %s",
+			len(rejected_pairs),
+			rejected_pairs,
+		)
+	metrics.set_gauge("entries_skipped_unsupported", len(rejected_pairs))
 
 	# 3. Load persisted states, determine active series
 	all_states = store.load_all_states()
