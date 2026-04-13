@@ -13,6 +13,7 @@ from edge_catcher.monitors.trade_store import TradeStore
 from edge_catcher.monitors.engine import (
 	_collect_active_series,
 	_handle_orderbook_delta,
+	_handle_orderbook_snapshot,
 	_handle_ticker_msg,
 	_handle_trade_msg,
 	_pnl_label,
@@ -396,6 +397,159 @@ class TestHandleOrderbookDelta:
 
 		# Should not raise
 		_handle_orderbook_delta(ms, msg)
+
+
+# ---------------------------------------------------------------------------
+# _handle_orderbook_snapshot tests
+# ---------------------------------------------------------------------------
+
+class TestHandleOrderbookSnapshot:
+	def test_installs_snapshot_from_ws_message(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [["0.50", 10], ["0.45", 20]],
+				"no": [["0.30", 5]],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob is not None
+		assert ob.yes_levels == [(0.45, 20), (0.50, 10)]  # sorted ascending
+		assert ob.no_levels == [(0.30, 5)]
+
+	def test_replaces_existing_book(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+		ms.seed_orderbook("T1", OrderbookSnapshot(
+			yes_levels=[(0.70, 99)], no_levels=[(0.20, 99)],
+		))
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [["0.55", 8]],
+				"no": [["0.40", 12]],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob.yes_levels == [(0.55, 8)]  # old 0.70 level gone
+		assert ob.no_levels == [(0.40, 12)]  # old 0.20 level gone
+
+	def test_filters_sub_cent_ghost_levels(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [
+					["0.007", 100],  # sub-cent ghost
+					["0.50", 10],    # legit
+					["0.009", 50],   # sub-cent ghost
+				],
+				"no": [["0.001", 200]],  # sub-cent ghost
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob.yes_levels == [(0.50, 10)]
+		assert ob.no_levels == []
+
+	def test_filters_non_positive_quantities(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [["0.50", 0], ["0.45", -5], ["0.40", 10]],
+				"no": [],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob.yes_levels == [(0.40, 10)]
+
+	def test_empty_sides_install_empty_book(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [],
+				"no": [],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob is not None
+		assert ob.yes_levels == []
+		assert ob.no_levels == []
+
+	def test_handles_fp_field_shape(self):
+		"""Kalshi's public schema documents yes_dollars_fp / no_dollars_fp."""
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes_dollars_fp": [["0.50", "10.00"]],
+				"no_dollars_fp": [["0.30", "5.00"]],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob.yes_levels == [(0.50, 10)]
+		assert ob.no_levels == [(0.30, 5)]
+
+	def test_ignores_missing_ticker(self):
+		ms = MarketState()
+		msg = {"type": "orderbook_snapshot", "msg": {}}
+
+		# Should not raise, should not install any book
+		_handle_orderbook_snapshot(ms, msg)
+		assert ms.get_orderbook("T1") is None
+
+	def test_ignores_malformed_entries(self):
+		ms = MarketState()
+		ms.register_ticker("T1")
+
+		msg = {
+			"type": "orderbook_snapshot",
+			"msg": {
+				"market_ticker": "T1",
+				"yes": [
+					["not_a_price", 10],    # bad price
+					["0.50", "not_qty"],    # bad qty
+					[],                      # empty entry
+					["0.45", 15],            # legit
+				],
+				"no": [],
+			},
+		}
+		_handle_orderbook_snapshot(ms, msg)
+
+		ob = ms.get_orderbook("T1")
+		assert ob.yes_levels == [(0.45, 15)]
 
 
 # ---------------------------------------------------------------------------
