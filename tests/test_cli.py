@@ -326,12 +326,14 @@ def test_research_loop_help(capsys):
     assert "--max-llm-calls" in proc.stdout
 
 
-def test_research_loop_start_end_defaults():
-    """Regression: `research loop` must default --start and --end to a
-    concrete date range. Passing None propagates through GridPlanner into
-    every hypothesis, and TemporalConsistencyGate then fails with
-    "0 windows possible" on any series whose DB-resolved range is < 35
-    days. Discovered during the 2026-04-13 Task 5 sweep.
+def test_research_loop_start_end_default_to_none():
+    """Regression: `research loop` must default --start and --end to None
+    so the backtester picks up all available data per series. Hardcoding
+    a specific year silently excludes real data from DBs whose history is
+    a rolling recent window (discovered when the 2025-01-01..2025-12-31
+    default excluded all 2026 data from the v2 sweep, leaving most crypto
+    series with 0 trades). The TemporalConsistencyGate handles None-date
+    hypotheses by querying the DB for the per-series range itself.
     """
     import argparse
     from edge_catcher.cli import research as research_cli
@@ -341,5 +343,5 @@ def test_research_loop_start_end_defaults():
     research_cli.register(sub)
 
     args = parser.parse_args(["research", "loop"])
-    assert args.start == "2025-01-01"
-    assert args.end == "2025-12-31"
+    assert args.start is None
+    assert args.end is None
