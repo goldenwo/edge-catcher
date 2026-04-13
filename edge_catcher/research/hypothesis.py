@@ -19,6 +19,7 @@ class Hypothesis:
     parent_id: str | None = None
     tags: list[str] = field(default_factory=list)
     notes: str = ""
+    slippage_cents: int | None = None
 
     @property
     def series(self) -> str:
