@@ -74,7 +74,7 @@ class ResearchAgent:
     # Core: run a single hypothesis
     # ------------------------------------------------------------------
 
-    def run_hypothesis(self, h: Hypothesis) -> HypothesisResult:
+    def run_hypothesis(self, h: Hypothesis, sweep_N_override: int | None = None) -> HypothesisResult:
         """Run a single hypothesis via CLI subprocess, evaluate, track, return result."""
         # Dedup check: skip if already tested with identical parameters
         if not self.force:
@@ -106,6 +106,8 @@ class ResearchAgent:
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
+        if h.slippage_cents is not None:
+            cmd.extend(["--slippage", str(h.slippage_cents)])
         if h.start_date:
             cmd += ["--start", h.start_date]
         if h.end_date:
@@ -179,7 +181,7 @@ class ResearchAgent:
         preliminary_verdict = verdict
         if verdict in ("candidate", "validate"):
             try:
-                pipeline = ValidationPipeline(default_gates())
+                pipeline = ValidationPipeline(default_gates(sweep_N_override=sweep_N_override))
                 context = GateContext(
                     tracker=self.tracker,
                     pnl_values=data.get("pnl_values", []),
@@ -227,6 +229,8 @@ class ResearchAgent:
             "--fee-pct", str(h.fee_pct),
             "--json",
         ]
+        if h.slippage_cents is not None:
+            cmd.extend(["--slippage", str(h.slippage_cents)])
         if h.start_date:
             cmd += ["--start", h.start_date]
         if h.end_date:
@@ -285,6 +289,8 @@ class ResearchAgent:
                 for series in series_list:
                     if series == h.series and db_path == h.db_path:
                         continue  # skip the one we just ran
+                    # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                    # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                     adjacent.append(
                         Hypothesis(
                             strategy=h.strategy,
@@ -302,6 +308,8 @@ class ResearchAgent:
             families = _build_strategy_families()
             cousins = families.get(h.strategy, [])
             for cousin in cousins:
+                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 adjacent.append(
                     Hypothesis(
                         strategy=cousin,
@@ -405,6 +413,8 @@ class ResearchAgent:
         hypotheses: list[Hypothesis] = []
         for db_path, series_list in self._discover_all_series().items():
             for series in series_list:
+                # TODO(task-2-followup): inherit slippage_cents from parent hypothesis (or use slippage_for_series)
+                # to avoid re-backtesting at the optimistic CLI default (1c) after grid used a realistic value.
                 hypotheses.append(
                     Hypothesis(
                         strategy=strategy,

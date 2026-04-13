@@ -96,6 +96,36 @@ class TestDeflatedSharpeGate:
 		assert gr.passed
 		assert gr.details["dsr"] > 0.95
 
+	def test_dsr_respects_sweep_n_override(self):
+		"""Passing sweep_N_override=500 makes N=500 regardless of tracker count."""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+		tracker = self._make_tracker_with_results([0.1, 0.2, 0.3])  # only 3 trials
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=tracker, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate(sweep_N_override=500)
+		gr = gate.check(result, ctx)
+		assert gr.details["n_strategies"] == 500
+
+	def test_dsr_override_works_without_tracker(self):
+		"""tracker=None + sweep_N_override → override wins, no early return.
+
+		Locks in the Task 8 reordering: the override check must come BEFORE
+		the tracker-None guard in check(), otherwise override+null-tracker
+		would fail on the internal check and never reach the computation.
+		"""
+		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
+
+		pnl = [20] * 80 + [-2] * 20
+		result = _make_result(pnl_values=pnl, sharpe=5.0, total_trades=100)
+		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)
+
+		gate = DeflatedSharpeGate(sweep_N_override=500)
+		gr = gate.check(result, ctx)
+		assert gr.details["n_strategies"] == 500
+
 	def test_low_dsr_fails(self):
 		"""Strategy with weak per-trade Sharpe among many families should fail DSR."""
 		from edge_catcher.research.validation.gate_dsr import DeflatedSharpeGate
@@ -836,6 +866,18 @@ class TestExtractNumericParams:
 		)
 		assert _extract_numeric_params(code) == []
 
+	def test_extract_skips_size_param(self):
+		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
+		code = (
+			"class Strat(Strategy):\n"
+			"\tname = 's'\n"
+			"\tdef __init__(self, threshold: int = 60, size: int = 1) -> None:\n"
+			"\t\tpass\n"
+		)
+		params = dict(_extract_numeric_params(code))
+		assert "threshold" in params
+		assert "size" not in params
+
 	def test_ignores_non_init_method_params(self):
 		"""Only __init__ defaults are parameters; other methods' defaults are not."""
 		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
@@ -901,6 +943,12 @@ class TestReplaceParam:
 			'name = "strategy_a__sens_unchanged"' in out
 		# class renamed (sanitized — hyphens → underscores)
 		assert "class debut_fade__sens_unchanged(Strategy)" in out
+
+	def test_replace_param_outputs_tab_indented(self):
+		from edge_catcher.research.validation.gate_sensitivity import _replace_param
+		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 72, "strategy_a__sens_72")
+		# No 4-space indentation runs should appear
+		assert "    " not in out, f"ast.unparse 4-space indentation leaked: {out[:200]}"
 
 
 class TestParameterSensitivityGate:
