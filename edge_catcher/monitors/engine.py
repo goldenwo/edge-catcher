@@ -23,6 +23,7 @@ from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
 	TickContext,
+	_is_tradeable_cents,
 	derive_event_ticker,
 )
 from edge_catcher.monitors.notifications import notify
@@ -576,12 +577,13 @@ async def _ws_loop(
 
 			msg_type = msg.get("type")
 
-			# TODO(task-1-followup): Kalshi sends orderbook_snapshot messages
-			# as the initial subscribe response AND (possibly) for full-book
-			# refreshes mid-session. The engine currently drops these; REST
-			# recovery compensates on reconnect but quiet markets may drift
-			# mid-session. See Step 1.3 evidence in the audit-followups plan.
-			if msg_type == "orderbook_delta":
+			if msg_type == "orderbook_snapshot":
+				try:
+					_handle_orderbook_snapshot(market_state, msg)
+				except Exception:
+					log.exception("Error handling orderbook_snapshot")
+
+			elif msg_type == "orderbook_delta":
 				try:
 					_handle_orderbook_delta(market_state, msg)
 				except Exception:
@@ -700,6 +702,51 @@ def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
 				)
 			except Exception:
 				log.exception("Error applying orderbook delta for %s", ticker)
+
+
+def _handle_orderbook_snapshot(market_state: MarketState, msg: dict) -> None:
+	"""Install a full orderbook snapshot from a Kalshi WS message.
+
+	Kalshi emits ``orderbook_snapshot`` as the initial response when a
+	client subscribes to the ``orderbook_delta`` channel, and again for
+	full-book refreshes mid-session on quiet markets. Without this handler
+	the engine drops the message and relies on REST recovery to re-seed on
+	reconnect, which leaves quiet markets stale mid-session.
+
+	Accepts both the legacy ``yes``/``no`` shape (matching the in-prod
+	delta handler) and the ``yes_dollars_fp``/``no_dollars_fp`` shape from
+	Kalshi's current public schema. Sub-cent ghost levels are filtered —
+	same invariant as REST snapshot ingest and delta application.
+	"""
+	data = msg.get("msg", {})
+	ticker = data.get("market_ticker", "")
+	if not ticker:
+		return
+
+	def _parse_side(raw_levels: Any) -> list[tuple[float, int]]:
+		parsed: list[tuple[float, int]] = []
+		for entry in raw_levels or []:
+			try:
+				price = float(entry[0])
+				qty = int(float(entry[1]))
+			except (TypeError, ValueError, IndexError):
+				continue
+			if qty <= 0:
+				continue
+			if not _is_tradeable_cents(price):
+				continue
+			parsed.append((price, qty))
+		parsed.sort(key=lambda lvl: lvl[0])
+		return parsed
+
+	yes_raw = data.get("yes") if data.get("yes") is not None else data.get("yes_dollars_fp")
+	no_raw = data.get("no") if data.get("no") is not None else data.get("no_dollars_fp")
+
+	snapshot = OrderbookSnapshot(
+		yes_levels=_parse_side(yes_raw),
+		no_levels=_parse_side(no_raw),
+	)
+	market_state.seed_orderbook(ticker, snapshot)
 
 
 def _handle_ticker_msg(
