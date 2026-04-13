@@ -137,6 +137,17 @@ def get_enabled_strategies(
 	validated on. Set ``strict_series_validation: false`` at the top
 	level of config to downgrade the error to a warning.
 
+	TODO(metrics-follow-up): this function doesn't currently return the
+	set of (strategy, series) pairs that were rejected during filtering.
+	The paper trader's ``entries_skipped_unsupported`` gauge exists in
+	metrics.py but is populated with 0 because there's nowhere to count
+	the rejected pairs at startup. To close that gap, reshape this
+	function to return ``(enabled, rejected_pairs)`` and have
+	``run_engine`` call ``metrics.set_gauge("entries_skipped_unsupported",
+	len(rejected_pairs))``. Deferred from Task 6a of the audit-followups
+	plan — gauge infrastructure is fully wired end-to-end, just needs a
+	population source.
+
 	Args:
 		config:         Full config dict.
 		all_strategies: All discovered strategy instances.
