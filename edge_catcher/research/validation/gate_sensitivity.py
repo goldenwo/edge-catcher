@@ -309,6 +309,11 @@ def _perturb(value: int | float, pct: float) -> int | float:
 	return result
 
 
+def _tabify(code: str) -> str:
+	"""Convert ast.unparse 4-space indentation to tabs to match strategies_local.py."""
+	return code.replace("    ", "\t")
+
+
 def _replace_param(
 	code: str, original_name: str, param_name: str,
 	new_value: int | float, new_strategy_name: str,
@@ -337,7 +342,7 @@ def _replace_param(
 				_replace_init_default(item, param_name, new_value)
 
 	ast.fix_missing_locations(tree)
-	return ast.unparse(tree)
+	return _tabify(ast.unparse(tree))
 
 
 def _replace_init_default(
