@@ -56,6 +56,7 @@ def walk_book_with_ceiling(
 	side: str,
 	size: int,
 	max_slippage_cents: int,
+	max_cost_cents: int | None = None,
 ) -> FillResult:
 	"""Walk the book with a slippage ceiling.
 
@@ -68,6 +69,15 @@ def walk_book_with_ceiling(
 		side:               'yes' or 'no'.
 		size:               Target number of contracts.
 		max_slippage_cents: Maximum allowed price above best in cents.
+		max_cost_cents:     Optional hard cap on total fill cost. When
+		                    set, the walker stops consuming levels the
+		                    moment adding one more contract at the
+		                    current price would push total_cost_cents
+		                    above this value. Used by resolve_fill to
+		                    enforce ``risk_per_trade_cents`` exactly —
+		                    prevents the longshot-entry oversizing bug
+		                    where a 2¢ signal gets a 4¢+ book walk that
+		                    blows through the risk budget.
 
 	Returns:
 		FillResult with intended_size set to *size*.
@@ -85,19 +95,31 @@ def walk_book_with_ceiling(
 	best_price_cents = round(levels[0][0] * 100)
 	ceiling_cents = best_price_cents + max_slippage_cents
 	remaining = size
+	remaining_budget = max_cost_cents  # None = unlimited
 	total_cost_cents = 0
 	total_filled = 0
 
 	for price_dollars, qty in levels:
 		if remaining <= 0:
 			break
+		if remaining_budget is not None and remaining_budget <= 0:
+			break
 		price_cents = round(price_dollars * 100)
 		if price_cents > ceiling_cents:
 			break
 		take = min(qty, remaining)
+		# Cap take so total cost never exceeds max_cost_cents. Integer
+		# floor division ensures we stay strictly at-or-below the budget.
+		if remaining_budget is not None:
+			max_by_budget = remaining_budget // price_cents
+			take = min(take, max_by_budget)
+		if take == 0:
+			break
 		total_cost_cents += take * price_cents
 		total_filled += take
 		remaining -= take
+		if remaining_budget is not None:
+			remaining_budget -= take * price_cents
 
 	if total_filled == 0:
 		return FillResult(
@@ -241,7 +263,16 @@ def resolve_fill(
 			intended_size=raw_size,
 		)
 
-	fill = walk_book_with_ceiling(book, side, raw_size, max_slippage)
+	# Pass risk_cents as the walker's hard cost cap. `compute_raw_size`
+	# computes contracts from the signal's entry_price, but the real
+	# book walk can fill at higher prices (2-5¢ divergence is common
+	# and stays under the stale-book 10¢ threshold). Without this cap,
+	# longshot entries at 2¢ signal / 4¢ actual fill silently doubled
+	# the configured per-trade risk — the 2026-04-14 paper-trader
+	# oversizing bug.
+	fill = walk_book_with_ceiling(
+		book, side, raw_size, max_slippage, max_cost_cents=risk_cents,
+	)
 
 	if fill.fill_size < min_fill_threshold:
 		log.debug(

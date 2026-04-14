@@ -152,9 +152,15 @@ class TestResolveFill:
 		)
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert fill is not None
-		assert fill.intended_size == 40  # 200 // 5
-		assert fill.fill_size == 40  # book has 40 within ceiling
-		assert fill.blended_price_cents == 6  # (20*5 + 20*6) / 40 = 5.5 → round(5.5) = 6
+		assert fill.intended_size == 40  # 200 // 5 — pre-walk target
+		# Walker fills 20@5¢ (cost 100) then caps at 16@6¢ (cost 96) because
+		# adding a 17th contract at 6¢ would push total cost to 202 > 200c risk.
+		# Without the risk-budget cap the walker would have taken 20@6, spending
+		# 220c → 10% over the configured budget. See resolve_fill docstring.
+		assert fill.fill_size == 36
+		assert fill.blended_price_cents == 5  # round((20*5 + 16*6) / 36) = round(5.44) = 5
+		# Verify the real cost stays strictly within the risk budget
+		assert fill.fill_size * fill.blended_price_cents <= config["sizing"]["risk_per_trade_cents"]
 
 	def test_empty_book_uses_entry_price_fallback(self, config) -> None:
 		"""Empty book → startup fallback: returns fill at entry_price (blended=0).
@@ -340,3 +346,96 @@ class TestResolveFill:
 		result = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
 		assert isinstance(result, FillSkip)
 		assert result.reason == "below_min_fill"
+
+
+class TestRiskBudgetCap:
+	"""Regression tests for the 2026-04-14 longshot oversizing bug.
+
+	The `compute_raw_size` sizer computes contract count from the
+	signal's entry_price, but the real book walk fills at the book's
+	current prices — which can be 2-5c higher (within the stale-book
+	10c tolerance). For longshot strategies like strategy_b that enter at
+	1-15c, this previously doubled or tripled the configured per-trade
+	risk. Fix: walk_book_with_ceiling now takes max_cost_cents and
+	trims the take at each level so total cost never exceeds it.
+	"""
+
+	@pytest.fixture
+	def config(self):
+		return {"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3}}
+
+	def test_longshot_walk_divergence_is_capped_at_budget(self, config) -> None:
+		"""Signal entry 2c but book's best_ask is already 3c with thin
+		depth forcing the walk into the 4c level. Without the cap, sizer
+		would buy 100 contracts (200 // 2) and the walker would fill
+		them at ~3.5c avg → total cost ~350c, 1.75x the 200c risk.
+		With the cap, total cost is strictly ≤ 200c.
+		"""
+		book = OrderbookSnapshot(
+			yes_levels=[(0.03, 30), (0.04, 100)],   # best=3c; 2c signal ≠ book best
+			no_levels=[],
+		)
+		fill = resolve_fill(config, entry_price_cents=2, side="yes", book=book)
+		assert isinstance(fill, FillResult)
+		# intended_size still sized from signal price (that's the contract)
+		assert fill.intended_size == 100  # 200 // 2
+
+		# Real cost stays within budget, not ≈350c
+		real_cost = fill.fill_size * fill.blended_price_cents
+		assert real_cost <= config["sizing"]["risk_per_trade_cents"]
+
+		# Specifically: walker takes 30@3c (cost 90) + 27@4c (cost 108) = 198c
+		# (28@4c would push cost to 202, past the 200c cap)
+		assert fill.fill_size == 57
+		assert fill.blended_price_cents == 3  # round(198/57) = round(3.47) = 3
+
+	def test_normal_entry_unchanged_by_budget_cap(self, config) -> None:
+		"""Sweet-spot-style entry where signal and book agree: the
+		cap is not load-bearing and the walker fills the full raw_size.
+		"""
+		book = OrderbookSnapshot(
+			yes_levels=[(0.50, 100)],   # plenty of depth at best
+			no_levels=[],
+		)
+		fill = resolve_fill(config, entry_price_cents=50, side="yes", book=book)
+		assert isinstance(fill, FillResult)
+		assert fill.fill_size == 4  # 200 // 50 = 4
+		assert fill.blended_price_cents == 50
+		assert fill.fill_size * fill.blended_price_cents == 200  # exactly at budget
+
+	def test_budget_cap_respects_min_fill(self, config) -> None:
+		"""If the budget cap trims the fill below min_fill, the trade is
+		skipped rather than entered under-sized. Prevents a 1-contract
+		runt fill that wouldn't have covered its own fees.
+		"""
+		# Budget 200c, signal 2c → raw_size 100. Book walks entirely at
+		# 99c (extreme slippage, stale_book wouldn't catch a 2→99 jump
+		# because it's over the 10c threshold — simulate with a normal
+		# small book instead). Pick an entry price + book combo where
+		# 200c budget only fits 2 contracts at the walked price:
+		# 200c // 99c = 2 (below min_fill=3).
+		book = OrderbookSnapshot(
+			yes_levels=[(0.90, 100)],
+			no_levels=[],
+		)
+		# Signal at 90c matches book (no divergence). raw_size = 200//90 = 2.
+		# Walker fills 2@90c = 180c (under budget). But 2 < min_fill=3.
+		result = resolve_fill(config, entry_price_cents=90, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "below_min_fill"
+
+	def test_walker_accepts_none_budget_for_backward_compat(self) -> None:
+		"""Direct callers of walk_book_with_ceiling (e.g. existing tests)
+		can omit max_cost_cents to get the unbounded pre-fix behavior.
+		"""
+		book = OrderbookSnapshot(
+			yes_levels=[(0.03, 30), (0.04, 100)],
+			no_levels=[],
+		)
+		fill = walk_book_with_ceiling(book, "yes", 100, max_slippage_cents=2)
+		# Unbounded walker fills 30@3 + 70@4 = 370c cost, 100 contracts
+		assert fill.fill_size == 100
+		assert fill.blended_price_cents == 4  # round(370/100) = 4
+		# (this is exactly the amount the resolve_fill cap prevents —
+		# the caller is responsible for enforcing budget at a higher layer
+		# if they don't pass max_cost_cents)
