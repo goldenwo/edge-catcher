@@ -8,6 +8,7 @@ import logging
 import math
 import random
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -197,12 +198,41 @@ class ParameterSensitivityGate(Gate):
 		return bt_sharpe / math.sqrt(trades) if trades >= 1 else 0.0
 
 	def _cleanup(self, temp_name: str) -> None:
-		"""Remove temporary strategy from strategies_local.py."""
+		"""Remove a sensitivity-generated temporary strategy from strategies_local.py.
+
+		Hardened after the 2026-04-13 Task 5 v2 sweep wiped the file: this
+		function now refuses to write unless every safety invariant holds,
+		and always backs up to ``strategies_local.py.bak`` before touching
+		the real file. Invariants:
+
+		1. ``temp_name`` must contain ``__sens_`` (matches the naming scheme
+		   from ``_run_neighbor``). Refuses otherwise — we will never
+		   silently delete a real strategy by mistake.
+		2. strategies_local.py must parse cleanly. A previous version
+		   fell back to line-level text filtering on SyntaxError, which
+		   could remove unrelated lines; that fallback is gone.
+		3. The AST splice must remove **exactly one** top-level class.
+		   Any other delta (0 or ≥2) aborts without writing.
+		4. The post-splice file must parse as valid Python.
+		5. The post-splice file must still contain at least one non-temp
+		   class — refuses to reduce the file to an empty or sens-only
+		   state.
+
+		Any failed invariant logs an error and leaves the file untouched.
+		"""
 		from edge_catcher.runner.strategy_parser import (
 			STRATEGIES_LOCAL_PATH, STRATEGIES_LOCAL_MODULE,
 		)
 
 		if not STRATEGIES_LOCAL_PATH.exists():
+			return
+
+		# Invariant 1: only clean up sensitivity-temp names.
+		if "__sens_" not in temp_name:
+			logger.error(
+				"_cleanup refused: %r is not a sensitivity-temp name",
+				temp_name,
+			)
 			return
 
 		# encoding="utf-8" is load-bearing on Windows: the default locale
@@ -211,20 +241,26 @@ class ParameterSensitivityGate(Gate):
 		# exception as a "validation pipeline error", silently demoting
 		# real candidates to "explore". Discovered during Task 5 sweep.
 		source = STRATEGIES_LOCAL_PATH.read_text(encoding="utf-8")
+
+		# Invariant 2: current file must parse cleanly.
 		try:
 			tree = ast.parse(source)
-		except SyntaxError:
-			# File has a syntax error; try to remove by text matching as fallback
-			lines = source.splitlines()
-			cleaned = [l for l in lines if temp_name not in l]
-			if len(cleaned) < len(lines):
-				STRATEGIES_LOCAL_PATH.write_text("\n".join(cleaned) + "\n")
+		except SyntaxError as exc:
+			logger.error(
+				"_cleanup refused: strategies_local.py has syntax error (%s); "
+				"manual repair required before cleanup of %r can proceed",
+				exc, temp_name,
+			)
 			return
 
-		lines = source.splitlines()
-		for node in tree.body:
-			if not isinstance(node, ast.ClassDef):
-				continue
+		classes_before = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+		non_temp_before = sum(
+			1 for n in classes_before if not _class_has_temp_name(n)
+		)
+
+		# Locate the target class by its ``name = temp_name`` attribute.
+		target_class: ast.ClassDef | None = None
+		for node in classes_before:
 			for item in node.body:
 				if (
 					isinstance(item, ast.Assign)
@@ -232,16 +268,97 @@ class ParameterSensitivityGate(Gate):
 					and isinstance(item.value, ast.Constant)
 					and item.value.value == temp_name
 				):
-					start_line = node.lineno - 1
-					end_line = node.end_lineno or node.lineno
-					lines[start_line:end_line] = []
-					try:
-						STRATEGIES_LOCAL_PATH.write_text("\n".join(lines) + "\n")
-						mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
-						importlib.reload(mod)
-					except Exception:
-						pass
-					return
+					target_class = node
+					break
+			if target_class is not None:
+				break
+
+		if target_class is None:
+			# Temp class not present — nothing to remove, nothing to write.
+			return
+
+		lines = source.splitlines()
+		start_line = target_class.lineno - 1
+		end_line = target_class.end_lineno or target_class.lineno
+		new_lines = lines[:start_line] + lines[end_line:]
+		new_source = "\n".join(new_lines) + "\n"
+
+		# Invariant 4: post-splice file must parse.
+		try:
+			new_tree = ast.parse(new_source)
+		except SyntaxError as exc:
+			logger.error(
+				"_cleanup refused: splice would leave strategies_local.py "
+				"with a syntax error (%s). temp_name=%r",
+				exc, temp_name,
+			)
+			return
+
+		new_classes = [n for n in new_tree.body if isinstance(n, ast.ClassDef)]
+
+		# Invariant 3: exactly one class removed.
+		if len(new_classes) != len(classes_before) - 1:
+			logger.error(
+				"_cleanup refused: splice would change class count by %d "
+				"(expected -1). temp_name=%r",
+				len(new_classes) - len(classes_before), temp_name,
+			)
+			return
+
+		# Invariant 5: non-temp class count must not drop.
+		non_temp_after = sum(1 for n in new_classes if not _class_has_temp_name(n))
+		if non_temp_after < non_temp_before:
+			logger.error(
+				"_cleanup refused: splice would remove a non-temp class "
+				"(%d -> %d). temp_name=%r",
+				non_temp_before, non_temp_after, temp_name,
+			)
+			return
+		if non_temp_after == 0:
+			logger.error(
+				"_cleanup refused: splice would leave strategies_local.py "
+				"with zero non-temp classes. temp_name=%r",
+				temp_name,
+			)
+			return
+
+		# All invariants hold — back up before writing.
+		backup_path = STRATEGIES_LOCAL_PATH.with_suffix(".py.bak")
+		try:
+			shutil.copy2(STRATEGIES_LOCAL_PATH, backup_path)
+		except Exception as exc:
+			logger.error(
+				"_cleanup refused: backup copy to %s failed: %s",
+				backup_path, exc,
+			)
+			return
+
+		STRATEGIES_LOCAL_PATH.write_text(new_source, encoding="utf-8")
+
+		try:
+			mod = importlib.import_module(STRATEGIES_LOCAL_MODULE)
+			importlib.reload(mod)
+		except Exception:
+			pass
+
+
+def _class_has_temp_name(class_node: ast.ClassDef) -> bool:
+	"""True if the class defines ``name = <str containing '__sens_'>``.
+
+	Used by ParameterSensitivityGate._cleanup to tell sensitivity-generated
+	classes apart from real strategies without relying on the caller's
+	temp_name matching.
+	"""
+	for item in class_node.body:
+		if (
+			isinstance(item, ast.Assign)
+			and any(isinstance(t, ast.Name) and t.id == "name" for t in item.targets)
+			and isinstance(item.value, ast.Constant)
+			and isinstance(item.value.value, str)
+			and "__sens_" in item.value.value
+		):
+			return True
+	return False
 
 
 def _extract_numeric_params(code: str) -> list[tuple[str, int | float]]:
