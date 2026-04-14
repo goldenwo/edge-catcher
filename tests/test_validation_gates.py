@@ -1155,6 +1155,135 @@ class MinimalStrategy(Strategy):
 		assert gate_a._file_lock is gate_b._file_lock
 
 
+class TestCleanupSafety:
+	"""_cleanup must never wipe the strategies_local.py file.
+
+	Regression: on 2026-04-13 during Task 5 v2 sweep, _cleanup reduced the
+	file to 6 bytes (3 blank lines), taking out every strategy. The new
+	invariants refuse any splice that would remove more than one class,
+	remove a non-temp class, leave the file empty, or corrupt its syntax.
+	"""
+
+	def _make_file(self, tmp_path, contents: str):
+		from pathlib import Path
+		p: Path = tmp_path / "strategies_local.py"
+		p.write_text(contents, encoding="utf-8")
+		return p
+
+	def _run_cleanup(self, gate, strategies_path, temp_name: str):
+		"""Run _cleanup with STRATEGIES_LOCAL_PATH pointed at a tmp file."""
+		import edge_catcher.runner.strategy_parser as sp
+		from unittest.mock import patch
+
+		# The module name doesn't matter — we patch importlib.import_module
+		# inside _cleanup so reload() is a no-op.
+		with patch.object(sp, "STRATEGIES_LOCAL_PATH", strategies_path), \
+		     patch("importlib.import_module", side_effect=ImportError("test")):
+			gate._cleanup(temp_name)
+
+	def test_refuses_non_temp_name(self, tmp_path):
+		"""A call with a non-sensitivity name must not touch the file."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		original = (
+			"class RealStrat:\n"
+			"    name = 'real-strat'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+		)
+		path = self._make_file(tmp_path, original)
+		gate = ParameterSensitivityGate()
+		self._run_cleanup(gate, path, "real-strat")  # not a __sens_ name
+
+		assert path.read_text(encoding="utf-8") == original
+
+	def test_removes_exactly_one_sens_class(self, tmp_path):
+		"""Normal happy path: one sensitivity temp removed, others intact."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		original = (
+			"class RealA:\n"
+			"    name = 'real-a'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+			"\n"
+			"class TempA(RealA):\n"
+			"    name = 'real-a__sens_x_1'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+			"\n"
+			"class RealB:\n"
+			"    name = 'real-b'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+		)
+		path = self._make_file(tmp_path, original)
+		gate = ParameterSensitivityGate()
+		self._run_cleanup(gate, path, "real-a__sens_x_1")
+
+		new = path.read_text(encoding="utf-8")
+		assert "real-a__sens_x_1" not in new
+		assert "real-a" in new       # real-a survives
+		assert "real-b" in new       # real-b survives
+
+		# Backup was created
+		backup = path.with_suffix(".py.bak")
+		assert backup.exists()
+		assert "real-a__sens_x_1" in backup.read_text(encoding="utf-8")
+
+	def test_refuses_when_temp_would_be_last_class(self, tmp_path):
+		"""If removing the temp would leave zero non-temp classes, refuse.
+		Protects against losing the whole file in a pathological state.
+		"""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		original = (
+			"class TempOnly:\n"
+			"    name = 'x__sens_only'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+		)
+		path = self._make_file(tmp_path, original)
+		gate = ParameterSensitivityGate()
+		self._run_cleanup(gate, path, "x__sens_only")
+
+		# File unchanged — refused to remove the only class
+		assert path.read_text(encoding="utf-8") == original
+
+	def test_refuses_on_existing_syntax_error(self, tmp_path):
+		"""If the file already has a syntax error, refuse the cleanup
+		instead of falling back to a text filter (the old fallback could
+		delete unrelated lines).
+		"""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		broken = (
+			"class RealA:\n"
+			"    name = 'real-a'\n"
+			"    def on_trade(self, t, m, p: return []\n"  # syntax error
+			"\n"
+			"class Temp:\n"
+			"    name = 'foo__sens_bar'\n"
+		)
+		path = self._make_file(tmp_path, broken)
+		gate = ParameterSensitivityGate()
+		self._run_cleanup(gate, path, "foo__sens_bar")
+
+		# File untouched — refused to run on broken input
+		assert path.read_text(encoding="utf-8") == broken
+
+	def test_noop_when_temp_class_absent(self, tmp_path):
+		"""If the temp_name isn't in the file, do nothing (no backup, no write)."""
+		from edge_catcher.research.validation.gate_sensitivity import ParameterSensitivityGate
+
+		original = (
+			"class RealA:\n"
+			"    name = 'real-a'\n"
+			"    def on_trade(self, t, m, p): return []\n"
+		)
+		path = self._make_file(tmp_path, original)
+		gate = ParameterSensitivityGate()
+		self._run_cleanup(gate, path, "not_in_file__sens_x_1")
+
+		assert path.read_text(encoding="utf-8") == original
+		assert not path.with_suffix(".py.bak").exists()
+
+
 # ---------------------------------------------------------------------------
 # Tail-risk gate (vol-seller / deep-OTM detector)
 # ---------------------------------------------------------------------------
