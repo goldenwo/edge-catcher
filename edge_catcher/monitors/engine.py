@@ -54,6 +54,99 @@ def _pnl_label(pnl: int | None) -> tuple[str, str]:
 	return "SCRATCH", "0¢"
 
 
+def _format_enter_message(
+	*,
+	strategy: str,
+	series: str,
+	ticker: str,
+	side: str,
+	fill_size: int,
+	entry_price: int,
+	trade_id: int,
+	bullet: str,
+) -> tuple[str, str]:
+	"""Format an ENTER event for log + Discord.
+
+	The log line is grep-stable: starts with 'ENTER <strategy>'. The
+	Discord notify message leads with a coloured bullet and carries the
+	full size + cost breakdown so a reader can spot-check risk exposure
+	against ``risk_per_trade_cents`` at a glance.
+
+	Returns (log_line, notify_line).
+	"""
+	side_label = "YES" if side == "yes" else "NO"
+	tag = f"{strategy} | {series}"
+	cost = fill_size * entry_price
+	log_line = (
+		f"ENTER {strategy} {side} {ticker} {fill_size}x@{entry_price}c "
+		f"cost={cost}c [id={trade_id}]"
+	)
+	notify_line = (
+		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
+		f"`{ticker}` {fill_size} @ {entry_price}¢ ({cost}¢ cost)"
+	)
+	return log_line, notify_line
+
+
+def _format_close_message(
+	*,
+	event: str,  # "EXIT" or "SETTLED"
+	outcome: str,  # "WIN", "LOSS", "SCRATCH"
+	strategy: str,
+	series: str,
+	ticker: str,
+	side: str,
+	fill_size: int,
+	effective_entry: int,
+	exit_price: int,
+	pnl_cents: int,
+	fee_cents: int,
+	settled_result: str | None,  # "yes"/"no" for SETTLED, None for EXIT
+	trade_id: int,
+	bullet: str,
+) -> tuple[str, str]:
+	"""Format an EXIT (TP/SL) or SETTLED event for log + Discord.
+
+	Output includes fill_size, effective entry, exit price, pnl, and
+	(for settlements) the market's resolve side — enough to verify the
+	PnL arithmetic from the line alone:
+
+	    SETTLED strategy_b yes KXATP... 100x 2c->0c result=no LOSS pnl=-202c fee=-2c
+
+	Reader can check 100 × (0 - 2) - 2 = -202 ✓. Before this helper the
+	line read "@ 2c → -202c" which hid both the contract count and the
+	exit price, making -428c losses look incongruous when the cap said 200c.
+
+	Returns (log_line, notify_line).
+	"""
+	side_label = "YES" if side == "yes" else "NO"
+	tag = f"{strategy} | {series}"
+	outcome_emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+	pnl_str = f"{pnl_cents:+d}"
+	fee_log = f" fee=-{fee_cents}c" if fee_cents else ""
+	fee_notify = f" (−{fee_cents}¢ fee)" if fee_cents else ""
+
+	if event == "SETTLED" and settled_result:
+		result_tag = f"result={settled_result}"
+		action_tag = f"{outcome} (settled {settled_result.upper()})"
+	else:
+		result_tag = "(exit)"
+		action_tag = f"{outcome} (exit)"
+
+	log_line = (
+		f"{event} {strategy} {side} {ticker} {fill_size}x "
+		f"{effective_entry}c->{exit_price}c {result_tag} "
+		f"{outcome} pnl={pnl_str}c{fee_log} [id={trade_id}]"
+	)
+	notify_line = (
+		f"{outcome_emoji}{bullet} **[{tag}] {action_tag}** — "
+		f"`{ticker}` {fill_size} {side_label} "
+		f"{effective_entry}¢ → {exit_price}¢, "
+		f"{pnl_str}¢ pnl{fee_notify}"
+	)
+	return log_line, notify_line
+
+
 
 # ---------------------------------------------------------------------------
 # Part 1: Synchronous signal pipeline (testable)
@@ -163,15 +256,19 @@ def _handle_enter(
 	)
 	metrics.inc("entries_filled")
 
-	side_label = "YES" if signal.side == "yes" else "NO"
-	tag = f"{signal.strategy} | {signal.series}"
 	display_price = fill.blended_price_cents if fill.blended_price_cents else entry_price
-	msg = (
-		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
-		f"`{signal.ticker}` @ {display_price}¢"
+	log_line, notify_line = _format_enter_message(
+		strategy=signal.strategy,
+		series=signal.series,
+		ticker=signal.ticker,
+		side=signal.side,
+		fill_size=fill.fill_size,
+		entry_price=display_price,
+		trade_id=trade_id,
+		bullet=bullet,
 	)
-	log.info("ENTER %s %s %s @ %dc [id=%d]", signal.strategy, signal.side, signal.ticker, display_price, trade_id)
-	notify(msg)
+	log.info(log_line)
+	notify(notify_line)
 
 
 def _handle_exit(
@@ -193,19 +290,42 @@ def _handle_exit(
 
 	store.exit_trade(signal.trade_id, exit_price)
 
-	# Read back PnL from DB (includes fee deduction)
+	# Read back PnL + fill fields from DB (includes fee deduction)
 	exited = store.get_trade_by_id(signal.trade_id)
-	pnl = exited.get("pnl_cents") if exited else None
-	outcome, pnl_str = _pnl_label(pnl)
-	emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
-	tag = f"{signal.strategy} | {signal.series}"
-	entry_price_display = exited.get("blended_entry") or exited.get("entry_price", "?") if exited else "?"
-	msg = (
-		f"{emoji}{bullet} **[{tag}] {outcome}** — "
-		f"`{signal.ticker}` @ {entry_price_display}¢ → {pnl_str}"
+	if exited is None:
+		log.warning("EXIT: trade id=%d not found post-exit_trade", signal.trade_id)
+		return
+	pnl = exited.get("pnl_cents") or 0
+	outcome, _ = _pnl_label(pnl)
+	blended = exited.get("blended_entry") or 0
+	effective_entry = blended if blended else (exited.get("entry_price") or 0)
+	fill_size = exited.get("fill_size") or 0
+	entry_fee = exited.get("entry_fee_cents") or 0
+	# Exit fee isn't stored separately — back-derive from the pnl formula
+	# pnl = fill_size * (exit_price - effective_entry) - entry_fee - exit_fee
+	#   → exit_fee = fill_size * (exit_price - effective_entry) - entry_fee - pnl
+	gross = fill_size * (exit_price - effective_entry)
+	exit_fee = gross - entry_fee - pnl
+	total_fee = entry_fee + (exit_fee if exit_fee > 0 else 0)
+
+	log_line, notify_line = _format_close_message(
+		event="EXIT",
+		outcome=outcome,
+		strategy=signal.strategy,
+		series=signal.series,
+		ticker=signal.ticker,
+		side=signal.side,
+		fill_size=fill_size,
+		effective_entry=effective_entry,
+		exit_price=exit_price,
+		pnl_cents=pnl,
+		fee_cents=total_fee,
+		settled_result=None,
+		trade_id=signal.trade_id,
+		bullet=bullet,
 	)
-	log.info("EXIT %s %s %s @ %dc pnl=%s [id=%d]", signal.strategy, signal.side, signal.ticker, exit_price, pnl_str, signal.trade_id)
-	notify(msg)
+	log.info(log_line)
+	notify(notify_line)
 
 
 # ---------------------------------------------------------------------------
@@ -241,20 +361,38 @@ async def _settlement_poller(
 						metrics.inc("trades_settled_won")
 					elif status == "lost":
 						metrics.inc("trades_settled_lost")
-					pnl = settled.get("pnl_cents") if settled else None
-					outcome, pnl_str = _pnl_label(pnl)
-					emoji = "🏆" if outcome == "WIN" else ("💀" if outcome == "LOSS" else "🧣")
+					if settled is None:
+						log.warning("SETTLE: trade id=%d not found post-settle_trade", trade["id"])
+						continue
+					pnl = settled.get("pnl_cents") or 0
+					outcome, _ = _pnl_label(pnl)
 					strat_obj = strat_by_name.get(trade["strategy"])
 					bullet = strat_obj.emoji if strat_obj else "🔵"
 					series = trade.get("series_ticker", "?")
-					tag = f"{trade['strategy']} | {series}"
-					entry_display = settled.get("blended_entry") or settled.get("entry_price", "?") if settled else "?"
-					msg = (
-						f"{emoji}{bullet} **[{tag}] {outcome}** — "
-						f"`{trade['ticker']}` @ {entry_display}¢ → {pnl_str}"
+					blended = settled.get("blended_entry") or 0
+					effective_entry = blended if blended else (settled.get("entry_price") or 0)
+					fill_size = settled.get("fill_size") or 0
+					entry_fee = settled.get("entry_fee_cents") or 0
+					# settle_trade subtracts only entry_fee (P*(1-P)=0 at 0/100)
+					settlement_exit_price = settled.get("exit_price") or 0
+					log_line, notify_line = _format_close_message(
+						event="SETTLED",
+						outcome=outcome,
+						strategy=trade["strategy"],
+						series=series,
+						ticker=trade["ticker"],
+						side=trade.get("side", "?"),
+						fill_size=fill_size,
+						effective_entry=effective_entry,
+						exit_price=settlement_exit_price,
+						pnl_cents=pnl,
+						fee_cents=entry_fee,
+						settled_result=result,
+						trade_id=trade["id"],
+						bullet=bullet,
 					)
-					log.info("SETTLED %s %s %s %s pnl=%s [id=%d]", trade['strategy'], trade.get('side','?'), trade['ticker'], outcome, pnl_str, trade['id'])
-					notify(msg)
+					log.info(log_line)
+					notify(notify_line)
 					# Call on_settle on matching strategy
 					strat = strat_by_name.get(trade["strategy"])
 					if strat is not None:

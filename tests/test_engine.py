@@ -12,6 +12,8 @@ from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
 from edge_catcher.monitors.trade_store import TradeStore
 from edge_catcher.monitors.engine import (
 	_collect_active_series,
+	_format_close_message,
+	_format_enter_message,
 	_handle_orderbook_delta,
 	_handle_orderbook_snapshot,
 	_handle_ticker_msg,
@@ -833,3 +835,115 @@ class TestProcessTickMetrics:
 		assert snap["entries_skipped_other"] == 0
 		# And no trade was recorded
 		assert len(store.get_open_trades()) == 0
+
+
+# ---------------------------------------------------------------------------
+# _format_enter_message / _format_close_message tests
+# ---------------------------------------------------------------------------
+
+class TestFormatEnterMessage:
+	"""The ENTER log line must expose fill_size + entry_price + cost so a
+	reader can spot-check risk exposure against risk_per_trade_cents
+	without consulting the DB.
+	"""
+
+	def test_longshot_yes_entry_includes_size_and_cost(self):
+		log_line, notify_line = _format_enter_message(
+			strategy="strategy_b", series="KXATPSETWINNER",
+			ticker="KXATPSETWINNER-26APR12LANMUS-2-LAN",
+			side="yes", fill_size=100, entry_price=2,
+			trade_id=1234, bullet="🟣",
+		)
+		# Log line is grep-stable + includes the three pieces of math
+		assert "ENTER strategy_b yes" in log_line
+		assert "100x@2c" in log_line
+		assert "cost=200c" in log_line
+		assert "[id=1234]" in log_line
+		# Notify shows the cost explicitly
+		assert "PAPER BUY YES" in notify_line
+		assert "100 @ 2¢" in notify_line
+		assert "(200¢ cost)" in notify_line
+
+	def test_no_side_label(self):
+		_, notify_line = _format_enter_message(
+			strategy="strategy_a", series="KXSPOTIFYARTISTD",
+			ticker="KXSPOTIFYARTISTD-xyz",
+			side="no", fill_size=5, entry_price=40,
+			trade_id=42, bullet="🔵",
+		)
+		assert "PAPER BUY NO" in notify_line
+		assert "5 @ 40¢" in notify_line
+		assert "(200¢ cost)" in notify_line
+
+
+class TestFormatCloseMessage:
+	"""EXIT and SETTLED log lines must include enough detail to verify
+	the PnL arithmetic from the line alone: contracts × (exit − entry) − fee = pnl.
+	"""
+
+	def test_settled_loss_includes_result_and_arithmetic(self):
+		log_line, notify_line = _format_close_message(
+			event="SETTLED", outcome="LOSS",
+			strategy="strategy_b", series="KXATPSETWINNER",
+			ticker="KXATPSETWINNER-26APR12LANMUS-2-LAN",
+			side="yes", fill_size=100, effective_entry=2,
+			exit_price=0, pnl_cents=-202, fee_cents=2,
+			settled_result="no", trade_id=1234, bullet="🟣",
+		)
+		# Log line: 100 × (0 - 2) - 2 = -202 is derivable
+		assert "SETTLED strategy_b yes" in log_line
+		assert "100x 2c->0c" in log_line
+		assert "result=no" in log_line
+		assert "LOSS pnl=-202c" in log_line
+		assert "fee=-2c" in log_line
+		# Notify shows settled side
+		assert "LOSS (settled NO)" in notify_line
+		assert "100 YES 2¢ → 0¢" in notify_line
+		assert "-202¢ pnl" in notify_line
+		assert "(−2¢ fee)" in notify_line
+
+	def test_settled_win_yes_resolves_yes(self):
+		log_line, notify_line = _format_close_message(
+			event="SETTLED", outcome="WIN",
+			strategy="strategy_b", series="KXATPSETWINNER",
+			ticker="KXATP-xyz",
+			side="yes", fill_size=100, effective_entry=2,
+			exit_price=100, pnl_cents=9798, fee_cents=2,
+			settled_result="yes", trade_id=5, bullet="🟣",
+		)
+		# 100 × (100 - 2) - 2 = 9798 ✓
+		assert "result=yes" in log_line
+		assert "WIN pnl=+9798c" in log_line
+		assert "WIN (settled YES)" in notify_line
+		assert "+9798¢ pnl" in notify_line
+
+	def test_exit_tp_has_no_settled_result(self):
+		"""Manual exits (TP/SL) don't have a market-settled side."""
+		log_line, notify_line = _format_close_message(
+			event="EXIT", outcome="WIN",
+			strategy="strategy_a", series="KXSPOTIFYARTISTD",
+			ticker="KXSP-xyz",
+			side="yes", fill_size=3, effective_entry=40,
+			exit_price=48, pnl_cents=23, fee_cents=1,
+			settled_result=None, trade_id=99, bullet="🔵",
+		)
+		# 3 × (48 - 40) - 1 = 23 ✓
+		assert "EXIT strategy_a yes" in log_line
+		assert "3x 40c->48c" in log_line
+		assert "(exit)" in log_line
+		assert "WIN pnl=+23c" in log_line
+		assert "WIN (exit)" in notify_line
+		assert "3 YES 40¢ → 48¢" in notify_line
+
+	def test_fee_zero_is_omitted(self):
+		"""Clean lines when no fee — avoids '(-0¢ fee)' noise."""
+		_, notify_line = _format_close_message(
+			event="SETTLED", outcome="SCRATCH",
+			strategy="strategy_a", series="KXETH15M",
+			ticker="KXETH15M-xyz",
+			side="no", fill_size=5, effective_entry=50,
+			exit_price=50, pnl_cents=0, fee_cents=0,
+			settled_result=None, trade_id=1, bullet="🔵",
+		)
+		assert "fee" not in notify_line
+		assert "(settled" not in notify_line  # no settled_result → (exit) path
