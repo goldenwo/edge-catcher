@@ -56,3 +56,16 @@ capture:
   # Set to 0 to disable pruning. Ignored when transport=none (pruning
   # requires a transport so local-only mode doesn't silently lose data).
   local_retention_days: 7
+
+  # extra_series: capture-only series the engine subscribes to but never
+  # dispatches to any strategy. Lets you record markets for FUTURE strategy
+  # research without firing any live trades on them. The tee captures their
+  # WS messages, REST recovery snapshots, and ticker discoveries with the
+  # same fidelity as strategy series. Strategies for these series can be
+  # developed later and backtested against the captured data via the
+  # replay backtester.
+  #
+  # Storage cost: each 15m crypto series adds ~1 active ticker at any time
+  # (single binary, single window). Strike-based markets like KXXRP add
+  # ~150-200 tickers per series. Estimate disk before enabling broad capture.
+  # extra_series: [KXBTC15M, KXDOGE15M, KXBNB15M]
