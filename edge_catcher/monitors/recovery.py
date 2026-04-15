@@ -287,6 +287,13 @@ async def run_recovery(
 
 			snapshot = await fetch_orderbook_snapshot(client, ticker)
 			if snapshot is not None:
+				# Capture the clock ONCE so the capture tee's recv_ts matches
+				# exactly when the orderbook was seeded. There's no store call
+				# here (recovery doesn't touch trades) but keeping the clock
+				# consistent with the seed moment matters for replay's
+				# _handle_synthetic_rest_orderbook timing ordering.
+				from datetime import datetime, timezone
+				rec_now = datetime.now(timezone.utc)
 				market_state.seed_orderbook(ticker, snapshot)
 				if capture_writer is not None:
 					# Tee point 2/4 — see capture/replay spec §6.1
@@ -294,6 +301,6 @@ async def run_recovery(
 						"ticker": ticker,
 						"yes_levels": snapshot.yes_levels,
 						"no_levels": snapshot.no_levels,
-					})
+					}, recv_ts=rec_now)
 
 	log.info("run_recovery: complete — %d total tickers across %d series", total, len(active_series))
