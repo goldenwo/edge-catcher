@@ -414,3 +414,30 @@ def test_strategy_state_snapshot_happy_path(tmp_path):
 		json.dumps(env2["states"], sort_keys=True, indent=2)
 		== json.dumps(envelope["states"], sort_keys=True, indent=2)
 	)
+
+
+def test_strategy_state_snapshot_empty_table(tmp_path):
+	"""Empty strategy_state table produces a valid envelope with states={}."""
+	import json
+	import sqlite3
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["schema_version"] == 1
+	assert envelope["states"] == {}
