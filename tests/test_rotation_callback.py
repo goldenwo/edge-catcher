@@ -161,6 +161,11 @@ def test_rotation_callback_exception_in_background_is_logged(
 
 	with caplog.at_level("ERROR"):
 		cb(date(2026, 4, 14))  # sync call must not raise
+		# Post-retention split: assembly failures log "background bundle assembly failed",
+		# upload failures log "bundle <day> upload failed". Accept either shape.
 		assert _wait_for(
-			lambda: any("background bundle assembly/upload failed" in r.message for r in caplog.records)
+			lambda: any(
+				"background bundle assembly failed" in r.message or "upload failed" in r.message
+				for r in caplog.records
+			)
 		), "expected background failure log message"

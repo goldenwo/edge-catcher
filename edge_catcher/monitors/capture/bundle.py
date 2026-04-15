@@ -13,6 +13,12 @@ The resulting bundle must be complete enough that replay can:
   * Seed its InMemoryTradeStore with the open trades that existed at
     end-of-day so the next day's replay picks up carry-over positions
   * Compare its resulting trade rows against the day's live paper_trades slice
+
+This module ALSO owns bundle lifecycle helpers (``delete_raw_jsonl`` and
+``prune_old_bundles``) used by the rotation callback to keep Pi disk usage
+bounded. Without retention, raw JSONL accumulates at ~1.5 GB/day and fills
+the disk in ~3 months. With retention (raw deleted after compression +
+uploaded bundles pruned after N days) the steady state is ~420 MB.
 """
 from __future__ import annotations
 
@@ -21,7 +27,7 @@ import logging
 import shutil
 import sqlite3
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +36,11 @@ import zstandard as zstd
 from edge_catcher.monitors.market_state import MarketState
 
 log = logging.getLogger(__name__)
+
+# Sentinel filename written inside a bundle dir after transport.upload_bundle
+# returns successfully. prune_old_bundles refuses to delete a bundle that
+# doesn't have this sentinel so silent upload failures can't cause data loss.
+UPLOADED_SENTINEL = ".uploaded"
 
 
 def assemble_daily_bundle(
@@ -236,3 +247,111 @@ def _write_manifest(bundle_dir: Path, capture_date: date, commit: str, dirty: bo
 	(bundle_dir / "manifest.json").write_text(
 		json.dumps(manifest, indent=2), encoding="utf-8"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Retention helpers — used by the rotation callback to keep Pi disk bounded
+# ---------------------------------------------------------------------------
+
+
+def mark_bundle_uploaded(bundle_dir: Path) -> None:
+	"""Write the ``.uploaded`` sentinel file into ``bundle_dir``.
+
+	Called by the rotation callback after ``transport.upload_bundle``
+	returns successfully. ``prune_old_bundles`` uses this sentinel to
+	distinguish safely-uploaded bundles (deletable) from stuck/failed
+	uploads (must preserve for manual recovery).
+	"""
+	(bundle_dir / UPLOADED_SENTINEL).touch()
+
+
+def delete_raw_jsonl(capture_dir: Path, capture_date: date) -> bool:
+	"""Delete the raw ``kalshi_engine_<date>.jsonl`` file after its
+	compressed copy has been placed in the bundle directory.
+
+	Safe to call multiple times — missing file is a no-op. Returns True
+	if a file was actually deleted, False otherwise.
+
+	CRITICAL: this must only be called AFTER ``assemble_daily_bundle``
+	has successfully produced the compressed ``<date>/kalshi_engine_<date>.jsonl.zst``
+	inside the bundle dir. Deleting the raw JSONL without a verified
+	compressed copy would lose the day's capture.
+	"""
+	raw = capture_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl"
+	if not raw.exists():
+		return False
+	# Sanity check: confirm the compressed version exists before deleting.
+	bundle_dir = capture_dir / capture_date.isoformat()
+	compressed = bundle_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl.zst"
+	if not compressed.exists():
+		log.warning(
+			"delete_raw_jsonl: refusing to delete %s — compressed copy %s is missing",
+			raw, compressed,
+		)
+		return False
+	try:
+		raw.unlink()
+	except OSError as e:
+		log.warning("delete_raw_jsonl: could not delete %s: %s", raw, e)
+		return False
+	log.info("delete_raw_jsonl: deleted raw JSONL for %s (compressed copy is authoritative)", capture_date)
+	return True
+
+
+def prune_old_bundles(
+	capture_dir: Path,
+	retention_days: int,
+	*,
+	require_uploaded: bool = True,
+	today: Optional[date] = None,
+) -> list[date]:
+	"""Delete bundle directories older than ``retention_days``.
+
+	Args:
+		capture_dir:      Root directory containing date-named bundle subdirs.
+		retention_days:   How many days of bundles to keep. ``0`` disables pruning.
+		require_uploaded: If True (default), only prune bundles that have the
+		                  ``.uploaded`` sentinel file. Bundles without it are
+		                  skipped and a warning is logged — they may be stuck
+		                  mid-upload or awaiting manual retry.
+		today:            Testing hook — defaults to ``date.today()``.
+
+	Returns:
+		List of dates whose bundle directories were actually deleted. Empty
+		list if nothing needed pruning.
+	"""
+	if retention_days <= 0:
+		return []
+	if today is None:
+		today = date.today()
+	cutoff = today - timedelta(days=retention_days)
+
+	deleted: list[date] = []
+	for child in sorted(capture_dir.iterdir()):
+		if not child.is_dir():
+			continue
+		# Only consider directories whose name is an ISO date — this skips
+		# stray files, the active capture dir, etc.
+		try:
+			bundle_date = date.fromisoformat(child.name)
+		except ValueError:
+			continue
+		if bundle_date >= cutoff:
+			continue
+		if require_uploaded and not (child / UPLOADED_SENTINEL).exists():
+			log.warning(
+				"prune_old_bundles: bundle %s is %d days old but has no %s sentinel — "
+				"skipping prune (upload failed or is in progress; fix or delete manually)",
+				child.name, (today - bundle_date).days, UPLOADED_SENTINEL,
+			)
+			continue
+		try:
+			shutil.rmtree(child)
+			deleted.append(bundle_date)
+			log.info(
+				"prune_old_bundles: removed %s (uploaded, older than %d days)",
+				child.name, retention_days,
+			)
+		except OSError as e:
+			log.warning("prune_old_bundles: could not delete %s: %s", child, e)
+	return deleted

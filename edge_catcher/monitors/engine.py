@@ -15,7 +15,12 @@ import httpx
 import websockets
 
 from edge_catcher.monitors.auth import KALSHI_WS_URL, WS_PATH, make_auth_headers
-from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+from edge_catcher.monitors.capture.bundle import (
+	assemble_daily_bundle,
+	delete_raw_jsonl,
+	mark_bundle_uploaded,
+	prune_old_bundles,
+)
 from edge_catcher.monitors.capture.transport import (
 	CaptureTransport,
 	LocalTransport,
@@ -306,6 +311,9 @@ def _make_rotation_callback(
 	db_path: Path,
 	market_state: MarketState,
 	transport: Optional[CaptureTransport],
+	*,
+	delete_raw_after_bundle: bool = True,
+	local_retention_days: int = 7,
 ):
 	"""Build the rotation_callback closure that RawFrameWriter fires on
 	midnight UTC rollover.
@@ -317,13 +325,27 @@ def _make_rotation_callback(
 	callback spawns a daemon thread for the slow bundle assembly + upload
 	work so the engine loop is only blocked by the deepcopy itself
 	(typically ~ms even with hundreds of orderbooks).
+
+	Retention:
+	  * ``delete_raw_after_bundle``: after ``assemble_daily_bundle`` succeeds,
+	    delete the raw ``kalshi_engine_<date>.jsonl`` (the compressed copy
+	    in the bundle dir is authoritative). Default True — disable only
+	    if you want the raw file kept for debugging.
+	  * ``local_retention_days``: prune local bundle dirs older than N days,
+	    but ONLY if they've been successfully uploaded (``.uploaded``
+	    sentinel present). Set to 0 to disable pruning entirely. Default 7.
+	    When ``transport`` is None, uploads never happen → sentinels never
+	    get written → pruning silently skips every bundle. That's intentional:
+	    local-only capture must be manually managed by the operator.
 	"""
 	def on_rotation(old_day: date) -> None:
 		# 1. Synchronous snapshot on the engine thread (fast, safe).
 		snapshot = copy.deepcopy(market_state)
 
-		# 2. Background thread for assemble + upload (slow, can take minutes).
-		def _assemble_and_upload() -> None:
+		# 2. Background thread for assemble + upload + retention (slow).
+		def _assemble_upload_prune() -> None:
+			bundle_assembled = False
+			upload_ok = False
 			try:
 				bundle_path = assemble_daily_bundle(
 					capture_date=old_day,
@@ -332,17 +354,48 @@ def _make_rotation_callback(
 					db_path=db_path,
 					market_state=snapshot,
 				)
+				bundle_assembled = True
+
 				if transport is not None:
 					remote_key = f"kalshi/{old_day.isoformat()}"
-					transport.upload_bundle(bundle_path, remote_key)
-					log.info("uploaded bundle %s to transport (%s)", old_day, remote_key)
+					try:
+						transport.upload_bundle(bundle_path, remote_key)
+						mark_bundle_uploaded(bundle_path)
+						upload_ok = True
+						log.info("uploaded bundle %s to transport (%s)", old_day, remote_key)
+					except Exception:
+						log.exception(
+							"bundle %s upload failed; bundle stays local for retry",
+							old_day,
+						)
 				else:
-					log.info("bundle %s assembled; no transport configured, skipping upload", old_day)
+					log.info(
+						"bundle %s assembled; no transport configured, skipping upload",
+						old_day,
+					)
 			except Exception:
-				log.exception("background bundle assembly/upload failed for %s", old_day)
+				log.exception("background bundle assembly failed for %s", old_day)
+
+			# 3. Retention (only runs when assembly succeeded — we MUST have
+			# a verified compressed copy before deleting the raw). Wrapped
+			# in its own try so a retention failure doesn't leak.
+			if bundle_assembled and delete_raw_after_bundle:
+				try:
+					delete_raw_jsonl(capture_dir, old_day)
+				except Exception:
+					log.exception("delete_raw_jsonl failed for %s", old_day)
+
+			# 4. Prune old bundles (only uploaded ones, and only when a
+			# transport is configured — otherwise pruning would have nothing
+			# to prune anyway since sentinels never get written).
+			if transport is not None and local_retention_days > 0:
+				try:
+					prune_old_bundles(capture_dir, local_retention_days)
+				except Exception:
+					log.exception("prune_old_bundles failed")
 
 		thread = threading.Thread(
-			target=_assemble_and_upload,
+			target=_assemble_upload_prune,
 			name=f"bundle-assemble-{old_day}",
 			daemon=True,
 		)
@@ -432,6 +485,8 @@ async def run_engine(config_path: Path) -> None:
 			db_path=db_path,
 			market_state=market_state,
 			transport=transport,
+			delete_raw_after_bundle=bool(capture_cfg.get("delete_raw_after_bundle", True)),
+			local_retention_days=int(capture_cfg.get("local_retention_days", 7)),
 		)
 
 	capture_writer = RawFrameWriter(
