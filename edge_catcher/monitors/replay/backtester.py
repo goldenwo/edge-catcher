@@ -212,7 +212,7 @@ def replay_capture(
 	# _state_flusher writes dirty states to the DB on its last tick.
 	for strat in strategies:
 		state = pending_states.get(strat.name)
-		if state:
+		if state is not None:
 			store.save_state(strat.name, state)
 
 	return ReplayResult(
