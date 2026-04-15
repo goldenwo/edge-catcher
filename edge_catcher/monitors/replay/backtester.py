@@ -66,6 +66,7 @@ class ReplayResult:
 	capture_start_ts: Optional[str] = None
 	capture_end_ts: Optional[str] = None
 	strategies_loaded: list[str] = field(default_factory=list)
+	store: Optional["InMemoryTradeStore"] = None  # NEW
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +132,10 @@ def replay_capture(
 	_seed_market_state(market_state, bundle, prior_bundle)
 
 	# 6. Construct InMemoryTradeStore and seed from PRIOR day's open_trades
+	#    and strategy_state snapshot.
 	store = InMemoryTradeStore()
 	_seed_open_trades(store, bundle, prior_bundle)
+	_seed_strategy_state(store, bundle, prior_bundle)
 
 	# 7. Build strategy-by-series index (same shape as engine.py run_engine)
 	strat_by_series: dict[str, list[PaperStrategy]] = {}
@@ -141,8 +144,14 @@ def replay_capture(
 		for s in series_for_strat:
 			strat_by_series.setdefault(s, []).append(strat)
 
-	# 8. Seed pending_states from strategies' persisted state (bundle-independent)
-	pending_states: dict[str, dict] = {strat.name: {} for strat in strategies}
+	# 8. Seed pending_states from strategies' persisted state via the store.
+	# After Task 10 of the strategy-state-bundle-gap plan, this projects from
+	# the store (which _seed_strategy_state may have populated) so replay
+	# starts from the same scratchpad the live engine had at end-of-day.
+	# Matches the live startup pattern at engine.py:541-544.
+	pending_states: dict[str, dict] = {
+		strat.name: store.load_state(strat.name) for strat in strategies
+	}
 	dirty: set[str] = set()
 
 	# 9. Stream events and dispatch
@@ -196,6 +205,16 @@ def replay_capture(
 			# the resulting row divergence if it matters.
 		events_processed += 1
 
+	# End-of-replay: flush pending_states to the store so final state is
+	# observable via result.store.load_all_states() and so the strict
+	# parity test can compare against the live DB's final strategy_state
+	# table. Mirrors the live engine's shutdown behavior where the
+	# _state_flusher writes dirty states to the DB on its last tick.
+	for strat in strategies:
+		state = pending_states.get(strat.name)
+		if state:
+			store.save_state(strat.name, state)
+
 	return ReplayResult(
 		trades=store.all_trades(),
 		final_market_state=market_state,
@@ -204,6 +223,7 @@ def replay_capture(
 		capture_start_ts=first_ts,
 		capture_end_ts=last_ts,
 		strategies_loaded=strategy_names,
+		store=store,
 	)
 
 
