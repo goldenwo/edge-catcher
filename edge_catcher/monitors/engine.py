@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -253,6 +254,7 @@ def _handle_enter(
 		fill_pct=fill.fill_pct,
 		slippage_cents=fill.slippage_cents,
 		book_snapshot=json.dumps(side_levels),
+		now=datetime.now(timezone.utc),  # Task 3 will thread this from the WS message loop
 	)
 	metrics.inc("entries_filled")
 
@@ -288,7 +290,7 @@ def _handle_exit(
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
-	store.exit_trade(signal.trade_id, exit_price)
+	store.exit_trade(signal.trade_id, exit_price, now=datetime.now(timezone.utc))  # Task 3 will thread this from the WS message loop
 
 	# Read back PnL + fill fields from DB (includes fee deduction)
 	exited = store.get_trade_by_id(signal.trade_id)
@@ -351,7 +353,7 @@ async def _settlement_poller(
 			for trade in open_trades:
 				result = await check_market_result(client, trade["ticker"])
 				if result is not None:
-					store.settle_trade(trade["id"], result)
+					store.settle_trade(trade["id"], result, now=datetime.now(timezone.utc))
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
 					# Branch settlement counters on DB 'status' (won/lost only),

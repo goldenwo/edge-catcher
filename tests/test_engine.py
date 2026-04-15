@@ -1,5 +1,7 @@
 """Tests for the paper trading engine — process_tick pipeline and WS message handlers."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from edge_catcher.monitors.market_state import (
@@ -151,6 +153,7 @@ class TestProcessTick:
 			intended_size=10,
 			fill_size=10,
 			blended_entry=50,
+			now=datetime.now(timezone.utc),
 		)
 		ob = OrderbookSnapshot(yes_levels=[(0.55, 20)], no_levels=[(0.45, 20)])
 		open_pos = [{"id": trade_id, "side": "yes", "ticker": "TEST-TICKER-T100"}]
