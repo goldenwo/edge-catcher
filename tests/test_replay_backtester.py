@@ -43,3 +43,19 @@ def test_seed_strategy_state_from_prior_bundle(tmp_path):
 		"strat-a": {"seen:FOO": True, "counter": 5},
 		"strat-b": {"entered:BAR": 1},
 	}
+
+
+def test_seed_strategy_state_missing_file(tmp_path, caplog):
+	"""Prior resolution returns None: no-op, info log, store untouched."""
+	import logging
+
+	bundle = tmp_path / "2026-04-15"
+	bundle.mkdir()
+	# No prior dir, no sibling → _resolve_prior_file returns None
+
+	store = InMemoryTradeStore()
+	with caplog.at_level(logging.INFO):
+		_seed_strategy_state(store, bundle, prior_bundle=None)
+
+	assert store.load_all_states() == {}
+	assert "no prior strategy_state" in caplog.text
