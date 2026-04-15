@@ -441,3 +441,24 @@ def test_strategy_state_snapshot_empty_table(tmp_path):
 	envelope = json.loads(dst.read_text(encoding="utf-8"))
 	assert envelope["schema_version"] == 1
 	assert envelope["states"] == {}
+
+
+def test_strategy_state_snapshot_missing_table(tmp_path, caplog):
+	"""DB without a strategy_state table writes an empty envelope + warns."""
+	import json
+	import logging
+	import sqlite3
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("CREATE TABLE paper_trades (id INTEGER);")
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	with caplog.at_level(logging.WARNING):
+		_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["states"] == {}
+	assert "strategy_state" in caplog.text
