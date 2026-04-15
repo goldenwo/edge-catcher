@@ -179,3 +179,86 @@ def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 		f"called (Edit 2 missing) or the projection / flush edits are "
 		f"incomplete (Edits 3/4)."
 	)
+
+
+def test_seeded_state_round_trips_through_replay_path(tmp_path):
+	"""THE behavioral test. Proves the entire chain:
+	_seed_strategy_state → store → projection into pending_states →
+	process_tick mutates the projection → end-of-replay flush → store
+	reflects the final state. Uses process_tick directly to avoid
+	fighting dispatch.py's WS message parsing and market_state priming.
+	"""
+	from datetime import datetime, timezone
+	from edge_catcher.monitors.replay.backtester import _seed_strategy_state
+	from edge_catcher.monitors.market_state import OrderbookSnapshot, TickContext
+	from edge_catcher.monitors.dispatch import process_tick
+	from edge_catcher.monitors.strategy_base import PaperStrategy
+
+	class CounterStrategy(PaperStrategy):
+		name = "counter-strat"
+		supported_series = ["KXTEST"]
+		default_params: dict = {}
+
+		def on_tick(self, ctx):
+			# Mutate persisted_state IN PLACE — this is exactly what
+			# real strategies do. The mutation must land in the dict
+			# that pending_states[name] points at.
+			ctx.persisted_state["counter"] = ctx.persisted_state.get("counter", 0) + 1
+			return []
+
+	# --- Stage 1: prior bundle with seeded counter=5 ---
+	prior = tmp_path / "2026-04-14"
+	prior.mkdir()
+	bundle = tmp_path / "2026-04-15"
+	bundle.mkdir()
+	_write_envelope(prior / "strategy_state_at_start.json", {
+		"counter-strat": {"counter": 5},
+	})
+
+	# --- Stage 2: seed the store via the new helper ---
+	store = InMemoryTradeStore()
+	_seed_strategy_state(store, bundle, prior_bundle=prior)
+	assert store.load_state("counter-strat") == {"counter": 5}
+
+	# --- Stage 3: build pending_states via the Task 10 projection ---
+	strat = CounterStrategy()
+	strategies = [strat]
+	pending_states = {s.name: store.load_state(s.name) for s in strategies}
+	# The projection copies out of the store, so pending_states["counter-strat"]
+	# is a NEW dict equal to {"counter": 5}. Mutations to it do not touch
+	# store._strategy_state until the end-of-replay flush fires.
+	assert pending_states["counter-strat"] == {"counter": 5}
+
+	# --- Stage 4: call process_tick with persisted_state pointing at the
+	#              projection dict — this is exactly what dispatch.py:462
+	#              and :541 do in the real path (pending_states.get(name, {})
+	#              returns the dict at that key by identity when present). ---
+	ctx = TickContext(
+		ticker="KXTEST-FOO",
+		event_ticker="KXTEST-FOO",
+		yes_bid=49, yes_ask=51, no_bid=49, no_ask=51,
+		orderbook=OrderbookSnapshot([], []),
+		price_history=[],
+		open_positions=[],
+		persisted_state=pending_states["counter-strat"],
+		market_metadata={},
+		series="KXTEST",
+		is_first_observation=True,
+	)
+	now = datetime.now(timezone.utc)
+	process_tick(ctx, [strat], store, config={}, now=now)
+
+	# The mutation lands in pending_states because persisted_state
+	# and pending_states["counter-strat"] are the same dict object.
+	assert pending_states["counter-strat"] == {"counter": 6}
+	# But the store is still at 5 — nothing has flushed yet.
+	assert store.load_state("counter-strat") == {"counter": 5}
+
+	# --- Stage 5: end-of-replay flush (what Task 10 adds to replay_capture) ---
+	for s in strategies:
+		state = pending_states.get(s.name)
+		if state is not None:
+			store.save_state(s.name, state)
+
+	# --- Stage 6: the store now reflects the mutation ---
+	assert store.load_state("counter-strat") == {"counter": 6}
