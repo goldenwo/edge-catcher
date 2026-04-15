@@ -314,6 +314,46 @@ def test_disabled_writer_does_not_create_output_dir(tmp_path: Path) -> None:
 # 7. Rotation
 # ---------------------------------------------------------------------------
 
+def test_rotation_callback_fires_synchronously_with_old_day(tmp_path: Path) -> None:
+	"""A rotation_callback registered at construction time fires SYNCHRONOUSLY
+	on every rotation with the old (just-closed) day as its sole argument.
+
+	Sync invocation is a deliberate design choice — the callback needs to
+	snapshot live engine state (e.g. deepcopy market_state) on the engine
+	thread to avoid races. The callback is responsible for backgrounding
+	any slow work itself.
+	"""
+	seen: list[date] = []
+
+	def cb(old_day: date) -> None:
+		seen.append(old_day)
+
+	writer = RawFrameWriter(tmp_path, enabled=True, rotation_callback=cb)
+	try:
+		writer.write_ws({"type": "test"})  # seed today's file
+		old_day = writer._active_date
+		writer._rotate(date(2099, 1, 1))
+		# Sync contract: callback has fired by the time _rotate returns
+		assert seen == [old_day]
+	finally:
+		writer.close()
+
+
+def test_rotation_callback_exception_is_logged_not_propagated(tmp_path: Path) -> None:
+	"""If the rotation_callback raises, the error is logged and swallowed —
+	the engine loop must never be affected by a bundle-assembly failure."""
+	def boom(old_day: date) -> None:
+		raise RuntimeError("bundle assembly failed for real reasons")
+
+	writer = RawFrameWriter(tmp_path, enabled=True, rotation_callback=boom)
+	try:
+		writer.write_ws({"type": "test"})
+		# Must not raise — the writer swallows callback exceptions.
+		writer._rotate(date(2099, 1, 1))
+	finally:
+		writer.close()
+
+
 def test_rotation_opens_new_file_with_header(tmp_path: Path) -> None:
 	"""Directly invoking _rotate(new_day) closes the old file and opens a new
 	one for new_day with a fresh schema header. We don't write to the new file

@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -60,11 +60,13 @@ class RawFrameWriter:
 		enabled: bool = True,
 		min_free_gb: int = 10,
 		seq_flush_every: int = 100,
+		rotation_callback: Optional[Callable[[date], None]] = None,
 	) -> None:
 		self.output_dir = Path(output_dir)
 		self.enabled = enabled
 		self.min_free_gb = min_free_gb
 		self.seq_flush_every = seq_flush_every
+		self._rotation_callback = rotation_callback
 		self._stopped = False  # set True permanently on disk pressure
 		self._active_file: Optional[Any] = None
 		self._active_date: Optional[date] = None
@@ -222,11 +224,19 @@ class RawFrameWriter:
 			self._active_file.write(header + "\n")
 
 	def _rotate(self, new_day: date) -> None:
-		"""Close yesterday's file and open a new one for `new_day`.
+		"""Close yesterday's file and open a new one for ``new_day``.
 
-		Task 13 will wire a rotation_callback here that fires bundle
-		assembly + R2 upload in a background thread. For now the rotation
-		is logged and the file swap is silent.
+		If a ``rotation_callback`` was registered at construction time, it
+		is invoked SYNCHRONOUSLY on the engine thread after the new file
+		is opened. This is a deliberate design choice: the callback is
+		expected to deep-copy any live engine state it needs (e.g.
+		market_state) immediately, which must happen on the engine thread
+		to avoid a race with ongoing mutations. The callback is then
+		responsible for spawning its own background thread for the slow
+		bundle-assembly + upload work.
+
+		Exceptions in the callback are caught and logged so a bundle
+		assembly failure never propagates into the engine loop.
 		"""
 		old_day = self._active_date
 		try:
@@ -236,6 +246,12 @@ class RawFrameWriter:
 		self._active_file = None
 		log.info("orderbook capture: rotated %s → %s", old_day, new_day)
 		self._open_active(new_day)
+
+		if self._rotation_callback is not None and old_day is not None:
+			try:
+				self._rotation_callback(old_day)
+			except Exception:
+				log.exception("rotation_callback failed for %s", old_day)
 
 	# ------------------------------------------------------------------
 	# Disk pressure

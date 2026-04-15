@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
-from datetime import datetime, timezone
+import threading
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import websockets
 
 from edge_catcher.monitors.auth import KALSHI_WS_URL, WS_PATH, make_auth_headers
+from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+from edge_catcher.monitors.capture.transport import (
+	CaptureTransport,
+	LocalTransport,
+	R2Transport,
+)
 from edge_catcher.monitors.capture.writer import RawFrameWriter
 from edge_catcher.monitors.discovery import (
 	discover_strategies,
@@ -289,6 +297,93 @@ def _series_for_strategy(config: dict, strategy_name: str) -> set[str]:
 	return set(scfg.get("series", []))
 
 
+def _make_rotation_callback(
+	capture_dir: Path,
+	repo_root: Path,
+	db_path: Path,
+	market_state: MarketState,
+	transport: Optional[CaptureTransport],
+):
+	"""Build the rotation_callback closure that RawFrameWriter fires on
+	midnight UTC rollover.
+
+	The callback runs SYNCHRONOUSLY on the engine thread. Its first action
+	is a ``copy.deepcopy(market_state)`` to snapshot live state safely —
+	the copy is safe only when taken on the engine thread because we have
+	no lock over MarketState's internal dicts. After snapshotting, the
+	callback spawns a daemon thread for the slow bundle assembly + upload
+	work so the engine loop is only blocked by the deepcopy itself
+	(typically ~ms even with hundreds of orderbooks).
+	"""
+	def on_rotation(old_day: date) -> None:
+		# 1. Synchronous snapshot on the engine thread (fast, safe).
+		snapshot = copy.deepcopy(market_state)
+
+		# 2. Background thread for assemble + upload (slow, can take minutes).
+		def _assemble_and_upload() -> None:
+			try:
+				bundle_path = assemble_daily_bundle(
+					capture_date=old_day,
+					capture_dir=capture_dir,
+					repo_root=repo_root,
+					db_path=db_path,
+					market_state=snapshot,
+				)
+				if transport is not None:
+					remote_key = f"kalshi/{old_day.isoformat()}"
+					transport.upload_bundle(bundle_path, remote_key)
+					log.info("uploaded bundle %s to transport (%s)", old_day, remote_key)
+				else:
+					log.info("bundle %s assembled; no transport configured, skipping upload", old_day)
+			except Exception:
+				log.exception("background bundle assembly/upload failed for %s", old_day)
+
+		thread = threading.Thread(
+			target=_assemble_and_upload,
+			name=f"bundle-assemble-{old_day}",
+			daemon=True,
+		)
+		thread.start()
+
+	return on_rotation
+
+
+def _build_capture_transport(capture_cfg: dict) -> Optional[CaptureTransport]:
+	"""Construct a CaptureTransport based on config.
+
+	Config shape:
+		capture:
+		  transport: none | local | r2           # default 'none'
+		  transport_local_root: <path>           # used when transport=local
+		  # R2 reads CAPTURE_TRANSPORT_* env vars
+
+	Returns None when transport is 'none' or when R2 config is missing —
+	the bundle assembler still runs and bundles accumulate on local disk,
+	just without uploading.
+	"""
+	kind = (capture_cfg.get("transport") or "none").lower()
+	if kind == "none":
+		return None
+	if kind == "local":
+		root = Path(capture_cfg.get("transport_local_root", "data/capture_bundles"))
+		log.info("capture transport: local → %s", root)
+		return LocalTransport(root=root)
+	if kind == "r2":
+		try:
+			transport = R2Transport()
+			log.info("capture transport: R2 (bucket=%s)", transport.bucket)
+			return transport
+		except KeyError as e:
+			log.warning(
+				"capture transport R2 requested but env var missing: %s — "
+				"continuing with local-only bundles",
+				e,
+			)
+			return None
+	log.warning("capture transport: unknown kind %r — continuing without upload", kind)
+	return None
+
+
 async def run_engine(config_path: Path) -> None:
 	"""Main engine loop — connect WS, dispatch ticks, manage background tasks.
 
@@ -316,13 +411,34 @@ async def run_engine(config_path: Path) -> None:
 	# opts in per-deploy). The writer is best-effort; if capture is disabled
 	# the writer is a no-op instance that doesn't touch disk.
 	capture_cfg = config.get("capture", {}) or {}
+	capture_enabled = capture_cfg.get("enabled", False)
+	capture_output_dir = Path(capture_cfg.get("output_dir", "data/orderbook_capture"))
+
+	# Build the rotation callback only when capture is enabled. The callback
+	# closes over market_state (by reference — deepcopies on call to stay
+	# consistent on the engine thread) and db_path, plus an optional transport.
+	# repo_root is derived from this file's location so it works on dev
+	# and on the Pi regardless of cwd.
+	rotation_callback = None
+	if capture_enabled:
+		transport = _build_capture_transport(capture_cfg)
+		repo_root = Path(__file__).resolve().parent.parent.parent
+		rotation_callback = _make_rotation_callback(
+			capture_dir=capture_output_dir,
+			repo_root=repo_root,
+			db_path=db_path,
+			market_state=market_state,
+			transport=transport,
+		)
+
 	capture_writer = RawFrameWriter(
-		output_dir=Path(capture_cfg.get("output_dir", "data/orderbook_capture")),
-		enabled=capture_cfg.get("enabled", False),
+		output_dir=capture_output_dir,
+		enabled=capture_enabled,
 		min_free_gb=capture_cfg.get("min_free_gb", 10),
+		rotation_callback=rotation_callback,
 	)
 	if capture_writer.enabled:
-		log.info("orderbook capture enabled → %s", capture_cfg.get("output_dir", "data/orderbook_capture"))
+		log.info("orderbook capture enabled → %s", capture_output_dir)
 
 	# 2. Discover and filter strategies
 	all_strategies = discover_strategies()
