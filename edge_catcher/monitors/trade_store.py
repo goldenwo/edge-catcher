@@ -10,6 +10,20 @@ from typing import Any, Optional
 from edge_catcher.fees import STANDARD_FEE
 
 
+class DuplicateOpenTradeError(Exception):
+	"""Raised when record_trade is called with a composite key that matches
+	an existing open trade.
+
+	The composite key is (strategy, ticker, side, entry_time). Per spec §4.1,
+	this key must be unique across open rows so the capture/replay pipeline's
+	synthetic.settlement event can resolve the target row unambiguously.
+
+	In the live engine this indicates either a strategy that scales in at the
+	same millisecond (shouldn't happen today) or a serious bug. Treat it as
+	fatal — do not catch and retry.
+	"""
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -134,6 +148,18 @@ class TradeStore:
 		effective_price = blended_entry if blended_entry is not None else entry_price
 		entry_fee_cents = int(STANDARD_FEE.calculate(effective_price, fill_size))
 		entry_time_iso = now.isoformat()
+
+		# Composite-key uniqueness check (spec §4.1) — see DuplicateOpenTradeError.
+		existing = self._conn.execute(
+			"SELECT id FROM paper_trades "
+			"WHERE strategy=? AND ticker=? AND side=? AND entry_time=? AND status='open'",
+			(strategy, ticker, side, entry_time_iso),
+		).fetchone()
+		if existing is not None:
+			raise DuplicateOpenTradeError(
+				f"open trade already exists: strategy={strategy} ticker={ticker} "
+				f"side={side} entry_time={entry_time_iso} (existing id={existing[0]})"
+			)
 
 		cur = self._conn.execute(
 			"""
