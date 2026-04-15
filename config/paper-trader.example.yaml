@@ -32,3 +32,27 @@ capture:
   enabled: false
   output_dir: data/orderbook_capture
   min_free_gb: 10
+
+  # Transport — where daily bundles are shipped at midnight UTC rotation.
+  #   none  — bundles stay on Pi local disk only (no auto-pruning)
+  #   local — copy to another local path (tests, dev mirror)
+  #   r2    — Cloudflare R2 via boto3 (production). Requires these env vars
+  #           on the paper-trader service: CAPTURE_TRANSPORT_BUCKET,
+  #           CAPTURE_TRANSPORT_ENDPOINT_URL, CAPTURE_TRANSPORT_ACCESS_KEY_ID,
+  #           CAPTURE_TRANSPORT_SECRET_ACCESS_KEY. Write them to a bare
+  #           KEY=VALUE file (NOT ~/.bashrc) and EnvironmentFile= it from
+  #           the systemd unit.
+  transport: none
+  # transport_local_root: data/capture_bundles   # only used when transport=local
+
+  # Retention — keeps Pi disk usage bounded.
+  # delete_raw_after_bundle: after midnight rotation, delete the raw
+  # kalshi_engine_<date>.jsonl file. The zstd-compressed copy inside
+  # the bundle dir is authoritative. Disable only for debugging.
+  delete_raw_after_bundle: true
+  # local_retention_days: prune bundle dirs older than N days — but
+  # ONLY if they have a .uploaded sentinel (written after a successful
+  # transport upload). Stuck/failed uploads are never auto-deleted.
+  # Set to 0 to disable pruning. Ignored when transport=none (pruning
+  # requires a transport so local-only mode doesn't silently lose data).
+  local_retention_days: 7
