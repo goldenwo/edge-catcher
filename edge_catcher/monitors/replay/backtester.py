@@ -323,6 +323,36 @@ def _seed_open_trades(store: InMemoryTradeStore, bundle: Path, prior_bundle: Opt
 	store.seed_from_rows([dict(r) for r in rows])
 
 
+def _seed_strategy_state(
+	store: InMemoryTradeStore,
+	bundle: Path,
+	prior_bundle: Optional[Path | str],
+) -> None:
+	"""Seed from the PRIOR day's strategy_state_at_start.json. See spec §4.2.
+
+	For each entry in the envelope's ``states`` dict, calls
+	``store.save_state(strategy_name, payload)`` which populates the
+	InMemoryTradeStore's internal ``_strategy_state`` dict.
+
+	Missing file is a no-op (logs info) — matches older bundles that
+	predate this feature. Schema version mismatch raises loudly to prevent
+	silent garbage-state replays.
+	"""
+	snapshot_file = _resolve_prior_file(bundle, prior_bundle, "strategy_state_at_start.json")
+	if snapshot_file is None:
+		log.info("replay_capture: no prior strategy_state snapshot; starting with empty state")
+		return
+	envelope = json.loads(snapshot_file.read_text(encoding="utf-8"))
+	version = envelope.get("schema_version")
+	if version != 1:
+		raise ValueError(
+			f"strategy_state_at_start.json: unsupported schema_version {version}"
+		)
+	states = envelope.get("states", {})
+	for strategy_name, payload in states.items():
+		store.save_state(strategy_name, payload)
+
+
 def _resolve_prior_file(
 	bundle: Path,
 	prior_bundle: Optional[Path | str],
