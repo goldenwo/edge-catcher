@@ -117,14 +117,23 @@ class TradeStore:
 		fill_pct: Optional[float] = None,
 		slippage_cents: Optional[float] = None,
 		book_snapshot: Optional[str] = None,
+		*,
+		now: datetime,
 	) -> int:
-		"""Insert a new open trade and return its row id."""
+		"""Insert a new open trade and return its row id.
+
+		`now` is written as `entry_time`. The caller passes
+		`datetime.now(timezone.utc)` (live engine) or the captured `recv_ts`
+		(replay backtester). This is required for parity between the two paths.
+		"""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
 		# Treat blended_entry=0 as None — sub-cent book levels round to 0¢ and must
 		# not be used as cost basis; fall back to entry_price instead.
 		blended_entry = blended_entry if blended_entry else None
 		effective_price = blended_entry if blended_entry is not None else entry_price
 		entry_fee_cents = int(STANDARD_FEE.calculate(effective_price, fill_size))
-		now = datetime.now(timezone.utc).isoformat()
+		entry_time_iso = now.isoformat()
 
 		cur = self._conn.execute(
 			"""
@@ -136,7 +145,7 @@ class TradeStore:
 			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			(
-				ticker, entry_price, now,
+				ticker, entry_price, entry_time_iso,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,  # blended_entry already sanitised above
 				fill_pct, slippage_cents, book_snapshot,
@@ -145,14 +154,18 @@ class TradeStore:
 		self._conn.commit()
 		return cur.lastrowid  # type: ignore[return-value]
 
-	def settle_trade(self, trade_id: int, result: str) -> None:
+	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None:
 		"""Settle a trade by market resolution result ('yes' or 'no').
 
 		exit_price = 100 when side wins, 0 otherwise.
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee
 		Uses blended_entry (post-slippage fill price) when available.
 		No exit fee at settlement since P*(1-P)=0 at prices 0 and 100.
+
+		`now` is written as `exit_time`. Required for live/replay parity.
 		"""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
 		row = self._conn.execute(
 			"SELECT entry_price, side, fill_size, entry_fee_cents, blended_entry, status "
 			"FROM paper_trades WHERE id=?",
@@ -173,20 +186,24 @@ class TradeStore:
 			status = "won" if result == "no" else "lost"
 
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents
-		now = datetime.now(timezone.utc).isoformat()
+		exit_time_iso = now.isoformat()
 		self._conn.execute(
 			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=? AND status='open'",
-			(exit_price, now, pnl, status, trade_id),
+			(exit_price, exit_time_iso, pnl, status, trade_id),
 		)
 		self._conn.commit()
 
-	def exit_trade(self, trade_id: int, exit_price: int) -> None:
+	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
 		"""Exit a trade at a specific price (TP/SL).
 
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee - exit_fee
 		Uses blended_entry (post-slippage fill price) when available.
 		Exit fee applies because TP/SL exits sell at a mid-price.
+
+		`now` is written as `exit_time`. Required for live/replay parity.
 		"""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
 		row = self._conn.execute(
 			"SELECT entry_price, fill_size, entry_fee_cents, blended_entry, side, status "
 			"FROM paper_trades WHERE id=?",
@@ -202,10 +219,10 @@ class TradeStore:
 		exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
 		pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
 		status = "won" if pnl > 0 else ("lost" if pnl < 0 else "scratch")
-		now = datetime.now(timezone.utc).isoformat()
+		exit_time_iso = now.isoformat()
 		self._conn.execute(
 			"UPDATE paper_trades SET exit_price=?, exit_time=?, pnl_cents=?, status=? WHERE id=? AND status='open'",
-			(exit_price, now, pnl, status, trade_id),
+			(exit_price, exit_time_iso, pnl, status, trade_id),
 		)
 		self._conn.commit()
 
