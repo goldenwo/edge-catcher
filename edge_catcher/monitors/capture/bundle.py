@@ -231,6 +231,55 @@ def _write_day_slice(db_path: Path, dst: Path, day: date) -> None:
 		src.close()
 
 
+def _write_strategy_state_snapshot(db_path: Path, dst: Path) -> None:
+	"""Snapshot the live DB's strategy_state table to a JSON envelope.
+
+	Format: {"schema_version": 1, "captured_at": <iso>, "states": {strategy: {key: value}}}
+	where each inner value is the json.loads'd Python object from the DB's
+	value column. Byte-stable output via sort_keys=True on the states dict.
+
+	Fails soft on missing table or per-row malformed JSON (logs a warning
+	and continues) — strategy_state is a replay-fidelity enhancement, not
+	a hard bundle requirement. See spec §7.1, §7.2.
+	"""
+	states: dict[str, dict[str, object]] = {}
+	try:
+		conn = sqlite3.connect(str(db_path))
+		try:
+			rows = conn.execute(
+				"SELECT strategy, key, value FROM strategy_state"
+			).fetchall()
+		finally:
+			conn.close()
+	except sqlite3.OperationalError as e:
+		log.warning(
+			"_write_strategy_state_snapshot: could not read strategy_state table from %s: %s",
+			db_path, e,
+		)
+		rows = []
+
+	for strategy, key, value in rows:
+		try:
+			parsed = json.loads(value)
+		except json.JSONDecodeError:
+			log.warning(
+				"_write_strategy_state_snapshot: skipping malformed value for %s.%s",
+				strategy, key,
+			)
+			continue
+		states.setdefault(strategy, {})[key] = parsed
+
+	envelope = {
+		"schema_version": 1,
+		"captured_at": datetime.now(timezone.utc).isoformat(),
+		"states": states,
+	}
+	dst.write_text(
+		json.dumps(envelope, sort_keys=True, indent=2),
+		encoding="utf-8",
+	)
+
+
 def _write_manifest(bundle_dir: Path, capture_date: date, commit: str, dirty: bool) -> None:
 	files = sorted(p.name for p in bundle_dir.iterdir() if p.name != "manifest.json")
 	manifest = {
