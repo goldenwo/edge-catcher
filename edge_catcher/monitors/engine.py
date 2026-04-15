@@ -13,6 +13,7 @@ import httpx
 import websockets
 
 from edge_catcher.monitors.auth import KALSHI_WS_URL, WS_PATH, make_auth_headers
+from edge_catcher.monitors.capture.writer import RawFrameWriter
 from edge_catcher.monitors.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
@@ -54,8 +55,15 @@ async def _settlement_poller(
 	pending_states: dict[str, dict],
 	metrics: Metrics | None = None,
 	interval: int = 60,
+	capture_writer: RawFrameWriter | None = None,
 ) -> None:
-	"""Periodically check open trades for settlement."""
+	"""Periodically check open trades for settlement.
+
+	If `capture_writer` is provided, tees each settlement resolution to the
+	capture pipeline as a `synthetic.settlement` event (tee point 4 of 4).
+	The tee uses the SAME `now` as the store.settle_trade call so replay
+	produces identical exit_time values to live.
+	"""
 	strat_by_name = {s.name: s for s in strategies}
 	if metrics is None:
 		metrics = Metrics()
@@ -66,9 +74,21 @@ async def _settlement_poller(
 			for trade in open_trades:
 				result = await check_market_result(client, trade["ticker"])
 				if result is not None:
-					# Capture the clock once per settled trade; Task 8 will also
-					# tee this `now` to the capture writer's synthetic.settlement event.
+					# Capture the clock ONCE per settled trade. The capture payload
+					# and the store call share this `now` so that replay produces
+					# byte-identical exit_time values.
 					now = datetime.now(timezone.utc)
+					if capture_writer is not None:
+						# Tee point 4/4 — see capture/replay spec §6.1
+						# `result` is 'yes' or 'no' (raw market outcome). The store
+						# translates to 'won'/'lost' internally based on trade['side'].
+						capture_writer.write_synthetic("settlement", {
+							"strategy": trade["strategy"],
+							"ticker": trade["ticker"],
+							"side": trade.get("side"),
+							"entry_time": trade.get("entry_time"),
+							"result": result,
+						})
 					store.settle_trade(trade["id"], result, now=now)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
@@ -193,8 +213,13 @@ async def _ticker_refresh(
 	ws_ref: list,
 	config: dict | None = None,
 	interval: int = 300,
+	capture_writer: RawFrameWriter | None = None,
 ) -> None:
-	"""Periodically re-fetch tickers and subscribe new ones on WS."""
+	"""Periodically re-fetch tickers and subscribe new ones on WS.
+
+	When a new ticker is discovered, tees the initial orderbook to the
+	capture pipeline as a `synthetic.ticker_discovered` event (tee point 3 of 4).
+	"""
 	while True:
 		await asyncio.sleep(interval)
 		try:
@@ -212,6 +237,13 @@ async def _ticker_refresh(
 						snapshot = await fetch_orderbook_snapshot(client, ticker)
 						if snapshot is not None:
 							market_state.seed_orderbook(ticker, snapshot)
+							if capture_writer is not None:
+								# Tee point 3/4 — see capture/replay spec §6.1
+								capture_writer.write_synthetic("ticker_discovered", {
+									"ticker": ticker,
+									"yes_levels": snapshot.yes_levels,
+									"no_levels": snapshot.no_levels,
+								})
 						new_tickers.append(ticker)
 
 				# Purge stale tickers only when the API response was complete
@@ -280,6 +312,18 @@ async def run_engine(config_path: Path) -> None:
 	store = TradeStore(db_path)
 	market_state = MarketState(limit=price_history_limit)
 
+	# Capture pipeline (default disabled — the `capture:` block in config
+	# opts in per-deploy). The writer is best-effort; if capture is disabled
+	# the writer is a no-op instance that doesn't touch disk.
+	capture_cfg = config.get("capture", {}) or {}
+	capture_writer = RawFrameWriter(
+		output_dir=Path(capture_cfg.get("output_dir", "data/orderbook_capture")),
+		enabled=capture_cfg.get("enabled", False),
+		min_free_gb=capture_cfg.get("min_free_gb", 10),
+	)
+	if capture_writer.enabled:
+		log.info("orderbook capture enabled → %s", capture_cfg.get("output_dir", "data/orderbook_capture"))
+
 	# 2. Discover and filter strategies
 	all_strategies = discover_strategies()
 	strategies, rejected_pairs = get_enabled_strategies(config, all_strategies)
@@ -309,7 +353,7 @@ async def run_engine(config_path: Path) -> None:
 
 	# 4. Run recovery
 	async with httpx.AsyncClient(timeout=30.0) as client:
-		await run_recovery(client, market_state, active_series)
+		await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
 
 		# 5. Call on_startup for each strategy
 		all_open = store.get_open_trades()
@@ -329,7 +373,10 @@ async def run_engine(config_path: Path) -> None:
 		dirty_strategies: set[str] = set()
 		tasks = [
 			asyncio.create_task(
-				_settlement_poller(store, client, strategies, pending_states, metrics=metrics),
+				_settlement_poller(
+					store, client, strategies, pending_states,
+					metrics=metrics, capture_writer=capture_writer,
+				),
 				name="settlement_poller",
 			),
 			asyncio.create_task(
@@ -341,7 +388,10 @@ async def run_engine(config_path: Path) -> None:
 				name="state_flusher",
 			),
 			asyncio.create_task(
-				_ticker_refresh(client, market_state, active_series, ws_ref, config=config),
+				_ticker_refresh(
+					client, market_state, active_series, ws_ref,
+					config=config, capture_writer=capture_writer,
+				),
 				name="ticker_refresh",
 			),
 		]
@@ -361,6 +411,7 @@ async def run_engine(config_path: Path) -> None:
 						config, market_state, store, strategies,
 						strat_by_series, pending_states, active_series,
 						client, ws_ref, dirty_strategies,
+						capture_writer=capture_writer,
 					)
 				except (
 					websockets.ConnectionClosed,
@@ -371,12 +422,12 @@ async def run_engine(config_path: Path) -> None:
 					log.warning("WS disconnected: %s — reconnecting in %ds", exc, reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
 					market_state.clear()
-					await run_recovery(client, market_state, active_series)
+					await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
 				except Exception:
 					log.exception("Unexpected WS error — reconnecting in %ds", reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
 					market_state.clear()
-					await run_recovery(client, market_state, active_series)
+					await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
 
 		finally:
 			# 8. Graceful shutdown
@@ -389,6 +440,7 @@ async def run_engine(config_path: Path) -> None:
 				task.cancel()
 			await asyncio.gather(*tasks, return_exceptions=True)
 			store.close()
+			capture_writer.close()
 
 
 async def _ws_loop(
@@ -402,6 +454,7 @@ async def _ws_loop(
 	client: httpx.AsyncClient,
 	ws_ref: list,
 	dirty: set[str],
+	capture_writer: RawFrameWriter | None = None,
 ) -> None:
 	"""Single WS connection lifecycle — connect, subscribe, process messages."""
 	headers = make_auth_headers()
@@ -438,6 +491,12 @@ async def _ws_loop(
 			except json.JSONDecodeError:
 				log.warning("Non-JSON WS message: %s", raw[:200])
 				continue
+
+			# Tee point 1/4 — capture BEFORE dispatch so a dispatch failure
+			# can't lose the message from the capture log. The writer never
+			# raises into this loop (verified by test_write_ws_never_raises_*).
+			if capture_writer is not None:
+				capture_writer.write_ws(msg)
 
 			# Capture the wall clock ONCE per message so any store rows written
 			# from this message share an identical timestamp (required for

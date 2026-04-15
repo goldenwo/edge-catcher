@@ -23,3 +23,12 @@ sizing:
   risk_per_trade_cents: 200    # $2.00 max risk per trade
   max_slippage_cents: 2        # stop filling beyond best + 2c
   min_fill: 3                  # skip if < 3 contracts fillable
+
+# Orderbook capture pipeline — tees engine input events to disk for
+# offline replay. Default disabled; flip to true on the Pi once R2
+# credentials are configured. See docs/superpowers/specs/2026-04-14-
+# orderbook-capture-replay-design.md
+capture:
+  enabled: false
+  output_dir: data/orderbook_capture
+  min_free_gb: 10

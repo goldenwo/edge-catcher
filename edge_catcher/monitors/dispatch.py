@@ -553,6 +553,88 @@ def _handle_trade_msg(
 # dispatch_message router
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Synthetic event handlers
+#
+# Synthetic events are captured-side-only: they represent state transitions
+# that don't arrive via WS but still affect MarketState or TradeStore. The
+# capture writer emits these events at the same moment the engine applies
+# them live, so the replay backtester can re-apply them in the same order as
+# the interleaved WS events.
+# ---------------------------------------------------------------------------
+
+def _handle_synthetic_rest_orderbook(market_state: MarketState, payload: dict) -> None:
+	"""Apply a captured REST orderbook response.
+
+	Replay equivalent of run_recovery's fetch_orderbook_snapshot + seed_orderbook
+	pair at the moment the live engine made the REST call. The payload carries
+	the post-parse `yes_levels` / `no_levels` so the replay doesn't re-parse
+	the raw Kalshi response.
+	"""
+	from edge_catcher.monitors.market_state import OrderbookSnapshot
+	ticker = payload.get("ticker")
+	if not ticker:
+		return
+	yes_levels = [(float(p), int(q)) for p, q in payload.get("yes_levels", [])]
+	no_levels = [(float(p), int(q)) for p, q in payload.get("no_levels", [])]
+	snapshot = OrderbookSnapshot(yes_levels=yes_levels, no_levels=no_levels)
+	market_state.seed_orderbook(ticker, snapshot)
+	meta = payload.get("market_metadata")
+	if meta is not None:
+		market_state.register_ticker(ticker, meta=meta)
+
+
+def _handle_synthetic_ticker_discovered(market_state: MarketState, payload: dict) -> None:
+	"""Functionally identical to _handle_synthetic_rest_orderbook but tagged
+	separately for telemetry — fires from _ticker_refresh when a new ticker
+	is discovered mid-day (vs run_recovery re-seeding after a reconnect)."""
+	_handle_synthetic_rest_orderbook(market_state, payload)
+
+
+def _handle_synthetic_settlement(store: TradeStore, payload: dict, now: datetime) -> None:
+	"""Apply a captured settlement decision from _settlement_poller.
+
+	Resolves the open trade by composite key (strategy, ticker, side, entry_time).
+	Per spec §4.1, this key is unique across open trades, enforced by
+	DuplicateOpenTradeError in record_trade.
+
+	`payload["result"]` is the raw market outcome 'yes' or 'no' — NOT 'won'/'lost'.
+	The store translates to won/lost internally based on the trade's side.
+	"""
+	strategy = payload.get("strategy")
+	ticker = payload.get("ticker")
+	side = payload.get("side")
+	entry_time = payload.get("entry_time")
+	result = payload.get("result")
+	if not all((strategy, ticker, side, entry_time, result)):
+		log.warning("synthetic.settlement: incomplete payload, skipping: %r", payload)
+		return
+
+	open_trades = store.get_open_trades_for(strategy, ticker)  # parameter is `strategy`, not `strat_name`
+	matches = [
+		t for t in open_trades
+		if t.get("side") == side and t.get("entry_time") == entry_time
+	]
+	if not matches:
+		log.warning(
+			"synthetic.settlement: no open trade matches key "
+			"(strategy=%s ticker=%s side=%s entry_time=%s) — skipping",
+			strategy, ticker, side, entry_time,
+		)
+		return
+	if len(matches) > 1:
+		# Shouldn't happen — DuplicateOpenTradeError in record_trade prevents this.
+		raise RuntimeError(
+			f"synthetic.settlement: composite key matched {len(matches)} open trades "
+			f"for {strategy}/{ticker} — DuplicateOpenTradeError invariant violated"
+		)
+	store.settle_trade(matches[0]["id"], result, now=now)
+
+
+# ---------------------------------------------------------------------------
+# dispatch_message router
+# ---------------------------------------------------------------------------
+
 def dispatch_message(
 	event: dict,
 	config: dict,
@@ -572,10 +654,6 @@ def dispatch_message(
 	accepts both so the live engine can construct events from raw WS messages
 	without going through a capture writer first, and the replay backtester
 	can feed the on-disk shape directly.
-
-	Synthetic event sources (``synthetic.rest_orderbook``, ``synthetic.ticker_discovered``,
-	``synthetic.settlement``) will be added in Task 8 alongside the capture tee
-	points. For now this router handles WS messages only.
 	"""
 	# Accept both the wrapped (capture) shape and the raw WS shape.
 	source = event.get("source")
@@ -585,25 +663,30 @@ def dispatch_message(
 		source = "ws"
 	elif source == "ws":
 		msg = event.get("payload", event)
-	else:
-		# Synthetic sources will be implemented in Task 8
-		log.warning("dispatch_message: unsupported source %r (synthetic handlers land in Task 8)", source)
-		return
 
-	msg_type = msg.get("type")
-	if msg_type == "orderbook_snapshot":
-		_handle_orderbook_snapshot(market_state, msg)
-	elif msg_type == "orderbook_delta":
-		_handle_orderbook_delta(market_state, msg)
-	elif msg_type == "ticker":
-		_handle_ticker_msg(
-			msg, config, market_state, store, strategies,
-			strat_by_series, pending_states, dirty, now=now,
-		)
-	elif msg_type == "trade":
-		_handle_trade_msg(
-			msg, config, market_state, store, strategies,
-			strat_by_series, pending_states, dirty, now=now,
-		)
+	if source == "ws":
+		msg_type = msg.get("type")
+		if msg_type == "orderbook_snapshot":
+			_handle_orderbook_snapshot(market_state, msg)
+		elif msg_type == "orderbook_delta":
+			_handle_orderbook_delta(market_state, msg)
+		elif msg_type == "ticker":
+			_handle_ticker_msg(
+				msg, config, market_state, store, strategies,
+				strat_by_series, pending_states, dirty, now=now,
+			)
+		elif msg_type == "trade":
+			_handle_trade_msg(
+				msg, config, market_state, store, strategies,
+				strat_by_series, pending_states, dirty, now=now,
+			)
+		else:
+			log.debug("dispatch_message: unknown msg_type %r", msg_type)
+	elif source == "synthetic.rest_orderbook":
+		_handle_synthetic_rest_orderbook(market_state, event.get("payload", {}))
+	elif source == "synthetic.ticker_discovered":
+		_handle_synthetic_ticker_discovered(market_state, event.get("payload", {}))
+	elif source == "synthetic.settlement":
+		_handle_synthetic_settlement(store, event.get("payload", {}), now)
 	else:
-		log.debug("dispatch_message: unknown msg_type %r", msg_type)
+		log.warning("dispatch_message: unknown source %r", source)

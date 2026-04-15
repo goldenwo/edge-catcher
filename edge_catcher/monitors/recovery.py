@@ -6,7 +6,7 @@ Kalshi's REST API.  Used on startup and after WebSocket reconnects.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from edge_catcher.monitors.auth import KALSHI_REST_BASE
 from edge_catcher.monitors.market_state import (
@@ -14,6 +14,9 @@ from edge_catcher.monitors.market_state import (
 	OrderbookSnapshot,
 	_is_tradeable_cents,
 )
+
+if TYPE_CHECKING:
+	from edge_catcher.monitors.capture.writer import RawFrameWriter
 
 log = logging.getLogger(__name__)
 
@@ -241,6 +244,7 @@ async def run_recovery(
 	client,
 	market_state: MarketState,
 	active_series: list[str],
+	capture_writer: Optional["RawFrameWriter"] = None,
 ) -> None:
 	"""Run a full REST recovery sweep.
 
@@ -248,10 +252,15 @@ async def run_recovery(
 	for each ticker and registers it in market_state, then seeds the
 	orderbook with a fresh snapshot.
 
+	If `capture_writer` is provided, tees each REST orderbook response
+	to the capture pipeline as a `synthetic.rest_orderbook` event.
+	Best-effort; write failures are swallowed by the writer.
+
 	Args:
-		client:        httpx.AsyncClient (or compatible mock).
-		market_state:  MarketState instance to populate.
-		active_series: List of series tickers to sweep.
+		client:         httpx.AsyncClient (or compatible mock).
+		market_state:   MarketState instance to populate.
+		active_series:  List of series tickers to sweep.
+		capture_writer: Optional RawFrameWriter (capture tee point 2 of 4).
 	"""
 	total = 0
 
@@ -270,5 +279,12 @@ async def run_recovery(
 			snapshot = await fetch_orderbook_snapshot(client, ticker)
 			if snapshot is not None:
 				market_state.seed_orderbook(ticker, snapshot)
+				if capture_writer is not None:
+					# Tee point 2/4 — see capture/replay spec §6.1
+					capture_writer.write_synthetic("rest_orderbook", {
+						"ticker": ticker,
+						"yes_levels": snapshot.yes_levels,
+						"no_levels": snapshot.no_levels,
+					})
 
 	log.info("run_recovery: complete — %d total tickers across %d series", total, len(active_series))
