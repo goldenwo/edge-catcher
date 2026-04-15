@@ -59,3 +59,19 @@ def test_seed_strategy_state_missing_file(tmp_path, caplog):
 
 	assert store.load_all_states() == {}
 	assert "no prior strategy_state" in caplog.text
+
+
+def test_seed_strategy_state_schema_version_mismatch(tmp_path):
+	"""Envelope with schema_version != 1 raises ValueError naming the version."""
+	prior = tmp_path / "2026-04-14"
+	prior.mkdir()
+	bundle = tmp_path / "2026-04-15"
+	bundle.mkdir()
+	(prior / "strategy_state_at_start.json").write_text(
+		json.dumps({"schema_version": 999, "captured_at": "x", "states": {}}),
+		encoding="utf-8",
+	)
+
+	store = InMemoryTradeStore()
+	with pytest.raises(ValueError, match="999"):
+		_seed_strategy_state(store, bundle, prior_bundle=prior)
