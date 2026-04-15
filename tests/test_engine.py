@@ -22,8 +22,7 @@ from edge_catcher.monitors.market_state import (
 from edge_catcher.monitors.metrics import Metrics
 from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
 from edge_catcher.monitors.trade_store import TradeStore
-from edge_catcher.monitors.engine import (
-	_collect_active_series,
+from edge_catcher.monitors.dispatch import (
 	_format_close_message,
 	_format_enter_message,
 	_handle_orderbook_delta,
@@ -31,8 +30,11 @@ from edge_catcher.monitors.engine import (
 	_handle_ticker_msg,
 	_handle_trade_msg,
 	_pnl_label,
-	_series_for_strategy,
 	process_tick,
+)
+from edge_catcher.monitors.engine import (
+	_collect_active_series,
+	_series_for_strategy,
 )
 
 
