@@ -462,3 +462,47 @@ def test_strategy_state_snapshot_missing_table(tmp_path, caplog):
 	envelope = json.loads(dst.read_text(encoding="utf-8"))
 	assert envelope["states"] == {}
 	assert "strategy_state" in caplog.text
+
+
+def test_strategy_state_snapshot_malformed_value(tmp_path, caplog):
+	"""One row with unparseable JSON in value column: skip that row,
+	keep the good ones, log a warning that names the (strategy, key)."""
+	import json
+	import logging
+	import sqlite3
+	from datetime import datetime, timezone
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	now = datetime.now(timezone.utc).isoformat()
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strat-a", "good-key", json.dumps({"ok": True}), now),
+	)
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strat-a", "bad-key", "{not-json", now),
+	)
+	conn.commit()
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	with caplog.at_level(logging.WARNING):
+		_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["states"] == {"strat-a": {"good-key": {"ok": True}}}
+	# Warning must reference both the strategy and the offending key.
+	# Using caplog.text (fully formatted) rather than per-record r.message
+	# to avoid subtle differences in how pytest caches formatted messages.
+	assert "strat-a" in caplog.text and "bad-key" in caplog.text
