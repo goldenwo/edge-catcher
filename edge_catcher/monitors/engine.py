@@ -290,12 +290,33 @@ async def _ticker_refresh(
 
 
 def _collect_active_series(config: dict) -> list[str]:
-	"""Collect all unique series from enabled strategies in config."""
+	"""Collect all unique series the engine should subscribe to.
+
+	Sources, in order:
+	  1. Series declared by every enabled strategy under ``strategies.<name>.series``.
+	  2. Capture-only series under ``capture.extra_series`` — observed but never
+	     dispatched to any strategy. Lets the operator record markets for future
+	     research without firing any live trades on them. Only included when
+	     ``capture.enabled`` is true (no point subscribing to extra tickers if
+	     capture is off).
+
+	Tickers in capture-only series get full WS subscription, REST recovery
+	snapshots, and ticker_refresh updates — so they're recorded with the same
+	fidelity as strategy tickers — but they have no entry in ``strat_by_series``
+	so dispatch silently drops them at the strategy-routing step. The capture
+	tee fires BEFORE dispatch, so observation is unaffected.
+	"""
 	series: set[str] = set()
 	for _name, scfg in config.get("strategies", {}).items():
 		if scfg.get("enabled", False):
-			for s in scfg.get("series", []):
+			for s in scfg.get("series", []) or []:
 				series.add(s)
+
+	capture_cfg = config.get("capture", {}) or {}
+	if capture_cfg.get("enabled", False):
+		for s in capture_cfg.get("extra_series", []) or []:
+			series.add(s)
+
 	return sorted(series)
 
 

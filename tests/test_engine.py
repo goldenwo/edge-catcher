@@ -800,6 +800,69 @@ class TestCollectActiveSeries:
 	def test_empty_config(self):
 		assert _collect_active_series({}) == []
 
+	def test_capture_extra_series_unioned_when_capture_enabled(self):
+		"""capture.extra_series tickers get observed but never dispatched to
+		any strategy. The union with strategy series happens at subscription
+		time so REST recovery + WS subscription pick them up automatically."""
+		config = {
+			"strategies": {
+				"s1": {"enabled": True, "series": ["KXETH15M"]},
+			},
+			"capture": {
+				"enabled": True,
+				"extra_series": ["KXBTC15M", "KXDOGE15M"],
+			},
+		}
+		result = _collect_active_series(config)
+		assert set(result) == {"KXETH15M", "KXBTC15M", "KXDOGE15M"}
+
+	def test_capture_extra_series_ignored_when_capture_disabled(self):
+		"""No point subscribing to extra tickers when capture is off — they
+		generate WS load without being recorded for any purpose."""
+		config = {
+			"strategies": {
+				"s1": {"enabled": True, "series": ["KXETH15M"]},
+			},
+			"capture": {
+				"enabled": False,
+				"extra_series": ["KXBTC15M"],
+			},
+		}
+		result = _collect_active_series(config)
+		assert set(result) == {"KXETH15M"}
+
+	def test_capture_extra_series_dedupe_with_strategy_series(self):
+		"""If a strategy already covers a series and capture lists it again,
+		the union dedupes — no double subscription."""
+		config = {
+			"strategies": {
+				"s1": {"enabled": True, "series": ["KXETH15M"]},
+			},
+			"capture": {
+				"enabled": True,
+				"extra_series": ["KXETH15M", "KXBTC15M"],
+			},
+		}
+		result = _collect_active_series(config)
+		assert set(result) == {"KXETH15M", "KXBTC15M"}
+		assert result == sorted(set(result))  # also confirm sorted output
+
+	def test_capture_extra_series_handles_none_or_missing(self):
+		"""Missing or null ``extra_series`` key under capture is a no-op."""
+		# capture present, no extra_series key
+		config_a = {
+			"strategies": {"s1": {"enabled": True, "series": ["KXETH15M"]}},
+			"capture": {"enabled": True},
+		}
+		assert set(_collect_active_series(config_a)) == {"KXETH15M"}
+
+		# capture present, extra_series explicitly null
+		config_b = {
+			"strategies": {"s1": {"enabled": True, "series": ["KXETH15M"]}},
+			"capture": {"enabled": True, "extra_series": None},
+		}
+		assert set(_collect_active_series(config_b)) == {"KXETH15M"}
+
 
 class TestSeriesForStrategy:
 	def test_returns_configured_series(self):
