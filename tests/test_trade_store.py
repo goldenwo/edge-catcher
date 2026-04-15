@@ -1,10 +1,22 @@
 """Tests for edge_catcher.monitors.trade_store."""
 from __future__ import annotations
 
-import pytest
+from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from edge_catcher.monitors.trade_store import TradeStore
+
+
+def _now() -> datetime:
+	"""Return a timezone-aware wall-clock datetime for test `now=` kwargs.
+
+	These tests don't assert anything about timestamps, they just need a
+	valid value to satisfy the required parameter. For timestamp-sensitive
+	assertions see tests/test_trade_store_now.py.
+	"""
+	return datetime.now(timezone.utc)
 
 
 @pytest.fixture
@@ -53,6 +65,7 @@ def test_record_trade_with_book_snapshot(store: TradeStore) -> None:
 	trade_id = store.record_trade(
 		ticker="T1", entry_price=3, strategy="test", side="no",
 		series_ticker="SERIES", book_snapshot=snapshot,
+		now=_now(),
 	)
 	row = store._conn.execute(
 		"SELECT book_snapshot FROM paper_trades WHERE id=?", (trade_id,)
@@ -64,6 +77,7 @@ def test_record_trade_book_snapshot_default_null(store: TradeStore) -> None:
 	trade_id = store.record_trade(
 		ticker="T1", entry_price=3, strategy="test", side="no",
 		series_ticker="SERIES",
+		now=_now(),
 	)
 	row = store._conn.execute(
 		"SELECT book_snapshot FROM paper_trades WHERE id=?", (trade_id,)
@@ -88,6 +102,7 @@ def test_record_trade_returns_id(store: TradeStore) -> None:
 		book_depth=5,
 		fill_pct=1.0,
 		slippage_cents=2.0,
+		now=_now(),
 	)
 	assert isinstance(trade_id, int)
 	assert trade_id > 0
@@ -106,6 +121,7 @@ def test_record_trade_fee_auto_calculated(store: TradeStore) -> None:
 		book_depth=5,
 		fill_pct=1.0,
 		slippage_cents=0.0,
+		now=_now(),
 	)
 	row = store._conn.execute(
 		"SELECT entry_fee_cents FROM paper_trades WHERE id=?", (trade_id,)
@@ -124,6 +140,7 @@ def test_record_trade_retrieve_open(store: TradeStore) -> None:
 		intended_size=1,
 		fill_size=1,
 		blended_entry=45,
+		now=_now(),
 	)
 	open_trades = store.get_open_trades()
 	assert len(open_trades) == 1
@@ -145,8 +162,9 @@ def test_settle_trade_yes_win(store: TradeStore) -> None:
 		intended_size=5,
 		fill_size=5,
 		blended_entry=40,
+		now=_now(),
 	)
-	store.settle_trade(trade_id, "yes")
+	store.settle_trade(trade_id, "yes", now=_now())
 	row = store._conn.execute(
 		"SELECT status, pnl_cents, exit_price FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()
@@ -170,8 +188,9 @@ def test_settle_trade_yes_loss(store: TradeStore) -> None:
 		intended_size=5,
 		fill_size=5,
 		blended_entry=40,
+		now=_now(),
 	)
-	store.settle_trade(trade_id, "no")
+	store.settle_trade(trade_id, "no", now=_now())
 	row = store._conn.execute(
 		"SELECT status, pnl_cents, exit_price FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()
@@ -194,8 +213,9 @@ def test_settle_trade_no_side_win(store: TradeStore) -> None:
 		intended_size=3,
 		fill_size=3,
 		blended_entry=35,
+		now=_now(),
 	)
-	store.settle_trade(trade_id, "no")  # "no" wins → exit at 100
+	store.settle_trade(trade_id, "no", now=_now())  # "no" wins → exit at 100
 	row = store._conn.execute(
 		"SELECT status, exit_price FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()
@@ -217,8 +237,9 @@ def test_exit_trade_profit(store: TradeStore) -> None:
 		intended_size=2,
 		fill_size=2,
 		blended_entry=40,
+		now=_now(),
 	)
-	store.exit_trade(trade_id, exit_price=50)
+	store.exit_trade(trade_id, exit_price=50, now=_now())
 	row = store._conn.execute(
 		"SELECT status, exit_price, pnl_cents FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()
@@ -243,8 +264,9 @@ def test_exit_trade_loss(store: TradeStore) -> None:
 		intended_size=2,
 		fill_size=2,
 		blended_entry=40,
+		now=_now(),
 	)
-	store.exit_trade(trade_id, exit_price=35)
+	store.exit_trade(trade_id, exit_price=35, now=_now())
 	row = store._conn.execute(
 		"SELECT status FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()
@@ -265,6 +287,7 @@ def test_get_open_trades_for_filters(store: TradeStore) -> None:
 		intended_size=1,
 		fill_size=1,
 		blended_entry=40,
+		now=_now(),
 	)
 	store.record_trade(
 		ticker="KXBTC-25MAR-T30000",
@@ -275,6 +298,7 @@ def test_get_open_trades_for_filters(store: TradeStore) -> None:
 		intended_size=1,
 		fill_size=1,
 		blended_entry=45,
+		now=_now(),
 	)
 	store.record_trade(
 		ticker="KXXRP-25MAR-T2",
@@ -285,6 +309,7 @@ def test_get_open_trades_for_filters(store: TradeStore) -> None:
 		intended_size=1,
 		fill_size=1,
 		blended_entry=30,
+		now=_now(),
 	)
 
 	result = store.get_open_trades_for("strategy_a", "KXBTC-25MAR-T30000")
@@ -303,8 +328,9 @@ def test_get_open_trades_for_excludes_closed(store: TradeStore) -> None:
 		intended_size=1,
 		fill_size=1,
 		blended_entry=40,
+		now=_now(),
 	)
-	store.settle_trade(trade_id, "yes")
+	store.settle_trade(trade_id, "yes", now=_now())
 	result = store.get_open_trades_for("strategy_a", "KXBTC-25MAR-T30000")
 	assert len(result) == 0
 
