@@ -258,7 +258,7 @@ class TradeStore:
 			"""
 			SELECT id, ticker, entry_price, strategy, side, series_ticker,
 			       entry_fee_cents, intended_size, fill_size, blended_entry,
-			       book_depth, fill_pct, slippage_cents, status
+			       book_depth, fill_pct, slippage_cents, status, entry_time
 			FROM paper_trades WHERE status='open'
 			"""
 		).fetchall()
@@ -270,7 +270,7 @@ class TradeStore:
 			"""
 			SELECT id, ticker, entry_price, strategy, side, series_ticker,
 			       entry_fee_cents, intended_size, fill_size, blended_entry,
-			       book_depth, fill_pct, slippage_cents, status,
+			       book_depth, fill_pct, slippage_cents, status, entry_time,
 			       exit_price, exit_time, pnl_cents
 			FROM paper_trades WHERE id=?
 			""",
@@ -284,7 +284,7 @@ class TradeStore:
 			"""
 			SELECT id, ticker, entry_price, strategy, side, series_ticker,
 			       entry_fee_cents, intended_size, fill_size, blended_entry,
-			       book_depth, fill_pct, slippage_cents, status
+			       book_depth, fill_pct, slippage_cents, status, entry_time
 			FROM paper_trades WHERE status='open' AND strategy=? AND ticker=?
 			""",
 			(strategy, ticker),
@@ -344,12 +344,14 @@ class TradeStore:
 def _row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
 	"""Map a SELECT row to a dict.
 
-	Supports both the 14-column (open trades) and 17-column (full trade) variants.
+	Supports both the 15-column (open trades) and 18-column (full trade)
+	variants. `entry_time` was added at position 15 in Task 8 (capture/replay)
+	so the settlement poller can include it in the synthetic.settlement payload.
 	"""
 	keys = (
 		"id", "ticker", "entry_price", "strategy", "side", "series_ticker",
 		"entry_fee_cents", "intended_size", "fill_size", "blended_entry",
-		"book_depth", "fill_pct", "slippage_cents", "status",
+		"book_depth", "fill_pct", "slippage_cents", "status", "entry_time",
 		"exit_price", "exit_time", "pnl_cents",
 	)
 	return dict(zip(keys, row))
