@@ -158,6 +158,8 @@ def process_tick(
 	strategies: list[PaperStrategy],
 	store: TradeStore,
 	config: dict,
+	*,
+	now: datetime,
 ) -> None:
 	"""Run every enabled strategy against the current tick context.
 
@@ -166,6 +168,11 @@ def process_tick(
 	  - Process enter/exit signals with exception isolation per-signal
 
 	This is the synchronous, testable core of the engine.
+
+	`now` is the wall-clock timestamp for this tick, captured once in the WS
+	message loop (or equivalent replay source) and threaded down so that every
+	trade row written during this call has an identical entry_time/exit_time.
+	Required for byte-equal parity between live and replay backtester paths.
 	"""
 	for strategy in strategies:
 		try:
@@ -176,7 +183,7 @@ def process_tick(
 
 		for signal in signals:
 			try:
-				_handle_signal(signal, ctx, store, config, strategy.emoji)
+				_handle_signal(signal, ctx, store, config, strategy.emoji, now=now)
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -190,12 +197,14 @@ def _handle_signal(
 	store: TradeStore,
 	config: dict,
 	bullet: str = "🔵",
+	*,
+	now: datetime,
 ) -> None:
 	"""Dispatch a single signal — enter or exit."""
 	if signal.action == "enter":
-		_handle_enter(signal, ctx, store, config, bullet)
+		_handle_enter(signal, ctx, store, config, bullet, now=now)
 	elif signal.action == "exit":
-		_handle_exit(signal, ctx, store, bullet)
+		_handle_exit(signal, ctx, store, bullet, now=now)
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
@@ -206,6 +215,8 @@ def _handle_enter(
 	store: TradeStore,
 	config: dict,
 	bullet: str = "🔵",
+	*,
+	now: datetime,
 ) -> None:
 	"""Process an entry signal: resolve sizing, walk orderbook, record trade."""
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
@@ -254,7 +265,7 @@ def _handle_enter(
 		fill_pct=fill.fill_pct,
 		slippage_cents=fill.slippage_cents,
 		book_snapshot=json.dumps(side_levels),
-		now=datetime.now(timezone.utc),  # Task 3 will thread this from the WS message loop
+		now=now,
 	)
 	metrics.inc("entries_filled")
 
@@ -278,6 +289,8 @@ def _handle_exit(
 	ctx: TickContext,
 	store: TradeStore,
 	bullet: str = "🔵",
+	*,
+	now: datetime,
 ) -> None:
 	"""Process an exit signal: compute exit price, close trade."""
 	if signal.trade_id is None:
@@ -290,7 +303,7 @@ def _handle_exit(
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
-	store.exit_trade(signal.trade_id, exit_price, now=datetime.now(timezone.utc))  # Task 3 will thread this from the WS message loop
+	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)
 	exited = store.get_trade_by_id(signal.trade_id)
@@ -353,7 +366,10 @@ async def _settlement_poller(
 			for trade in open_trades:
 				result = await check_market_result(client, trade["ticker"])
 				if result is not None:
-					store.settle_trade(trade["id"], result, now=datetime.now(timezone.utc))
+					# Capture the clock once per settled trade; Task 8 will also
+					# tee this `now` to the capture writer's synthetic.settlement event.
+					now = datetime.now(timezone.utc)
+					store.settle_trade(trade["id"], result, now=now)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
 					# Branch settlement counters on DB 'status' (won/lost only),
@@ -723,6 +739,10 @@ async def _ws_loop(
 				log.warning("Non-JSON WS message: %s", raw[:200])
 				continue
 
+			# Capture the wall clock ONCE per message so any store rows written
+			# from this message share an identical timestamp (required for
+			# capture/replay parity — see spec §4.7).
+			now = datetime.now(timezone.utc)
 			msg_type = msg.get("type")
 
 			if msg_type == "orderbook_snapshot":
@@ -742,6 +762,7 @@ async def _ws_loop(
 					_handle_ticker_msg(
 						msg, config, market_state, store,
 						strategies, strat_by_series, pending_states, dirty,
+						now=now,
 					)
 				except Exception:
 					log.exception("Error handling ticker msg")
@@ -751,6 +772,7 @@ async def _ws_loop(
 					_handle_trade_msg(
 						msg, config, market_state, store,
 						strategies, strat_by_series, pending_states, dirty,
+						now=now,
 					)
 				except Exception:
 					log.exception("Error handling trade msg")
@@ -765,6 +787,8 @@ def _handle_trade_msg(
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
 	dirty: set[str],
+	*,
+	now: datetime,
 ) -> None:
 	"""Handle a trade WS message — routes to flow-sensitive strategies."""
 	data = msg.get("msg", {})
@@ -831,7 +855,7 @@ def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			process_tick(ctx, [strat], store, config)
+			process_tick(ctx, [strat], store, config, now=now)
 			dirty.add(strat.name)
 
 
@@ -906,6 +930,8 @@ def _handle_ticker_msg(
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
 	dirty: set[str],
+	*,
+	now: datetime,
 ) -> None:
 	"""Handle a ticker (price update) WS message."""
 	data = msg.get("msg", {})
@@ -970,5 +996,5 @@ def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			process_tick(ctx, [strat], store, config)
+			process_tick(ctx, [strat], store, config, now=now)
 			dirty.add(strat.name)
