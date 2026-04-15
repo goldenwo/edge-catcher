@@ -75,3 +75,16 @@ def test_seed_strategy_state_schema_version_mismatch(tmp_path):
 	store = InMemoryTradeStore()
 	with pytest.raises(ValueError, match="999"):
 		_seed_strategy_state(store, bundle, prior_bundle=prior)
+
+
+def test_seed_strategy_state_malformed_json(tmp_path):
+	"""Malformed JSON file propagates JSONDecodeError (fail loud)."""
+	prior = tmp_path / "2026-04-14"
+	prior.mkdir()
+	bundle = tmp_path / "2026-04-15"
+	bundle.mkdir()
+	(prior / "strategy_state_at_start.json").write_text("{not-json", encoding="utf-8")
+
+	store = InMemoryTradeStore()
+	with pytest.raises(json.JSONDecodeError):
+		_seed_strategy_state(store, bundle, prior_bundle=prior)
