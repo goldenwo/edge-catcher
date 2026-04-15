@@ -260,6 +260,25 @@ class TestCheckMarketResult:
 		result = asyncio.run(check_market_result(mock_client, "EVT1-T10"))
 		assert result is None
 
+	def test_empty_string_result_is_treated_as_unsettled(self):
+		"""Kalshi returns result="" for markets that are expired but whose
+		settlement is still pending (or scratched/void). Treat this as
+		unsettled — return None — so the caller doesn't prematurely close
+		the trade. Observed in production 2026-04-15 overnight soak: 4
+		trades were miscategorized as 'lost' with exit_price=0 because the
+		empty-string result was passed through to store.settle_trade.
+		"""
+		from edge_catcher.monitors.recovery import check_market_result
+
+		mock_client = AsyncMock()
+		mock_client.get = AsyncMock(return_value=MagicMock(
+			status_code=200,
+			json=lambda: {"market": {"result": ""}},
+		))
+
+		result = asyncio.run(check_market_result(mock_client, "EVT1-T10"))
+		assert result is None, "empty string result must be normalized to None"
+
 	def test_handles_api_error_returns_none(self):
 		"""Should return None on exception."""
 		from edge_catcher.monitors.recovery import check_market_result

@@ -207,6 +207,14 @@ async def check_market_result(client, ticker: str) -> Optional[str]:
 
 	Returns:
 		'yes', 'no', or None (unsettled / error).
+
+	Kalshi returns ``result=""`` for markets that are expired but whose
+	settlement is still pending (or scratched/void). We normalize the empty
+	string to ``None`` so the _settlement_poller caller doesn't prematurely
+	close the open trade. Without this normalization, settle_trade would be
+	called with ``result=""`` which falls through the side/result match and
+	produces ``status="lost"`` + ``exit_price=0`` for any side — permanent
+	miscategorization. Discovered via the 2026-04-15 overnight capture soak.
 	"""
 	for attempt in range(3):
 		try:
@@ -230,8 +238,9 @@ async def check_market_result(client, ticker: str) -> Optional[str]:
 				)
 				return None
 
-			market = resp.json().get("market", {})
-			return market.get("result")  # may be None if not settled
+			raw = resp.json().get("market", {}).get("result")
+			# Normalize empty string → None (expired-but-pending or void/scratched)
+			return raw if raw else None
 
 		except Exception:
 			log.exception("check_market_result failed for %s", ticker)
