@@ -66,7 +66,7 @@ class ReplayResult:
 	capture_start_ts: Optional[str] = None
 	capture_end_ts: Optional[str] = None
 	strategies_loaded: list[str] = field(default_factory=list)
-	store: Optional["InMemoryTradeStore"] = None  # NEW
+	store: Optional["InMemoryTradeStore"] = None
 
 
 # ---------------------------------------------------------------------------
