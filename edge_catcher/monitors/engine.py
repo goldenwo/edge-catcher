@@ -82,9 +82,9 @@ async def _settlement_poller(
 			for trade in open_trades:
 				result = await check_market_result(client, trade["ticker"])
 				if result is not None:
-					# Capture the clock ONCE per settled trade. The capture payload
-					# and the store call share this `now` so that replay produces
-					# byte-identical exit_time values.
+					# Capture the clock ONCE per settled trade. The capture payload,
+					# its recv_ts, and the store call ALL share this `now` so that
+					# replay produces byte-identical exit_time values.
 					now = datetime.now(timezone.utc)
 					if capture_writer is not None:
 						# Tee point 4/4 — see capture/replay spec §6.1
@@ -96,7 +96,7 @@ async def _settlement_poller(
 							"side": trade.get("side"),
 							"entry_time": trade.get("entry_time"),
 							"result": result,
-						})
+						}, recv_ts=now)
 					store.settle_trade(trade["id"], result, now=now)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
@@ -244,6 +244,9 @@ async def _ticker_refresh(
 						market_state.register_ticker(ticker)
 						snapshot = await fetch_orderbook_snapshot(client, ticker)
 						if snapshot is not None:
+							# Capture the clock ONCE so both seed_orderbook and
+							# the capture tee share an identical recv_ts.
+							tick_now = datetime.now(timezone.utc)
 							market_state.seed_orderbook(ticker, snapshot)
 							if capture_writer is not None:
 								# Tee point 3/4 — see capture/replay spec §6.1
@@ -251,7 +254,7 @@ async def _ticker_refresh(
 									"ticker": ticker,
 									"yes_levels": snapshot.yes_levels,
 									"no_levels": snapshot.no_levels,
-								})
+								}, recv_ts=tick_now)
 						new_tickers.append(ticker)
 
 				# Purge stale tickers only when the API response was complete
@@ -608,16 +611,20 @@ async def _ws_loop(
 				log.warning("Non-JSON WS message: %s", raw[:200])
 				continue
 
+			# Capture the wall clock ONCE per message. The SAME `now` is passed
+			# to BOTH the capture writer's recv_ts AND the dispatch now
+			# parameter so replay reads back the exact same timestamp the
+			# live engine used for record_trade / exit_trade. Without this,
+			# the writer's internal clock read and the dispatch's clock read
+			# are microseconds apart and every trade row diverges on
+			# entry_time / exit_time. See spec §4.7.
+			now = datetime.now(timezone.utc)
+
 			# Tee point 1/4 — capture BEFORE dispatch so a dispatch failure
 			# can't lose the message from the capture log. The writer never
 			# raises into this loop (verified by test_write_ws_never_raises_*).
 			if capture_writer is not None:
-				capture_writer.write_ws(msg)
-
-			# Capture the wall clock ONCE per message so any store rows written
-			# from this message share an identical timestamp (required for
-			# capture/replay parity — see spec §4.7).
-			now = datetime.now(timezone.utc)
+				capture_writer.write_ws(msg, recv_ts=now)
 
 			try:
 				dispatch_message(

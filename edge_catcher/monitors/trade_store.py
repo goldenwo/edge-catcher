@@ -338,6 +338,214 @@ class TradeStore:
 
 
 # ---------------------------------------------------------------------------
+# InMemoryTradeStore — structural twin of TradeStore for the replay backtester
+# ---------------------------------------------------------------------------
+#
+# The replay backtester dispatches captured events through the same handlers
+# as the live trader, which means it needs a store object that satisfies the
+# same duck-typed interface (record_trade / exit_trade / settle_trade /
+# get_open_trades / get_trade_by_id / get_open_trades_for / save_state /
+# load_state / load_all_states). This in-memory version mirrors the SQLite
+# implementation's arithmetic EXACTLY — any divergence would break the parity
+# test. When adding behavior to TradeStore, mirror it here.
+
+class InMemoryTradeStore:
+	"""Pure-Python structural twin of TradeStore for replay.
+
+	Mirrors TradeStore's write path arithmetic exactly so replay produces
+	byte-identical trade rows. Not thread-safe; the replay backtester
+	dispatches events serially.
+	"""
+
+	def __init__(self) -> None:
+		self._rows: list[dict[str, Any]] = []
+		self._next_id = 1
+		self._strategy_state: dict[str, dict[str, Any]] = {}
+
+	# -------------------------------------------------------------------------
+	# Seeding (replay-only; no SQLiteTradeStore equivalent)
+	# -------------------------------------------------------------------------
+
+	def seed_from_rows(self, rows: list[dict[str, Any]]) -> None:
+		"""Load rows from a dict-of-dicts (e.g. from the bundle's
+		open_trades_at_start.sqlite). Used to carry over open positions
+		from the prior day's replay. Bumps _next_id past the max existing id
+		so new record_trade calls don't collide."""
+		for row in rows:
+			self._rows.append(dict(row))
+			if row.get("id") is not None:
+				self._next_id = max(self._next_id, int(row["id"]) + 1)
+
+	# -------------------------------------------------------------------------
+	# Trades — mirror SQLiteTradeStore exactly
+	# -------------------------------------------------------------------------
+
+	def record_trade(
+		self,
+		ticker: str,
+		entry_price: int,
+		strategy: str,
+		side: str,
+		series_ticker: str,
+		intended_size: int = 1,
+		fill_size: int = 1,
+		blended_entry: Optional[int] = None,
+		book_depth: Optional[int] = None,
+		fill_pct: Optional[float] = None,
+		slippage_cents: Optional[float] = None,
+		book_snapshot: Optional[str] = None,
+		*,
+		now: datetime,
+	) -> int:
+		"""Mirror of SQLiteTradeStore.record_trade — see trade_store.py:106.
+		Computes entry_fee_cents internally using STANDARD_FEE. Raises
+		DuplicateOpenTradeError on composite-key collision (spec §4.1)."""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
+		blended_entry = blended_entry if blended_entry else None
+		effective_price = blended_entry if blended_entry is not None else entry_price
+		entry_fee_cents = int(STANDARD_FEE.calculate(effective_price, fill_size))
+		entry_time_iso = now.isoformat()
+
+		# Composite-key uniqueness check
+		for r in self._rows:
+			if (r["strategy"] == strategy and r["ticker"] == ticker
+					and r["side"] == side and r["entry_time"] == entry_time_iso
+					and r["status"] == "open"):
+				raise DuplicateOpenTradeError(
+					f"open trade already exists: strategy={strategy} ticker={ticker} "
+					f"side={side} entry_time={entry_time_iso} (existing id={r['id']})"
+				)
+
+		trade_id = self._next_id
+		self._next_id += 1
+		self._rows.append({
+			"id": trade_id,
+			"ticker": ticker,
+			"entry_price": entry_price,
+			"strategy": strategy,
+			"side": side,
+			"series_ticker": series_ticker,
+			"entry_fee_cents": entry_fee_cents,
+			"intended_size": intended_size,
+			"fill_size": fill_size,
+			"blended_entry": blended_entry,
+			"book_depth": book_depth,
+			"fill_pct": fill_pct,
+			"slippage_cents": slippage_cents,
+			"book_snapshot": book_snapshot,
+			"status": "open",
+			"entry_time": entry_time_iso,
+			"exit_price": None,
+			"exit_time": None,
+			"pnl_cents": None,
+		})
+		return trade_id
+
+	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None:
+		"""Mirror of SQLiteTradeStore.settle_trade — see trade_store.py:148.
+		``result`` is the raw market outcome 'yes' or 'no' (NOT 'won'/'lost');
+		the store translates based on side. Idempotent: no-op if row is
+		missing or already closed."""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
+		for r in self._rows:
+			if r["id"] != trade_id:
+				continue
+			if r["status"] != "open":
+				return  # idempotent — matches live race protection
+			entry_price = r["entry_price"]
+			side = r["side"]
+			fill_size = r["fill_size"]
+			entry_fee_cents = r["entry_fee_cents"] or 0
+			blended_entry = r["blended_entry"]
+			effective_entry = blended_entry if blended_entry else entry_price
+			if side == "yes":
+				exit_price = 100 if result == "yes" else 0
+				status = "won" if result == "yes" else "lost"
+			else:
+				exit_price = 100 if result == "no" else 0
+				status = "won" if result == "no" else "lost"
+			pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents
+			r["exit_price"] = exit_price
+			r["exit_time"] = now.isoformat()
+			r["pnl_cents"] = pnl
+			r["status"] = status
+			return
+		# not found → silent return to match live behavior (trade_store.py:161-162)
+
+	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
+		"""Mirror of SQLiteTradeStore.exit_trade — see trade_store.py:183.
+		Signature is (trade_id, exit_price, now) — pnl and status are
+		computed internally from STANDARD_FEE + side. Idempotent."""
+		if now.tzinfo is None:
+			raise ValueError("now must be timezone-aware")
+		for r in self._rows:
+			if r["id"] != trade_id:
+				continue
+			if r["status"] != "open":
+				return
+			entry_price = r["entry_price"]
+			fill_size = r["fill_size"]
+			entry_fee_cents = r["entry_fee_cents"] or 0
+			blended_entry = r["blended_entry"]
+			effective_entry = blended_entry if blended_entry else entry_price
+			exit_fee_cents = int(STANDARD_FEE.calculate(exit_price, fill_size))
+			pnl = fill_size * (exit_price - effective_entry) - entry_fee_cents - exit_fee_cents
+			status = "won" if pnl > 0 else ("lost" if pnl < 0 else "scratch")
+			r["exit_price"] = exit_price
+			r["exit_time"] = now.isoformat()
+			r["pnl_cents"] = pnl
+			r["status"] = status
+			return
+
+	# -------------------------------------------------------------------------
+	# Read methods — shape matches SQLiteTradeStore return dicts
+	# -------------------------------------------------------------------------
+
+	def get_open_trades(self) -> list[dict[str, Any]]:
+		return [dict(r) for r in self._rows if r["status"] == "open"]
+
+	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None:
+		for r in self._rows:
+			if r["id"] == trade_id:
+				return dict(r)
+		return None
+
+	def get_open_trades_for(self, strategy: str, ticker: str) -> list[dict[str, Any]]:
+		"""Parameter name is ``strategy``, NOT ``strat_name`` — matches
+		SQLiteTradeStore.get_open_trades_for(strategy, ticker)."""
+		return [
+			dict(r) for r in self._rows
+			if r["strategy"] == strategy and r["ticker"] == ticker and r["status"] == "open"
+		]
+
+	def all_trades(self) -> list[dict[str, Any]]:
+		"""Return a copy of every row (open + closed). Used by the parity
+		test to compare against the live DB's day slice."""
+		return [dict(r) for r in self._rows]
+
+	# -------------------------------------------------------------------------
+	# Strategy state — minimal no-op mirrors (replay doesn't persist state
+	# across bundles; strategies re-hydrate from the captured events)
+	# -------------------------------------------------------------------------
+
+	def save_state(self, strategy: str, state_dict: dict[str, Any]) -> None:
+		self._strategy_state[strategy] = dict(state_dict)
+
+	def load_state(self, strategy: str) -> dict[str, Any]:
+		return dict(self._strategy_state.get(strategy, {}))
+
+	def load_all_states(self) -> dict[str, dict[str, Any]]:
+		return {k: dict(v) for k, v in self._strategy_state.items()}
+
+	def close(self) -> None:
+		"""No-op for symmetry with TradeStore — lets the replay backtester
+		use the same shutdown pattern."""
+		return
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

@@ -157,19 +157,33 @@ class RawFrameWriter:
 	# Public write API — must never raise
 	# ------------------------------------------------------------------
 
-	def write_ws(self, msg: dict) -> None:
-		"""Append one parsed WS message. Best-effort; never raises."""
-		self._write_event(source="ws", payload=msg)
+	def write_ws(self, msg: dict, recv_ts: Optional[datetime] = None) -> None:
+		"""Append one parsed WS message. Best-effort; never raises.
 
-	def write_synthetic(self, kind: str, payload: dict) -> None:
+		``recv_ts`` — when provided, used as the event's on-disk timestamp.
+		The engine MUST pass the same ``now`` it threads to dispatch_message
+		so that replay's entry_time matches live's entry_time exactly.
+		When None, the writer reads its own clock (test-only fallback).
+		"""
+		self._write_event(source="ws", payload=msg, recv_ts=recv_ts)
+
+	def write_synthetic(self, kind: str, payload: dict, recv_ts: Optional[datetime] = None) -> None:
 		"""Append one synthetic event from a non-WS source. Best-effort; never raises.
 
-		`kind` is one of: 'rest_orderbook', 'ticker_discovered', 'settlement'.
-		The on-disk `source` field becomes `f"synthetic.{kind}"`.
+		``kind`` is one of: 'rest_orderbook', 'ticker_discovered', 'settlement'.
+		The on-disk ``source`` field becomes ``f"synthetic.{kind}"``.
+		``recv_ts`` — same contract as ``write_ws``: pass the ``now`` the
+		live engine used for the corresponding store call so replay produces
+		byte-identical timestamps.
 		"""
-		self._write_event(source=f"synthetic.{kind}", payload=payload)
+		self._write_event(source=f"synthetic.{kind}", payload=payload, recv_ts=recv_ts)
 
-	def _write_event(self, source: str, payload: dict) -> None:
+	def _write_event(
+		self,
+		source: str,
+		payload: dict,
+		recv_ts: Optional[datetime] = None,
+	) -> None:
 		"""Core write path. Wraps everything in try/except so the writer
 		never leaks an exception into the engine message loop."""
 		if self._stopped or not self.enabled:
@@ -180,9 +194,10 @@ class RawFrameWriter:
 			if self._stopped:
 				return
 			self._recv_seq += 1
+			ts = recv_ts if recv_ts is not None else datetime.now(timezone.utc)
 			line = json.dumps({
 				"recv_seq": self._recv_seq,
-				"recv_ts": datetime.now(timezone.utc).isoformat(),
+				"recv_ts": ts.isoformat(),
 				"source": source,
 				"payload": payload,
 			})
