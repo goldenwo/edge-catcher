@@ -127,3 +127,80 @@ def test_settle_trade_rejects_naive_datetime(store: TradeStore, fixed_now: datet
 	)
 	with pytest.raises(ValueError, match="timezone-aware"):
 		store.settle_trade(trade_id, "yes", now=datetime(2026, 4, 14, 14, 0, 0))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# DuplicateOpenTradeError: composite-key uniqueness on (strategy, ticker, side, entry_time)
+#
+# Per spec §4.1, the composite key must be unique across open trades so that
+# the synthetic.settlement event in replay can look up the target row
+# unambiguously. Live engine treats a collision as a fatal bug.
+# ---------------------------------------------------------------------------
+
+def test_record_trade_raises_on_duplicate_open(store: TradeStore, fixed_now: datetime) -> None:
+	"""Two record_trade calls with the same (strategy, ticker, side, entry_time) must fail."""
+	from edge_catcher.monitors.trade_store import DuplicateOpenTradeError
+
+	store.record_trade(
+		ticker="KXTEST-26APR14",
+		entry_price=50,
+		strategy="test-strat",
+		side="yes",
+		series_ticker="KXTEST",
+		now=fixed_now,
+	)
+	with pytest.raises(DuplicateOpenTradeError, match="open trade already exists"):
+		store.record_trade(
+			ticker="KXTEST-26APR14",
+			entry_price=55,  # different entry price is still a collision
+			strategy="test-strat",
+			side="yes",
+			series_ticker="KXTEST",
+			now=fixed_now,  # same timestamp → composite key collision
+		)
+
+
+def test_record_trade_allows_different_side_same_timestamp(store: TradeStore, fixed_now: datetime) -> None:
+	"""Same strategy+ticker+time but different side is NOT a collision."""
+	store.record_trade(
+		ticker="KXTEST-26APR14",
+		entry_price=50,
+		strategy="test-strat",
+		side="yes",
+		series_ticker="KXTEST",
+		now=fixed_now,
+	)
+	# Should not raise
+	store.record_trade(
+		ticker="KXTEST-26APR14",
+		entry_price=50,
+		strategy="test-strat",
+		side="no",
+		series_ticker="KXTEST",
+		now=fixed_now,
+	)
+	assert len(store.get_open_trades()) == 2
+
+
+def test_record_trade_allows_after_close(store: TradeStore, fixed_now: datetime) -> None:
+	"""A settled trade frees its composite key for a new open on the same key."""
+	trade_id = store.record_trade(
+		ticker="KXTEST-26APR14",
+		entry_price=50,
+		strategy="test-strat",
+		side="yes",
+		series_ticker="KXTEST",
+		now=fixed_now,
+	)
+	store.settle_trade(trade_id, "yes", now=fixed_now)
+	# After close, the composite key is free — a new open on the same key is allowed
+	store.record_trade(
+		ticker="KXTEST-26APR14",
+		entry_price=50,
+		strategy="test-strat",
+		side="yes",
+		series_ticker="KXTEST",
+		now=fixed_now,
+	)
+	# One open (the second) + one settled (the first) = 2 total rows
+	assert len(store.get_open_trades()) == 1
