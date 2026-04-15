@@ -506,3 +506,74 @@ def test_strategy_state_snapshot_malformed_value(tmp_path, caplog):
 	# Using caplog.text (fully formatted) rather than per-record r.message
 	# to avoid subtle differences in how pytest caches formatted messages.
 	assert "strat-a" in caplog.text and "bad-key" in caplog.text
+
+
+def test_assemble_daily_bundle_includes_strategy_state(tmp_path):
+	"""End-to-end: assemble_daily_bundle writes strategy_state_at_start.json
+	into the bundle dir and includes it in the manifest's file list."""
+	import json
+	import sqlite3
+	from datetime import date, datetime, timezone
+	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.monitors.market_state import MarketState
+
+	capture_dir = tmp_path / "capture"
+	capture_dir.mkdir()
+	repo_root = tmp_path / "repo"
+	(repo_root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo_root / "config.local").mkdir()
+	(repo_root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+		"# fixture\n", encoding="utf-8"
+	)
+	(repo_root / "config.local" / "paper-trader.yaml").write_text(
+		"strategies: {}\n", encoding="utf-8"
+	)
+	# A raw JSONL for compression
+	capture_date = date(2026, 4, 15)
+	raw_jsonl = capture_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl"
+	raw_jsonl.write_text('{"header": true}\n', encoding="utf-8")
+
+	# Live DB with strategy_state rows
+	db_path = tmp_path / "paper_trades.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE paper_trades (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ticker TEXT NOT NULL,
+			entry_price INTEGER NOT NULL,
+			entry_time TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'open',
+			strategy TEXT NOT NULL DEFAULT 'unknown',
+			side TEXT NOT NULL DEFAULT 'yes'
+		);
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	now = datetime.now(timezone.utc).isoformat()
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strategy_a", "seen:KXETH", json.dumps(True), now),
+	)
+	conn.commit()
+	conn.close()
+
+	bundle_dir = assemble_daily_bundle(
+		capture_date=capture_date,
+		capture_dir=capture_dir,
+		repo_root=repo_root,
+		db_path=db_path,
+		market_state=MarketState(),
+	)
+
+	state_file = bundle_dir / "strategy_state_at_start.json"
+	assert state_file.exists()
+	envelope = json.loads(state_file.read_text(encoding="utf-8"))
+	assert envelope["states"] == {"strategy_a": {"seen:KXETH": True}}
+
+	manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+	assert "strategy_state_at_start.json" in manifest["files"]

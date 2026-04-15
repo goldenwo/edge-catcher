@@ -108,6 +108,11 @@ def assemble_daily_bundle(
 	#    from this so carry-over positions' composite keys are present.
 	_write_open_trades_slice(db_path, bundle_dir / "open_trades_at_start.sqlite")
 
+	# 6.5. strategy_state_at_start.json — snapshot of the strategy_state table
+	#    so next day's replay seeds pending_states from the same scratchpad
+	#    the live engine had at end-of-day. See spec §4.1.
+	_write_strategy_state_snapshot(db_path, bundle_dir / "strategy_state_at_start.json")
+
 	# 7. paper_trades_v2_<date>.sqlite — the full day's slice of the live DB.
 	#    This is the ground truth that the parity test compares replay output
 	#    against. Only includes rows whose entry_time is within the UTC day.
