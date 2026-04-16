@@ -344,3 +344,236 @@ def test_bundle_market_state_none_skips_snapshot(
 	# Everything else still there
 	assert (bundle_path / "manifest.json").exists()
 	assert (bundle_path / "kalshi_engine_2026-04-14.jsonl.zst").exists()
+
+
+def test_strategy_state_snapshot_happy_path(tmp_path):
+	"""Snapshot writes a JSON envelope with all rows from the fixture DB,
+	json.loads'd into native Python objects and grouped by strategy."""
+	import json
+	import sqlite3
+	from datetime import datetime, timezone
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	now = datetime.now(timezone.utc).isoformat()
+	rows = [
+		("strategy_a", "seen:KXETH", json.dumps(True), now),
+		("strategy_a", "counter", json.dumps(42), now),
+		("strategy_a", "rolling", json.dumps([1, 2, 3]), now),
+		("strategy_b", "entered:KXLOL", json.dumps(1), now),
+		("strategy_b", "nested", json.dumps({"a": 1, "b": [2, 3]}), now),
+		("strategy_b", "scalar", json.dumps("string-val"), now),
+	]
+	conn.executemany(
+		"INSERT INTO strategy_state (strategy, key, value, updated_at) VALUES (?, ?, ?, ?)",
+		rows,
+	)
+	conn.commit()
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	_write_strategy_state_snapshot(db_path, dst)
+
+	assert dst.exists()
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["schema_version"] == 1
+	# captured_at must be parseable ISO8601
+	datetime.fromisoformat(envelope["captured_at"])
+	assert envelope["states"]["strategy_a"] == {
+		"seen:KXETH": True,
+		"counter": 42,
+		"rolling": [1, 2, 3],
+	}
+	assert envelope["states"]["strategy_b"] == {
+		"entered:KXLOL": 1,
+		"nested": {"a": 1, "b": [2, 3]},
+		"scalar": "string-val",
+	}
+
+	# Stable serialization: running the snapshot twice on the same fixture DB
+	# must produce identical `states` subtrees (captured_at drifts by wall
+	# clock, so it's parsed out rather than raw-byte compared). Relies on
+	# sort_keys=True in the writer.
+	dst2 = tmp_path / "strategy_state_at_start_2.json"
+	_write_strategy_state_snapshot(db_path, dst2)
+	env2 = json.loads(dst2.read_text(encoding="utf-8"))
+	assert env2["states"] == envelope["states"]
+	# Re-serializing both states subtrees with the same options must produce
+	# identical bytes — proves the writer's output order is deterministic.
+	assert (
+		json.dumps(env2["states"], sort_keys=True, indent=2)
+		== json.dumps(envelope["states"], sort_keys=True, indent=2)
+	)
+
+
+def test_strategy_state_snapshot_empty_table(tmp_path):
+	"""Empty strategy_state table produces a valid envelope with states={}."""
+	import json
+	import sqlite3
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["schema_version"] == 1
+	assert envelope["states"] == {}
+
+
+def test_strategy_state_snapshot_missing_table(tmp_path, caplog):
+	"""DB without a strategy_state table writes an empty envelope + warns."""
+	import json
+	import logging
+	import sqlite3
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("CREATE TABLE paper_trades (id INTEGER);")
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	with caplog.at_level(logging.WARNING):
+		_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["states"] == {}
+	assert "strategy_state" in caplog.text
+
+
+def test_strategy_state_snapshot_malformed_value(tmp_path, caplog):
+	"""One row with unparseable JSON in value column: skip that row,
+	keep the good ones, log a warning that names the (strategy, key)."""
+	import json
+	import logging
+	import sqlite3
+	from datetime import datetime, timezone
+	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+
+	db_path = tmp_path / "fixture.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	now = datetime.now(timezone.utc).isoformat()
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strat-a", "good-key", json.dumps({"ok": True}), now),
+	)
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strat-a", "bad-key", "{not-json", now),
+	)
+	conn.commit()
+	conn.close()
+
+	dst = tmp_path / "strategy_state_at_start.json"
+	with caplog.at_level(logging.WARNING):
+		_write_strategy_state_snapshot(db_path, dst)
+
+	envelope = json.loads(dst.read_text(encoding="utf-8"))
+	assert envelope["states"] == {"strat-a": {"good-key": {"ok": True}}}
+	# Warning must reference both the strategy and the offending key.
+	# Using caplog.text (fully formatted) rather than per-record r.message
+	# to avoid subtle differences in how pytest caches formatted messages.
+	assert "strat-a" in caplog.text and "bad-key" in caplog.text
+
+
+def test_assemble_daily_bundle_includes_strategy_state(tmp_path):
+	"""End-to-end: assemble_daily_bundle writes strategy_state_at_start.json
+	into the bundle dir and includes it in the manifest's file list."""
+	import json
+	import sqlite3
+	from datetime import date, datetime, timezone
+	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.monitors.market_state import MarketState
+
+	capture_dir = tmp_path / "capture"
+	capture_dir.mkdir()
+	repo_root = tmp_path / "repo"
+	(repo_root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo_root / "config.local").mkdir()
+	(repo_root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+		"# fixture\n", encoding="utf-8"
+	)
+	(repo_root / "config.local" / "paper-trader.yaml").write_text(
+		"strategies: {}\n", encoding="utf-8"
+	)
+	# A raw JSONL for compression
+	capture_date = date(2026, 4, 15)
+	raw_jsonl = capture_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl"
+	raw_jsonl.write_text('{"header": true}\n', encoding="utf-8")
+
+	# Live DB with strategy_state rows
+	db_path = tmp_path / "paper_trades.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.executescript("""
+		CREATE TABLE paper_trades (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ticker TEXT NOT NULL,
+			entry_price INTEGER NOT NULL,
+			entry_time TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'open',
+			strategy TEXT NOT NULL DEFAULT 'unknown',
+			side TEXT NOT NULL DEFAULT 'yes'
+		);
+		CREATE TABLE strategy_state (
+			strategy TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (strategy, key)
+		);
+	""")
+	now = datetime.now(timezone.utc).isoformat()
+	conn.execute(
+		"INSERT INTO strategy_state VALUES (?, ?, ?, ?)",
+		("strategy_a", "seen:KXETH", json.dumps(True), now),
+	)
+	conn.commit()
+	conn.close()
+
+	bundle_dir = assemble_daily_bundle(
+		capture_date=capture_date,
+		capture_dir=capture_dir,
+		repo_root=repo_root,
+		db_path=db_path,
+		market_state=MarketState(),
+	)
+
+	state_file = bundle_dir / "strategy_state_at_start.json"
+	assert state_file.exists()
+	envelope = json.loads(state_file.read_text(encoding="utf-8"))
+	assert envelope["states"] == {"strategy_a": {"seen:KXETH": True}}
+
+	manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+	assert "strategy_state_at_start.json" in manifest["files"]
