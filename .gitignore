@@ -81,7 +81,13 @@ tests/test_local_*.py
 tests/test_strategies_paper.py
 
 .superpowers/
-.claude/settings.local.json
+.claude/
+
+# Backup files
+*.bak
+
+# Pi strategy scratch files (from scp/handoff)
+pi-*.py
 
 # Export bundles (Pi handoff zips)
 exports/
