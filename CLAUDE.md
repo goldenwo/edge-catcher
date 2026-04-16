@@ -33,6 +33,9 @@ If a file reveals **what** we trade, **how** we detect edges, or **specific thre
 
 - `edge_catcher/` — core Python package
   - `runner/` — backtester engine + strategies framework
+  - `monitors/` — paper trader engine, dispatch, capture/replay pipeline
+    - `capture/` — daily bundle assembly (`bundle.py`), R2 transport (`transport.py`), raw frame writer (`writer.py`)
+    - `replay/` — replay backtester (`backtester.py`), JSONL loader (`loader.py`)
   - `research/` — automated hypothesis testing agent
   - `adapters/` — market data adapters (Kalshi, Coinbase)
   - `storage/` — database layer
@@ -41,6 +44,22 @@ If a file reveals **what** we trade, **how** we detect edges, or **specific thre
 - `ui/` — React + Vite frontend
 - `config/` — market configs per category (tracked)
 - `tests/` — pytest suite (framework tests only)
+
+## Backtesters
+
+Two backtester engines exist for different stages of the research pipeline:
+
+**Event backtester** (`runner/event_backtest.py`) — fast hypothesis discovery. Replays historical trade events from the DB against strategy logic. Used for quick sweeps over parameter space. Does NOT reproduce live execution fidelity (no orderbook state, no synthetic settlement, no dispatch plumbing). Use for "does this signal have directional edge?" questions.
+
+**Replay backtester** (`monitors/replay/backtester.py`) — execution fidelity verdict. Replays a captured daily bundle (JSONL + strategies + config + state snapshots) through the exact same `dispatch_message` path the live paper trader uses. Seeds MarketState, open trades, and strategy state from the prior day's bundle. Use for "does replay produce the same trades as live?" questions. Entry point: `replay_capture(bundle_path)`.
+
+**Four-stage filter** for strategy validation:
+1. **Hypothesis** → does the signal exist? (research agent)
+2. **Event backtest** → does it have directional edge? (fast, approximate)
+3. **Replay backtest** → does live execution match? (slow, high-fidelity)
+4. **Live paper trader** → P&L source of truth
+
+**Daily bundle pipeline:** the paper trader captures all events to a JSONL file via `RawFrameWriter`. At midnight UTC, `rotation_callback` assembles a daily bundle (compressed JSONL + strategies_local.py + config + market_state + open_trades + strategy_state + day slice), uploads to Cloudflare R2, and deletes the raw file. Bundles are self-contained — replay can run against any bundle without needing the live DB or engine.
 
 ## Coding Standards
 - Python 3.10+
