@@ -401,12 +401,55 @@ def _resolve_prior_file(
 	except ValueError:
 		pass
 
-	# 3. R2 fallback — NOT IMPLEMENTED in MVP. See plan followup #13.
+	# 3. R2 fallback — download the full prior-day bundle from R2 as a
+	#    local sibling so subsequent _resolve_prior_file calls for the same
+	#    prior date hit step 2 instead of re-downloading.
+	try:
+		prior_date = date.fromisoformat(bundle_date_str) - timedelta(days=1)
+	except ValueError:
+		log.info(
+			"replay_capture: %s not found and bundle name %r is not a date; "
+			"cannot compute prior date for R2 lookup",
+			filename, bundle_date_str,
+		)
+		return None
+
+	try:
+		from edge_catcher.monitors.capture.transport import R2Transport
+		transport = R2Transport()
+	except (KeyError, ImportError):
+		log.info(
+			"replay_capture: %s not found locally and R2 transport not configured "
+			"(missing env vars or boto3); starting without prior-day seed",
+			filename,
+		)
+		return None
+
+	remote_key = f"kalshi/{prior_date.isoformat()}"
+	local_sibling = bundle.parent / prior_date.isoformat()
+
+	if not local_sibling.exists():
+		try:
+			transport.download_bundle(remote_key, local_sibling)
+			log.info(
+				"replay_capture: downloaded prior bundle from R2 (%s → %s)",
+				remote_key, local_sibling,
+			)
+		except Exception as e:
+			log.warning(
+				"replay_capture: R2 download failed for %s: %s; "
+				"starting without prior-day seed",
+				remote_key, e,
+			)
+			return None
+
+	resolved = local_sibling / filename
+	if resolved.exists():
+		return resolved
+
 	log.info(
-		"replay_capture: %s not found via explicit or sibling lookup; "
-		"R2 fallback is MVP-deferred. If this causes replay divergence, "
-		"fetch the prior bundle manually with: "
-		"rclone copy r2:edge-catcher-captures/kalshi/<prior_date>/ <local>",
-		filename,
+		"replay_capture: prior bundle %s downloaded from R2 but %s not found in it "
+		"(bundle may predate this feature)",
+		remote_key, filename,
 	)
 	return None
