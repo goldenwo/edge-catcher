@@ -108,6 +108,11 @@ def assemble_daily_bundle(
 	#    from this so carry-over positions' composite keys are present.
 	_write_open_trades_slice(db_path, bundle_dir / "open_trades_at_start.sqlite")
 
+	# 6.5. strategy_state_at_start.json — snapshot of the strategy_state table
+	#    so next day's replay seeds pending_states from the same scratchpad
+	#    the live engine had at end-of-day. See spec §4.1.
+	_write_strategy_state_snapshot(db_path, bundle_dir / "strategy_state_at_start.json")
+
 	# 7. paper_trades_v2_<date>.sqlite — the full day's slice of the live DB.
 	#    This is the ground truth that the parity test compares replay output
 	#    against. Only includes rows whose entry_time is within the UTC day.
@@ -229,6 +234,55 @@ def _write_day_slice(db_path: Path, dst: Path, day: date) -> None:
 		src.commit()
 	finally:
 		src.close()
+
+
+def _write_strategy_state_snapshot(db_path: Path, dst: Path) -> None:
+	"""Snapshot the live DB's strategy_state table to a JSON envelope.
+
+	Format: {"schema_version": 1, "captured_at": <iso>, "states": {strategy: {key: value}}}
+	where each inner value is the json.loads'd Python object from the DB's
+	value column. Byte-stable output via sort_keys=True on the states dict.
+
+	Fails soft on missing table or per-row malformed JSON (logs a warning
+	and continues) — strategy_state is a replay-fidelity enhancement, not
+	a hard bundle requirement. See spec §7.1, §7.2.
+	"""
+	states: dict[str, dict[str, object]] = {}
+	try:
+		conn = sqlite3.connect(str(db_path))
+		try:
+			rows = conn.execute(
+				"SELECT strategy, key, value FROM strategy_state"
+			).fetchall()
+		finally:
+			conn.close()
+	except sqlite3.OperationalError as e:
+		log.warning(
+			"_write_strategy_state_snapshot: could not read strategy_state table from %s: %s",
+			db_path, e,
+		)
+		rows = []
+
+	for strategy, key, value in rows:
+		try:
+			parsed = json.loads(value)
+		except json.JSONDecodeError:
+			log.warning(
+				"_write_strategy_state_snapshot: skipping malformed value for %s.%s",
+				strategy, key,
+			)
+			continue
+		states.setdefault(strategy, {})[key] = parsed
+
+	envelope = {
+		"schema_version": 1,
+		"captured_at": datetime.now(timezone.utc).isoformat(),
+		"states": states,
+	}
+	dst.write_text(
+		json.dumps(envelope, sort_keys=True, indent=2),
+		encoding="utf-8",
+	)
 
 
 def _write_manifest(bundle_dir: Path, capture_date: date, commit: str, dirty: bool) -> None:
