@@ -2,7 +2,8 @@
 import math
 
 import pytest
-from edge_catcher.fees import STANDARD_FEE, INDEX_FEE, ZERO_FEE
+from edge_catcher.adapters.kalshi.fees import STANDARD_FEE, INDEX_FEE
+from edge_catcher.fees import ZERO_FEE
 
 
 class TestStandardFee:
@@ -112,7 +113,7 @@ class TestZeroFee:
 class TestFeeModelForDbWithOverrides:
 	def test_default_fee_model(self):
 		from api.adapter_registry import get_fee_model_for_db
-		fee = get_fee_model_for_db("data/kalshi.db")
+		fee = get_fee_model_for_db("data/kalshi-btc.db")
 		assert fee is STANDARD_FEE
 
 	def test_override_by_series_prefix(self):
@@ -129,3 +130,15 @@ class TestFeeModelForDbWithOverrides:
 		from api.adapter_registry import get_fee_model_for_db
 		fee = get_fee_model_for_db("data/btc.db")
 		assert fee is ZERO_FEE
+
+
+def test_get_fee_model_warns_and_returns_zero_on_unknown_adapter(caplog):
+	"""Fallback path should never fire in practice; when it does, log a warning."""
+	import logging
+	from api.adapter_registry import get_fee_model
+	from edge_catcher.fees import ZERO_FEE
+
+	with caplog.at_level(logging.WARNING, logger="api.adapter_registry"):
+		fee = get_fee_model("nonexistent_adapter_xyz")
+	assert fee is ZERO_FEE
+	assert any("nonexistent_adapter_xyz" in rec.message for rec in caplog.records)

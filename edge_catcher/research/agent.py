@@ -57,7 +57,7 @@ def _build_strategy_families() -> dict[str, list[str]]:
 
 class ResearchAgent:
     # Per-hypothesis subprocess timeout. 300s was too tight for BTC series
-    # in kalshi.db (17M trades on KXBTC15M, 15M on KXBTCD) — every BTC
+    # in kalshi-btc.db (17M trades on KXBTC15M, 15M on KXBTCD) — every BTC
     # hypothesis in the 2026-04-13 sweep timed out. 1800s (30min) aligns
     # with the validation gate timeouts and gives the backtester enough
     # headroom for the biggest series without blocking small ones.

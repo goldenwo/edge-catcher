@@ -20,7 +20,7 @@ def get_pipeline_status() -> PipelineStatusResponse:
 		list_strategies, STRATEGIES_LOCAL_PATH, STRATEGIES_PUBLIC_PATH,
 	)
 
-	db = validate_db("kalshi.db")
+	db = validate_db("kalshi-btc.db")
 
 	# Data status — from market DB
 	data_status = PipelineDataStatus(has_data=False, markets=0, trades=0)
