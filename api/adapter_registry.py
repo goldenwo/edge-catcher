@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Optional
 from edge_catcher.adapters.base import AdapterMeta as _BaseAdapterMeta
 from edge_catcher.fees import FeeModel, STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
@@ -21,10 +21,14 @@ def _db_file_from_markets_yaml(markets_yaml: str) -> str:
 
 @dataclass
 class AdapterMeta:
+    # Required (no defaults)
     id: str
+    exchange: str                     # NEW — explicit everywhere, no default
     name: str
     description: str
-    requires_api_key: bool
+
+    # Optional
+    requires_api_key: bool = False
     api_key_env_var: Optional[str] = None
     default_start_date: Optional[str] = None  # ISO date, shown as default in UI
     markets_yaml: Optional[str] = None  # path to markets YAML (None = non-Kalshi adapters)
@@ -32,16 +36,21 @@ class AdapterMeta:
     fee_model: FeeModel = field(default_factory=lambda: STANDARD_FEE)
     coinbase_product_id: Optional[str] = None  # e.g. "ETH-USD" — set for Coinbase adapters
     fee_overrides: dict[str, FeeModel] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)  # NEW
 
     def __post_init__(self):
         if not self.db_file and self.markets_yaml:
             self.db_file = _db_file_from_markets_yaml(self.markets_yaml)
         elif not self.db_file:
             self.db_file = "data/kalshi.db"
+        # Hoist coinbase_product_id into extra if set
+        if self.coinbase_product_id and "product_id" not in self.extra:
+            self.extra["product_id"] = self.coinbase_product_id
 
 ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
         id="kalshi",
+        exchange="kalshi",
         name="Kalshi BTC",
         description="Download settled BTC contracts (KXBTC/D/W/M/15M) and trade history from Kalshi.",
         requires_api_key=False,
@@ -51,6 +60,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="coinbase_btc",
+        exchange="coinbase",
         name="Coinbase BTC-USD",
         description="Download 1-minute BTC-USD OHLC candles from Coinbase (no API key required).",
         requires_api_key=False,
@@ -62,6 +72,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="coinbase_eth",
+        exchange="coinbase",
         name="Coinbase ETH-USD",
         description="Download 1-minute ETH-USD OHLC candles from Coinbase (no API key required).",
         requires_api_key=False,
@@ -72,6 +83,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="coinbase_sol",
+        exchange="coinbase",
         name="Coinbase SOL-USD",
         description="Download 1-minute SOL-USD OHLC candles from Coinbase (no API key required).",
         requires_api_key=False,
@@ -82,6 +94,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="coinbase_xrp",
+        exchange="coinbase",
         name="Coinbase XRP-USD",
         description="Download 1-minute XRP-USD OHLC candles from Coinbase (no API key required).",
         requires_api_key=False,
@@ -92,6 +105,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="coinbase_doge",
+        exchange="coinbase",
         name="Coinbase DOGE-USD",
         description="Download 1-minute DOGE-USD OHLC candles from Coinbase (no API key required).",
         requires_api_key=False,
@@ -102,6 +116,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_sports",
+        exchange="kalshi",
         name="Kalshi Sports",
         description="Download settled NBA/MLB spread and moneyline contracts from Kalshi.",
         requires_api_key=False,
@@ -111,6 +126,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_crypto",
+        exchange="kalshi",
         name="Kalshi Crypto (Altcoins)",
         description="Download settled altcoin contracts (ETH/SOL/XRP/DOGE/BNB/HYPE — hourly, daily, 15M) from Kalshi.",
         requires_api_key=False,
@@ -120,6 +136,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_weather",
+        exchange="kalshi",
         name="Kalshi Weather",
         description="Download settled weather contracts (temperature, rain) from Kalshi.",
         requires_api_key=False,
@@ -129,6 +146,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_financials",
+        exchange="kalshi",
         name="Kalshi Financials",
         description="Download settled financials/economics contracts (Nasdaq, S&P, yields, jobless) from Kalshi.",
         requires_api_key=False,
@@ -139,6 +157,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_entertainment",
+        exchange="kalshi",
         name="Kalshi Entertainment",
         description="Download settled entertainment contracts (Spotify charts, awards) from Kalshi.",
         requires_api_key=False,
@@ -148,6 +167,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_politics",
+        exchange="kalshi",
         name="Kalshi Politics & Elections",
         description="Download settled politics/election/mentions contracts from Kalshi.",
         requires_api_key=False,
@@ -157,6 +177,7 @@ ADAPTERS: list[AdapterMeta] = [
     ),
     AdapterMeta(
         id="kalshi_esports",
+        exchange="kalshi",
         name="Kalshi Esports",
         description="Download settled esports contracts (CS2, LoL, ATP tennis, J-League) from Kalshi.",
         requires_api_key=False,
