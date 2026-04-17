@@ -31,6 +31,10 @@ Adopt a per-exchange directory layout under `edge_catcher/adapters/<exchange>/` 
 - One extra directory layer of indirection.
 - Fees for new exchanges live in `adapters/<exchange>/fees.py`, not a central file. Generic fee types stay in `edge_catcher/fees.py`.
 
+## Adapter implementation contract
+
+The `PredictionMarketAdapter` ABC in `edge_catcher/adapters/base.py` is a Kalshi-shaped contract: `collect_markets` + `collect_trades` + `validate_response`. Prediction markets (Kalshi, Polymarket, etc.) should inherit from it. Exchanges with a different shape — Coinbase does OHLC candles, not markets+trades — intentionally do NOT inherit; they duck-type their own interface. The `AdapterMeta` entry in the registry still tags them with `exchange=`, which is what the download dispatch in `api/main.py` switches on.
+
 ## Contract for future adapter additions
 
 See `CLAUDE.md` → "Adding a new exchange" for the step-by-step.
