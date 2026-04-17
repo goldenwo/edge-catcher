@@ -40,7 +40,7 @@ class TestLLMIdeatorBuildPrompt:
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=MagicMock())
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["A", "B", "C"],
-			series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
+			series_map={"data/kalshi-btc.db": ["SERIES_A", "SERIES_E"]},
 		)
 		assert "promote" in prompt.lower()
 		assert "kill" in prompt.lower()
@@ -54,7 +54,7 @@ class TestLLMIdeatorBuildPrompt:
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=MagicMock())
 		prompt = ideator.build_ideation_prompt(
 			available_strategies=["MyStrat", "AnotherStrat"],
-			series_map={"data/kalshi.db": ["SERIES_A"]},
+			series_map={"data/kalshi-btc.db": ["SERIES_A"]},
 		)
 		assert "MyStrat" in prompt
 		assert "AnotherStrat" in prompt
@@ -69,7 +69,7 @@ class TestLLMIdeatorParseResponse:
 		response = json.dumps({
 			"reasoning": "testing",
 			"existing_strategy_hypotheses": [
-				{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi.db", "rationale": "r"}
+				{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi-btc.db", "rationale": "r"}
 			],
 			"novel_strategy_proposals": [
 				{"name": "new-strat", "description": "buy low sell high", "rationale": "r"}
@@ -112,7 +112,7 @@ class TestLLMIdeatorIdeate:
 		mock_client.complete.return_value = json.dumps({
 			"reasoning": "testing",
 			"existing_strategy_hypotheses": [
-				{"strategy": "S0", "series": "SER0", "db_path": "data/kalshi.db", "rationale": "r"}
+				{"strategy": "S0", "series": "SER0", "db_path": "data/kalshi-btc.db", "rationale": "r"}
 			],
 			"novel_strategy_proposals": [],
 		})
@@ -122,7 +122,7 @@ class TestLLMIdeatorIdeate:
 		ideator = LLMIdeator(tracker=tracker, audit=audit, client=mock_client)
 		hypotheses, novel = ideator.ideate(
 			available_strategies=["S0", "S1", "S2"],
-			series_map={"data/kalshi.db": ["SER0", "SER1"]},
+			series_map={"data/kalshi-btc.db": ["SER0", "SER1"]},
 			start_date="2025-01-01",
 			end_date="2025-12-31",
 		)
@@ -144,7 +144,7 @@ class TestLLMIdeatorIdeate:
 		with pytest.raises(ValueError, match="Not enough data"):
 			ideator.ideate(
 				available_strategies=["A"],
-				series_map={"data/kalshi.db": ["SERIES_A"]},
+				series_map={"data/kalshi-btc.db": ["SERIES_A"]},
 				start_date="2025-01-01",
 				end_date="2025-12-31",
 			)
@@ -155,7 +155,7 @@ class TestCoverageTrackingIncludesDbPath:
 		"""Untested combos should distinguish between same series in different DBs."""
 		tracker = MagicMock()
 		tracker.list_results.return_value = [
-			{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi.db",
+			{"strategy": "A", "series": "SERIES_A", "db_path": "data/kalshi-btc.db",
 			 "verdict": "explore", "verdict_reason": "test", "sharpe": 1.2,
 			 "win_rate": 0.55, "net_pnl_cents": 100, "total_trades": 80,
 			 "tags": "[]", "validation_details": None},
@@ -164,7 +164,7 @@ class TestCoverageTrackingIncludesDbPath:
 		ideator = LLMIdeator(tracker=tracker, audit=MagicMock(), client=MagicMock())
 
 		series_map = {
-			"data/kalshi.db": ["SERIES_A"],
+			"data/kalshi-btc.db": ["SERIES_A"],
 			"data/coinbase.db": ["SERIES_A"],  # same series name, different DB
 		}
 

@@ -29,8 +29,8 @@ def config_path() -> Path:
 
 
 def markets_yaml() -> Path:
-	"""Return the primary markets config path."""
-	return Path("config") / "markets.yaml"
+	"""Return the primary markets config path (Kalshi BTC)."""
+	return Path("config") / "markets-btc.yaml"
 
 
 def research_db_path() -> Path:

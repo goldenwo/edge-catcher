@@ -7,16 +7,16 @@ from edge_catcher.adapters.kalshi.fees import STANDARD_FEE, INDEX_FEE
 
 KALSHI_ADAPTERS: list[AdapterMeta] = [
 	AdapterMeta(
-		id="kalshi",
+		id="kalshi_btc",
 		exchange="kalshi",
 		name="Kalshi BTC",
 		description="Download settled BTC contracts (KXBTC/D/W/M/15M) and trade history from Kalshi.",
-		db_file="data/kalshi.db",
+		db_file="data/kalshi-btc.db",
 		fee_model=STANDARD_FEE,
 		requires_api_key=False,
 		api_key_env_var="KALSHI_API_KEY",
 		default_start_date="2025-03-21",
-		markets_yaml="config/markets.yaml",
+		markets_yaml="config/markets-btc.yaml",
 	),
 	AdapterMeta(
 		id="kalshi_sports",

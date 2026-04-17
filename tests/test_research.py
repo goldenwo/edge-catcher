@@ -17,7 +17,7 @@ from edge_catcher.research.reporter import Reporter
 from edge_catcher.research.tracker import Tracker
 
 
-def _ds(db="kalshi.db", series="SERIES_A"):
+def _ds(db="kalshi-btc.db", series="SERIES_A"):
     return make_ds(db=db, series=series)
 
 
@@ -496,7 +496,7 @@ class TestResearchAgent:
         agent = self._make_agent(tmp_path)
         r = _make_result(strategy="test-strategy-a", series="SERIES_A", verdict="promote", verdict_reason="great")
 
-        mock_discovery = {"data/kalshi.db": ["SERIES_A", "SERIES_E", "SPORTS_SERIES"]}
+        mock_discovery = {"data/kalshi-btc.db": ["SERIES_A", "SERIES_E", "SPORTS_SERIES"]}
         with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
             adjacent = agent.generate_adjacent(r)
 
@@ -517,7 +517,7 @@ class TestResearchAgent:
         agent = self._make_agent(tmp_path)
         r = _make_result(strategy="test-strategy-a", series="SERIES_OLD", verdict="promote", verdict_reason="great")
 
-        mock_discovery = {"data/kalshi.db": ["KXBNB15M", "KXBTC", "RANDOM_SERIES"]}
+        mock_discovery = {"data/kalshi-btc.db": ["KXBNB15M", "KXBTC", "RANDOM_SERIES"]}
         with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
             adjacent = agent.generate_adjacent(r)
 
@@ -577,7 +577,7 @@ class TestResearchAgent:
         disagree with grid-generated hypotheses for the same (strategy, series).
         """
         agent = self._make_agent(tmp_path)
-        mock_discovery = {"data/kalshi.db": ["KXBNB15M", "KXETH", "UNKNOWN"]}
+        mock_discovery = {"data/kalshi-btc.db": ["KXBNB15M", "KXETH", "UNKNOWN"]}
 
         captured: list[Hypothesis] = []
 
