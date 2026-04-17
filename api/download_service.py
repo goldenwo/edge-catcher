@@ -169,9 +169,9 @@ def adapter_has_data(meta) -> bool:
 		return False
 	try:
 		conn = sqlite3.connect(str(db_file), timeout=5)
-		if meta.markets_yaml:
+		if meta.exchange == "kalshi" and meta.markets_yaml:
 			cfg = yaml.safe_load(Path(meta.markets_yaml).read_text())
-			series = cfg.get("adapters", {}).get("kalshi", {}).get("series", [])
+			series = cfg.get("adapters", {}).get(meta.exchange, {}).get("series", [])
 			if not series:
 				conn.close()
 				return False
