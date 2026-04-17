@@ -1,6 +1,6 @@
 """Tests for AdapterMeta — the shared adapter metadata dataclass.
 
-See docs/superpowers/specs/2026-04-16-adapter-registry-design.md.
+See docs/adr/0001-adapter-registry.md.
 """
 from __future__ import annotations
 
@@ -26,19 +26,12 @@ def test_adapter_meta_can_be_constructed_with_required_fields():
 	assert meta.extra == {}
 
 
-def test_adapter_meta_in_api_has_exchange_field():
-	"""api/adapter_registry.py re-exports the clean AdapterMeta from base."""
+def test_api_adapter_meta_is_the_base_adapter_meta():
+	"""api/adapter_registry.py.AdapterMeta must be the same class object as
+	edge_catcher.adapters.base.AdapterMeta — re-export, not redefinition."""
 	from api.adapter_registry import AdapterMeta as ApiAdapterMeta
-	meta = ApiAdapterMeta(
-		id="test",
-		exchange="test_exchange",
-		name="T",
-		description="T",
-		db_file="data/x.db",
-		fee_model=ZERO_FEE,
-		markets_yaml="config/markets-btc.yaml",
-	)
-	assert meta.exchange == "test_exchange"
+	from edge_catcher.adapters.base import AdapterMeta as BaseAdapterMeta
+	assert ApiAdapterMeta is BaseAdapterMeta
 
 
 def test_adapter_meta_extra_stores_coinbase_product_id():

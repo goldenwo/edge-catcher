@@ -21,10 +21,11 @@ def test_all_adapters_have_exchange_tag():
 
 
 def test_central_adapters_list_is_concat_of_per_exchange_lists():
+	"""Compare full AdapterMeta objects (not just ids) to catch drift in
+	any field — fee_model identity in particular, which an id-only check
+	would miss."""
 	from api.adapter_registry import ADAPTERS
 	from edge_catcher.adapters.kalshi.registry import KALSHI_ADAPTERS
 	from edge_catcher.adapters.coinbase.registry import COINBASE_ADAPTERS
 
-	expected_ids = [a.id for a in (*KALSHI_ADAPTERS, *COINBASE_ADAPTERS)]
-	actual_ids = [a.id for a in ADAPTERS]
-	assert actual_ids == expected_ids
+	assert list(ADAPTERS) == [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS]

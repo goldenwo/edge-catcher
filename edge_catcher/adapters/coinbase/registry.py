@@ -17,7 +17,6 @@ COINBASE_ADAPTERS: list[AdapterMeta] = [
 		db_file="data/btc.db",
 		fee_model=ZERO_FEE,
 		requires_api_key=False,
-		api_key_env_var=None,
 		default_start_date="2025-03-21",
 		extra={"product_id": "BTC-USD"},
 	),
