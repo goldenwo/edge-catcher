@@ -177,7 +177,7 @@ def test_check_memory_sleeps_when_ram_low(adapter):
     mock_psutil.virtual_memory.return_value = mock_vm
 
     with patch.dict(sys.modules, {"psutil": mock_psutil}):
-        with patch("edge_catcher.adapters.kalshi.time.sleep") as mock_sleep:
+        with patch("edge_catcher.adapters.kalshi.adapter.time.sleep") as mock_sleep:
             adapter._check_memory()
 
     mock_sleep.assert_called_once_with(30)
@@ -193,7 +193,7 @@ def test_check_memory_no_sleep_when_ram_ok(adapter):
     mock_psutil.virtual_memory.return_value = mock_vm
 
     with patch.dict(sys.modules, {"psutil": mock_psutil}):
-        with patch("edge_catcher.adapters.kalshi.time.sleep") as mock_sleep:
+        with patch("edge_catcher.adapters.kalshi.adapter.time.sleep") as mock_sleep:
             adapter._check_memory()
 
     mock_sleep.assert_not_called()
