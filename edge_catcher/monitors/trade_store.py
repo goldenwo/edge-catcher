@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from edge_catcher.fees import STANDARD_FEE
+from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 
 
 class DuplicateOpenTradeError(Exception):

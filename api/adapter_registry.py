@@ -7,6 +7,7 @@ See docs/adr/0001-adapter-registry.md.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -14,7 +15,10 @@ from typing import Optional
 from edge_catcher.adapters.base import AdapterMeta  # re-export
 from edge_catcher.adapters.kalshi.registry import KALSHI_ADAPTERS
 from edge_catcher.adapters.coinbase.registry import COINBASE_ADAPTERS
-from edge_catcher.fees import FeeModel, STANDARD_FEE
+from edge_catcher.fees import FeeModel, ZERO_FEE
+
+
+log = logging.getLogger(__name__)
 
 
 ADAPTERS: list[AdapterMeta] = [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS]
@@ -57,9 +61,21 @@ def is_api_key_set(meta: AdapterMeta) -> bool:
 
 
 def get_fee_model(adapter_id: str) -> FeeModel:
-	"""Return the fee model for a specific adapter by ID (preferred lookup)."""
+	"""Return the fee model for a specific adapter by ID (preferred lookup).
+
+	Falls back to ZERO_FEE with a warning if the adapter_id is unknown —
+	every registered adapter declares a fee_model explicitly, so a fallback
+	hit indicates a misconfiguration.
+	"""
 	adapter = get_adapter(adapter_id)
-	return adapter.fee_model if adapter else STANDARD_FEE
+	if adapter is not None:
+		return adapter.fee_model
+	log.warning(
+		"get_fee_model: no adapter registered with id=%r; returning ZERO_FEE. "
+		"This likely indicates a typo or stale adapter reference.",
+		adapter_id,
+	)
+	return ZERO_FEE
 
 
 def get_fee_model_for_db(db_path: str, series: str | None = None) -> FeeModel:
@@ -68,6 +84,9 @@ def get_fee_model_for_db(db_path: str, series: str | None = None) -> FeeModel:
 	Resolution: if series is provided and the adapter has fee_overrides
 	matching a prefix of the series, return the override. Otherwise
 	return the adapter's default fee model.
+
+	Falls back to ZERO_FEE with a warning if no adapter declares the given
+	db_file — a lookup miss indicates a stale path or unregistered adapter.
 	"""
 	resolved = str(Path(db_path).resolve())
 	for adapter in ADAPTERS:
@@ -78,4 +97,9 @@ def get_fee_model_for_db(db_path: str, series: str | None = None) -> FeeModel:
 					if series.startswith(prefix):
 						return fee_model
 			return adapter.fee_model
-	return STANDARD_FEE
+	log.warning(
+		"get_fee_model_for_db: no adapter declares db_file=%r; returning ZERO_FEE. "
+		"This likely indicates a stale DB path or unregistered adapter.",
+		db_path,
+	)
+	return ZERO_FEE
