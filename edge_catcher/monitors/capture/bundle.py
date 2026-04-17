@@ -67,8 +67,8 @@ def assemble_daily_bundle(
 	bundle_dir.mkdir(parents=True, exist_ok=True)
 	day_str = capture_date.isoformat()
 
-	# 1. Compress the JSONL (zstd level 19 — takes a few seconds at rotation
-	#    but shrinks the overnight capture to ~10-20% of original).
+	# 1. Compress the JSONL (zstd level 3 — default). See _compress_zstd
+	#    for the level choice rationale.
 	src_jsonl = capture_dir / f"kalshi_engine_{day_str}.jsonl"
 	dst_jsonl = bundle_dir / f"kalshi_engine_{day_str}.jsonl.zst"
 	_compress_zstd(src_jsonl, dst_jsonl)
@@ -131,9 +131,13 @@ def assemble_daily_bundle(
 # ---------------------------------------------------------------------------
 
 
-def _compress_zstd(src: Path, dst: Path, level: int = 19) -> None:
-	"""Stream-compress ``src`` to ``dst`` using zstd level 19 (slow compress,
-	fast decompress, ~10% of original size for JSONL text)."""
+def _compress_zstd(src: Path, dst: Path, level: int = 3) -> None:
+	"""Stream-compress ``src`` to ``dst`` using zstd (default level 3).
+
+	Level 3 is zstd's default: ~10% of original size for JSONL text at
+	high throughput. Higher levels (e.g. 19) achieve ~5% ratio but are
+	~25× slower and can contend with the live event loop during rotation —
+	the storage savings don't justify the rotation cost at typical scales."""
 	cctx = zstd.ZstdCompressor(level=level)
 	with open(src, "rb") as fin, open(dst, "wb") as fout:
 		cctx.copy_stream(fin, fout)
