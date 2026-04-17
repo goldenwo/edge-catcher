@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from edge_catcher.adapters.base import AdapterMeta
-from edge_catcher.adapters.kalshi.fees import STANDARD_FEE, INDEX_FEE
+from edge_catcher.fees import STANDARD_FEE, INDEX_FEE
 
 
 KALSHI_ADAPTERS: list[AdapterMeta] = [
