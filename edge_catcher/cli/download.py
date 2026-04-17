@@ -146,18 +146,20 @@ def _run_download(args) -> None:
 
 
 def _run_download_btc(args) -> None:
+	from api.adapter_registry import get_adapter
 	from edge_catcher.adapters.coinbase import CoinbaseAdapter
 	from edge_catcher.storage.db import get_connection, init_btc_ohlc_table
 	from datetime import datetime, timezone
-	import time
 
 	db_path = Path(args.db)
 	db_path.parent.mkdir(parents=True, exist_ok=True)
 	conn = get_connection(db_path)
 	init_btc_ohlc_table(conn)
 
-	# Default start: 2025-03-21T00:00:00 UTC (earliest Kalshi market open)
-	start_ts = int(datetime(2025, 3, 21, tzinfo=timezone.utc).timestamp())
+	# Start date from the coinbase_btc registry entry (keeps CLI + registry in sync).
+	meta = get_adapter("coinbase_btc")
+	assert meta is not None and meta.default_start_date is not None, "coinbase_btc must be registered with a default_start_date"
+	start_ts = int(datetime.fromisoformat(meta.default_start_date).replace(tzinfo=timezone.utc).timestamp())
 	end_ts = int(datetime.now(timezone.utc).timestamp())
 
 	adapter = CoinbaseAdapter()
