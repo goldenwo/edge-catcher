@@ -5,20 +5,25 @@ from pathlib import Path
 
 
 def _resolve_db_from_markets_yaml(markets_yaml: str) -> str:
-	"""Look up db_file from ADAPTERS by markets_yaml path.
+	"""Look up db_file from ADAPTERS by markets_yaml filename.
 
-	Raises ValueError if no adapter declares this markets_yaml.
+	Matches on Path.name so config/ and config.local/ variants of the
+	same markets file resolve to the same db_file (users put private
+	market overrides in config.local/; the db_file mapping stays the
+	same).
+
+	Raises ValueError if no adapter declares this markets filename.
 	"""
 	from api.adapter_registry import ADAPTERS
 
-	target = Path(markets_yaml).as_posix()
+	target_name = Path(markets_yaml).name
 	for adapter in ADAPTERS:
 		if adapter.markets_yaml is None:
 			continue
-		if Path(adapter.markets_yaml).as_posix() == target:
+		if Path(adapter.markets_yaml).name == target_name:
 			return adapter.db_file
 	raise ValueError(
-		f"No adapter found for markets_yaml={markets_yaml}. "
+		f"No adapter found for markets_yaml={markets_yaml!r}. "
 		f"Declare it in the appropriate edge_catcher/adapters/<exchange>/registry.py"
 	)
 
