@@ -159,7 +159,7 @@ class TestAuditLogValidation:
         ok, err = audit.validate_hypothesis(
             strategy="",
             series="SERIES_A",
-            db_path="data/kalshi.db",
+            db_path="data/kalshi-btc.db",
             start_date="2025-01-01",
             end_date="2025-12-31",
         )

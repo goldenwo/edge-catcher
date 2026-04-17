@@ -6,7 +6,7 @@ source .venv/bin/activate
 
 MARKET_COUNT=$(python -c "
 import sqlite3, os
-db = 'data/kalshi.db'
+db = 'data/kalshi-btc.db'
 if not os.path.exists(db):
     print(0)
 else:

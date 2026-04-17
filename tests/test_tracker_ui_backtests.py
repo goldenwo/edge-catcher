@@ -15,7 +15,7 @@ def test_save_and_list_ui_backtest(tracker):
 		task_id="bt-001",
 		series="KXBTC",
 		strategies='["example"]',
-		db_path="data/kalshi.db",
+		db_path="data/kalshi-btc.db",
 		start_date="2025-01-01",
 		end_date="2025-06-01",
 		total_trades=100,
@@ -32,7 +32,7 @@ def test_save_and_list_ui_backtest(tracker):
 	assert total == 1
 	assert rows[0]["task_id"] == "bt-001"
 	assert rows[0]["series"] == "KXBTC"
-	assert rows[0]["db_path"] == "data/kalshi.db"
+	assert rows[0]["db_path"] == "data/kalshi-btc.db"
 
 
 def test_delete_ui_backtest(tracker):
@@ -40,7 +40,7 @@ def test_delete_ui_backtest(tracker):
 		task_id="bt-del",
 		series="KXBTC",
 		strategies='["example"]',
-		db_path="data/kalshi.db",
+		db_path="data/kalshi-btc.db",
 		total_trades=10,
 		wins=5,
 		losses=5,
@@ -106,7 +106,7 @@ def test_count_and_latest(tracker):
 	import time
 	tracker.save_ui_backtest(
 		task_id="bt-a", series="KXBTC", strategies='["s1"]',
-		db_path="data/kalshi.db",
+		db_path="data/kalshi-btc.db",
 		total_trades=10, wins=5, losses=5,
 		net_pnl_cents=100, sharpe=1.0,
 		max_drawdown_pct=2.0, win_rate=0.5,
@@ -114,7 +114,7 @@ def test_count_and_latest(tracker):
 	time.sleep(0.01)  # ensure distinct timestamps
 	tracker.save_ui_backtest(
 		task_id="bt-b", series="KXBTC", strategies='["s2"]',
-		db_path="data/kalshi.db",
+		db_path="data/kalshi-btc.db",
 		total_trades=20, wins=15, losses=5,
 		net_pnl_cents=800, sharpe=2.5,
 		max_drawdown_pct=1.0, win_rate=0.75,

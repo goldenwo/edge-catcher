@@ -36,7 +36,7 @@ def test_adapter_meta_in_api_has_exchange_field():
 		description="T",
 		db_file="data/x.db",
 		fee_model=ZERO_FEE,
-		markets_yaml="config/markets.yaml",
+		markets_yaml="config/markets-btc.yaml",
 	)
 	assert meta.exchange == "test_exchange"
 

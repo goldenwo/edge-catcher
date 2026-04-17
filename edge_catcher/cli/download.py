@@ -41,7 +41,7 @@ def _run_download(args) -> None:
 	logger = logging.getLogger(__name__)
 
 	config_dir = getattr(args, 'config', 'config')
-	markets_file = Path(args.markets) if args.markets else Path(config_dir) / "markets.yaml"
+	markets_file = Path(args.markets) if args.markets else Path(config_dir) / "markets-btc.yaml"
 
 	# Derive DB path from the adapter registry when not explicitly provided —
 	# source of truth for markets_yaml → db_file mapping is per-exchange registry.py.
@@ -205,7 +205,7 @@ def register(subparsers) -> None:
 		"--markets",
 		default=None,
 		metavar="FILE",
-		help="Path to markets YAML file (default: {config}/markets.yaml). "
+		help="Path to markets YAML file (default: {config}/markets-btc.yaml). "
 		     "Example: --markets config/markets-altcrypto.yaml",
 	)
 	dl.add_argument(

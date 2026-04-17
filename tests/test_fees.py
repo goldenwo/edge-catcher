@@ -113,7 +113,7 @@ class TestZeroFee:
 class TestFeeModelForDbWithOverrides:
 	def test_default_fee_model(self):
 		from api.adapter_registry import get_fee_model_for_db
-		fee = get_fee_model_for_db("data/kalshi.db")
+		fee = get_fee_model_for_db("data/kalshi-btc.db")
 		assert fee is STANDARD_FEE
 
 	def test_override_by_series_prefix(self):

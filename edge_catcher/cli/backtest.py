@@ -220,7 +220,7 @@ def register(subparsers) -> None:
 	bt.add_argument("--slippage", type=int, default=1, help="Slippage in cents (default: 1)")
 	# Strategy-specific params auto-generated from __init__ signatures
 	_auto_strategy_args(bt)
-	bt.add_argument("--db-path", default="data/kalshi.db", dest="db_path")
+	bt.add_argument("--db-path", default="data/kalshi-btc.db", dest="db_path")
 	bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
 	bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
 	                help="Multiplier on entry fee formula (default: 1.0 = full taker fee; 0.25 = maker fee; 0.0 = no fee)")
