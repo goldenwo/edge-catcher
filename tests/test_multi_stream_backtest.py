@@ -13,7 +13,8 @@ from edge_catcher.runner.event_backtest import (
 	Portfolio,
 )
 from edge_catcher.runner.strategies import Signal, Strategy
-from edge_catcher.fees import STANDARD_FEE, ZERO_FEE
+from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+from edge_catcher.fees import ZERO_FEE
 from edge_catcher.research.data_source_resolver import PrimarySource, ResolvedSource
 
 

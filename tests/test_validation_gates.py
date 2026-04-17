@@ -217,7 +217,7 @@ class TestDeflatedSharpeGate:
 				rows.append({
 					"strategy": f"Strat{s_idx}",
 					"series": f"SER_{series_idx}",
-					"db_path": "data/kalshi.db",
+					"db_path": "data/kalshi-btc.db",
 					"fee_pct": 1.0,
 					"status": "ok",
 					"sharpe": 0.3 + s_idx * 0.1 + series_idx * 0.02,
@@ -330,7 +330,7 @@ class TestDeflatedSharpeGate:
 				rows.append({
 					"strategy": f"Strat{s_idx}",
 					"series": f"SER_{series_idx}",
-					"db_path": "data/kalshi.db",
+					"db_path": "data/kalshi-btc.db",
 					"fee_pct": 1.0,
 					"status": "ok",
 					"sharpe": 0.3 + s_idx * 0.1 + series_idx * 0.02,

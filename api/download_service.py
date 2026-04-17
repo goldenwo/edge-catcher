@@ -34,7 +34,7 @@ def run_kalshi_download(
 		upsert_trades_batch,
 	)
 
-	db = Path(db_file) if db_file else validate_db("kalshi.db")
+	db = Path(db_file) if db_file else validate_db("kalshi-btc.db")
 
 	state.running = True
 	state.progress = "Initializing..."
@@ -153,7 +153,7 @@ def run_legacy_download(download_state) -> None:
 	download_state.error = None
 	download_state.rows_fetched = 0  # duck-type compatibility with AdapterDownloadState
 
-	run_kalshi_download("kalshi", download_state)
+	run_kalshi_download("kalshi_btc", download_state)
 
 	# Mirror adapter field name to legacy field name
 	download_state.trades_fetched = getattr(download_state, 'rows_fetched', 0)
@@ -181,8 +181,9 @@ def adapter_has_data(meta) -> bool:
 			).fetchone()[0]
 			conn.close()
 			return count > 0
-		elif meta.coinbase_product_id:
-			table = meta.coinbase_product_id.split("-")[0].lower() + "_ohlc"
+		elif meta.exchange == "coinbase":
+			product_id = meta.extra["product_id"]
+			table = product_id.split("-")[0].lower() + "_ohlc"
 			count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 			conn.close()
 			return count > 0

@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
+
+from edge_catcher.fees import FeeModel
 from edge_catcher.storage.models import Market, Trade
 
 
@@ -24,3 +27,30 @@ class MarketAdapter(ABC):
     def stream_realtime(self):
         """WebSocket/polling live feed. Override for Phase 5 live collectors."""
         raise NotImplementedError("stream_realtime not implemented for this adapter")
+
+
+@dataclass
+class AdapterMeta:
+	"""Metadata for a data adapter. See docs/adr/0001-adapter-registry.md.
+
+	Contract:
+	- `exchange`, `db_file`, and `fee_model` MUST be specified explicitly.
+	- Exchange-specific fields go in `extra`, not as typed attributes.
+	- Each exchange lives in edge_catcher/adapters/<exchange>/ with its
+	  own registry.py and fees.py (if applicable).
+	"""
+	# Identity (all required)
+	id: str
+	exchange: str
+	name: str
+	description: str
+	db_file: str
+	fee_model: FeeModel
+
+	# Optional
+	requires_api_key: bool = False
+	api_key_env_var: Optional[str] = None
+	default_start_date: Optional[str] = None
+	markets_yaml: Optional[str] = None
+	fee_overrides: dict[str, FeeModel] = field(default_factory=dict)
+	extra: dict[str, Any] = field(default_factory=dict)

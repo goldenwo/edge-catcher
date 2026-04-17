@@ -25,7 +25,7 @@ while true; do
     # Check completion: markets with trades vs markets with volume
     MARKETS_WITH_TRADES=$(python -c "
 import sqlite3
-conn = sqlite3.connect('data/kalshi.db')
+conn = sqlite3.connect('data/kalshi-btc.db')
 with_trades = conn.execute('SELECT COUNT(DISTINCT ticker) FROM trades').fetchone()[0]
 total_vol = conn.execute('SELECT COUNT(*) FROM markets WHERE volume > 0').fetchone()[0]
 print(with_trades)
@@ -34,7 +34,7 @@ conn.close()
 
     TOTAL_MARKETS_VOL=$(python -c "
 import sqlite3
-conn = sqlite3.connect('data/kalshi.db')
+conn = sqlite3.connect('data/kalshi-btc.db')
 total_vol = conn.execute('SELECT COUNT(*) FROM markets WHERE volume > 0').fetchone()[0]
 print(total_vol)
 conn.close()

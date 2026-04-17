@@ -248,7 +248,7 @@ def test_exit_trade_profit(store: TradeStore) -> None:
 	entry_fee = store._conn.execute(
 		"SELECT entry_fee_cents FROM paper_trades WHERE id=?", (trade_id,)
 	).fetchone()[0]
-	from edge_catcher.fees import STANDARD_FEE
+	from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 	exit_fee = int(STANDARD_FEE.calculate(50, 2))
 	expected_pnl = 2 * (50 - 40) - entry_fee - exit_fee
 	assert row[2] == expected_pnl

@@ -13,7 +13,7 @@ from edge_catcher.runner.event_backtest import (
 	Portfolio,
 	Position,
 )
-from edge_catcher.fees import STANDARD_FEE
+from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.runner.strategies import Signal, Strategy
 from edge_catcher.storage.models import Market, Trade
 

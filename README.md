@@ -70,7 +70,7 @@ edge-catcher/
 │   ├── fees.yaml               # Fee models per market
 │   └── hypotheses.yaml         # Hypothesis configs
 ├── config.local/               # Market configs (gitignored)
-│   ├── markets.yaml            # Default market series
+│   ├── markets-btc.yaml        # Default market series (Kalshi BTC)
 │   └── markets-*.yaml          # Category-specific series
 └── tests/                # pytest suite (255+ tests)
 ```
@@ -178,7 +178,7 @@ Kalshi adapters download settled contracts and trade history. No API key require
 
 | Adapter | Config | Database |
 |---------|--------|----------|
-| Default | `config.local/markets.yaml` | `data/kalshi.db` |
+| Default | `config.local/markets-btc.yaml` | `data/kalshi-btc.db` |
 | Per-category | `config.local/markets-*.yaml` | `data/kalshi-*.db` |
 
 Each category adapter reads its market series from a YAML config in `config.local/`. Database filenames are auto-derived from the config filename.
@@ -193,7 +193,7 @@ OHLC adapters download 1-minute candles for supported assets. Each writes to a t
 
 ## Configuration
 
-### Markets (`config.local/markets.yaml`)
+### Markets (`config.local/markets-btc.yaml`)
 
 ```yaml
 adapters:

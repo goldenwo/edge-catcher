@@ -48,6 +48,6 @@ def register(subparsers) -> None:
 	ldbs.set_defaults(func=_run_list_dbs)
 
 	ar = subparsers.add_parser("archive", help="Archive trades older than 90 days")
-	ar.add_argument("--db-path", default="data/kalshi.db")
+	ar.add_argument("--db-path", default="data/kalshi-btc.db")
 	ar.add_argument("--archive-dir", default="data/archive")
 	ar.set_defaults(func=_run_archive)
