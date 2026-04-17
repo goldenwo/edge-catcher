@@ -38,3 +38,25 @@ def test_adapter_meta_in_api_has_exchange_field():
 		markets_yaml="config/markets.yaml",
 	)
 	assert meta.exchange == "test_exchange"
+
+
+def test_coinbase_product_id_syncs_with_extra():
+	"""During transition both forms must work — old coinbase_product_id=
+	and new extra={'product_id': ...}."""
+	from api.adapter_registry import AdapterMeta as ApiAdapterMeta
+
+	# New form
+	m1 = ApiAdapterMeta(
+		id="x", exchange="coinbase", name="X", description="X",
+		db_file="data/x.db",
+		extra={"product_id": "BTC-USD"},
+	)
+	assert m1.coinbase_product_id == "BTC-USD"
+
+	# Old form
+	m2 = ApiAdapterMeta(
+		id="y", exchange="coinbase", name="Y", description="Y",
+		db_file="data/y.db",
+		coinbase_product_id="ETH-USD",
+	)
+	assert m2.extra.get("product_id") == "ETH-USD"

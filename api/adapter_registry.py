@@ -43,9 +43,11 @@ class AdapterMeta:
             self.db_file = _db_file_from_markets_yaml(self.markets_yaml)
         elif not self.db_file:
             self.db_file = "data/kalshi.db"
-        # Hoist coinbase_product_id into extra if set
+        # Sync coinbase_product_id with extra["product_id"] in both directions
         if self.coinbase_product_id and "product_id" not in self.extra:
             self.extra["product_id"] = self.coinbase_product_id
+        elif "product_id" in self.extra and not self.coinbase_product_id:
+            self.coinbase_product_id = self.extra["product_id"]
 
 ADAPTERS: list[AdapterMeta] = [
     AdapterMeta(
@@ -68,7 +70,7 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-03-21",
         db_file="data/btc.db",
         fee_model=ZERO_FEE,
-        coinbase_product_id="BTC-USD",
+        extra={"product_id": "BTC-USD"},
     ),
     AdapterMeta(
         id="coinbase_eth",
@@ -79,7 +81,7 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-01-01",
         db_file="data/ohlc.db",
         fee_model=ZERO_FEE,
-        coinbase_product_id="ETH-USD",
+        extra={"product_id": "ETH-USD"},
     ),
     AdapterMeta(
         id="coinbase_sol",
@@ -90,7 +92,7 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-01-01",
         db_file="data/ohlc.db",
         fee_model=ZERO_FEE,
-        coinbase_product_id="SOL-USD",
+        extra={"product_id": "SOL-USD"},
     ),
     AdapterMeta(
         id="coinbase_xrp",
@@ -101,7 +103,7 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-01-01",
         db_file="data/ohlc.db",
         fee_model=ZERO_FEE,
-        coinbase_product_id="XRP-USD",
+        extra={"product_id": "XRP-USD"},
     ),
     AdapterMeta(
         id="coinbase_doge",
@@ -112,7 +114,7 @@ ADAPTERS: list[AdapterMeta] = [
         default_start_date="2025-01-01",
         db_file="data/ohlc.db",
         fee_model=ZERO_FEE,
-        coinbase_product_id="DOGE-USD",
+        extra={"product_id": "DOGE-USD"},
     ),
     AdapterMeta(
         id="kalshi_sports",
