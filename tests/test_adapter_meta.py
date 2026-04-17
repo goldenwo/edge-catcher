@@ -27,36 +27,53 @@ def test_adapter_meta_can_be_constructed_with_required_fields():
 
 
 def test_adapter_meta_in_api_has_exchange_field():
-	"""api/adapter_registry.py must have the new exchange field so the
-	existing ADAPTERS list can be tagged during the transition."""
+	"""api/adapter_registry.py re-exports the clean AdapterMeta from base."""
 	from api.adapter_registry import AdapterMeta as ApiAdapterMeta
 	meta = ApiAdapterMeta(
 		id="test",
 		exchange="test_exchange",
 		name="T",
 		description="T",
+		db_file="data/x.db",
+		fee_model=ZERO_FEE,
 		markets_yaml="config/markets.yaml",
 	)
 	assert meta.exchange == "test_exchange"
 
 
-def test_coinbase_product_id_syncs_with_extra():
-	"""During transition both forms must work — old coinbase_product_id=
-	and new extra={'product_id': ...}."""
-	from api.adapter_registry import AdapterMeta as ApiAdapterMeta
-
-	# New form
-	m1 = ApiAdapterMeta(
+def test_adapter_meta_extra_stores_coinbase_product_id():
+	"""Coinbase adapters stash product_id in extra rather than a typed field."""
+	from edge_catcher.adapters.base import AdapterMeta
+	meta = AdapterMeta(
 		id="x", exchange="coinbase", name="X", description="X",
-		db_file="data/x.db",
+		db_file="data/x.db", fee_model=ZERO_FEE,
 		extra={"product_id": "BTC-USD"},
 	)
-	assert m1.coinbase_product_id == "BTC-USD"
+	assert meta.extra["product_id"] == "BTC-USD"
 
-	# Old form
-	m2 = ApiAdapterMeta(
-		id="y", exchange="coinbase", name="Y", description="Y",
-		db_file="data/y.db",
-		coinbase_product_id="ETH-USD",
-	)
-	assert m2.extra.get("product_id") == "ETH-USD"
+
+def test_adapter_meta_requires_exchange():
+	from edge_catcher.adapters.base import AdapterMeta
+	with pytest.raises(TypeError):
+		AdapterMeta(  # type: ignore
+			id="x", name="X", description="X",
+			db_file="data/x.db", fee_model=ZERO_FEE,
+		)
+
+
+def test_adapter_meta_requires_db_file():
+	from edge_catcher.adapters.base import AdapterMeta
+	with pytest.raises(TypeError):
+		AdapterMeta(  # type: ignore
+			id="x", exchange="test", name="X", description="X",
+			fee_model=ZERO_FEE,
+		)
+
+
+def test_adapter_meta_requires_fee_model():
+	from edge_catcher.adapters.base import AdapterMeta
+	with pytest.raises(TypeError):
+		AdapterMeta(  # type: ignore
+			id="x", exchange="test", name="X", description="X",
+			db_file="data/x.db",
+		)
