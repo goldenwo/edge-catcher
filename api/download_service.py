@@ -181,8 +181,9 @@ def adapter_has_data(meta) -> bool:
 			).fetchone()[0]
 			conn.close()
 			return count > 0
-		elif meta.coinbase_product_id:
-			table = meta.coinbase_product_id.split("-")[0].lower() + "_ohlc"
+		elif meta.exchange == "coinbase":
+			product_id = meta.extra["product_id"]
+			table = product_id.split("-")[0].lower() + "_ohlc"
 			count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 			conn.close()
 			return count > 0

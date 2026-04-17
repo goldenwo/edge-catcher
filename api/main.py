@@ -464,9 +464,9 @@ async def start_adapter_download(
     if meta.markets_yaml:
         target = _run_kalshi_download
         args = (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
-    elif meta.coinbase_product_id:
+    elif meta.exchange == "coinbase":
         target = _run_coinbase_download
-        args = (adapter_id, state, req.start_date, meta.coinbase_product_id, meta.db_file)
+        args = (adapter_id, state, req.start_date, meta.extra["product_id"], meta.db_file)
     else:
         raise HTTPException(status_code=400, detail=f"No download handler for {adapter_id!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
