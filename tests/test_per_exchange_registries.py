@@ -4,7 +4,7 @@ from edge_catcher.adapters.coinbase.registry import COINBASE_ADAPTERS
 
 def test_kalshi_registry_contains_btc_adapter():
 	ids = [a.id for a in KALSHI_ADAPTERS]
-	assert "kalshi" in ids  # renamed to "kalshi_btc" in task 11
+	assert "kalshi_btc" in ids
 
 
 def test_coinbase_registry_contains_5_products():

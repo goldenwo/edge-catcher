@@ -47,7 +47,7 @@ class KalshiAdapter(MarketAdapter):
     """Kalshi REST API adapter.
 
     Fetches market metadata and trade history from the Kalshi elections API.
-    NOTE: base_url points to the elections subdomain as specified in markets.yaml.
+    NOTE: base_url points to the elections subdomain as specified in markets-btc.yaml.
     For crypto series (KXBTC*), verify whether api.kalshi.com is needed instead.
     """
 
@@ -55,7 +55,7 @@ class KalshiAdapter(MarketAdapter):
 
     def __init__(
         self,
-        config_path: Path = Path("config/markets.yaml"),
+        config_path: Path = Path("config/markets-btc.yaml"),
         api_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> None:

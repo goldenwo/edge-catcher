@@ -10,7 +10,7 @@ pytest.importorskip("requests", reason="requests not installed")
 from edge_catcher.adapters.kalshi import KalshiAdapter
 
 
-CONFIG_PATH = Path("config/markets.yaml")
+CONFIG_PATH = Path("config/markets-btc.yaml")
 
 
 @pytest.fixture

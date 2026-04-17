@@ -15,7 +15,7 @@ requests = pytest.importorskip("requests", reason="requests not installed")
 
 def _download_args(**overrides):
     defaults = dict(
-        db_path="data/kalshi.db",
+        db_path="data/kalshi-btc.db",
         config="config",
         markets=None,
         dry_run=False,
@@ -40,7 +40,7 @@ def test_skip_market_scan_flag_accepted():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     dl = sub.add_parser("download")
-    dl.add_argument("--db-path", default="data/kalshi.db")
+    dl.add_argument("--db-path", default="data/kalshi-btc.db")
     dl.add_argument("--dry-run", action="store_true")
     dl.add_argument("--skip-market-scan", action="store_true")
     dl.add_argument("--max-trade-markets", type=int, default=None)
@@ -142,7 +142,7 @@ def _backtest_args(**overrides):
         h1_threshold_low=None,
         h5_fav_threshold=None,
         h5_long_threshold=None,
-        db_path="data/kalshi.db",
+        db_path="data/kalshi-btc.db",
         output="reports/backtest_result.json",
         fee_pct=1.0,
         json=False,

@@ -13,7 +13,7 @@ from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.tracker import Tracker
 
 
-def _grid_result(strategy="C", series="SERIES_A", db_path="data/kalshi.db",
+def _grid_result(strategy="C", series="SERIES_A", db_path="data/kalshi-btc.db",
                  verdict="kill", verdict_reason="k", **kw) -> HypothesisResult:
     """Helper that creates a result with explicit db_path control."""
     from pathlib import Path
@@ -34,7 +34,7 @@ class TestGridPlannerGenerate:
         tracker = Tracker(tmp_path / "research.db")
         planner = GridPlanner(tracker=tracker)
         strategies = ["A", "B"]
-        series_map = {"data/kalshi.db": ["SERIES_A", "SERIES_E"]}
+        series_map = {"data/kalshi-btc.db": ["SERIES_A", "SERIES_E"]}
         hypotheses = planner.generate(
             strategies=strategies,
             series_map=series_map,
@@ -45,8 +45,8 @@ class TestGridPlannerGenerate:
         # 2 strategies × 2 series = 4
         assert len(hypotheses) == 4
         combos = {(h.strategy, h.series, h.db_path) for h in hypotheses}
-        assert ("A", "SERIES_A", "data/kalshi.db") in combos
-        assert ("B", "SERIES_E", "data/kalshi.db") in combos
+        assert ("A", "SERIES_A", "data/kalshi-btc.db") in combos
+        assert ("B", "SERIES_E", "data/kalshi-btc.db") in combos
 
     def test_skips_already_tested(self, tmp_path):
         tracker = Tracker(tmp_path / "research.db")
@@ -57,7 +57,7 @@ class TestGridPlannerGenerate:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A", "B"],
-            series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
+            series_map={"data/kalshi-btc.db": ["SERIES_A", "SERIES_E"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
             fee_pct=1.0,
@@ -71,7 +71,7 @@ class TestGridPlannerGenerate:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A"],
-            series_map={"data/kalshi.db": ["SERIES_A"]},
+            series_map={"data/kalshi-btc.db": ["SERIES_A"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
@@ -82,7 +82,7 @@ class TestGridPlannerGenerate:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=[],
-            series_map={"data/kalshi.db": ["SERIES_A"]},
+            series_map={"data/kalshi-btc.db": ["SERIES_A"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
@@ -108,7 +108,7 @@ class TestGridPlannerSlippage:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A"],
-            series_map={"data/kalshi.db": ["KXDOGED"]},
+            series_map={"data/kalshi-btc.db": ["KXDOGED"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
             fee_pct=1.0,
@@ -123,7 +123,7 @@ class TestGridPlannerSlippage:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A"],
-            series_map={"data/kalshi.db": ["UNKNOWN_SERIES_XYZ"]},
+            series_map={"data/kalshi-btc.db": ["UNKNOWN_SERIES_XYZ"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
             fee_pct=1.0,
@@ -143,7 +143,7 @@ class TestGridPlannerOrdering:
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A", "B"],
-            series_map={"data/kalshi.db": ["SERIES_A", "SERIES_E"]},
+            series_map={"data/kalshi-btc.db": ["SERIES_A", "SERIES_E"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
         )
