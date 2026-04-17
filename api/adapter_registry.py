@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Optional
+from edge_catcher.adapters.base import AdapterMeta as _BaseAdapterMeta
 from edge_catcher.fees import FeeModel, STANDARD_FEE, INDEX_FEE, ZERO_FEE
 
 
