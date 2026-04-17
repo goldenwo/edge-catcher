@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import yaml
 import requests
 
-from edge_catcher.adapters.base import MarketAdapter
+from edge_catcher.adapters.base import PredictionMarketAdapter
 from edge_catcher.storage.models import Market, Trade
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ SCHEMAS: Dict[str, Any] = {
 }
 
 
-class KalshiAdapter(MarketAdapter):
+class KalshiAdapter(PredictionMarketAdapter):
     """Kalshi REST API adapter.
 
     Fetches market metadata and trade history from the Kalshi elections API.
