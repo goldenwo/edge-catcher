@@ -4,6 +4,25 @@ import logging
 from pathlib import Path
 
 
+def _resolve_db_from_markets_yaml(markets_yaml: str) -> str:
+	"""Look up db_file from ADAPTERS by markets_yaml path.
+
+	Raises ValueError if no adapter declares this markets_yaml.
+	"""
+	from api.adapter_registry import ADAPTERS
+
+	target = Path(markets_yaml).as_posix()
+	for adapter in ADAPTERS:
+		if adapter.markets_yaml is None:
+			continue
+		if Path(adapter.markets_yaml).as_posix() == target:
+			return adapter.db_file
+	raise ValueError(
+		f"No adapter found for markets_yaml={markets_yaml}. "
+		f"Declare it in the appropriate edge_catcher/adapters/<exchange>/registry.py"
+	)
+
+
 def _run_download(args) -> None:
 	from edge_catcher.adapters.kalshi import KalshiAdapter
 	from edge_catcher.storage.db import (
@@ -19,14 +38,12 @@ def _run_download(args) -> None:
 	config_dir = getattr(args, 'config', 'config')
 	markets_file = Path(args.markets) if args.markets else Path(config_dir) / "markets.yaml"
 
-	# Derive DB path from markets file name when not explicitly provided
-	# e.g. markets-crypto.yaml → data/kalshi-crypto.db, markets.yaml → data/kalshi.db
+	# Derive DB path from the adapter registry when not explicitly provided —
+	# source of truth for markets_yaml → db_file mapping is per-exchange registry.py.
 	if args.db_path:
 		db_path = Path(args.db_path)
 	else:
-		stem = markets_file.stem  # e.g. "markets-crypto" or "markets"
-		suffix = stem.removeprefix("markets")  # e.g. "-crypto" or ""
-		db_path = Path(f"data/kalshi{suffix}.db")
+		db_path = Path(_resolve_db_from_markets_yaml(str(markets_file)))
 
 	init_db(db_path)
 	adapter = KalshiAdapter(
