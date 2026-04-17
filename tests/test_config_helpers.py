@@ -93,9 +93,9 @@ def test_config_path_env_override(tmp_path):
 
 
 def test_markets_yaml():
-	"""markets_yaml() always points to config/markets.yaml."""
+	"""markets_yaml() always points to config/markets-btc.yaml (Kalshi BTC default)."""
 	from api.config_helpers import markets_yaml
-	assert markets_yaml() == Path("config") / "markets.yaml"
+	assert markets_yaml() == Path("config") / "markets-btc.yaml"
 
 
 def test_research_db_path_default():
@@ -185,11 +185,11 @@ def test_validate_db_valid():
 		db_file: str
 
 	# Mock ADAPTERS with a test database
-	mock_adapters = [MockAdapter(db_file="data/kalshi.db")]
+	mock_adapters = [MockAdapter(db_file="data/kalshi-btc.db")]
 
 	with patch("api.adapter_registry.ADAPTERS", mock_adapters):
-		result = validate_db("kalshi.db")
-		assert result == Path("data") / "kalshi.db"
+		result = validate_db("kalshi-btc.db")
+		assert result == Path("data") / "kalshi-btc.db"
 
 
 def test_validate_db_invalid():
@@ -202,7 +202,7 @@ def test_validate_db_invalid():
 		db_file: str
 
 	# Mock ADAPTERS with a test database
-	mock_adapters = [MockAdapter(db_file="data/kalshi.db")]
+	mock_adapters = [MockAdapter(db_file="data/kalshi-btc.db")]
 
 	with patch("api.adapter_registry.ADAPTERS", mock_adapters):
 		with pytest.raises(ValueError, match="Unknown database: invalid.db"):

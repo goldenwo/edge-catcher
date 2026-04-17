@@ -82,7 +82,7 @@ When asked to propose statistical hypotheses, return a JSON object with:
 Each hypothesis config must have:
 - "test_type": one of the available test types
 - "series": target series ticker
-- "db": database filename (e.g., "kalshi.db")
+- "db": database filename (e.g., "kalshi-btc.db")
 - "rationale": why you expect this pattern to exist
 - "params": test-specific parameters
 - "thresholds": statistical thresholds

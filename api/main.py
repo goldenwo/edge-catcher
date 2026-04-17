@@ -89,7 +89,7 @@ app.add_middleware(
 def get_status(_: None = Depends(check_auth)) -> StatusResponse:
     from edge_catcher.storage.db import get_connection, get_db_stats
 
-    db = _validate_db("kalshi.db")
+    db = _validate_db("kalshi-btc.db")
     if not db.exists():
         return StatusResponse(
             markets=0,
@@ -204,7 +204,7 @@ def _run_analyze_task(task_id: str, hypothesis_id: str) -> None:
 	state.running = True
 	state.progress = "Running analysis..."
 	try:
-		db_path = _validate_db("kalshi.db")
+		db_path = _validate_db("kalshi-btc.db")
 		conn = sqlite3.connect(str(db_path))
 		conn.row_factory = sqlite3.Row
 		result = run_hypothesis(hypothesis_id, conn, _config_path())
@@ -216,7 +216,7 @@ def _run_analyze_task(task_id: str, hypothesis_id: str) -> None:
 		tracker.save_hypothesis_result(
 			test_type=getattr(result, "test_type", "unknown"),
 			series=hypothesis_id,
-			db="kalshi.db",
+			db="kalshi-btc.db",
 			params=getattr(result, "params", {}) if hasattr(result, "params") else {},
 			thresholds=getattr(result, "thresholds", {}) if hasattr(result, "thresholds") else {},
 			verdict=verdict if isinstance(verdict, str) else str(verdict),
@@ -464,9 +464,9 @@ async def start_adapter_download(
     if meta.markets_yaml:
         target = _run_kalshi_download
         args = (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
-    elif meta.coinbase_product_id:
+    elif meta.exchange == "coinbase":
         target = _run_coinbase_download
-        args = (adapter_id, state, req.start_date, meta.coinbase_product_id, meta.db_file)
+        args = (adapter_id, state, req.start_date, meta.extra["product_id"], meta.db_file)
     else:
         raise HTTPException(status_code=400, detail=f"No download handler for {adapter_id!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
@@ -1039,7 +1039,7 @@ def storage_report(_: None = Depends(check_auth)) -> dict:
 
     archive_dir = Path("data/archive")
     dbs = {}
-    for db_name in ("kalshi.db", "research.db"):
+    for db_name in ("kalshi-btc.db", "research.db"):
         db_path = Path("data") / db_name
         if db_path.exists():
             dbs[db_name] = get_size_report(db_path, archive_dir)
@@ -1048,7 +1048,7 @@ def storage_report(_: None = Depends(check_auth)) -> dict:
 
     # Row counts
     counts: dict = {}
-    kalshi_db = Path("data/kalshi.db")
+    kalshi_db = Path("data/kalshi-btc.db")
     if kalshi_db.exists():
         from edge_catcher.storage.db import get_connection
         conn = get_connection(kalshi_db)
@@ -1073,7 +1073,7 @@ def storage_archive(
     from edge_catcher.storage.archiver import archive_old_trades, archive_old_markets
 
     archive_dir = Path("data/archive")
-    kalshi_db = _validate_db("kalshi.db")
+    kalshi_db = _validate_db("kalshi-btc.db")
     if not kalshi_db.exists():
         raise HTTPException(status_code=404, detail="Database not found")
 
@@ -1093,7 +1093,7 @@ def storage_vacuum(_: None = Depends(check_auth)) -> dict:
     from edge_catcher.storage.db import get_connection
     from edge_catcher.storage.archiver import vacuum_db, get_size_report
 
-    kalshi_db = _validate_db("kalshi.db")
+    kalshi_db = _validate_db("kalshi-btc.db")
     if not kalshi_db.exists():
         raise HTTPException(status_code=404, detail="Database not found")
 
