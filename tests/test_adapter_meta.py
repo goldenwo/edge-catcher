@@ -24,3 +24,17 @@ def test_adapter_meta_can_be_constructed_with_required_fields():
 	assert meta.db_file == "data/test.db"
 	assert meta.fee_model is ZERO_FEE
 	assert meta.extra == {}
+
+
+def test_adapter_meta_in_api_has_exchange_field():
+	"""api/adapter_registry.py must have the new exchange field so the
+	existing ADAPTERS list can be tagged during the transition."""
+	from api.adapter_registry import AdapterMeta as ApiAdapterMeta
+	meta = ApiAdapterMeta(
+		id="test",
+		exchange="test_exchange",
+		name="T",
+		description="T",
+		markets_yaml="config/markets.yaml",
+	)
+	assert meta.exchange == "test_exchange"
