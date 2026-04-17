@@ -48,10 +48,11 @@ If a file reveals **what** we trade, **how** we detect edges, or **specific thre
 ## Adding a new exchange
 
 1. Create `edge_catcher/adapters/<exchange>/` with `__init__.py`.
-2. Add `adapter.py` implementing the `MarketAdapter` ABC from `edge_catcher.adapters.base`.
+2. Add `adapter.py` with your collector class. If your exchange has a markets+trades shape (like Kalshi, Polymarket), inherit from `PredictionMarketAdapter` in `edge_catcher.adapters.base`. If it has a different shape (e.g. OHLC candles like Coinbase), duck-type freely — no base class required.
 3. Add `fees.py` if the exchange has specialized fee models (otherwise adapters can use `ZERO_FEE` from central `edge_catcher.fees`).
 4. Add `registry.py` defining `<EXCHANGE>_ADAPTERS: list[AdapterMeta]`.
 5. Add import + concat line in `api/adapter_registry.py`.
+6. Wire download dispatch in `api/main.py` (`if meta.exchange == "<exchange>"` branch) and `api/download_service.py` (`adapter_has_data` helper).
 
 `AdapterMeta` requires `id`, `exchange`, `name`, `description`, `db_file`, `fee_model`. See `docs/adr/0001-adapter-registry.md` for rationale.
 

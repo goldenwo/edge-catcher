@@ -6,27 +6,36 @@ from edge_catcher.fees import FeeModel
 from edge_catcher.storage.models import Market, Trade
 
 
-class MarketAdapter(ABC):
-    """Abstract interface for market data collectors."""
+class PredictionMarketAdapter(ABC):
+	"""Abstract contract for prediction-market adapters (markets + trades shape).
 
-    @abstractmethod
-    def collect_markets(self, series_tickers: Optional[List[str]] = None) -> List[Market]:
-        """Download/refresh market metadata + settlements for given series."""
-        ...
+	This is the Kalshi-shaped contract: the adapter downloads market metadata
+	plus per-market trade history. Polymarket and other prediction markets
+	would inherit from this.
 
-    @abstractmethod
-    def collect_trades(self, ticker: str, since: Optional[str] = None) -> List[Trade]:
-        """Download trade history for a market. since = ISO datetime string."""
-        ...
+	Exchanges with a different shape (e.g. Coinbase OHLC candles) do NOT
+	inherit — they expose their own interface. The AdapterMeta entry still
+	registers them; only the implementation class differs.
+	"""
 
-    @abstractmethod
-    def validate_response(self, data: dict, schema_key: str) -> bool:
-        """Validate API response against expected schema. Raise ValueError on failure."""
-        ...
+	@abstractmethod
+	def collect_markets(self, series_tickers: Optional[List[str]] = None) -> List[Market]:
+		"""Download/refresh market metadata + settlements for given series."""
+		...
 
-    def stream_realtime(self):
-        """WebSocket/polling live feed. Override for Phase 5 live collectors."""
-        raise NotImplementedError("stream_realtime not implemented for this adapter")
+	@abstractmethod
+	def collect_trades(self, ticker: str, since: Optional[str] = None) -> List[Trade]:
+		"""Download trade history for a market. since = ISO datetime string."""
+		...
+
+	@abstractmethod
+	def validate_response(self, data: dict, schema_key: str) -> bool:
+		"""Validate API response against expected schema. Raise ValueError on failure."""
+		...
+
+	def stream_realtime(self):
+		"""WebSocket/polling live feed. Override for Phase 5 live collectors."""
+		raise NotImplementedError("stream_realtime not implemented for this adapter")
 
 
 @dataclass

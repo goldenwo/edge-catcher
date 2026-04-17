@@ -25,9 +25,9 @@ Built for rigorous, anti-p-hacking statistical research: pre-registered hypothes
 edge-catcher/
 ├── edge_catcher/
 │   ├── adapters/         # Market data collectors
-│   │   ├── base.py       # MarketAdapter abstract interface
-│   │   ├── kalshi.py     # Kalshi API adapter (markets + trades)
-│   │   └── coinbase.py   # Coinbase OHLC adapter (any product)
+│   │   ├── base.py       # AdapterMeta + PredictionMarketAdapter ABC (Kalshi-shaped)
+│   │   ├── kalshi/       # Kalshi API adapter (markets + trades)
+│   │   └── coinbase/     # Coinbase OHLC adapter (any product)
 │   ├── hypotheses/       # Statistical hypothesis modules
 │   │   ├── examples/     # Example hypothesis template
 │   │   ├── kalshi/       # Kalshi-specific hypotheses
