@@ -28,7 +28,7 @@ class FeeModel:
 		return self._calc(price, size)
 
 
-def _make_proportional_fee(rate: float) -> FeeCalc:
+def make_proportional_fee(rate: float) -> FeeCalc:
 	"""Factory: proportional fee at given rate. ceil(rate × contracts × P × (1-P) × 100) cents."""
 	def _fee(price: int, size: int) -> float:
 		p = price / 100.0

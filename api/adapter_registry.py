@@ -30,6 +30,7 @@ def get_adapter(adapter_id: str) -> Optional[AdapterMeta]:
 
 def resolve_db_for_series(series: str) -> Optional[Path]:
 	"""Find which database contains a given series_ticker."""
+	import sqlite3
 	from edge_catcher.storage.db import get_connection
 
 	seen: set[str] = set()
@@ -49,7 +50,8 @@ def resolve_db_for_series(series: str) -> Optional[Path]:
 					return db_path
 			finally:
 				conn.close()
-		except Exception:
+		except sqlite3.Error as e:
+			log.debug("resolve_db_for_series: skipping %s (%s)", db_path, e)
 			continue
 	return None
 
@@ -87,6 +89,13 @@ def get_fee_model_for_db(db_path: str, series: str | None = None) -> FeeModel:
 
 	Falls back to ZERO_FEE with a warning if no adapter declares the given
 	db_file — a lookup miss indicates a stale path or unregistered adapter.
+
+	Caveat: if multiple adapters share the same db_file (e.g. Coinbase
+	eth/sol/xrp/doge all point at data/ohlc.db), the FIRST match in
+	ADAPTERS wins. This is safe when the shared-DB adapters have the
+	same fee_model, but would silently ignore per-adapter fee_overrides
+	on non-first entries. Prefer per-series fee_overrides on the first
+	adapter for that DB, or split into distinct db_file paths.
 	"""
 	resolved = str(Path(db_path).resolve())
 	for adapter in ADAPTERS:
