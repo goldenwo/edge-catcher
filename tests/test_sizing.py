@@ -347,6 +347,58 @@ class TestResolveFill:
 		assert isinstance(result, FillSkip)
 		assert result.reason == "below_min_fill"
 
+	def test_stale_book_fires_on_relative_drift_for_longshots(self) -> None:
+		"""Longshot signals (low-priced entries) need a relative divergence check.
+
+		entry=7c with best_book at 1c is only 6c absolute drift (below the
+		10c threshold) but 86% relative drift — classic phantom-liquidity
+		pattern. Without the relative gate, strategy_b longshots silently
+		filled against 1c ghost levels that didn't reflect the live market
+		(see project_open_bugs_trade_channel.md Bug 2).
+
+		Rule: stale if abs > 10c OR (abs >= 3c AND rel > 30%). The 3c floor
+		exempts normal 1-2c spread movement from the relative gate.
+		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		book = OrderbookSnapshot(
+			yes_levels=[(0.01, 500)],
+			no_levels=[],
+		)
+		result = resolve_fill(config, entry_price_cents=7, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "stale_book"
+
+	def test_stale_book_does_not_fire_on_small_absolute_drift(self) -> None:
+		"""1-2c drifts must NOT be flagged stale even when relative % is high.
+
+		entry=2 with book=3 is 50% relative, but 1c absolute is normal market
+		spread movement — the walker handles sizing via the budget cap. Without
+		this floor, every normal longshot tick with a 1c market move would
+		wrongly trigger stale_book.
+		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		book = OrderbookSnapshot(
+			yes_levels=[(0.03, 30), (0.04, 100)],
+			no_levels=[],
+		)
+		result = resolve_fill(config, entry_price_cents=2, side="yes", book=book)
+		# Must be a FillResult (proceed), NOT FillSkip.
+		assert isinstance(result, FillResult)
+
 
 class TestRiskBudgetCap:
 	"""Regression tests for the 2026-04-14 longshot oversizing bug.
