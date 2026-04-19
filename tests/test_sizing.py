@@ -162,15 +162,28 @@ class TestResolveFill:
 		# Verify the real cost stays strictly within the risk budget
 		assert fill.fill_size * fill.blended_price_cents <= config["sizing"]["risk_per_trade_cents"]
 
-	def test_empty_book_uses_entry_price_fallback(self, config) -> None:
-		"""Empty book → startup fallback: returns fill at entry_price (blended=0).
+	def test_empty_book_fallback_when_require_fresh_book_false(self) -> None:
+		"""Legacy fallback: entry_price used as fake fill price when
+		require_fresh_book=False AND the fill side is empty.
 
-		An empty book is the legitimate startup case (strategy_a fires on
-		the first tick of a new market before the orderbook has been seeded).
+		Historically this was strategy_a's first-tick entry path. Data from
+		2026-04-12..19 showed these fallback entries had 0% win rate and
+		-204c avg P&L — the entry_price from the ticker msg is a derived
+		value, not a fillable offer. The new default is require_fresh_book=True
+		which correctly skips these (see test_empty_book_skipped_...).
+		This test exercises the backward-compat path only.
 		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": False,
+			}
+		}
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
-		assert fill is not None
+		assert isinstance(fill, FillResult)
 		assert fill.blended_price_cents == 0  # signals stale book; trade_store uses entry_price
 		assert fill.fill_size == 40  # 200 // 5
 
@@ -240,13 +253,15 @@ class TestResolveFill:
 		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
 		assert isinstance(fill, FillSkip), "stale populated book must be skipped when require_fresh_book is set"
 
-	def test_empty_book_still_allowed_under_require_fresh_book(self) -> None:
-		"""require_fresh_book only filters populated-but-stale books.
+	def test_empty_book_skipped_under_require_fresh_book_basic(self) -> None:
+		"""require_fresh_book=True also filters empty fill sides (floor filter).
 
-		Empty books are the legitimate startup case for strategy_a's first-tick
-		entries and must still fall back to entry_price even when strict
-		fresh-book checking is enabled.
-		"""
+		This replaces the old behavior where empty books fell through to an
+		entry_price fallback. The fallback produced phantom fills (0% win rate
+		on 82 strategy_a entries, -204c avg) because the ticker-derived
+		entry_price isn't a fillable offer. Now empty books → FillSkip("empty_book")
+		by default. See test_empty_book_skipped_when_require_fresh_book for
+		the authoritative version; this one locks the default behavior."""
 		config = {
 			"sizing": {
 				"risk_per_trade_cents": 200,
@@ -256,10 +271,9 @@ class TestResolveFill:
 			}
 		}
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
-		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
-		assert fill is not None
-		assert fill.blended_price_cents == 0
-		assert fill.fill_size == 40
+		result = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "empty_book"
 
 	def test_min_fill_gate(self, config) -> None:
 		"""Book has only 2 contracts, min_fill is 3 → FillSkip."""
@@ -338,14 +352,16 @@ class TestResolveFill:
 		assert isinstance(result, FillSkip)
 		assert result.reason == "below_min_fill"
 
-	def test_fillskip_below_min_fill_empty_book(self) -> None:
-		"""Empty book with raw_size < min_fill → FillSkip(below_min_fill)."""
+	def test_fillskip_empty_book_precedes_min_fill(self) -> None:
+		"""Empty book under require_fresh_book=True skips as 'empty_book'
+		regardless of would-be fill size. The empty-book check fires before
+		the min_fill gate because there's nothing fillable on that side."""
 		config = {"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3}}
 		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
-		# 200 // 99 = 2, below min_fill=3
+		# 200 // 99 = 2 — would be below_min_fill under fallback, but empty_book fires first.
 		result = resolve_fill(config, entry_price_cents=99, side="yes", book=book)
 		assert isinstance(result, FillSkip)
-		assert result.reason == "below_min_fill"
+		assert result.reason == "empty_book"
 
 	def test_stale_book_fires_on_relative_drift_for_longshots(self) -> None:
 		"""Longshot signals (low-priced entries) need a relative divergence check.
@@ -374,6 +390,51 @@ class TestResolveFill:
 		result = resolve_fill(config, entry_price_cents=7, side="yes", book=book)
 		assert isinstance(result, FillSkip)
 		assert result.reason == "stale_book"
+
+	def test_empty_book_skipped_when_require_fresh_book(self) -> None:
+		"""Empty fill side MUST be skipped when require_fresh_book=True.
+
+		An empty side means nobody is offering on the side the strategy wants
+		to buy. The previous "stale fallback" entered at the ticker's reported
+		entry_price — but that's a phantom fill that never actually executes.
+		Data from 2026-04-12..19 showed 82 such entries on strategy_a, all
+		losses with 0% win rate and -204c avg (vs +71c avg on real walked
+		fills). This is the "floor filter" the
+		project_debut_fade_viability.md memory predicted.
+		"""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[])
+		result = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "empty_book"
+
+	def test_empty_book_side_asymmetric_is_skipped(self) -> None:
+		"""Empty fill side skipped even if the OTHER side has depth.
+
+		strategy_a's is_first_observation can fire when YES side is populated
+		but NO side has no real asks (or vice versa). The fill side's depth is
+		what matters — ctx.orderbook.depth sums both sides and would incorrectly
+		let one-sided books through."""
+		config = {
+			"sizing": {
+				"risk_per_trade_cents": 200,
+				"max_slippage_cents": 2,
+				"min_fill": 3,
+				"require_fresh_book": True,
+			}
+		}
+		# Deep YES side, empty NO side. Strategy wants to buy NO.
+		book = OrderbookSnapshot(yes_levels=[(0.95, 500)], no_levels=[])
+		result = resolve_fill(config, entry_price_cents=5, side="no", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "empty_book"
 
 	def test_stale_book_does_not_fire_on_small_absolute_drift(self) -> None:
 		"""1-2c drifts must NOT be flagged stale even when relative % is high.
