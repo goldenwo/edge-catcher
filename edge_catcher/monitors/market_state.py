@@ -262,6 +262,23 @@ class MarketState:
 		"""Return the current orderbook snapshot for *ticker*, or None."""
 		return self._orderbooks.get(ticker)
 
+	def get_yes_ask(self, ticker: str) -> int | None:
+		"""Best YES ask in cents from the current orderbook, or None if unknown.
+
+		Preferred over reading trade WS `yes_price` — trade messages carry the
+		executed price of a completed trade, which can be off-book."""
+		ob = self._orderbooks.get(ticker)
+		if ob is None or not ob.yes_levels:
+			return None
+		return round(ob.yes_levels[0][0] * 100)
+
+	def get_yes_bid(self, ticker: str) -> int | None:
+		"""Best YES bid in cents (derived from best NO ask), or None if unknown."""
+		ob = self._orderbooks.get(ticker)
+		if ob is None or not ob.no_levels:
+			return None
+		return 100 - round(ob.no_levels[0][0] * 100)
+
 	def apply_orderbook_delta(
 		self,
 		ticker: str,

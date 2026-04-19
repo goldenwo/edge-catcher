@@ -495,17 +495,11 @@ def _handle_trade_msg(
 		return
 
 	try:
-		yes_ask_cents = int(round(float(yes_price_raw) * 100))
+		trade_price_cents = int(round(float(yes_price_raw) * 100))
 	except (TypeError, ValueError):
 		return
-	if not (1 <= yes_ask_cents <= 99):
+	if not (1 <= trade_price_cents <= 99):
 		return
-
-	no_price_raw = data.get("no_price")
-	try:
-		no_ask_cents = int(round(float(no_price_raw) * 100)) if no_price_raw is not None else (100 - yes_ask_cents)
-	except (TypeError, ValueError):
-		no_ask_cents = 100 - yes_ask_cents
 
 	taker_side = data.get("taker_side")
 	count_raw = data.get("count")
@@ -514,11 +508,21 @@ def _handle_trade_msg(
 	except (TypeError, ValueError):
 		trade_count = None
 
-	yes_bid_cents = 100 - no_ask_cents
-	no_bid_cents = 100 - yes_ask_cents
+	# Record the trade price in history (legitimate event data) before the
+	# orderbook guard — price_history should still accumulate even if the
+	# book isn't populated yet.
+	is_first = market_state.update_price(ticker, trade_price_cents)
 
-	# Update market state so price history reflects trades
-	is_first = market_state.update_price(ticker, yes_ask_cents)
+	# Bid/ask come from the orderbook, NOT the trade price. A trade can execute
+	# off-book (late limit orders, aggressive fills); treating yes_price as the
+	# current ask caused strategy_b to enter phantom trades on 2026-04-14. If the
+	# orderbook isn't populated, skip strategies rather than fire blind.
+	yes_ask_cents = market_state.get_yes_ask(ticker)
+	yes_bid_cents = market_state.get_yes_bid(ticker)
+	if yes_ask_cents is None or yes_bid_cents is None:
+		return
+	no_ask_cents = 100 - yes_bid_cents
+	no_bid_cents = 100 - yes_ask_cents
 	event_ticker = derive_event_ticker(ticker)
 	orderbook = market_state.get_orderbook(ticker) or OrderbookSnapshot([], [])
 	history = list(market_state.get_price_history(ticker) or [])
