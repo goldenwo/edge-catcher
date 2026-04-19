@@ -694,8 +694,14 @@ class TestHandleTradeMsg:
 		assert len(strat.observed) == 1
 		assert strat.observed[0] == ("no", 136)
 
-	def test_derives_no_ask_from_no_price(self, setup):
-		"""When no_price is provided, no_ask is derived from it (not 100-yes_ask)."""
+	def test_bid_ask_sourced_from_orderbook_not_trade(self, setup):
+		"""TickContext bid/ask come from the orderbook, not the trade price.
+
+		Kalshi's trade WS carries `yes_price` = executed price of a completed
+		trade, which can land off-book (late limit orders, aggressive fills).
+		Strategies must see the current orderbook-sourced quote so they don't
+		fire on phantom prices. See project_open_bugs_trade_channel.md.
+		"""
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 
 		class BidAskCheckStub(PaperStrategy):
@@ -712,16 +718,39 @@ class TestHandleTradeMsg:
 		strat_by_series["KXBTC15M"] = [check_strat]
 		pending_states["bid-check"] = {}
 
-		# yes_price=0.60, no_price=0.38 → no_ask=38, yes_bid=100-38=62
+		# Fixture orderbook: yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)]
+		# Expected ctx quotes: yes_ask=50, no_ask=45, yes_bid=100-45=55, no_bid=100-50=50.
+		# Trade reports yes_price=0.30, no_price=0.60 — both off-book. Must be ignored for quotes.
 		msg = self._make_trade_msg(
-			"KXBTC15M-26APR10-T100", yes_price=0.60, no_price=0.38, taker_side="yes",
+			"KXBTC15M-26APR10-T100", yes_price=0.30, no_price=0.60, taker_side="yes",
 		)
 		_handle_trade_msg(msg, config, ms, store, [check_strat], strat_by_series, pending_states, set(), now=_now())
 
 		assert check_strat.seen_ctx is not None
-		assert check_strat.seen_ctx.yes_ask == 60
-		assert check_strat.seen_ctx.no_ask == 38
-		assert check_strat.seen_ctx.yes_bid == 62  # 100 - no_ask
+		assert check_strat.seen_ctx.yes_ask == 50
+		assert check_strat.seen_ctx.no_ask == 45
+		assert check_strat.seen_ctx.yes_bid == 55  # 100 - best no_ask
+		assert check_strat.seen_ctx.no_bid == 50   # 100 - best yes_ask
+
+	def test_skips_strategy_when_orderbook_not_populated(self, setup):
+		"""If orderbook hasn't been seeded for the ticker, don't fire strategies.
+
+		Without book state, we can't evaluate entry criteria correctly. The
+		previous behavior spoofed bid/ask from the trade price, which caused
+		strategy_b to enter phantom trades on 2026-04-14. New policy: skip the
+		strategy if orderbook isn't populated, but still record the trade in
+		price_history (legitimate event data)."""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+
+		# Register a fresh ticker but do NOT seed its orderbook
+		ms.register_ticker("KXBTC15M-26APR10-T999")
+
+		msg = self._make_trade_msg("KXBTC15M-26APR10-T999", yes_price=0.50, taker_side="yes", count=1)
+		_handle_trade_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set(), now=_now())
+
+		assert strat.observed == [], "strategy must not fire without an orderbook"
+		# Trade itself is still recorded in price history
+		assert 50 in list(ms.get_price_history("KXBTC15M-26APR10-T999") or [])
 
 
 # ---------------------------------------------------------------------------
