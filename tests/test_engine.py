@@ -140,8 +140,14 @@ class TestProcessTick:
 		assert t["fill_size"] == 10  # 500c risk / 50c price = 10, book has 20 at 50c
 		assert t["series_ticker"] == "TEST"
 
-	def test_enter_uses_entry_price_on_empty_book(self, store, config):
-		"""Empty orderbook triggers stale-book fallback: trade enters at entry_price."""
+	def test_enter_signal_on_empty_book_is_skipped(self, store, config):
+		"""Empty orderbook with require_fresh_book=true (default) skips the entry.
+
+		This replaces the old "entry_price fallback" which produced phantom
+		fills (0% win rate on 82 strategy_a trades, -204c avg) because the
+		ticker-derived entry_price isn't a fillable offer. The floor filter
+		now requires a real book for every entry.
+		"""
 		ob = OrderbookSnapshot(yes_levels=[], no_levels=[])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
@@ -149,10 +155,7 @@ class TestProcessTick:
 		process_tick(ctx, strategies, store, config, now=_now())
 
 		trades = store.get_open_trades()
-		# Stale-book fallback: trade is recorded with blended_entry=None (entry_price used for PnL)
-		assert len(trades) == 1
-		assert trades[0]['blended_entry'] is None
-		assert trades[0]['entry_price'] == 50  # ctx default yes_ask=50
+		assert trades == []
 
 	def test_exit_signal_closes_trade(self, store, config):
 		"""ExitStrategy exits open positions at the bid price (selling)."""

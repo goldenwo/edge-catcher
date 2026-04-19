@@ -14,7 +14,7 @@ from edge_catcher.monitors.market_state import FillResult, OrderbookSnapshot
 log = logging.getLogger(__name__)
 
 
-FillSkipReason = Literal["stale_book", "budget_too_small", "below_min_fill"]
+FillSkipReason = Literal["stale_book", "empty_book", "budget_too_small", "below_min_fill"]
 
 
 @dataclass(frozen=True)
@@ -205,19 +205,20 @@ def resolve_fill(
 	  - max_slippage_cents: passed to walk_book_with_ceiling
 	  - min_fill: gate check on fill_size
 	  - require_fresh_book: (optional, default True) if True, skip entries
-	    when the orderbook is populated but the best price diverges from
-	    entry_price by > 10¢. Empty books are still treated as a legitimate
-	    startup case and fall through to the entry-price fallback.
+	    when the fill side's orderbook is empty OR its best price diverges
+	    from entry_price (see two-gate stale-book rule below).
 
-	Two stale-book cases, handled differently:
-	  1. Empty book → legitimate startup (strategy_a fires on the first
-	     tick before the orderbook has been seeded). Falls back to
-	     entry_price regardless of require_fresh_book.
-	  2. Populated but best diverges > 10¢ from entry_price → phantom
-	     liquidity / WS orderbook lag. By default (require_fresh_book=True),
-	     the entry is skipped so we don't book phantom fills. Configs
-	     that explicitly set require_fresh_book=False fall back to
-	     entry_price for backward compat.
+	Three fill-gate cases:
+	  1. Empty fill side → no one is offering on the side we want to buy.
+	     Skipped as FillSkip("empty_book") when require_fresh_book=True.
+	     Reason: the "entry_price fallback" path was producing phantom fills
+	     (0% win rate on 82 strategy_a entries, -204c avg) because the ticker's
+	     reported yes_ask is a derived/estimated value not a fillable offer.
+	     The legacy fallback remains only when require_fresh_book=False.
+	  2. Populated but best diverges from entry_price (abs > 10c OR
+	     abs >= 3c AND rel > 30%) → phantom liquidity or WS lag. Skipped
+	     as FillSkip("stale_book") when require_fresh_book=True.
+	  3. Populated + fresh → normal walked-book fill.
 
 	Returns:
 		FillResult if trade should proceed, FillSkip with a reason if not.
@@ -261,7 +262,15 @@ def resolve_fill(
 		)
 		return FillSkip(reason="stale_book")
 
+	if book_empty and require_fresh_book:
+		log.info(
+			"Skip: empty fill side for %s (entry=%dc) with require_fresh_book=true",
+			side, entry_price_cents,
+		)
+		return FillSkip(reason="empty_book")
+
 	if book_empty or book_populated_but_stale:
+		# Legacy fallback — only reachable when require_fresh_book=False.
 		if raw_size < min_fill_threshold:
 			return FillSkip(reason="below_min_fill")
 		return FillResult(
