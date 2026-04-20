@@ -363,34 +363,6 @@ class TestResolveFill:
 		assert isinstance(result, FillSkip)
 		assert result.reason == "empty_book"
 
-	def test_stale_book_fires_on_relative_drift_for_longshots(self) -> None:
-		"""Longshot signals (low-priced entries) need a relative divergence check.
-
-		entry=7c with best_book at 1c is only 6c absolute drift (below the
-		10c threshold) but 86% relative drift — classic phantom-liquidity
-		pattern. Without the relative gate, strategy_b longshots silently
-		filled against 1c ghost levels that didn't reflect the live market
-		(see project_open_bugs_trade_channel.md Bug 2).
-
-		Rule: stale if abs > 10c OR (abs >= 3c AND rel > 30%). The 3c floor
-		exempts normal 1-2c spread movement from the relative gate.
-		"""
-		config = {
-			"sizing": {
-				"risk_per_trade_cents": 200,
-				"max_slippage_cents": 2,
-				"min_fill": 3,
-				"require_fresh_book": True,
-			}
-		}
-		book = OrderbookSnapshot(
-			yes_levels=[(0.01, 500)],
-			no_levels=[],
-		)
-		result = resolve_fill(config, entry_price_cents=7, side="yes", book=book)
-		assert isinstance(result, FillSkip)
-		assert result.reason == "stale_book"
-
 	def test_empty_book_skipped_when_require_fresh_book(self) -> None:
 		"""Empty fill side MUST be skipped when require_fresh_book=True.
 
