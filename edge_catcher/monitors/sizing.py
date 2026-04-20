@@ -239,19 +239,17 @@ def resolve_fill(
 	book_populated_but_stale = False
 	if not book_empty:
 		best_book_cents = round(levels[0][0] * 100)
-		absolute_divergence = abs(best_book_cents - entry_price_cents)
-		relative_divergence = absolute_divergence / max(entry_price_cents, 1)
-		# Two-gate stale-book check:
-		#   1. absolute > 10c catches dramatic drifts at any price level
-		#   2. absolute >= 3c AND relative > 30% catches phantom-liquidity
-		#      longshots (entry=7c with 1c ghost level — 6c abs, 86% rel)
-		# The 3c floor exempts normal 1-2c spread movement, which has large
-		# relative % on low-priced entries but isn't staleness.
-		if absolute_divergence > 10 or (absolute_divergence >= 3 and relative_divergence > 0.3):
+		# Simple absolute threshold: best price > 10c from entry_price = stale.
+		# An earlier two-gate rule (abs >= 3c AND rel > 30%) was tried but
+		# regressed legitimate walker-walks-down-to-real-book opportunities on
+		# strategy_a (commit fcafb11 post-mortem: 7 real fills worth +1825c/day
+		# were wrongly rejected). The relative gate was belt-and-suspenders for
+		# the strategy_b trade-channel bug which is already handled by Bug 1's
+		# orderbook-sourced bid/ask (commit 1fe470b).
+		if abs(best_book_cents - entry_price_cents) > 10:
 			log.debug(
-				"Book populated but stale: best=%dc entry=%dc (abs=%dc rel=%.0f%%)",
+				"Book populated but stale: best=%dc entry=%dc",
 				best_book_cents, entry_price_cents,
-				absolute_divergence, relative_divergence * 100,
 			)
 			book_populated_but_stale = True
 
