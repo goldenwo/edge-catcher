@@ -93,3 +93,6 @@ pi-*.py
 exports/
 
 paper-trader.yaml
+
+# Local private-infra paper-trader log stash (never tracked)
+private-infra_paper_trader_logs/
