@@ -14,6 +14,12 @@ data/
 *.db-wal
 *.db-shm
 
+# Tracked example fixtures — small, deterministic DBs bundled for the
+# quickstart + reporting tests. Re-build with tests/fixtures/build_demo_*.py.
+!edge_catcher/data/
+!edge_catcher/data/examples/
+!edge_catcher/data/examples/*.db
+
 # Python
 __pycache__/
 *.py[cod]
