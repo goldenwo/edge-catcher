@@ -143,7 +143,10 @@ class LLMIdeator:
 
 		parts.append("## Summary")
 		parts.append(f"Total backtests: {len(results)}")
-		parts.append(f"Promoted: {len(promoted)}, Review: {len(reviewed)}, Explore: {len(explored)}, Killed: {len(killed)}")
+		parts.append(
+			f"Promoted: {len(promoted)}, Review: {len(reviewed)}, "
+			f"Explore: {len(explored)}, Killed: {len(killed)}"
+		)
 
 		if promoted:
 			parts.append("\n## Promoted Strategies (strong edge)")
@@ -183,14 +186,20 @@ class LLMIdeator:
 			parts.append("\n## Kill Registry (permanently killed — do NOT re-propose)")
 			shown = registry[:50]
 			for entry in shown:
-				parts.append(f"- **{entry['strategy']}** (killed {entry['kill_count']}/{entry['series_tested']} series, rate={entry['kill_rate']:.0%}): {entry['reason_summary']}")
+				parts.append(
+					f"- **{entry['strategy']}** (killed {entry['kill_count']}/{entry['series_tested']} series, "
+					f"rate={entry['kill_rate']:.0%}): {entry['reason_summary']}"
+				)
 			if len(registry) > 50:
-				parts.append(f"\n... and {len(registry) - 50} more killed strategies (use kill-registry list to see all)")
+				parts.append(
+					f"\n... and {len(registry) - 50} more killed strategies "
+					f"(use kill-registry list to see all)"
+				)
 
 		parts.append(f"\n## Available Strategies: {', '.join(available_strategies)}")
 
 		if not context_block:
-			parts.append(f"\n## Available Data")
+			parts.append("\n## Available Data")
 			for db_path, series_list in series_map.items():
 				parts.append(f"- {db_path}: {', '.join(series_list)}")
 
@@ -656,7 +665,10 @@ class LLMIdeator:
 			except Exception:
 				pass  # journal is optional
 
-		parts.append("\n## Task\nPropose statistical hypotheses about market inefficiencies. Use Hypothesis Ideation Mode output format.")
+		parts.append(
+			"\n## Task\nPropose statistical hypotheses about market inefficiencies. "
+			"Use Hypothesis Ideation Mode output format."
+		)
 
 		return "\n".join(parts)
 

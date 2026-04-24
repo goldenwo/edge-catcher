@@ -1,12 +1,10 @@
 """Shared fixtures for edge_catcher tests."""
 
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
-from edge_catcher.storage.db import get_connection, init_db, upsert_market, upsert_trade
+from edge_catcher.storage.db import get_connection, init_db
 from edge_catcher.storage.models import Market, Trade
 
 

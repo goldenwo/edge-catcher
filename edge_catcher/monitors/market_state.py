@@ -6,7 +6,7 @@ and the derive_event_ticker helper.
 
 import re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 

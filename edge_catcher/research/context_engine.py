@@ -7,7 +7,7 @@ import math
 import sqlite3
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -374,7 +374,7 @@ class ContextEngine:
 				rd = p.result_distribution
 				if rd:
 					parts.append(
-						f"  Result skew: " +
+						"  Result skew: " +
 						", ".join(f"{k} {v:.0%}" for k, v in rd.items())
 					)
 				if p.strike_info:

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from edge_catcher.monitors.capture.transport import CaptureTransport, LocalTransport
+from edge_catcher.monitors.capture.transport import LocalTransport
 
 
 # ---------------------------------------------------------------------------

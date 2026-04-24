@@ -158,7 +158,9 @@ def _run_download_btc(args) -> None:
 
 	# Start date from the coinbase_btc registry entry (keeps CLI + registry in sync).
 	meta = get_adapter("coinbase_btc")
-	assert meta is not None and meta.default_start_date is not None, "coinbase_btc must be registered with a default_start_date"
+	assert meta is not None and meta.default_start_date is not None, (
+		"coinbase_btc must be registered with a default_start_date"
+	)
 	start_ts = int(datetime.fromisoformat(meta.default_start_date).replace(tzinfo=timezone.utc).timestamp())
 	end_ts = int(datetime.now(timezone.utc).timestamp())
 

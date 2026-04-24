@@ -24,11 +24,6 @@ def test_discover_module_has_run_function():
     assert hasattr(modules["example_hypothesis"], "run")
 
 
-def test_discover_module_has_run_function():
-    modules = discover(CONFIG)
-    assert hasattr(modules["example_hypothesis"], "run")
-
-
 # ---------------------------------------------------------------------------
 # run_hypothesis()
 # ---------------------------------------------------------------------------

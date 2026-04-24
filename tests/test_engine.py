@@ -4,16 +4,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-
-def _now() -> datetime:
-	"""Timezone-aware wall-clock timestamp for `now=` kwargs in engine tests.
-
-	These tests don't assert anything about timestamps; they just need a
-	valid value to satisfy the required parameter. See tests/test_trade_store_now.py
-	for the contract that these timestamps are checked against.
-	"""
-	return datetime.now(timezone.utc)
-
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -36,6 +26,16 @@ from edge_catcher.monitors.engine import (
 	_collect_active_series,
 	_series_for_strategy,
 )
+
+
+def _now() -> datetime:
+	"""Timezone-aware wall-clock timestamp for `now=` kwargs in engine tests.
+
+	These tests don't assert anything about timestamps; they just need a
+	valid value to satisfy the required parameter. See tests/test_trade_store_now.py
+	for the contract that these timestamps are checked against.
+	"""
+	return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------

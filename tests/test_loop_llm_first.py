@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 class TestLoopPhaseOrder:
@@ -45,7 +44,7 @@ class TestLoopPhaseOrder:
              patch('edge_catcher.research.observer.ResearchObserver.cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue'), \
-             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:
+             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:  # noqa: E501
 
             MockJournal.return_value.get_latest_trajectory.return_value = None
 
@@ -111,7 +110,7 @@ class TestLoopPhaseOrder:
              patch('edge_catcher.research.observer.ResearchObserver.cleanup_dead_strategies'), \
              patch('edge_catcher.research.loop.ResearchAgent'), \
              patch('edge_catcher.research.loop.RunQueue'), \
-             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:
+             patch('edge_catcher.research.loop.ResearchJournal' if hasattr(__import__('edge_catcher.research.loop', fromlist=['ResearchJournal']), 'ResearchJournal') else 'edge_catcher.research.journal.ResearchJournal') as MockJournal:  # noqa: E501
 
             MockJournal.return_value.get_latest_trajectory.return_value = None
 

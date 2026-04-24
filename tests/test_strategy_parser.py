@@ -3,7 +3,6 @@
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from edge_catcher.runner.strategy_parser import (
     list_strategies,

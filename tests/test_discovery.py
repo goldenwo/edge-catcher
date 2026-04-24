@@ -14,7 +14,7 @@ from edge_catcher.monitors.discovery import (
 	get_enabled_strategies,
 	load_config,
 )
-from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
+from edge_catcher.monitors.strategy_base import PaperStrategy
 
 
 # ---------------------------------------------------------------------------

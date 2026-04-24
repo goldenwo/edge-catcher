@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 import zstandard as zstd
 
 
@@ -155,9 +154,9 @@ def test_loader_ticker_filter_keeps_matching_ws_events(tmp_path: Path) -> None:
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
 		json.dumps({"schema_version": 1, "header": True}) + "\n"
-		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXETH-1"}}}) + "\n"
-		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXSOL-1"}}}) + "\n"
-		+ json.dumps({"recv_seq": 3, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXETH-1"}}}) + "\n",
+		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXETH-1"}}}) + "\n"  # noqa: E501
+		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXSOL-1"}}}) + "\n"  # noqa: E501
+		+ json.dumps({"recv_seq": 3, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXETH-1"}}}) + "\n",  # noqa: E501
 		encoding="utf-8",
 	)
 
@@ -176,7 +175,7 @@ def test_loader_ticker_filter_keeps_matching_synthetic_events(tmp_path: Path) ->
 		json.dumps({"schema_version": 1, "header": True}) + "\n"
 		+ json.dumps({"recv_seq": 1, "source": "synthetic.rest_orderbook", "payload": {"ticker": "KXETH-1"}}) + "\n"
 		+ json.dumps({"recv_seq": 2, "source": "synthetic.rest_orderbook", "payload": {"ticker": "KXSOL-1"}}) + "\n"
-		+ json.dumps({"recv_seq": 3, "source": "synthetic.settlement", "payload": {"strategy": "s1", "ticker": "KXETH-1", "side": "yes", "entry_time": "2026-04-14T00:00:00+00:00", "result": "yes"}}) + "\n",
+		+ json.dumps({"recv_seq": 3, "source": "synthetic.settlement", "payload": {"strategy": "s1", "ticker": "KXETH-1", "side": "yes", "entry_time": "2026-04-14T00:00:00+00:00", "result": "yes"}}) + "\n",  # noqa: E501
 		encoding="utf-8",
 	)
 
@@ -194,8 +193,8 @@ def test_loader_no_filter_passes_everything(tmp_path: Path) -> None:
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
 		json.dumps({"schema_version": 1, "header": True}) + "\n"
-		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXA"}}}) + "\n"
-		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {"type": "trade", "msg": {"market_ticker": "KXB"}}}) + "\n",
+		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXA"}}}) + "\n"  # noqa: E501
+		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {"type": "trade", "msg": {"market_ticker": "KXB"}}}) + "\n",  # noqa: E501
 		encoding="utf-8",
 	)
 	events = list(read_jsonl_window(path, ticker_filter=None))

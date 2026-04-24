@@ -1,22 +1,16 @@
 """Tests for storage layer: CRUD operations and WAL mode."""
 
-import pytest
-from datetime import datetime, timezone
-from pathlib import Path
 
 from edge_catcher.storage.db import (
     get_connection,
-    get_db,
     get_db_stats,
     get_markets_by_series,
     get_settled_markets,
     get_trades_for_ticker,
-    init_db,
     upsert_market,
     upsert_trade,
     upsert_trades_batch,
 )
-from edge_catcher.storage.models import Market, Trade
 from tests.conftest import make_market, make_trade
 
 

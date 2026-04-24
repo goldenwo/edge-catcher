@@ -30,8 +30,8 @@ def capture_dir(tmp_path: Path) -> Path:
 	jsonl = d / "kalshi_engine_2026-04-14.jsonl"
 	jsonl.write_text(
 		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
-		+ json.dumps({"recv_seq": 1, "recv_ts": "2026-04-14T00:00:01+00:00", "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXTEST"}}}) + "\n"
-		+ json.dumps({"recv_seq": 2, "recv_ts": "2026-04-14T00:00:02+00:00", "source": "synthetic.rest_orderbook", "payload": {"ticker": "KXTEST", "yes_levels": [[0.5, 10]], "no_levels": [[0.48, 5]]}}) + "\n",
+		+ json.dumps({"recv_seq": 1, "recv_ts": "2026-04-14T00:00:01+00:00", "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "KXTEST"}}}) + "\n"  # noqa: E501
+		+ json.dumps({"recv_seq": 2, "recv_ts": "2026-04-14T00:00:02+00:00", "source": "synthetic.rest_orderbook", "payload": {"ticker": "KXTEST", "yes_levels": [[0.5, 10]], "no_levels": [[0.48, 5]]}}) + "\n",  # noqa: E501
 		encoding="utf-8",
 	)
 	return d

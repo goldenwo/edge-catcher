@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 from edge_catcher.research.test_runner import (
-	TestResult, StatisticalTest, TestRunner,
+	TestResult, TestRunner,
 	EDGE_EXISTS, NO_EDGE, INSUFFICIENT_DATA, EDGE_NOT_TRADEABLE,
 )
 
@@ -232,7 +232,7 @@ class TestLifecycleBiasTest:
 
 	def test_edge_exists_when_early_mispriced(self, tmp_path):
 		"""Early trades (first 30 min) have 30% win rate at 50% implied; late ~50% → EDGE_EXISTS."""
-		from edge_catcher.research.test_runner import TestRunner, EDGE_EXISTS, LifecycleBiasTest
+		from edge_catcher.research.test_runner import TestRunner, EDGE_EXISTS
 
 		markets = []
 		trades = []

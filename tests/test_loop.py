@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,7 +12,6 @@ from edge_catcher.research.audit import AuditLog
 from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.loop import LoopOrchestrator
-from edge_catcher.research.tracker import Tracker
 
 
 def _make_result(h: Hypothesis, verdict="promote") -> HypothesisResult:
@@ -229,7 +226,7 @@ class TestRefinementResumeWalkBackwards:
         current_name = "Foo"
         start_iteration = 1
         for v in range(existing_version + 1, 0, -1):
-            candidate = f"Foo" + f"V{v}"
+            candidate = "Foo" + f"V{v}"
             code = agent.read_strategy_code(candidate)
             if code:
                 current_name = candidate

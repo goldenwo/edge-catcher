@@ -4,13 +4,11 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 
 from edge_catcher.runner.event_backtest import (
 	TradeStream,
 	merge_streams,
 	EventBacktester,
-	Portfolio,
 )
 from edge_catcher.runner.strategies import Signal, Strategy
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE

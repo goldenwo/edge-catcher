@@ -1,6 +1,5 @@
 """Tests for shared statistical utilities."""
 
-import math
 import pytest
 from edge_catcher.research.stats_utils import (
 	proportions_ztest, clustered_z, wilson_ci, fee_adjusted_edge,

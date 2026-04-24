@@ -1,8 +1,6 @@
 """Tests for AI strategizer module. No actual API calls — all mocked."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

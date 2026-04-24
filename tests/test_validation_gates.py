@@ -33,7 +33,11 @@ def _make_hypothesis(**kwargs) -> Hypothesis:
 
 
 def _make_result(pnl_values=None, sharpe=2.5, total_trades=100, **kwargs) -> HypothesisResult:
-	h = _make_hypothesis(**{k: kwargs.pop(k) for k in list(kwargs) if k in ("strategy", "series", "db_path", "start_date", "end_date")})
+	h = _make_hypothesis(**{
+		k: kwargs.pop(k)
+		for k in list(kwargs)
+		if k in ("strategy", "series", "db_path", "start_date", "end_date")
+	})
 	if pnl_values is None:
 		pnl_values = [10] * 90 + [-5] * 10
 	defaults = dict(

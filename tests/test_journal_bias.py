@@ -1,9 +1,7 @@
 """Tests for journal bias mitigation: near-miss observations and gate margins."""
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
-from collections import defaultdict
 
 from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
@@ -86,8 +84,8 @@ class TestGateMarginAnnotations:
 			"validation_details": json.dumps([
 				{"gate": "monte_carlo", "passed": True, "details": {"p_value": 0.02}},
 				{"gate": "deflated_sharpe", "passed": True, "details": {"dsr_margin": 0.3}},
-				{"gate": "temporal_consistency", "passed": True, "details": {"profitable_windows": 4, "total_windows": 5}},
-				{"gate": "param_sensitivity", "passed": True, "details": {"neighbors_passing": 3, "neighbors_tested": 4}},
+				{"gate": "temporal_consistency", "passed": True, "details": {"profitable_windows": 4, "total_windows": 5}},  # noqa: E501
+				{"gate": "param_sensitivity", "passed": True, "details": {"neighbors_passing": 3, "neighbors_tested": 4}},  # noqa: E501
 			]),
 		}
 		observer = ResearchObserver(tracker=tracker, run_id="test-run")

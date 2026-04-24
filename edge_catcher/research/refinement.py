@@ -10,11 +10,15 @@ import logging
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from .audit import AuditLog
 from .hypothesis import HypothesisResult
 from .tracker import Tracker
+
+if TYPE_CHECKING:
+	from .agent import ResearchAgent
+	from .run_queue import RunQueue
 
 logger = logging.getLogger(__name__)
 

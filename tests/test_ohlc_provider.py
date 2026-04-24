@@ -1,7 +1,6 @@
 """Tests for OHLCProvider."""
 
 import sqlite3
-import tempfile
 from datetime import datetime, timezone
 
 import pytest

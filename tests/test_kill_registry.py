@@ -1,8 +1,5 @@
 """Tests for the persistent kill registry in Tracker."""
 
-import sqlite3
-import tempfile
-from pathlib import Path
 
 import pytest
 

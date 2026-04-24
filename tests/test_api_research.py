@@ -1,7 +1,6 @@
 """Tests for research dashboard API."""
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from api.main import app
 from api.research_tasks import (

@@ -11,7 +11,6 @@ from pathlib import Path
 
 from edge_catcher.storage.db import (
     get_connection,
-    init_db,
     upsert_market,
     upsert_trade,
 )
@@ -150,7 +149,7 @@ def test_empty_db_has_no_markets(tmp_db_path):
 
 def test_proportions_z_stat_negative_edge():
     """Verify z-stat is negative when actual win rate < implied probability."""
-    statsmodels = pytest.importorskip("statsmodels")
+    pytest.importorskip("statsmodels")
     from statsmodels.stats.proportion import proportions_ztest
     n = 100
     wins = 30

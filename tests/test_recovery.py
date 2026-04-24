@@ -3,7 +3,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 
 class TestFetchActiveTickersForSeries:

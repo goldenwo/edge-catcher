@@ -1,6 +1,5 @@
 """Tests for edge_catcher.research.journal formatting helpers."""
 
-import pytest
 
 
 def test_trajectory_uses_total_sessions_field():

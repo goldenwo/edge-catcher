@@ -1,6 +1,5 @@
 """Basic tests for backtest API models and state management."""
 
-import json
 from api.tasks import BacktestTaskState, backtest_states, get_backtest_state, is_backtest_running
 
 
