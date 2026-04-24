@@ -482,11 +482,10 @@ async def start_adapter_download(
         raise HTTPException(status_code=409, detail="Download already in progress")
     if req.api_key and meta.api_key_env_var:
         _save_api_key(meta.api_key_env_var, req.api_key)
-    if meta.exchange == "kalshi":
-        target, args = _kalshi_download_target(adapter_id, meta, req, state)
-    elif meta.exchange == "coinbase":
-        target, args = _coinbase_download_target(adapter_id, meta, req, state)
-    else:
+    from api.dispatchers import dispatch_download
+    try:
+        target, args = dispatch_download(adapter_id, meta, req, state)
+    except ValueError:
         raise HTTPException(status_code=400, detail=f"No download handler for exchange={meta.exchange!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
     return {"adapter_id": adapter_id, "task_id": str(uuid.uuid4())}
