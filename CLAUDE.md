@@ -13,7 +13,7 @@
 | `tests/test_local_*.py` | Any local/private test files |
 | `edge_catcher/runner/strategies_local.py` | Private strategy implementations |
 | `edge_catcher/hypotheses/local/` | Private hypothesis analysis |
-| `edge_catcher/monitors/` | Paper trader implementations |
+| `edge_catcher/monitors/strategies_local.py` | Paper trader strategy definitions |
 | `config.local/` | Local config overrides |
 | `reports/` | All backtest reports and findings |
 | `data/` | All databases |
