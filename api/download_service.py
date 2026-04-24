@@ -159,37 +159,47 @@ def run_legacy_download(download_state) -> None:
 	download_state.trades_fetched = getattr(download_state, 'rows_fetched', 0)
 
 
+def _kalshi_has_data(meta, conn) -> bool:
+	import yaml
+
+	if not meta.markets_yaml:
+		return False
+	cfg = yaml.safe_load(Path(meta.markets_yaml).read_text())
+	series = cfg.get("adapters", {}).get(meta.exchange, {}).get("series", [])
+	if not series:
+		return False
+	placeholders = ",".join("?" for _ in series)
+	count = conn.execute(
+		f"SELECT COUNT(*) FROM markets WHERE series_ticker IN ({placeholders})", series
+	).fetchone()[0]
+	return count > 0
+
+
+def _coinbase_has_data(meta, conn) -> bool:
+	product_id = meta.extra["product_id"]
+	table = product_id.split("-")[0].lower() + "_ohlc"
+	count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+	return count > 0
+
+
 def adapter_has_data(meta) -> bool:
 	"""Check whether an adapter's DB actually contains data."""
 	import sqlite3
-	import yaml
 
 	db_file = Path(meta.db_file)
 	if not db_file.exists():
 		return False
 	try:
 		conn = sqlite3.connect(str(db_file), timeout=5)
-		if meta.exchange == "kalshi" and meta.markets_yaml:
-			cfg = yaml.safe_load(Path(meta.markets_yaml).read_text())
-			series = cfg.get("adapters", {}).get(meta.exchange, {}).get("series", [])
-			if not series:
-				conn.close()
+		try:
+			if meta.exchange == "kalshi":
+				return _kalshi_has_data(meta, conn)
+			elif meta.exchange == "coinbase":
+				return _coinbase_has_data(meta, conn)
+			else:
 				return False
-			placeholders = ",".join("?" for _ in series)
-			count = conn.execute(
-				f"SELECT COUNT(*) FROM markets WHERE series_ticker IN ({placeholders})", series
-			).fetchone()[0]
+		finally:
 			conn.close()
-			return count > 0
-		elif meta.exchange == "coinbase":
-			product_id = meta.extra["product_id"]
-			table = product_id.split("-")[0].lower() + "_ohlc"
-			count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-			conn.close()
-			return count > 0
-		else:
-			conn.close()
-			return False
 	except Exception:
 		return False
 
