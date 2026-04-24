@@ -59,6 +59,8 @@ edge-catcher/
 │   │   ├── models.py     # Market, Trade dataclasses
 │   │   └── archiver.py   # 90-day rolling archive
 │   ├── reports/          # Report formatting
+│   ├── reporting/        # P&L reporting CLI (python -m edge_catcher.reporting)
+│   ├── data/examples/    # Bundled fixtures: demo_markets.db + paper_trades_demo.db
 │   └── fees.py           # Config-driven fee models
 ├── api/                  # FastAPI backend
 │   ├── main.py           # REST endpoints
@@ -86,18 +88,29 @@ git clone https://github.com/goldenwo/edge-catcher.git
 cd edge-catcher
 pip install -e ".[dev]"
 
-# Download market data (default series)
+# Try the bundled example with no data download required
+edge-catcher backtest \
+    --series DEMO_SERIES \
+    --db-path edge_catcher/data/examples/demo_markets.db \
+    --strategy longshot_fade_example --json
+
+# Generate a P&L report against the bundled paper-trades fixture
+python -m edge_catcher.reporting --db edge_catcher/data/examples/paper_trades_demo.db
+
+# Download real market data (default series)
 python -m edge_catcher download
 
 # Download OHLC data (no API key needed)
 python -m edge_catcher download-btc
 
-# Run a backtest
+# Run a backtest on downloaded data
 python -m edge_catcher backtest --series SERIES_A --strategy example --json
 
 # Run all registered hypotheses
 python -m edge_catcher analyze
 ```
+
+For a longer walkthrough see [`docs/quickstart.md`](docs/quickstart.md).
 
 ---
 
@@ -266,7 +279,7 @@ The UI provides:
 
 ## Writing a Strategy
 
-Strategies live in `edge_catcher/runner/strategies.py` (public) or `edge_catcher/runner/strategies_local.py` (private, gitignored):
+Strategies live in `edge_catcher/runner/strategies.py` (public) or `edge_catcher/runner/strategies_local.py` (private, gitignored). A worked tutorial example, `longshot_fade_example`, ships in `edge_catcher/runner/strategies_example.py` — copy it to `strategies_local.py` and edit:
 
 ```python
 from edge_catcher.runner.strategies import Strategy, Signal
@@ -274,12 +287,12 @@ from edge_catcher.runner.strategies import Strategy, Signal
 class MyStrategy(Strategy):
     name = "my_strategy"
 
-    def on_trade(self, trade, market, context) -> Signal | None:
-        # Return Signal.BUY_YES, Signal.BUY_NO, or None
+    def on_trade(self, trade, market, context) -> list[Signal]:
+        # Return zero or more Signal objects (action='buy' or 'sell')
         ...
 ```
 
-Strategies are auto-discovered by the backtester and research loop.
+Strategies are auto-discovered by the backtester and research loop. See [`docs/strategy-guide.md`](docs/strategy-guide.md) for the full walkthrough.
 
 ---
 
