@@ -186,18 +186,15 @@ def adapter_has_data(meta) -> bool:
 	"""Check whether an adapter's DB actually contains data."""
 	import sqlite3
 
+	from api.dispatchers import dispatch_data_check
+
 	db_file = Path(meta.db_file)
 	if not db_file.exists():
 		return False
 	try:
 		conn = sqlite3.connect(str(db_file), timeout=5)
 		try:
-			if meta.exchange == "kalshi":
-				return _kalshi_has_data(meta, conn)
-			elif meta.exchange == "coinbase":
-				return _coinbase_has_data(meta, conn)
-			else:
-				return False
+			return dispatch_data_check(meta, conn)
 		finally:
 			conn.close()
 	except Exception:
