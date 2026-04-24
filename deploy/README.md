@@ -1,19 +1,19 @@
 # Edge Catcher — Systemd Service Deployment
 
 This directory contains files for running the Kalshi data downloader as a
-systemd service on the Raspberry Pi 5 (or any Linux host).
+systemd service on any Linux host.
 
 ## Prerequisites
 
-1. **Python venv configured** at `/home/private-infra/edge-catcher/.venv` with all
+1. **Python venv configured** at `/opt/edge-catcher/.venv` with all
    dependencies installed:
    ```bash
-   cd /home/private-infra/edge-catcher
+   cd /opt/edge-catcher
    python -m venv .venv
    .venv/bin/pip install -e ".[ai,ui]"
    ```
 
-2. **API key present** in `/home/private-infra/edge-catcher/.env`:
+2. **API key present** in `/opt/edge-catcher/.env`:
    ```
    KALSHI_API_KEY=your_key_here
    ```

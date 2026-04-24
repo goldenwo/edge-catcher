@@ -6,12 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=private-infra
-Group=private-infra
-WorkingDirectory=/home/private-infra/edge-catcher
+User=edge-catcher
+Group=edge-catcher
+WorkingDirectory=/opt/edge-catcher
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/home/private-infra/edge-catcher/.env
-ExecStart=/bin/bash /home/private-infra/edge-catcher/deploy/run-download.sh
+EnvironmentFile=-/opt/edge-catcher/.env
+ExecStart=/bin/bash /opt/edge-catcher/deploy/run-download.sh
 StandardOutput=append:/var/log/edge-catcher/download.log
 StandardError=append:/var/log/edge-catcher/download.log
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Wrapper used by systemd service.
 # Runs full market scan on first run (empty DB), skip scan on restarts.
-cd /home/private-infra/edge-catcher
+cd "$(dirname "$0")/.."
 source .venv/bin/activate
 
 MARKET_COUNT=$(python -c "

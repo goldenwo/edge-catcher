@@ -12,7 +12,7 @@ echo "Installing edge-catcher-download systemd service..."
 
 # Create log directory
 mkdir -p "$LOG_DIR"
-chown private-infra:private-infra "$LOG_DIR"
+chown "${SERVICE_USER:-edge-catcher}:${SERVICE_USER:-edge-catcher}" "$LOG_DIR"
 
 # Install unit file
 cp "$SERVICE_FILE" /etc/systemd/system/edge-catcher-download.service
