@@ -1,0 +1,25 @@
+[Unit]
+Description=Edge Catcher — Paper Trader
+Documentation=https://github.com/goldenwo/edge-catcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edge-catcher
+Group=edge-catcher
+WorkingDirectory=/opt/edge-catcher
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/edge-catcher/.env
+ExecStart=/opt/edge-catcher/.venv/bin/python -m edge_catcher paper-trade --config config/paper-trader.example.yaml
+StandardOutput=append:/var/log/edge-catcher/paper-trader.log
+StandardError=append:/var/log/edge-catcher/paper-trader.log
+
+# Restart always — paper trader is a long-running loop
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

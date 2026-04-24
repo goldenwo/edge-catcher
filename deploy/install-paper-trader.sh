@@ -10,7 +10,7 @@ LOG_DIR="/var/log/edge-catcher"
 echo "Installing edge-catcher-paper-trader systemd service..."
 
 mkdir -p "$LOG_DIR"
-chown private-infra:private-infra "$LOG_DIR"
+chown "${SERVICE_USER:-edge-catcher}:${SERVICE_USER:-edge-catcher}" "$LOG_DIR"
 
 cp "$SCRIPT_DIR/paper-trader.service" /etc/systemd/system/edge-catcher-paper-trader.service
 systemctl daemon-reload
