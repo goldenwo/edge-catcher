@@ -235,7 +235,7 @@ class TestResolveFill:
 		returns None so the trade is skipped entirely.
 
 		This prevents the bookkeeping-artifact wins we saw in the Apr 11-12
-		paper trader run where 94% of crypto 15m / KXXRP entries filled
+		paper trader run where 94% of crypto 15m / SERIES_A entries filled
 		against phantom 1c liquidity that didn't reflect the tradeable market.
 		"""
 		config = {

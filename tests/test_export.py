@@ -169,17 +169,17 @@ class TestCollectJournalAndAudit:
 class TestCollectConfig:
 	def test_attaches_series_mapping(self, tmp_path):
 		collector = _make_collector(tmp_path)
-		_insert_result(collector.tracker, strategy="alpha", series="KXXRP15M", verdict="promote")
+		_insert_result(collector.tracker, strategy="alpha", series="SERIES_A", verdict="promote")
 
-		mapping = {"series_to_asset": {"KXXRP": ["xrp", "ohlc.db", "xrp_ohlc"]}}
+		mapping = {"series_to_asset": {"SERIES_A": ["xrp", "ohlc.db", "xrp_ohlc"]}}
 		mapping_path = tmp_path / "series_mapping.yaml"
 		mapping_path.write_text(yaml.dump(mapping))
 
 		with patch("edge_catcher.research.export.ResearchAgent.read_strategy_code",
 		           return_value=None):
 			bundle = collector.collect(series_mapping_path=mapping_path)
-		assert "KXXRP" in bundle["series_mapping"]
-		assert bundle["series_mapping"]["KXXRP"]["asset"] == "xrp"
+		assert "SERIES_A" in bundle["series_mapping"]
+		assert bundle["series_mapping"]["SERIES_A"]["asset"] == "xrp"
 
 	def test_attaches_hypothesis_config(self, tmp_path):
 		collector = _make_collector(tmp_path)
