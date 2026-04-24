@@ -22,6 +22,21 @@ def build_strategy_map():
 			if isinstance(name_attr, str):
 				strategy_map[name_attr] = obj
 
+	# Auto-discover the tutorial/example module (`strategies_example.py`).
+	# Kept in its own module so the file reads as a standalone template;
+	# we import it here so `--list-strategies` and `--strategy <name>` see
+	# the example class without the user editing strategies.py.
+	try:
+		example_mod = importlib.import_module("edge_catcher.runner.strategies_example")
+		for attr_name in dir(example_mod):
+			obj = getattr(example_mod, attr_name)
+			if isinstance(obj, type) and hasattr(obj, 'on_trade'):
+				name_attr = getattr(obj, 'name', None)
+				if isinstance(name_attr, str):
+					strategy_map[name_attr] = obj
+	except ImportError:
+		pass
+
 	# Auto-discover local strategies (override public if same name)
 	local_mod = None
 	if STRATEGIES_LOCAL_PATH.exists():
