@@ -4,15 +4,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from edge_catcher.research.llm_ideator import LLMIdeator
 from edge_catcher.research.tracker import Tracker
 from edge_catcher.research.audit import AuditLog
-from edge_catcher.research.hypothesis import Hypothesis
 
 
 def _seed_tracker(tracker: Tracker) -> None:

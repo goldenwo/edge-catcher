@@ -139,8 +139,14 @@ def validate_strategy_code(code: str) -> tuple[bool, Optional[str]]:
 			pass  # docstrings / string literals are fine
 		else:
 			if not has_class:
-				return False, f"No class definition found; disallowed statement: {type(node).__name__} at line {node.lineno}"
-			return False, f"Disallowed module-level statement: {type(node).__name__} at line {node.lineno}"
+				return False, (
+					f"No class definition found; disallowed statement: "
+					f"{type(node).__name__} at line {node.lineno}"
+				)
+			return False, (
+				f"Disallowed module-level statement: "
+				f"{type(node).__name__} at line {node.lineno}"
+			)
 
 	if not has_class:
 		return False, "No class definition found in code"

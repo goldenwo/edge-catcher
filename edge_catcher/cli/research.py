@@ -205,7 +205,7 @@ def _run_status(args) -> None:
 	for verdict, count in sorted(stats['by_verdict'].items()):
 		print(f"  {verdict}: {count}")
 	if rows:
-		print(f"\nRecent results (last 10):")
+		print("\nRecent results (last 10):")
 		print(f"  {'Verdict':<10} {'Strategy':<12} {'Series':<20} {'Sharpe':>7} {'WinRate':>8} {'PnL(¢)':>9}")
 		print(f"  {'-'*10} {'-'*12} {'-'*20} {'-'*7} {'-'*8} {'-'*9}")
 		for row in rows[:10]:

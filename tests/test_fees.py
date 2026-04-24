@@ -1,7 +1,6 @@
 """Tests for FeeModel definitions."""
 import math
 
-import pytest
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE, INDEX_FEE
 from edge_catcher.fees import ZERO_FEE
 
@@ -91,7 +90,6 @@ class TestIndexFee:
 
 	def test_matches_kalshi_published_index_table(self):
 		"""Index fee at key price points (rate=0.035 instead of 0.07)."""
-		import math
 		for price in [5, 10, 25, 50, 75, 90, 95]:
 			p = price / 100.0
 			expected = math.ceil(0.035 * 1 * p * (1 - p) * 100)

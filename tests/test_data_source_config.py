@@ -1,6 +1,5 @@
 """Tests for DataSourceConfig, PrimaryEntry, make_ds, and ohlc_for_series."""
 
-import pytest
 from unittest.mock import patch
 from edge_catcher.research.data_source_config import (
 	PrimaryEntry, DataSourceConfig, make_ds, ohlc_for_series,

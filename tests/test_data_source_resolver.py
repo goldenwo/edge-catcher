@@ -3,12 +3,10 @@
 import pytest
 from edge_catcher.research.data_source_resolver import (
 	DataSourceResolver,
-	PrimarySource,
-	ResolvedSource,
 )
 from edge_catcher.research.data_source_config import PrimaryEntry, DataSourceConfig
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE, INDEX_FEE
-from edge_catcher.fees import ZERO_FEE
+from edge_catcher.fees import ZERO_FEE, FeeModel  # noqa: F401  (FeeModel used in string annotation)
 
 
 @pytest.fixture

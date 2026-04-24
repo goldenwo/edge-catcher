@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 from edge_catcher.storage.models import Market, Trade
 
 if TYPE_CHECKING:
+	from datetime import datetime
 	from edge_catcher.research.ohlc_provider import OHLCProvider
 	from edge_catcher.runner.event_backtest import Portfolio
 

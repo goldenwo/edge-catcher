@@ -443,7 +443,7 @@ class TestResearchAgent:
         mock_proc.stdout = self._mock_backtest_output()
         mock_proc.stderr = ""
 
-        with patch("subprocess.run", return_value=mock_proc) as mock_sub:
+        with patch("subprocess.run", return_value=mock_proc):
             agent.run_hypothesis(h)
 
         # Second run with same params — should not call subprocess again
@@ -565,7 +565,10 @@ class TestResearchAgent:
         from edge_catcher.research import grid_planner
         monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_TEST", 8)
         agent = self._make_agent(tmp_path)
-        r = _make_result(strategy="test-strategy-a", series="SERIES_TEST", verdict="explore", verdict_reason="borderline")
+        r = _make_result(
+            strategy="test-strategy-a", series="SERIES_TEST",
+            verdict="explore", verdict_reason="borderline",
+        )
         assert r.hypothesis.slippage_cents is None  # sanity: fixture doesn't set one
 
         mock_families = {"test-strategy-a": ["test-strategy-a-vol"]}
@@ -900,8 +903,13 @@ class TestResearchJournal:
     def test_build_context_trajectory_first(self, tmp_path):
         from edge_catcher.research.journal import ResearchJournal
         journal = ResearchJournal(tmp_path / "research.db")
-        journal.write_entry("run-001", "outcome", {"phase": "grid", "strategy": "Bar", "best_sharpe": 1.2, "verdicts": {"promote": 0, "explore": 1, "kill": 2}})
-        journal.write_entry("run-001", "trajectory", {"status": "plateauing", "total_sessions": 30, "promote_rate": 0.02})
+        journal.write_entry("run-001", "outcome", {
+            "phase": "grid", "strategy": "Bar", "best_sharpe": 1.2,
+            "verdicts": {"promote": 0, "explore": 1, "kill": 2},
+        })
+        journal.write_entry("run-001", "trajectory", {
+            "status": "plateauing", "total_sessions": 30, "promote_rate": 0.02,
+        })
 
         ctx = journal.build_context_for_prompt()
         # Trajectory header should appear before outcome

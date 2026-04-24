@@ -1,7 +1,6 @@
 """Event-driven backtester for prediction market strategies."""
 
 import heapq
-import json
 import math
 import os
 import sqlite3
@@ -9,12 +8,15 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from edge_catcher.fees import ZERO_FEE
 from edge_catcher.storage.db import get_connection
 from edge_catcher.storage.models import Market, Trade
 from edge_catcher.runner.strategies import Signal, Strategy
+
+if TYPE_CHECKING:
+	from edge_catcher.research.data_source_resolver import ResolvedSource
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +528,10 @@ class EventBacktester:
 		os.environ.setdefault('SQLITE_TMPDIR', db_dir)
 		conn = get_connection(db_path)
 		try:
-			return self._run(conn, series, strategies, start, end, initial_cash, slippage_cents, fee_fn, on_progress, is_cancelled)
+			return self._run(
+				conn, series, strategies, start, end, initial_cash, slippage_cents,
+				fee_fn, on_progress, is_cancelled,
+			)
 		finally:
 			conn.close()
 
@@ -692,7 +697,7 @@ class EventBacktester:
 							trade.created_time, reason, slippage_cents,
 						)
 
-	
+
 		cursor.close()
 
 		# --- 5. Final settlement sweep ---
@@ -752,7 +757,6 @@ class EventBacktester:
 		is_cancelled=None,
 	) -> BacktestResult:
 		"""Run backtest across one or more primary data sources."""
-		from edge_catcher.research.data_source_resolver import ResolvedSource  # noqa: F811
 
 		# Single-primary fast path
 		if len(resolved.primaries) == 1:

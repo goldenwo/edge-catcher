@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 
 from edge_catcher.research.audit import AuditLog
 from edge_catcher.research.data_source_config import make_ds
@@ -39,7 +37,7 @@ def _make_mock_result(h: Hypothesis, verdict="promote") -> HypothesisResult:
 
 class TestRunQueueSubmit:
     def test_submit_sequential(self, tmp_path):
-        tracker = Tracker(tmp_path / "research.db")
+        _tracker = Tracker(tmp_path / "research.db")
         audit = AuditLog(tmp_path / "research.db")
         agent = MagicMock()
 

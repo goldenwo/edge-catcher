@@ -290,14 +290,20 @@ class Tracker:
         finally:
             conn.close()
 
-    def list_results(self, limit: int | None = None, offset: int | None = None, sort: str = "completed_at", verdict: str | None = None) -> list[dict]:
+    def list_results(
+        self,
+        limit: int | None = None,
+        offset: int | None = None,
+        sort: str = "completed_at",
+        verdict: str | None = None,
+    ) -> list[dict]:
         """Return all results as plain dicts, joined with hypothesis metadata."""
         conn = self._connect()
         try:
             allowed_sorts = {"completed_at", "sharpe", "win_rate", "net_pnl_cents", "total_trades"}
             if sort not in allowed_sorts:
                 sort = "completed_at"
-            query = f"""
+            query = """
                 SELECT h.id, h.strategy, h.series, h.db_path,
                           h.start_date, h.end_date, h.fee_pct, h.tags, h.created_at,
                           r.status, r.total_trades, r.wins, r.losses, r.win_rate,

@@ -170,7 +170,9 @@ def run(args) -> None:
 		from api.adapter_registry import get_fee_model_for_db
 		_base_model = get_fee_model_for_db(args.db_path, args.series)
 		_fee_pct = args.fee_pct
-		fee_fn = lambda p, s: _fee_pct * _base_model.calculate(p, s)
+
+		def fee_fn(p, s):
+			return _fee_pct * _base_model.calculate(p, s)
 		backtester = EventBacktester()
 		result = backtester.run(
 			series=args.series,
@@ -222,8 +224,13 @@ def register(subparsers) -> None:
 	_auto_strategy_args(bt)
 	bt.add_argument("--db-path", default="data/kalshi-btc.db", dest="db_path")
 	bt.add_argument("--output", default=str(BACKTEST_OUTPUT))
-	bt.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct",
-	                help="Multiplier on entry fee formula (default: 1.0 = full taker fee; 0.25 = maker fee; 0.0 = no fee)")
+	bt.add_argument(
+		"--fee-pct", type=float, default=1.0, dest="fee_pct",
+		help=(
+			"Multiplier on entry fee formula "
+			"(default: 1.0 = full taker fee; 0.25 = maker fee; 0.0 = no fee)"
+		),
+	)
 	bt.add_argument("--json", action="store_true", default=False,
 	                help="Output only valid JSON to stdout; progress goes to stderr")
 	bt.add_argument("--list-strategies", action="store_true", default=False, dest="list_strategies",

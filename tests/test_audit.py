@@ -3,19 +3,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sqlite3
-from pathlib import Path
 
-import pytest
 
 from edge_catcher.research.audit import AuditLog
 
 
 class TestAuditLogInit:
     def test_creates_tables(self, tmp_path):
-        audit = AuditLog(tmp_path / "research.db")
+        _audit = AuditLog(tmp_path / "research.db")
         conn = sqlite3.connect(str(tmp_path / "research.db"))
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -32,7 +28,7 @@ class TestAuditLogInit:
         conn.execute("CREATE TABLE hypotheses (id TEXT PRIMARY KEY)")
         conn.commit()
         conn.close()
-        audit = AuditLog(db_path)
+        _audit = AuditLog(db_path)
         conn = sqlite3.connect(str(db_path))
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"

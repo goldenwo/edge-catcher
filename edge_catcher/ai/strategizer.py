@@ -32,7 +32,11 @@ def _get_hypothesis_config(hypothesis_id: str, config_path: Path = Path("config"
     return merged.get(hypothesis_id)
 
 
-def _get_tracker_result(hypothesis_id: str, run_id: Optional[str] = None, db_path: str = "data/research.db") -> Optional[dict]:
+def _get_tracker_result(
+    hypothesis_id: str,
+    run_id: Optional[str] = None,
+    db_path: str = "data/research.db",
+) -> Optional[dict]:
     """Fetch result from Tracker (research.db).
 
     Checks research loop results first, then statistical hypothesis_results.

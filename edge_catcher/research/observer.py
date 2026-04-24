@@ -6,9 +6,13 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter, defaultdict
+from typing import TYPE_CHECKING
 
 from .hypothesis import HypothesisResult
 from .tracker import Tracker
+
+if TYPE_CHECKING:
+	from .journal import ResearchJournal
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +77,10 @@ class ResearchObserver:
 					pass
 
 			journal.write_entry(self.run_id, "observation", {
-				"pattern": f"NEAR-MISS: {best_kill.hypothesis.strategy} scored Sharpe {best_kill.sharpe:.2f} but was killed{val_details_str}",
+				"pattern": (
+					f"NEAR-MISS: {best_kill.hypothesis.strategy} scored Sharpe "
+					f"{best_kill.sharpe:.2f} but was killed{val_details_str}"
+				),
 				"evidence": (
 					f"series={best_kill.hypothesis.series}, trades={best_kill.total_trades}, "
 					f"verdict_reason={best_kill.verdict_reason}"
@@ -202,7 +209,10 @@ class ResearchObserver:
 		journal.write_entry(self.run_id, "trajectory", {
 			"status": trajectory_status,
 			"total_sessions": prev_trajectory.get("total_sessions", 0) + 1 if prev_trajectory else 1,
-			"promote_rate": sum(1 for r in all_results if r.verdict in ("promote", "review")) / max(len(all_results), 1),
+			"promote_rate": (
+				sum(1 for r in all_results if r.verdict in ("promote", "review"))
+				/ max(len(all_results), 1)
+			),
 			"promote_rate_prev": prev_trajectory.get("promote_rate") if prev_trajectory else None,
 			"best_sharpe_this_run": max((r.sharpe for r in all_results if r.status == "ok"), default=0.0),
 			"best_sharpe_overall": max(

@@ -37,7 +37,7 @@ class NovelStrategyGenerator:
 		client,
 		strategies: list[str],
 		series_map: dict[str, list[str]],
-	) -> list["Hypothesis"]:
+	) -> list["Hypothesis"]:  # noqa: F821  # Hypothesis imported lazily below to avoid circular import
 		"""Generate strategy code from a novel proposal and return hypotheses to test."""
 		from edge_catcher.ai.strategizer import _parse_strategy_response
 		from edge_catcher.runner.strategy_parser import (
