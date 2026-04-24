@@ -425,7 +425,7 @@ class ContextEngine:
 			if p.series_ticker == series_ticker:
 				continue
 			score = 0.0
-			# Same asset (e.g. KXXRP and KXXRPD) — highest similarity
+			# Same asset (e.g. SERIES_H and SERIES_D) — highest similarity
 			if p.external_asset and p.external_asset == source.external_asset:
 				score += 3.0
 			# Same asset class
