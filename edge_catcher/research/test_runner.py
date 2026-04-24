@@ -132,8 +132,6 @@ class PriceBucketBiasTest(StatisticalTest):
 		# 4. Per-bucket statistics
 		bucket_results: list[dict] = []
 		any_bucket_has_data = False
-		worst_z: float = 0.0
-		worst_fee_adj: float = 0.0
 		all_rows: list[tuple[float, bool, Optional[str]]] = []
 
 		for (lo, hi) in bucket_tuples:

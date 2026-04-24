@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult

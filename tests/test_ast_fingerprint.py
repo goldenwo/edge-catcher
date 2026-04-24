@@ -3,6 +3,7 @@
 import pytest
 
 from edge_catcher.runner.strategy_parser import compute_code_hash, compute_ast_fingerprint
+from edge_catcher.research.tracker import Tracker
 
 
 STRATEGY_A = '''
@@ -88,9 +89,6 @@ class TestASTFingerprint:
 
 	def test_invalid_code_returns_none(self):
 		assert compute_ast_fingerprint("this is not python{{{") is None
-
-
-from edge_catcher.research.tracker import Tracker
 
 
 @pytest.fixture

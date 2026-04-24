@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-from api.config_helpers import validate_db as _validate_db
 from api.models import BacktestRequest
 from api.tasks import backtest_states
 
@@ -16,7 +14,7 @@ def run_backtest_task(task_id: str, body: BacktestRequest) -> None:
 	import importlib
 	import inspect
 	import json
-	from datetime import date, datetime, timezone
+	from datetime import date
 
 	from edge_catcher.runner.event_backtest import EventBacktester
 	from edge_catcher.runner.strategy_parser import (

@@ -11,7 +11,6 @@ from edge_catcher.runner.event_backtest import (
 	CompletedTrade,
 	EventBacktester,
 	Portfolio,
-	Position,
 )
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.runner.strategies import Signal, Strategy
@@ -95,8 +94,11 @@ class BuyNoInRange(Strategy):
 			if pos is not None:
 				current_no_price = 100 - trade.yes_price
 				if self.take_profit is not None and current_no_price >= pos.entry_price + self.take_profit:
-					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=current_no_price,
-						size=pos.size, reason=f'take_profit: no={current_no_price}>={pos.entry_price}+{self.take_profit}')]
+					return [Signal(
+						action='sell', ticker=trade.ticker, side=pos.side, price=current_no_price,
+						size=pos.size,
+						reason=f'take_profit: no={current_no_price}>={pos.entry_price}+{self.take_profit}',
+					)]
 				if self.stop_loss is not None and current_no_price <= pos.entry_price - self.stop_loss:
 					return [Signal(action='sell', ticker=trade.ticker, side=pos.side, price=current_no_price,
 						size=pos.size, reason=f'stop_loss: no={current_no_price}<={pos.entry_price}-{self.stop_loss}')]
@@ -487,7 +489,7 @@ class TestExitFee:
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=1, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
 		entry_fee = port.total_fees_paid
-		ct = port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
+		port.close_position('T', 'strat', 60, _dt(1), 'take_profit', slippage=0)
 		exit_fee = math.ceil(0.07 * 1 * 0.60 * 0.40 * 100)  # 2¢
 		assert port.total_fees_paid == pytest.approx(entry_fee + exit_fee)
 		# cash = 1000 - (50 + entry_fee) + (60 - exit_fee)
@@ -537,7 +539,9 @@ class TestExitFee:
 	def test_close_position_pnl_includes_both_fees(self):
 		"""PnL = (exit - entry) * size - entry_fee - exit_fee."""
 		import math
-		fee_fn = lambda p, s: math.ceil(0.07 * s * (p / 100) * (1 - p / 100) * 100) if p > 0 and p < 100 else 0.0
+
+		def fee_fn(p, s):
+			return math.ceil(0.07 * s * (p / 100) * (1 - p / 100) * 100) if p > 0 and p < 100 else 0.0
 		port = Portfolio(1000.0, fee_fn=fee_fn)
 		sig = Signal(action='buy', ticker='T', side='yes', price=50, size=3, reason='test')
 		port.open_position(sig, 'strat', _dt(), slippage=0)
@@ -894,7 +898,6 @@ class TestBacktestResult:
 	def test_to_dict_includes_pnl_values(self):
 		"""BacktestResult.to_dict() should include the full pnl_values list."""
 		from edge_catcher.runner.event_backtest import BacktestResult
-		from datetime import datetime, timezone
 
 		result = BacktestResult(
 			total_trades=3, wins=2, losses=1,
@@ -1132,7 +1135,7 @@ class TestIntegration:
 		]
 		db_path = _make_db(tmp_path, markets, trades)
 		progress_calls = []
-		result = EventBacktester().run(
+		EventBacktester().run(
 			series='PROGSERIES',
 			strategies=[BuyYesInRange(min_price=70, max_price=99)],
 			initial_cash=1000.0,
@@ -1168,7 +1171,7 @@ class TestIntegration:
 		]
 		db_path = _make_db(tmp_path, markets, trades)
 		progress_calls = []
-		result = EventBacktester().run(
+		EventBacktester().run(
 			series='PROGSERIES2',
 			strategies=[BuyYesInRange(min_price=70, max_price=99)],
 			initial_cash=100000.0,

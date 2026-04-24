@@ -6,7 +6,6 @@ Usage: python start.py [--port 8080] [--no-browser]
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import shutil
 import subprocess

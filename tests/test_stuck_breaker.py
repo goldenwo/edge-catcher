@@ -1,6 +1,5 @@
 """Tests for the stuck circuit breaker."""
 
-import pytest
 
 
 class TestConsecutiveStuckCounter:

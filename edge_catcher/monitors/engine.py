@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 import websockets
 
-from edge_catcher.monitors.auth import KALSHI_WS_URL, WS_PATH, make_auth_headers
+from edge_catcher.monitors.auth import KALSHI_WS_URL, make_auth_headers
 from edge_catcher.monitors.capture.bundle import (
 	assemble_daily_bundle,
 	delete_raw_jsonl,
@@ -268,7 +268,10 @@ async def _ticker_refresh(
 						if existing.startswith(series) and existing not in fresh_set:
 							market_state.unregister_ticker(existing)
 				else:
-					log.warning("Skipping ticker purge for %s: API response unreliable (got %d partial tickers)", series, len(tickers))
+					log.warning(
+						"Skipping ticker purge for %s: API response unreliable (got %d partial tickers)",
+						series, len(tickers),
+					)
 
 			if new_tickers and ws_ref and ws_ref[0] is not None:
 				try:
@@ -366,7 +369,6 @@ def _make_rotation_callback(
 		# 2. Background thread for assemble + upload + retention (slow).
 		def _assemble_upload_prune() -> None:
 			bundle_assembled = False
-			upload_ok = False
 			try:
 				bundle_path = assemble_daily_bundle(
 					capture_date=old_day,
@@ -382,7 +384,6 @@ def _make_rotation_callback(
 					try:
 						transport.upload_bundle(bundle_path, remote_key)
 						mark_bundle_uploaded(bundle_path)
-						upload_ok = True
 						log.info("uploaded bundle %s to transport (%s)", old_day, remote_key)
 					except Exception:
 						log.exception(
@@ -478,7 +479,6 @@ async def run_engine(config_path: Path) -> None:
 	ws_cfg = config.get("ws", {})
 	recovery_cfg = config.get("recovery", {})
 	reconnect_delay = ws_cfg.get("reconnect_delay", 30)
-	ping_interval = ws_cfg.get("ping_interval", 20)
 	price_history_limit = ws_cfg.get("price_history_limit", 100)
 	state_flush_interval = recovery_cfg.get("state_flush_interval", 5)
 	store = TradeStore(db_path)

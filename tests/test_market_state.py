@@ -3,7 +3,6 @@
 import pytest
 from edge_catcher.monitors.market_state import (
 	OrderbookSnapshot,
-	FillResult,
 	TickContext,
 	MarketState,
 	derive_event_ticker,

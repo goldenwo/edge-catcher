@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
 
-import pytest
 
 from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.grid_planner import GridPlanner

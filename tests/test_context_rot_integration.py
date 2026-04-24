@@ -1,9 +1,8 @@
 """Integration tests for context rot prevention features."""
 
-import json
 import uuid
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from edge_catcher.research.data_source_config import make_ds
 from edge_catcher.research.tracker import Tracker

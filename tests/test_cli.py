@@ -1,8 +1,10 @@
 """Tests for the download CLI command — specifically the --skip-market-scan flag."""
 
 import argparse
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+import json
+import subprocess
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,7 +36,6 @@ def _download_args(**overrides):
 def test_skip_market_scan_flag_accepted():
     """Parser accepts --skip-market-scan without raising SystemExit."""
     import argparse
-    from edge_catcher.__main__ import main
 
     # Build the same parser as main() and confirm the flag parses cleanly
     parser = argparse.ArgumentParser()
@@ -119,10 +120,6 @@ def test_skip_market_scan_proceeds_to_phase2(tmp_path):
 # Tests for new agent-facing flags: --json, --list-strategies, --list-series,
 # and the list-dbs command
 # ---------------------------------------------------------------------------
-
-import json
-import subprocess
-import sys
 
 
 def _backtest_args(**overrides):
@@ -274,7 +271,6 @@ class TestListDbs:
     def test_scans_data_dir(self, tmp_path, capsys, monkeypatch):
         """list-dbs scans data/ and returns JSON with path, size_mb, series."""
         import sqlite3
-        from pathlib import Path
 
         # Create a fake data/ directory with one .db file
         data_dir = tmp_path / "data"
@@ -313,7 +309,6 @@ class TestListDbs:
 
 def test_research_loop_help(capsys):
     """Verify the loop subcommand is registered."""
-    import subprocess, sys
     proc = subprocess.run(
         [sys.executable, "-m", "edge_catcher", "research", "loop", "--help"],
         capture_output=True, text=True, timeout=10,

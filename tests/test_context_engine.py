@@ -1,9 +1,6 @@
 """Tests for the Context Engine series profiler."""
 
-import math
 import sqlite3
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -30,7 +27,10 @@ def sample_db(tmp_path):
 		day = 1 + i // 24
 		hour = i % 24
 		open_t = f"2025-01-{day:02d}T{hour:02d}:00:00+00:00"
-		close_t = f"2025-01-{day:02d}T{hour + 1:02d}:00:00+00:00" if hour < 23 else f"2025-01-{day + 1:02d}T00:00:00+00:00"
+		close_t = (
+			f"2025-01-{day:02d}T{hour + 1:02d}:00:00+00:00" if hour < 23
+			else f"2025-01-{day + 1:02d}T00:00:00+00:00"
+		)
 		conn.execute(
 			"INSERT INTO markets (ticker, series_ticker, title, status, result, "
 			"last_price, volume, open_time, close_time, floor_strike, cap_strike) "
@@ -230,7 +230,7 @@ class TestIdeatorContextIntegration:
 		tracker.list_results.return_value = []  # 0 results
 
 		client = MagicMock()
-		client.complete.return_value = '{"analysis":"test","existing_strategy_hypotheses":[],"novel_strategy_proposals":[]}'
+		client.complete.return_value = '{"analysis":"test","existing_strategy_hypotheses":[],"novel_strategy_proposals":[]}'  # noqa: E501
 		client._resolve_model.return_value = "test-model"
 		client.last_usage = {"input_tokens": 0, "output_tokens": 0}
 

@@ -14,7 +14,6 @@ the disk in ~3 months. These tests verify that with retention enabled:
 """
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from pathlib import Path
 

@@ -1,7 +1,6 @@
 """Tests for KalshiAdapter: schema validation with mock responses."""
 
 import sys
-import time
 import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path

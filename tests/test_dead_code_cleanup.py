@@ -1,7 +1,5 @@
 """Tests for dead code cleanup in strategies_local.py."""
 
-import pytest
-from pathlib import Path
 
 from edge_catcher.runner.strategy_parser import cleanup_dead_strategies
 

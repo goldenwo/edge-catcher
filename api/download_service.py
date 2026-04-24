@@ -214,6 +214,6 @@ def clear_api_key(env_var: str) -> None:
 	"""Remove KEY=value from .env file and unset from current process."""
 	env_path = Path(".env")
 	if env_path.exists():
-		lines = [l for l in env_path.read_text().splitlines() if not l.startswith(f"{env_var}=")]
+		lines = [ln for ln in env_path.read_text().splitlines() if not ln.startswith(f"{env_var}=")]
 		env_path.write_text("\n".join(lines) + "\n" if lines else "")
 	os.environ.pop(env_var, None)

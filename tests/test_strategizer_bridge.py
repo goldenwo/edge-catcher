@@ -1,6 +1,5 @@
 """Tests for strategizer.generate_from_hypothesis()."""
 
-import pytest
 from unittest.mock import MagicMock
 from edge_catcher.ai.strategizer import generate_from_hypothesis
 from edge_catcher.research.test_runner import TestResult, EDGE_EXISTS

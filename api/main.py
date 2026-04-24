@@ -26,16 +26,10 @@ from api.adapter_registry import get_adapter
 from api.config_helpers import (
 	validate_db as _validate_db,
 	config_path as _config_path,
-	markets_yaml as _markets_yaml,
 	research_db_path as _research_db_path,
 	load_merged_hypotheses,
 )
 from edge_catcher.ai.client import detect_active_provider as _detect_active_provider_full
-
-
-def _detect_active_provider() -> str | None:
-	"""Detect provider for API settings (excludes CLI auto-detection)."""
-	return _detect_active_provider_full(include_cli=False)
 from api.models import (
     AdapterDownloadRequest,
     AdapterDownloadStatus,
@@ -58,7 +52,10 @@ from api.models import (
     ModelOption, ModelSettingsResponse, ModelOverrideRequest,
     ResearchLoopStartRequest, ReviewRejectRequest,
 )
-from api.tasks import download_state, get_adapter_state, backtest_states, get_backtest_state, is_backtest_running, BacktestTaskState
+from api.tasks import (
+    download_state, get_adapter_state, backtest_states, get_backtest_state,
+    is_backtest_running, BacktestTaskState,
+)
 from api.download_service import (
 	run_kalshi_download as _run_kalshi_download,
 	run_coinbase_download as _run_coinbase_download,
@@ -68,8 +65,14 @@ from api.download_service import (
 )
 from api.research_tasks import (
     ResearchLoopState, research_loop_state,
-    get_research_loop_state, is_research_loop_running,
+    is_research_loop_running,
 )
+
+
+def _detect_active_provider() -> str | None:
+	"""Detect provider for API settings (excludes CLI auto-detection)."""
+	return _detect_active_provider_full(include_cli=False)
+
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +215,10 @@ def _run_analyze_task(task_id: str, hypothesis_id: str) -> None:
 
 		# Save to hypothesis_results via tracker
 		tracker = Tracker(str(_research_db_path()))
-		verdict = getattr(result, "verdict", None) or result.get("verdict", "UNKNOWN") if isinstance(result, dict) else str(result)
+		verdict = (
+			getattr(result, "verdict", None)
+			or result.get("verdict", "UNKNOWN") if isinstance(result, dict) else str(result)
+		)
 		tracker.save_hypothesis_result(
 			test_type=getattr(result, "test_type", "unknown"),
 			series=hypothesis_id,
@@ -221,8 +227,13 @@ def _run_analyze_task(task_id: str, hypothesis_id: str) -> None:
 			thresholds=getattr(result, "thresholds", {}) if hasattr(result, "thresholds") else {},
 			verdict=verdict if isinstance(verdict, str) else str(verdict),
 			z_stat=getattr(result, "z_stat", 0.0) if hasattr(result, "z_stat") else 0.0,
-			fee_adjusted_edge=getattr(result, "fee_adjusted_edge", 0.0) if hasattr(result, "fee_adjusted_edge") else 0.0,
-			detail=result if isinstance(result, dict) else (result.__dict__ if hasattr(result, "__dict__") else {"raw": str(result)}),
+			fee_adjusted_edge=(
+				getattr(result, "fee_adjusted_edge", 0.0) if hasattr(result, "fee_adjusted_edge") else 0.0
+			),
+			detail=(
+				result if isinstance(result, dict)
+				else (result.__dict__ if hasattr(result, "__dict__") else {"raw": str(result)})
+			),
 			rationale=getattr(result, "rationale", "") if hasattr(result, "rationale") else "",
 		)
 
