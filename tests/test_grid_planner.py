@@ -101,21 +101,22 @@ class TestGridPlannerGenerate:
 
 
 class TestGridPlannerSlippage:
-    def test_assigns_per_series_slippage(self, tmp_path):
-        """Known-series hypotheses should carry the hand-set slippage value."""
-        from edge_catcher.research.grid_planner import _SERIES_SLIPPAGE
+    def test_assigns_per_series_slippage(self, tmp_path, monkeypatch):
+        """Known-series hypotheses should carry the overridden slippage value."""
+        from edge_catcher.research import grid_planner
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_TEST", 8)
         tracker = Tracker(tmp_path / "research.db")
         planner = GridPlanner(tracker=tracker)
         hypotheses = planner.generate(
             strategies=["A"],
-            series_map={"data/kalshi-btc.db": ["KXDOGED"]},
+            series_map={"data/kalshi-btc.db": ["SERIES_TEST"]},
             start_date="2025-01-01",
             end_date="2025-12-31",
             fee_pct=1.0,
         )
         assert len(hypotheses) == 1
-        assert hypotheses[0].series == "KXDOGED"
-        assert hypotheses[0].slippage_cents == _SERIES_SLIPPAGE["KXDOGED"]
+        assert hypotheses[0].series == "SERIES_TEST"
+        assert hypotheses[0].slippage_cents == 8
 
     def test_unknown_series_gets_default_slippage(self, tmp_path):
         from edge_catcher.research.grid_planner import _DEFAULT_SLIPPAGE
