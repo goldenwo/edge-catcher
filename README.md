@@ -68,8 +68,7 @@ edge-catcher/
 ├── ui/                   # React + Vite frontend
 ├── config/
 │   ├── fees.yaml               # Fee models per market
-│   └── hypotheses.yaml         # Hypothesis configs
-├── config.local/               # Market configs (gitignored)
+│   ├── hypotheses.yaml         # Hypothesis configs
 │   ├── markets-btc.yaml        # Default market series (Kalshi BTC)
 │   └── markets-*.yaml          # Category-specific series
 └── tests/                # pytest suite (255+ tests)
@@ -107,7 +106,7 @@ python -m edge_catcher analyze
 ```bash
 # Data download
 python -m edge_catcher download                      # Default market contracts
-python -m edge_catcher download --markets config.local/markets-altcrypto.yaml  # Category-specific
+python -m edge_catcher download --markets config/markets-altcrypto.yaml  # Category-specific
 python -m edge_catcher download-btc                  # OHLC candles (primary asset)
 python -m edge_catcher download-altcoin-ohlc         # OHLC candles (additional assets)
 
@@ -178,10 +177,10 @@ Kalshi adapters download settled contracts and trade history. No API key require
 
 | Adapter | Config | Database |
 |---------|--------|----------|
-| Default | `config.local/markets-btc.yaml` | `data/kalshi-btc.db` |
-| Per-category | `config.local/markets-*.yaml` | `data/kalshi-*.db` |
+| Default | `config/markets-btc.yaml` | `data/kalshi-btc.db` |
+| Per-category | `config/markets-*.yaml` | `data/kalshi-*.db` |
 
-Each category adapter reads its market series from a YAML config in `config.local/`. Database filenames are auto-derived from the config filename.
+Each category adapter reads its market series from a YAML config in `config/`. Database filenames are auto-derived from the config filename.
 
 ### Coinbase OHLC Adapters
 
@@ -193,7 +192,7 @@ OHLC adapters download 1-minute candles for supported assets. Each writes to a t
 
 ## Configuration
 
-### Markets (`config.local/markets-btc.yaml`)
+### Markets (`config/markets-btc.yaml`)
 
 ```yaml
 adapters:
@@ -204,7 +203,7 @@ adapters:
       - SERIES_B   # example series
     statuses:
       - settled
-    min_available_ram_pct: 10  # RAM guard for Pi/low-memory machines
+    min_available_ram_pct: 10  # RAM guard for low-memory machines
 ```
 
 ### Fees (`config/fees.yaml`)
