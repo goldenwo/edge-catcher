@@ -515,8 +515,9 @@ def _handle_trade_msg(
 
 	# Bid/ask come from the orderbook, NOT the trade price. A trade can execute
 	# off-book (late limit orders, aggressive fills); treating yes_price as the
-	# current ask caused strategy_b to enter phantom trades on 2026-04-14. If the
-	# orderbook isn't populated, skip strategies rather than fire blind.
+	# current ask lets strategies enter phantom trades at a price no resting
+	# order would fill. If the orderbook isn't populated, skip strategies rather
+	# than fire blind.
 	yes_ask_cents = market_state.get_yes_ask(ticker)
 	yes_bid_cents = market_state.get_yes_bid(ticker)
 	if yes_ask_cents is None or yes_bid_cents is None:

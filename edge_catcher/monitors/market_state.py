@@ -165,12 +165,12 @@ _STRIKE_RE = re.compile(r"-[TB][\d.]+$")
 def derive_event_ticker(ticker: str) -> str:
 	"""Strip the final strike suffix from a ticker string.
 
-	Handles both -Tnnnn (BTC-style) and -Bn.nnn (XRP-style) suffixes.
+	Handles both -Tnnnn (integer strike) and -Bn.nnn (decimal strike) suffixes.
 	If no recognised strike segment exists at the end, returns ticker unchanged.
 
 	Examples:
 		'KXBTC15M-26APR10-T1234'          -> 'KXBTC15M-26APR10'
-		'KXXRP-26APR1113-B1.3699500'      -> 'KXXRP-26APR1113'
+		'KXSERIES-25JAN0112-B1.2345'      -> 'KXSERIES-25JAN0112'
 		'KXBTC15M-26APR10'                -> 'KXBTC15M-26APR10'
 		'FOO-BAR-TBAZ'                    -> 'FOO-BAR-TBAZ'
 	"""

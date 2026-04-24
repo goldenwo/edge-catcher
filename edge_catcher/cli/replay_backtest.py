@@ -66,7 +66,7 @@ def register(subparsers) -> None:
 	p.add_argument("--prior", default=None,
 	               help="Path to prior-day bundle for state seeding (auto-resolves sibling if omitted)")
 	p.add_argument("--series", default=None,
-	               help="Comma-separated ticker filter (e.g. KXETH15M-26APR142330-30)")
+	               help="Comma-separated ticker filter (e.g. KXBTC-25JAN1014-B1.2345)")
 	p.add_argument("--output", default=None,
 	               help="Path to write JSON results (prints to stdout if omitted)")
 	p.add_argument("--json", action="store_true", default=False,

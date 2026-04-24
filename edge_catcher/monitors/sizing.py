@@ -211,13 +211,13 @@ def resolve_fill(
 	Three fill-gate cases:
 	  1. Empty fill side → no one is offering on the side we want to buy.
 	     Skipped as FillSkip("empty_book") when require_fresh_book=True.
-	     Reason: the "entry_price fallback" path was producing phantom fills
-	     (0% win rate on 82 strategy_a entries, -204c avg) because the ticker's
-	     reported yes_ask is a derived/estimated value not a fillable offer.
-	     The legacy fallback remains only when require_fresh_book=False.
-	  2. Populated but best diverges from entry_price (abs > 10c OR
-	     abs >= 3c AND rel > 30%) → phantom liquidity or WS lag. Skipped
-	     as FillSkip("stale_book") when require_fresh_book=True.
+	     Reason: the "entry_price fallback" path produces phantom fills when
+	     the ticker's reported yes_ask is a derived/estimated value not a
+	     fillable offer. The legacy fallback remains only when
+	     require_fresh_book=False.
+	  2. Populated but best diverges from entry_price (abs > 10c) →
+	     phantom liquidity or WS lag. Skipped as FillSkip("stale_book") when
+	     require_fresh_book=True.
 	  3. Populated + fresh → normal walked-book fill.
 
 	Returns:
@@ -240,12 +240,10 @@ def resolve_fill(
 	if not book_empty:
 		best_book_cents = round(levels[0][0] * 100)
 		# Simple absolute threshold: best price > 10c from entry_price = stale.
-		# An earlier two-gate rule (abs >= 3c AND rel > 30%) was tried but
-		# regressed legitimate walker-walks-down-to-real-book opportunities on
-		# strategy_a (commit fcafb11 post-mortem: 7 real fills worth +1825c/day
-		# were wrongly rejected). The relative gate was belt-and-suspenders for
-		# the strategy_b trade-channel bug which is already handled by Bug 1's
-		# orderbook-sourced bid/ask (commit 1fe470b).
+		# A tighter relative-divergence gate was tried but regressed legitimate
+		# walker-walks-down-to-real-book opportunities; the absolute 10c rule
+		# is sufficient once trade-channel bid/ask is already sourced from the
+		# orderbook (see dispatch.py).
 		if abs(best_book_cents - entry_price_cents) > 10:
 			log.debug(
 				"Book populated but stale: best=%dc entry=%dc",
