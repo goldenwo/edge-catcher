@@ -996,7 +996,7 @@ class TestReplaceParam:
 		assert "name = 'strategy_a__sens_unchanged'" in out or \
 			'name = "strategy_a__sens_unchanged"' in out
 		# class renamed (sanitized — hyphens → underscores)
-		assert "class debut_fade__sens_unchanged(Strategy)" in out
+		assert "class strategy_a__sens_unchanged(Strategy)" in out
 
 	def test_replace_param_outputs_tab_indented(self):
 		from edge_catcher.research.validation.gate_sensitivity import _replace_param

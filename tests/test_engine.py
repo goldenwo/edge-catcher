@@ -286,12 +286,12 @@ class TestHandleTickerMsg:
 	def test_ignores_unmatched_series(self, setup):
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 		# Ticker from a different series
-		ms.register_ticker("KXXRP-26APR10-T200")
-		msg = self._make_msg("KXXRP-26APR10-T200", yes_ask=50)
+		ms.register_ticker("SERIES_A-26APR10-T200")
+		msg = self._make_msg("SERIES_A-26APR10-T200", yes_ask=50)
 
 		_handle_ticker_msg(msg, config, ms, store, strategies, strat_by_series, pending_states, set(), now=_now())
 
-		# No strategy matched KXXRP
+		# No strategy matched SERIES_A
 		assert len(store.get_open_trades()) == 0
 
 	def test_rejects_price_outside_range(self, setup):
@@ -821,13 +821,13 @@ class TestCollectActiveSeries:
 	def test_collects_from_enabled_strategies(self):
 		config = {
 			"strategies": {
-				"s1": {"enabled": True, "series": ["KXBTC15M", "KXXRP"]},
+				"s1": {"enabled": True, "series": ["KXBTC15M", "SERIES_A"]},
 				"s2": {"enabled": False, "series": ["KXSOLD"]},
-				"s3": {"enabled": True, "series": ["KXXRP", "KXNBA"]},
+				"s3": {"enabled": True, "series": ["SERIES_A", "KXNBA"]},
 			},
 		}
 		result = _collect_active_series(config)
-		assert set(result) == {"KXBTC15M", "KXXRP", "KXNBA"}
+		assert set(result) == {"KXBTC15M", "SERIES_A", "KXNBA"}
 
 	def test_empty_config(self):
 		assert _collect_active_series({}) == []
@@ -838,7 +838,7 @@ class TestCollectActiveSeries:
 		time so REST recovery + WS subscription pick them up automatically."""
 		config = {
 			"strategies": {
-				"s1": {"enabled": True, "series": ["KXETH15M"]},
+				"s1": {"enabled": True, "series": ["SERIES_C"]},
 			},
 			"capture": {
 				"enabled": True,
@@ -846,14 +846,14 @@ class TestCollectActiveSeries:
 			},
 		}
 		result = _collect_active_series(config)
-		assert set(result) == {"KXETH15M", "KXBTC15M", "KXDOGE15M"}
+		assert set(result) == {"SERIES_C", "KXBTC15M", "KXDOGE15M"}
 
 	def test_capture_extra_series_ignored_when_capture_disabled(self):
 		"""No point subscribing to extra tickers when capture is off — they
 		generate WS load without being recorded for any purpose."""
 		config = {
 			"strategies": {
-				"s1": {"enabled": True, "series": ["KXETH15M"]},
+				"s1": {"enabled": True, "series": ["SERIES_C"]},
 			},
 			"capture": {
 				"enabled": False,
@@ -861,39 +861,39 @@ class TestCollectActiveSeries:
 			},
 		}
 		result = _collect_active_series(config)
-		assert set(result) == {"KXETH15M"}
+		assert set(result) == {"SERIES_C"}
 
 	def test_capture_extra_series_dedupe_with_strategy_series(self):
 		"""If a strategy already covers a series and capture lists it again,
 		the union dedupes — no double subscription."""
 		config = {
 			"strategies": {
-				"s1": {"enabled": True, "series": ["KXETH15M"]},
+				"s1": {"enabled": True, "series": ["SERIES_C"]},
 			},
 			"capture": {
 				"enabled": True,
-				"extra_series": ["KXETH15M", "KXBTC15M"],
+				"extra_series": ["SERIES_C", "KXBTC15M"],
 			},
 		}
 		result = _collect_active_series(config)
-		assert set(result) == {"KXETH15M", "KXBTC15M"}
+		assert set(result) == {"SERIES_C", "KXBTC15M"}
 		assert result == sorted(set(result))  # also confirm sorted output
 
 	def test_capture_extra_series_handles_none_or_missing(self):
 		"""Missing or null ``extra_series`` key under capture is a no-op."""
 		# capture present, no extra_series key
 		config_a = {
-			"strategies": {"s1": {"enabled": True, "series": ["KXETH15M"]}},
+			"strategies": {"s1": {"enabled": True, "series": ["SERIES_C"]}},
 			"capture": {"enabled": True},
 		}
-		assert set(_collect_active_series(config_a)) == {"KXETH15M"}
+		assert set(_collect_active_series(config_a)) == {"SERIES_C"}
 
 		# capture present, extra_series explicitly null
 		config_b = {
-			"strategies": {"s1": {"enabled": True, "series": ["KXETH15M"]}},
+			"strategies": {"s1": {"enabled": True, "series": ["SERIES_C"]}},
 			"capture": {"enabled": True, "extra_series": None},
 		}
-		assert set(_collect_active_series(config_b)) == {"KXETH15M"}
+		assert set(_collect_active_series(config_b)) == {"SERIES_C"}
 
 
 class TestSeriesForStrategy:
@@ -959,8 +959,8 @@ class TestFormatEnterMessage:
 
 	def test_longshot_yes_entry_includes_size_and_cost(self):
 		log_line, notify_line = _format_enter_message(
-			strategy="strategy_b", series="KXATPSETWINNER",
-			ticker="KXATPSETWINNER-26APR12LANMUS-2-LAN",
+			strategy="strategy_b", series="SERIES_G",
+			ticker="SERIES_G-26APR12LANMUS-2-LAN",
 			side="yes", fill_size=100, entry_price=2,
 			trade_id=1234, bullet="🟣",
 		)
@@ -976,8 +976,8 @@ class TestFormatEnterMessage:
 
 	def test_no_side_label(self):
 		_, notify_line = _format_enter_message(
-			strategy="strategy_a", series="KXSPOTIFYARTISTD",
-			ticker="KXSPOTIFYARTISTD-xyz",
+			strategy="strategy_a", series="SERIES_B",
+			ticker="SERIES_B-xyz",
 			side="no", fill_size=5, entry_price=40,
 			trade_id=42, bullet="🔵",
 		)
@@ -994,8 +994,8 @@ class TestFormatCloseMessage:
 	def test_settled_loss_includes_result_and_arithmetic(self):
 		log_line, notify_line = _format_close_message(
 			event="SETTLED", outcome="LOSS",
-			strategy="strategy_b", series="KXATPSETWINNER",
-			ticker="KXATPSETWINNER-26APR12LANMUS-2-LAN",
+			strategy="strategy_b", series="SERIES_G",
+			ticker="SERIES_G-26APR12LANMUS-2-LAN",
 			side="yes", fill_size=100, effective_entry=2,
 			exit_price=0, pnl_cents=-202, fee_cents=2,
 			settled_result="no", trade_id=1234, bullet="🟣",
@@ -1015,7 +1015,7 @@ class TestFormatCloseMessage:
 	def test_settled_win_yes_resolves_yes(self):
 		log_line, notify_line = _format_close_message(
 			event="SETTLED", outcome="WIN",
-			strategy="strategy_b", series="KXATPSETWINNER",
+			strategy="strategy_b", series="SERIES_G",
 			ticker="KXATP-xyz",
 			side="yes", fill_size=100, effective_entry=2,
 			exit_price=100, pnl_cents=9798, fee_cents=2,
@@ -1031,7 +1031,7 @@ class TestFormatCloseMessage:
 		"""Manual exits (TP/SL) don't have a market-settled side."""
 		log_line, notify_line = _format_close_message(
 			event="EXIT", outcome="WIN",
-			strategy="strategy_a", series="KXSPOTIFYARTISTD",
+			strategy="strategy_a", series="SERIES_B",
 			ticker="KXSP-xyz",
 			side="yes", fill_size=3, effective_entry=40,
 			exit_price=48, pnl_cents=23, fee_cents=1,
@@ -1049,8 +1049,8 @@ class TestFormatCloseMessage:
 		"""Clean lines when no fee — avoids '(-0¢ fee)' noise."""
 		_, notify_line = _format_close_message(
 			event="SETTLED", outcome="SCRATCH",
-			strategy="strategy_a", series="KXETH15M",
-			ticker="KXETH15M-xyz",
+			strategy="strategy_a", series="SERIES_C",
+			ticker="SERIES_C-xyz",
 			side="no", fill_size=5, effective_entry=50,
 			exit_price=50, pnl_cents=0, fee_cents=0,
 			settled_result=None, trade_id=1, bullet="🔵",

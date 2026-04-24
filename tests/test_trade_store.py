@@ -301,11 +301,11 @@ def test_get_open_trades_for_filters(store: TradeStore) -> None:
 		now=_now(),
 	)
 	store.record_trade(
-		ticker="KXXRP-25MAR-T2",
+		ticker="SERIES_A-25MAR-T2",
 		entry_price=30,
 		strategy="strategy_a",
 		side="yes",
-		series_ticker="KXXRP",
+		series_ticker="SERIES_A",
 		intended_size=1,
 		fill_size=1,
 		blended_entry=30,

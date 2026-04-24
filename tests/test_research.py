@@ -536,7 +536,7 @@ class TestResearchAgent:
         agent = self._make_agent(tmp_path)
         h_parent = Hypothesis(
             strategy="test-strategy-a",
-            data_sources=_ds(series="KXBNB15M"),
+            data_sources=_ds(series="SERIES_E"),
             start_date="2025-01-01", end_date="2025-12-31",
             slippage_cents=12,  # non-default, prove we inherit it
         )
