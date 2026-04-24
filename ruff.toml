@@ -1,0 +1,12 @@
+# Ruff config for edge-catcher.
+# The codebase uses tabs by convention (per CLAUDE.md), so W191 + E101 are excluded.
+
+line-length = 120
+indent-width = 4
+
+[lint]
+select = ["E", "F", "W"]  # pycodestyle errors, pyflakes, warnings (not full default set)
+ignore = ["W191", "E101"]  # tab-indentation rules don't apply — codebase uses tabs
+
+[format]
+indent-style = "tab"
