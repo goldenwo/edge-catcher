@@ -456,6 +456,16 @@ async def clear_adapter_key(adapter_id: str, _=Depends(check_auth)) -> dict:
     return {"ok": True}
 
 
+def _kalshi_download_target(adapter_id, meta, req, state):
+    if not meta.markets_yaml:
+        raise HTTPException(status_code=500, detail=f"Kalshi adapter {adapter_id!r} missing markets_yaml")
+    return _run_kalshi_download, (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
+
+
+def _coinbase_download_target(adapter_id, meta, req, state):
+    return _run_coinbase_download, (adapter_id, state, req.start_date, meta.extra["product_id"], meta.db_file)
+
+
 @app.post("/adapters/{adapter_id}/download", status_code=202)
 async def start_adapter_download(
     adapter_id: str,
@@ -473,13 +483,9 @@ async def start_adapter_download(
     if req.api_key and meta.api_key_env_var:
         _save_api_key(meta.api_key_env_var, req.api_key)
     if meta.exchange == "kalshi":
-        if not meta.markets_yaml:
-            raise HTTPException(status_code=500, detail=f"Kalshi adapter {adapter_id!r} missing markets_yaml")
-        target = _run_kalshi_download
-        args = (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
+        target, args = _kalshi_download_target(adapter_id, meta, req, state)
     elif meta.exchange == "coinbase":
-        target = _run_coinbase_download
-        args = (adapter_id, state, req.start_date, meta.extra["product_id"], meta.db_file)
+        target, args = _coinbase_download_target(adapter_id, meta, req, state)
     else:
         raise HTTPException(status_code=400, detail=f"No download handler for exchange={meta.exchange!r}")
     threading.Thread(target=target, args=args, daemon=True).start()
