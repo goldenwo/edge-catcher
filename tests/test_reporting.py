@@ -1,7 +1,10 @@
 """Tests for edge_catcher.reporting."""
 from __future__ import annotations
 
+import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 from edge_catcher.reporting import generate_report
@@ -117,3 +120,58 @@ def test_deployed_uses_entry_price_times_fill_size_not_just_entry_price():
 	# but does not distinguish the two formulas arithmetically. The real regression
 	# guarantee comes from reading edge_catcher/reporting/__init__.py.
 	assert report["all_time"]["deployed_cents"] != buggy or correct == buggy
+
+
+def test_cli_prints_json_for_fixture():
+	result = subprocess.run(
+		[
+			sys.executable,
+			"-m",
+			"edge_catcher.reporting",
+			"--db",
+			str(FIXTURE_DB),
+		],
+		capture_output=True,
+		text=True,
+		check=True,
+	)
+	data = json.loads(result.stdout)
+	assert data["all_time"]["closed_trades"] == 20
+	assert data["all_time"]["net_pnl_cents"] == 821
+
+
+def test_cli_returns_nonzero_on_missing_db():
+	result = subprocess.run(
+		[
+			sys.executable,
+			"-m",
+			"edge_catcher.reporting",
+			"--db",
+			"/tmp/does_not_exist_71294.db",
+		],
+		capture_output=True,
+		text=True,
+	)
+	assert result.returncode != 0
+	data = json.loads(result.stdout)
+	assert "error" in data
+
+
+def test_cli_accepts_date_argument():
+	result = subprocess.run(
+		[
+			sys.executable,
+			"-m",
+			"edge_catcher.reporting",
+			"--db",
+			str(FIXTURE_DB),
+			"--date",
+			"2026-04-03",
+		],
+		capture_output=True,
+		text=True,
+		check=True,
+	)
+	data = json.loads(result.stdout)
+	assert data["date"] == "2026-04-03"
+	assert data["today"]["settled_count"] == 8
