@@ -508,22 +508,25 @@ class TestResearchAgent:
             assert h.strategy == "test-strategy-a"
             assert h.parent_id == r.hypothesis.id
 
-    def test_generate_adjacent_promote_threads_per_series_slippage(self, tmp_path):
+    def test_generate_adjacent_promote_threads_per_series_slippage(self, tmp_path, monkeypatch):
         """Each adjacent (promote/review) hypothesis gets slippage for its
         OWN target series, not the parent's. Inheriting the parent's value
         would lie about cost structure once we cross into a different
         liquidity regime.
         """
+        from edge_catcher.research import grid_planner
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_WIDE", 8)
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_TIGHT", 4)
         agent = self._make_agent(tmp_path)
         r = _make_result(strategy="test-strategy-a", series="SERIES_OLD", verdict="promote", verdict_reason="great")
 
-        mock_discovery = {"data/kalshi-btc.db": ["KXBNB15M", "KXBTC", "RANDOM_SERIES"]}
+        mock_discovery = {"data/kalshi-btc.db": ["SERIES_WIDE", "SERIES_TIGHT", "RANDOM_SERIES"]}
         with patch.object(agent, "_discover_all_series", return_value=mock_discovery):
             adjacent = agent.generate_adjacent(r)
 
         by_series = {h.series: h.slippage_cents for h in adjacent}
-        assert by_series["KXBNB15M"] == 8  # 15m crypto: wide spreads
-        assert by_series["KXBTC"] == 4     # hourly crypto: tighter
+        assert by_series["SERIES_WIDE"] == 8  # per-series override: wide spreads
+        assert by_series["SERIES_TIGHT"] == 4  # per-series override: tighter
         assert by_series["RANDOM_SERIES"] == 2  # fallback default
 
     def test_generate_adjacent_explore_inherits_parent_slippage(self, tmp_path):
@@ -553,14 +556,16 @@ class TestResearchAgent:
         for cousin in adjacent:
             assert cousin.slippage_cents == 12  # inherited from parent
 
-    def test_generate_adjacent_explore_falls_back_to_per_series_default(self, tmp_path):
+    def test_generate_adjacent_explore_falls_back_to_per_series_default(self, tmp_path, monkeypatch):
         """If the parent was created without explicit slippage (pre-Task-2
         hypothesis, or a hand-built result), fall back to the per-series
         default instead of leaving slippage_cents=None (which would silently
         collapse to the CLI's optimistic 1c).
         """
+        from edge_catcher.research import grid_planner
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_TEST", 8)
         agent = self._make_agent(tmp_path)
-        r = _make_result(strategy="test-strategy-a", series="KXBTC15M", verdict="explore", verdict_reason="borderline")
+        r = _make_result(strategy="test-strategy-a", series="SERIES_TEST", verdict="explore", verdict_reason="borderline")
         assert r.hypothesis.slippage_cents is None  # sanity: fixture doesn't set one
 
         mock_families = {"test-strategy-a": ["test-strategy-a-vol"]}
@@ -568,16 +573,19 @@ class TestResearchAgent:
             adjacent = agent.generate_adjacent(r)
 
         assert len(adjacent) == 1
-        assert adjacent[0].slippage_cents == 8  # KXBTC15M default
+        assert adjacent[0].slippage_cents == 8  # SERIES_TEST override
 
-    def test_sweep_all_series_threads_per_series_slippage(self, tmp_path):
+    def test_sweep_all_series_threads_per_series_slippage(self, tmp_path, monkeypatch):
         """sweep_all_series builds root hypotheses with no parent. Each one
         must carry its own per-series slippage default — without this, the
         whole sweep re-runs at the CLI's optimistic 1c floor and the results
         disagree with grid-generated hypotheses for the same (strategy, series).
         """
+        from edge_catcher.research import grid_planner
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_WIDE", 8)
+        monkeypatch.setitem(grid_planner._SERIES_SLIPPAGE, "SERIES_TIGHT", 4)
         agent = self._make_agent(tmp_path)
-        mock_discovery = {"data/kalshi-btc.db": ["KXBNB15M", "KXETH", "UNKNOWN"]}
+        mock_discovery = {"data/kalshi-btc.db": ["SERIES_WIDE", "SERIES_TIGHT", "UNKNOWN"]}
 
         captured: list[Hypothesis] = []
 
@@ -590,8 +598,8 @@ class TestResearchAgent:
             agent.sweep_all_series(strategy="test-strategy-a")
 
         by_series = {h.series: h.slippage_cents for h in captured}
-        assert by_series["KXBNB15M"] == 8  # 15m crypto
-        assert by_series["KXETH"] == 4     # hourly crypto
+        assert by_series["SERIES_WIDE"] == 8  # per-series override
+        assert by_series["SERIES_TIGHT"] == 4  # per-series override
         assert by_series["UNKNOWN"] == 2   # fallback default
         # All should be tagged as sweep-all-series roots (no parent)
         for h in captured:

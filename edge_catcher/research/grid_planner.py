@@ -14,23 +14,12 @@ from .tracker import Tracker
 logger = logging.getLogger(__name__)
 
 
-# Per-series slippage defaults in cents (one-sided). Hand-set conservative
-# values based on the 2026-04-11/12 paper trader audit findings. Empirical
-# refinement is deferred until Task 1 (orderbook staleness investigation)
-# lands — the book_snapshot data used to measure spreads may be contaminated
-# by that bug. Crypto 15m markets showed 20-40c bid-ask in live data; sports
-# and mention markets are tight. One-sided values halve the round-trip.
-_SERIES_SLIPPAGE: dict[str, int] = {
-	"KXDOGED": 8,
-	"KXBNB15M": 8,
-	"KXXRP15M": 8,
-	"KXSOL15M": 8,
-	"KXETH15M": 8,
-	"KXBTC15M": 8,
-	"KXXRP": 4,
-	"KXETH": 4,
-	"KXBTC": 4,
-}
+# Per-series slippage defaults are NOT hardcoded here — tune them to your own
+# observed spreads per series in your market. The framework uses a single
+# conservative default. To override per-series, subclass GridPlanner and
+# override slippage_for_series() or set a _SERIES_SLIPPAGE dict in
+# config.local/slippage.py (not tracked).
+_SERIES_SLIPPAGE: dict[str, int] = {}
 _DEFAULT_SLIPPAGE = 2
 
 
