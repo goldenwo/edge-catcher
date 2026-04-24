@@ -66,6 +66,6 @@ capture:
   # replay backtester.
   #
   # Storage cost: each 15m crypto series adds ~1 active ticker at any time
-  # (single binary, single window). Strike-based markets like KXXRP add
+  # (single binary, single window). Strike-based markets like SERIES_A add
   # ~150-200 tickers per series. Estimate disk before enabling broad capture.
-  # extra_series: [KXBTC15M, KXDOGE15M, KXBNB15M]
+  # extra_series: [SERIES_A, SERIES_B]
