@@ -80,8 +80,15 @@ just want to sweep parameters.
 
 ## Capture / replay pipeline
 
-The live paper trader writes every WS frame it sees to a
-`RawFrameWriter` (`monitors/capture/writer.py`). At UTC midnight, a
+**Capture is opt-in.** By default (`capture.enabled: false` in the
+paper-trader config) the engine writes no WS frames to disk, so the
+paper trader runs without disk pressure on tight-storage machines.
+Replay requires bundles, and bundles only exist when capture is on,
+so the replay backtester is opt-in too. Set `capture.enabled: true`
+to turn the pipeline on.
+
+When enabled, the live paper trader writes every WS frame it sees to
+a `RawFrameWriter` (`monitors/capture/writer.py`). At UTC midnight, a
 rotation callback assembles a **daily bundle**:
 
 - Compressed JSONL of every dispatched event for the day
@@ -91,18 +98,28 @@ rotation callback assembles a **daily bundle**:
   captured at the moment of rotation
 - A "day slice" — the prior 24h of relevant context
 
-The bundle is uploaded to Cloudflare R2 (`monitors/capture/transport.py`)
-and the raw working file is deleted. The replay backtester
-(`monitors/replay/backtester.py`) can take any bundle and reproduce
-that day bit-exact: it instantiates a fresh engine, seeds it from the
-state snapshots, and walks the JSONL through the same `dispatch_message`
-function the live engine uses. This is what makes Stage 3 of the
-four-stage filter possible — the same code answers "what did happen?"
-and "what would happen?".
+The bundle is uploaded via the configured transport
+(`monitors/capture/transport.py` — `local` writes to a directory,
+`r2` uploads to Cloudflare R2) and the raw working file is deleted.
+The replay backtester (`monitors/replay/backtester.py`) can take any
+bundle and reproduce that day bit-exact: it instantiates a fresh
+engine, seeds it from the state snapshots, and walks the JSONL through
+the same `dispatch_message` function the live engine uses. This is
+what makes Stage 3 of the four-stage filter possible — the same code
+answers "what did happen?" and "what would happen?".
 
 Bundles are self-contained: replay does not need access to the live
-DB, the live engine, or even the live machine. Pull a bundle from R2,
-run replay, get a deterministic answer.
+DB, the live engine, or even the live machine. Pull a bundle from
+wherever the transport stored it, run replay, get a deterministic
+answer.
+
+**Storage cost when capture is enabled:** ~1.5 GB/day raw working
+file (peak before midnight rotation), ~150–300 MB/day after the
+bundle is compressed with zstd. Default `local_retention_days: 7`
+prunes uploaded bundles after a week; set to `0` to disable pruning.
+For long-term archival on a budget, the `r2` transport uploads
+bundles to Cloudflare R2's free tier (10 GB) and beyond at roughly
+$0.015/GB/month.
 
 ## LLM abstraction
 
