@@ -21,6 +21,7 @@ dependencies = [
     "zstandard>=0.22",
     "boto3>=1.34",
     "cryptography>=42.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
