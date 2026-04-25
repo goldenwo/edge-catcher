@@ -224,6 +224,7 @@ def test_rotation_callback_deletes_raw_and_marks_uploaded(
 	delete the raw JSONL and write the .uploaded sentinel on success."""
 	import time
 	from unittest.mock import MagicMock
+	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
 	import edge_catcher.monitors.engine as engine_mod
 	from edge_catcher.monitors.engine import _make_rotation_callback
 	from edge_catcher.monitors.market_state import MarketState
@@ -279,6 +280,7 @@ def test_rotation_callback_keeps_raw_when_assembly_fails(
 	"""If assemble_daily_bundle raises, the raw JSONL must survive so the
 	operator can reassemble manually."""
 	import time
+	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
 	import edge_catcher.monitors.engine as engine_mod
 	from edge_catcher.monitors.engine import _make_rotation_callback
 	from edge_catcher.monitors.market_state import MarketState
@@ -319,6 +321,7 @@ def test_rotation_callback_no_transport_skips_sentinel_and_prune(
 	.uploaded sentinel and does NOT prune old bundles. Local-only capture
 	must be manually managed."""
 	import time
+	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
 	import edge_catcher.monitors.engine as engine_mod
 	from edge_catcher.monitors.engine import _make_rotation_callback
 	from edge_catcher.monitors.market_state import MarketState
@@ -374,6 +377,7 @@ def test_rotation_callback_keeps_raw_when_delete_flag_false(
 ) -> None:
 	"""delete_raw_after_bundle=False preserves the raw JSONL (debugging mode)."""
 	import time
+	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
 	import edge_catcher.monitors.engine as engine_mod
 	from edge_catcher.monitors.engine import _make_rotation_callback
 	from edge_catcher.monitors.market_state import MarketState
