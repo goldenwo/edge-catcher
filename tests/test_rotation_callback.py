@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytest.importorskip("websockets", reason="paper-trader engine tests require the [live] extra")
+
 from edge_catcher.monitors.engine import _make_rotation_callback
 from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
 
