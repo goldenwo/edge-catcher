@@ -1,6 +1,11 @@
 """Tests for research dashboard API."""
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+
+pytest.importorskip("fastapi", reason="api tests require the [ui] extra")
+
 from fastapi.testclient import TestClient
 from api.main import app
 from api.research_tasks import (
