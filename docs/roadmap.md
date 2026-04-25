@@ -26,7 +26,6 @@
 
 Small, low-risk improvements that didn't make the v1 cut:
 
-- **Re-enable `tests/test_capture_retention.py`** — currently ignored in CI because of a pre-existing failure unrelated to the v1 work. Worth fixing properly.
 - **Demo fixture with `fill_size > 1`** — makes the reporting regression test strict (the "deployed = entry_price × fill_size" assertion currently can't fully distinguish from the buggy `SUM(entry_price)` formula because all fixture rows have `fill_size = 1`).
 - **GitHub issue + PR templates** — `.github/ISSUE_TEMPLATE/` + `.github/pull_request_template.md`.
 - **`CODE_OF_CONDUCT.md`** — standard contributor agreement.

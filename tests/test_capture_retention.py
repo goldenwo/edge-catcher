@@ -221,7 +221,14 @@ def test_rotation_callback_deletes_raw_and_marks_uploaded(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 	"""End-to-end: the rotation callback with a transport configured should
-	delete the raw JSONL and write the .uploaded sentinel on success."""
+	delete the raw JSONL and write the .uploaded sentinel on success.
+
+	Uses ``today() - 1`` rather than a hardcoded date so the freshly-uploaded
+	bundle stays inside ``local_retention_days=7`` — mirroring the production
+	scenario where rotation fires at midnight UTC for the day that just
+	ended. A hardcoded past date would let ``prune_old_bundles`` delete the
+	bundle directory (sentinel and all) before the test's assertions ran.
+	"""
 	import time
 	from unittest.mock import MagicMock
 	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
@@ -231,7 +238,7 @@ def test_rotation_callback_deletes_raw_and_marks_uploaded(
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
-	day = date(2026, 4, 13)
+	day = date.today() - timedelta(days=1)
 
 	# Seed a raw JSONL + a stub compressed copy that assemble_daily_bundle "produced"
 	_make_raw(capture_dir, day)
