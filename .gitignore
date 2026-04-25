@@ -34,9 +34,9 @@ venv/
 
 # Reports output (entire directory is private)
 reports/
-TASK.md
-BACKLOG.md
-ROADMAP.md
+/TASK.md
+/BACKLOG.md
+/ROADMAP.md
 
 # Environment
 .env
