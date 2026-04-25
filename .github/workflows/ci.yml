@@ -23,4 +23,4 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Test
-        run: pytest tests/ -v --ignore=tests/test_capture_retention.py
+        run: pytest tests/ -v
