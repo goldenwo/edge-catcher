@@ -70,7 +70,10 @@ pytest tests/ -v
 ```
 
 The suite runs fully mocked — no live API access, no API keys. Useful
-for confirming your install is healthy.
+for confirming your install is healthy. Tests that exercise the paper
+trader or the FastAPI dashboard skip cleanly when the `[live]` or
+`[ui]` extras aren't installed; install `[dev,live,ui]` if you want
+full coverage.
 
 ## 5. Next steps
 
