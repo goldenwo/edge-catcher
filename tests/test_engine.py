@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+pytest.importorskip("websockets", reason="paper-trader engine tests require the [live] extra")
+
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,

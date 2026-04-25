@@ -1,6 +1,8 @@
 """Tests for api.dispatchers registries."""
 import pytest
 
+pytest.importorskip("fastapi", reason="api tests require the [ui] extra")
+
 from api.dispatchers import (
 	dispatch_download,
 	dispatch_data_check,

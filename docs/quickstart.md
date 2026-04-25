@@ -48,10 +48,11 @@ python -m edge_catcher.reporting --db edge_catcher/data/examples/paper_trades_de
 ```
 
 This prints a JSON report against `paper_trades_demo.db`, which contains
-20 settled trades across two synthetic strategies. You will see
-`all_time` aggregates (win rate, P&L, deployed capital) and a `today`
-bucket that is empty because the fixture's `exit_time` values are not
-"today" relative to your wall clock.
+20 settled trades from `longshot_fade_example` across two synthetic
+series (`DEMO_A15M` and `DEMO_B15M`). You will see `all_time`
+aggregates (win rate, P&L, deployed capital) and a `today` bucket that
+is empty because the fixture's `exit_time` values are not "today"
+relative to your wall clock.
 
 To see the `today` bucket populated, pin the date to a day that has
 settled trades in the fixture (e.g. `2026-04-03`):
@@ -69,7 +70,10 @@ pytest tests/ -v
 ```
 
 The suite runs fully mocked — no live API access, no API keys. Useful
-for confirming your install is healthy.
+for confirming your install is healthy. Tests that exercise the paper
+trader or the FastAPI dashboard skip cleanly when the `[live]` or
+`[ui]` extras aren't installed; install `[dev,live,ui]` if you want
+full coverage.
 
 ## 5. Next steps
 

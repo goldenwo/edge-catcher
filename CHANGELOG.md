@@ -45,7 +45,6 @@ The runtime auto-discovers and merges private modules at load time — users nev
 - **No Docker / cloud deployment tooling.** A systemd service example is in `deploy/`; full deployment guides are v1.1.
 - **Documentation is minimum viable.** README + 6 topic guides. Tutorial walkthroughs ("build your first strategy end-to-end") are v1.1.
 - **Type-check CI (mypy/pyright) is not enabled** — ruff-only for now.
-- **Test `test_capture_retention.py` is ignored in CI** because of a pre-existing failure unrelated to this release. To be fixed in v1.0.x.
 
 ### Contributing
 
