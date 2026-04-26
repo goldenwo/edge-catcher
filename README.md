@@ -1,333 +1,186 @@
 # edge-catcher
 
-A production-grade hypothesis testing pipeline for detecting pricing inefficiencies in prediction markets (Kalshi), with automated backtesting, strategy research, and an optional AI-driven ideation loop.
+> Research-grade pipeline for finding pricing inefficiencies on prediction markets — from hypothesis to backtest to paper-trader, with the same code path at every step.
 
-Built for rigorous, anti-p-hacking statistical research: pre-registered hypotheses, out-of-sample validation, clustered standard errors, and multi-comparison correction.
+[![CI](https://github.com/goldenwo/edge-catcher/actions/workflows/ci.yml/badge.svg)](https://github.com/goldenwo/edge-catcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Release](https://img.shields.io/github/v/release/goldenwo/edge-catcher)](https://github.com/goldenwo/edge-catcher/releases)
 
----
+edge-catcher is a Python framework for building and validating systematic strategies on event markets like Kalshi. Take a hunch — *"NO trades at <5¢ rebound 70% of the time"* — and walk it through a four-stage filter ending in a live paper trader, with bit-exact reproducibility between every stage.
 
-## Features
-
-- **Multi-market adapter pattern** — Kalshi (multiple categories) + Coinbase OHLC
-- **Event-driven backtester** — Run strategies against historical trade data with fee-adjusted PnL, Sharpe ratio, win rate, and per-strategy breakdowns
-- **Autonomous research loop** — Grid sweep across all strategy×series combinations, then LLM-driven hypothesis ideation for novel strategies
-- **Incremental data pipeline** — SQLite with WAL mode, resumable downloads, 90-day rolling archive
-- **Rigorous statistics** — `proportions_ztest` for binary outcomes, clustered SEs by expiration date, Harvey-Liu-Zhu threshold (t > 3.0), Bonferroni correction
-- **AI-powered workflow (optional)** — Claude Code CLI (no API key needed), Anthropic, OpenAI, or OpenRouter for hypothesis formalization, result interpretation, and strategy ideation
-- **Web UI** — React + FastAPI dashboard for data source management, backtesting, and strategy generation
-- **No auto-trading** — Research and alerting only
+**Built for** quants, researchers, and developers who want rigorous tooling for prediction-market alpha without the overfitting trap.
 
 ---
 
-## Architecture
+## Highlights
 
-```
-edge-catcher/
-├── edge_catcher/
-│   ├── adapters/         # Market data collectors
-│   │   ├── base.py       # AdapterMeta + PredictionMarketAdapter ABC (Kalshi-shaped)
-│   │   ├── kalshi/       # Kalshi API adapter (markets + trades)
-│   │   └── coinbase/     # Coinbase OHLC adapter (any product)
-│   ├── hypotheses/       # Statistical hypothesis modules
-│   │   ├── examples/     # Example hypothesis template
-│   │   ├── kalshi/       # Kalshi-specific hypotheses
-│   │   └── registry.py   # Auto-discovery + multi-comparison correction
-│   ├── ai/               # LLM integration
-│   │   ├── client.py     # Provider-agnostic client (Anthropic, OpenAI, OpenRouter, Claude Code CLI)
-│   │   ├── formalizer.py # English → hypothesis config
-│   │   ├── interpreter.py# Analysis JSON → English summary
-│   │   ├── strategizer.py# Hypothesis → strategy code generation
-│   │   └── prompts/      # Editable system prompts
-│   ├── research/         # Autonomous research agent
-│   │   ├── agent.py      # Hypothesis runner + adjacent generation
-│   │   ├── loop.py       # Grid + LLM phase orchestrator
-│   │   ├── llm_ideator.py# LLM-driven hypothesis proposals
-│   │   ├── grid_planner.py# Exhaustive strategy×series grid
-│   │   ├── evaluator.py  # Promote/explore/kill verdict engine
-│   │   ├── tracker.py    # SQLite result persistence
-│   │   ├── run_queue.py  # Parallel execution with audit logging
-│   │   ├── audit.py      # Integrity checks + decision log
-│   │   └── reporter.py   # Research report generation
-│   ├── runner/           # Backtest engine
-│   │   ├── backtest.py   # Core backtester
-│   │   ├── event_backtest.py # Event-driven backtest
-│   │   ├── strategies.py # Public strategy framework
-│   │   ├── strategy_parser.py # Strategy discovery + validation
-│   │   └── strategies_local.py.example # Template for private strategies
-│   ├── storage/          # SQLite persistence layer
-│   │   ├── db.py         # Connection management, WAL, OHLC tables
-│   │   ├── models.py     # Market, Trade dataclasses
-│   │   └── archiver.py   # 90-day rolling archive
-│   ├── reports/          # Report formatting
-│   ├── reporting/        # P&L reporting CLI (python -m edge_catcher.reporting)
-│   ├── data/examples/    # Bundled fixtures: demo_markets.db + paper_trades_demo.db
-│   └── fees.py           # Config-driven fee models
-├── api/                  # FastAPI backend
-│   ├── main.py           # REST endpoints
-│   ├── adapter_registry.py # All data source definitions
-│   ├── tasks.py          # Background download state
-│   └── models.py         # API schemas
-├── ui/                   # React + Vite frontend
-├── config/
-│   ├── fees.yaml               # Fee models per market
-│   ├── hypotheses.yaml         # Hypothesis configs
-│   ├── markets-btc.yaml        # Default market series (Kalshi BTC)
-│   └── markets-*.yaml          # Category-specific series
-└── tests/                # pytest suite (255+ tests)
-```
+- 🔬 **Anti-p-hacking by default** — Pre-registered hypotheses, Bonferroni + Harvey-Liu-Zhu (t > 3.0), clustered SEs, mandatory out-of-sample validation
+- 🤖 **Autonomous research loop** — Exhaustive grid sweep + LLM ideator with kill/explore/promote verdicts
+- 📈 **Event-driven backtester** — Fee-adjusted P&L, Sharpe, win rate, drawdown, streaming stats (O(1) memory)
+- 🎯 **Capture / replay paper trader** — Daily JSONL bundles, replay backtester reproduces live trades bit-exactly
+- 🔌 **Pluggable adapter registry** — Add a new exchange in ~50 LOC
+- 🧠 **Optional AI (no API key required)** — Auto-detects Claude Code CLI; falls back to Anthropic / OpenAI / OpenRouter
+- 🖥️ **React + FastAPI web UI** — 8 pages: Dashboard, Data Sources, Analyze, Strategize, Research, Hypotheses, Backtest, Settings
+- ✅ **1030 tests** — Fully mocked, runs without live API keys
 
 ---
 
 ## Quickstart
 
-**Requirements:** Python 3.11+
-
 ```bash
-# Clone and install
-git clone https://github.com/goldenwo/edge-catcher.git
+git clone https://github.com/goldenwo/edge-catcher
 cd edge-catcher
 pip install -e ".[dev]"
 
-# Try the bundled example with no data download required
+# First backtest — bundled fixture, no data download, no API keys
 edge-catcher backtest \
     --series DEMO_SERIES \
     --db-path edge_catcher/data/examples/demo_markets.db \
     --strategy longshot_fade_example --json
-
-# Generate a P&L report against the bundled paper-trades fixture
-python -m edge_catcher.reporting --db edge_catcher/data/examples/paper_trades_demo.db
-
-# Download real market data (default series)
-python -m edge_catcher download
-
-# Download OHLC data (no API key needed)
-python -m edge_catcher download-btc
-
-# Run a backtest on downloaded data
-python -m edge_catcher backtest --series SERIES_A --strategy example --json
-
-# Run all registered hypotheses
-python -m edge_catcher analyze
 ```
 
-For a longer walkthrough see [`docs/quickstart.md`](docs/quickstart.md).
+You should see a JSON blob with `"status": "ok"` and a per-strategy P&L breakdown. That's the toolchain end-to-end in 60 seconds.
+
+**Next:** the [5-minute walkthrough](docs/quickstart.md) adds a P&L report against bundled paper-trade fixtures.
 
 ---
 
-## CLI Reference
+## How it works
 
-```bash
-# Data download
-python -m edge_catcher download                      # Default market contracts
-python -m edge_catcher download --markets config/markets-altcrypto.yaml  # Category-specific
-python -m edge_catcher download-btc                  # OHLC candles (primary asset)
-python -m edge_catcher download-altcoin-ohlc         # OHLC candles (additional assets)
+edge-catcher gives you a **four-stage filter** for taking a hypothesis from idea to live paper-trading:
 
-# Backtesting
-python -m edge_catcher backtest --series SERIES_A --strategy example --json
-python -m edge_catcher backtest --list-strategies    # Show available strategies
-python -m edge_catcher backtest --list-series        # Show available series
-python -m edge_catcher list-dbs                      # Scan all databases
-
-# Research loop
-python -m edge_catcher research loop --grid-only --max-runs 50 --parallel 4
-python -m edge_catcher research loop --max-runs 200 --parallel 4 --max-llm-calls 5
-python -m edge_catcher research status               # Show progress
-python -m edge_catcher research audit decisions       # Review LLM decisions
-
-# Analysis
-python -m edge_catcher analyze
-python -m edge_catcher archive                       # Archive old trades
-
-# AI tools (optional)
-python -m edge_catcher formalize "your hypothesis in plain English"
-python -m edge_catcher interpret
 ```
+                ┌─→  1. Hypothesis      Does the signal exist?           (research agent)
+                │
+                ├─→  2. Event backtest  Does it have directional edge?   (fast, approximate)
+                │
+                ├─→  3. Replay backtest Does live execution match?       (high-fidelity)
+                │
+                └─→  4. Paper trader    Does P&L hold up live?           (source of truth)
+```
+
+Stages 3 and 4 share the same dispatch path. **A passing replay means your live trader will behave identically** — the same `dispatch_message` function processes both a captured JSONL frame and a real-time WebSocket message.
 
 ---
 
-## Autonomous Research Loop
+## Features
 
-The research loop automates hypothesis generation and testing across all available data:
+### Research
 
-```
-Grid Phase ──→ LLM Ideation ──→ Strategy Generation ──→ Backtest ──→ Evaluate
-   (exhaustive)     (opus)          (sonnet)            (local)     (promote/explore/kill)
-       │                                                                    │
-       └────────────────────────── feedback ────────────────────────────────┘
-```
+- **Autonomous research loop** — exhaustive strategy×series grid, then LLM-driven hypothesis ideation when the grid plateaus
+- **Pre-registered hypothesis configs** — auto-discovered from `hypotheses/` modules; no inline statistical hacks
+- **Clustered standard errors** — by expiration date, since contracts on the same date share a common shock
+- **Multi-comparison correction** — Bonferroni + Harvey-Liu-Zhu (t > 3.0 instead of 1.96) drops false discovery rate to <0.3%
+- **Validation gates** — out-of-sample windows enforce honest evaluation
 
-**Grid phase:** Tests every strategy×series combination. No LLM calls, fast.
+### Backtesting
 
-**LLM phase:** Analyzes results, proposes new hypotheses and novel strategies. Uses Claude Code CLI by default (no API key required if `claude` is on PATH).
+- **Event-driven** — replays historical trade events at original timestamps with fee-adjusted P&L
+- **Per-strategy breakdowns** — win rate, Sharpe, deployed capital, drawdown, expectancy
+- **Streaming stats** — closed-trade accumulators run in O(1) memory regardless of dataset size
+- **List discovery** — `--list-strategies` and `--list-series` show what's available before you start
 
-```bash
-# Warm up the grid first (need 10+ results before LLM activates)
-python -m edge_catcher research loop --grid-only --max-runs 50 --parallel 4
+### Live trading + replay
 
-# Full loop with LLM ideation
-python -m edge_catcher research loop --max-runs 200 --parallel 4 --max-llm-calls 5
+- **Paper trader** — real-time WebSocket dispatch, orderbook-aware sizing, fresh-book gates, multi-strategy concurrency
+- **Capture pipeline** — daily JSONL bundles assembled at midnight UTC with state snapshots; uploads to Cloudflare R2 with local fallback
+- **Replay backtester** — re-runs a captured day through the exact `dispatch_message` path used live; verifies bit-exact reproducibility
+- **Discord notifications** — trade entry/exit with per-strategy color/emoji + P&L
 
-# Overnight unattended
-export EDGE_CATCHER_CC_BUDGET_USD=1  # cap per-call spend
-while true; do
-    python -m edge_catcher research loop --max-runs 100 --parallel 4 --max-llm-calls 5
-    EXIT=$?
-    if [ $EXIT -ne 2 ]; then break; fi
-    echo "Budget exhausted, continuing..."
-done
-```
+### Adapters
 
-Exit code 2 = more work to do. Exit code 0 = grid exhausted. The loop auto-deduplicates and resumes.
+- **Kalshi** — settled markets across BTC, altcrypto, sports, politics, financials, esports, weather, entertainment
+- **Coinbase** — 1-minute OHLC candles for any asset
+- **Registry pattern** — see [docs/adapter-guide.md](docs/adapter-guide.md) for adding a new exchange
 
----
+### Reporting + UI
 
-## Data Sources
+- **Reporting CLI** — `python -m edge_catcher.reporting` produces daily P&L JSON with corrected `deployed = entry_price × fill_size` math
+- **React + Vite dashboard** — Dashboard, Data Sources, Analyze, Strategize, Research, Hypotheses, Backtest, Settings
+- **FastAPI backend** — REST endpoints, background download workers, live progress streams
 
-### Kalshi Adapters
+### AI (optional)
 
-Kalshi adapters download settled contracts and trade history. No API key required for settled data.
-
-| Adapter | Config | Database |
-|---------|--------|----------|
-| Default | `config/markets-btc.yaml` | `data/kalshi-btc.db` |
-| Per-category | `config/markets-*.yaml` | `data/kalshi-*.db` |
-
-Each category adapter reads its market series from a YAML config in `config/`. Database filenames are auto-derived from the config filename.
-
-### Coinbase OHLC Adapters
-
-Coinbase adapters download 1-minute OHLC candles. No API key required (public endpoints).
-
-OHLC adapters download 1-minute candles for supported assets. Each writes to a table in `data/ohlc.db` (or `data/btc.db` for the primary asset). All adapters share a global rate limiter.
+- **Claude Code CLI** — auto-detected if `claude` is on PATH; no API key required
+- **Anthropic / OpenAI / OpenRouter** — fallback providers via `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`
+- **Tasks**: hypothesis formalization, result interpretation, strategy code generation, autonomous ideation
+- **Per-call budget cap** via `EDGE_CATCHER_CC_BUDGET_USD`
 
 ---
 
-## Configuration
+## Documentation
 
-### Markets (`config/markets-btc.yaml`)
-
-```yaml
-adapters:
-  kalshi:
-    enabled: true
-    series:
-      - SERIES_A   # example series
-      - SERIES_B   # example series
-    statuses:
-      - settled
-    min_available_ram_pct: 10  # RAM guard for low-memory machines
-```
-
-### Fees (`config/fees.yaml`)
-
-```yaml
-kalshi:
-  maker:
-    formula: "0.0175 * P * (1 - P)"
-  taker:
-    formula: "0.07 * P * (1 - P)"
-```
+| | |
+|--|--|
+| **Get started** | [quickstart.md](docs/quickstart.md) — 5-minute walkthrough |
+| **Write a strategy** | [strategy-guide.md](docs/strategy-guide.md) |
+| **Add an exchange** | [adapter-guide.md](docs/adapter-guide.md) |
+| **System design** | [architecture.md](docs/architecture.md) |
+| **P&L reporting** | [reporting.md](docs/reporting.md) |
+| **Research data flow** | [research-pipeline-data-flow.md](docs/research-pipeline-data-flow.md) |
+| **What's next** | [roadmap.md](docs/roadmap.md) |
+| **ADRs** | [docs/adr/](docs/adr/) |
 
 ---
 
-## AI Integration
+## Project structure
 
-AI features are optional. The core pipeline works without any API key.
+```
+edge_catcher/
+├── adapters/      Exchange data collectors (Kalshi, Coinbase)
+├── ai/            Provider-agnostic LLM client + prompts
+├── hypotheses/    Statistical hypothesis modules + registry
+├── monitors/      Paper trader (engine, dispatch, capture, replay, sizing)
+├── research/      Autonomous research agent + grid planner + ideator
+├── runner/        Backtester + strategy framework
+├── reporting/     P&L reporting CLI
+└── storage/       SQLite persistence layer
+api/               FastAPI backend
+ui/                React + Vite frontend (8 pages)
+config/            Public market configs (per category)
+tests/             1030 tests across 77 files
+```
 
-### Provider Priority
+### Privacy by design
 
-1. **Claude Code CLI** — auto-detected if `claude` is on PATH (no API key needed)
-2. **Anthropic** — `ANTHROPIC_API_KEY`
-3. **OpenAI** — `OPENAI_API_KEY`
-4. **OpenRouter** — `OPENROUTER_API_KEY`
+The framework ships publicly; **your strategies stay yours**. Private zones are gitignored:
 
-Override with `--provider` or `EDGE_CATCHER_LLM_PROVIDER` env var.
+- `edge_catcher/runner/strategies_local.py` (and `monitors/strategies_local.py`)
+- `edge_catcher/hypotheses/local/`
+- `config.local/`
+- `scripts/` (analysis)
+- `reports/` (research outputs)
 
-### Task Models (Claude Code CLI defaults)
-
-| Task | Model | Effort | Purpose |
-|------|-------|--------|---------|
-| Ideator | opus | high | Analyze results, propose new hypotheses |
-| Strategizer | sonnet | high | Generate strategy code from proposals |
-| Formalizer | sonnet | default | Plain English → structured hypothesis |
-| Interpreter | haiku | default | Summarize results |
-
-Per-call budget cap: `EDGE_CATCHER_CC_BUDGET_USD=1`
+The runtime auto-discovers and merges these at load time. You never commit research.
 
 ---
 
-## Web UI
+## Use cases
 
-```bash
-# Install UI dependencies
-pip install -e ".[ui]"
-cd ui && npm install
-
-# Run backend + frontend
-uvicorn api.main:app --reload &
-npm run dev
-```
-
-The UI provides:
-- Data source management (download, API key config, status monitoring)
-- Strategy backtesting with real-time progress
-- AI-powered hypothesis formalization and interpretation
-- Model/provider configuration
+- **Quant researcher** — Pipeline a hypothesis from `formalize → grid backtest → AI ideator → replay → paper trader` without re-implementing infrastructure each time
+- **Strategy developer** — Drop a new `Strategy` subclass in `strategies_local.py`; the backtester, research loop, and paper trader auto-discover it
+- **Exchange contributor** — Implement `AdapterMeta` + a download function and the new exchange shows up everywhere (CLI, UI, research loop)
+- **Statistical purist** — Pre-registered hypotheses + clustered SEs + HLZ thresholds + OOS gates prevent the usual finance research traps
 
 ---
 
-## Writing a Strategy
-
-Strategies live in `edge_catcher/runner/strategies.py` (public) or `edge_catcher/runner/strategies_local.py` (private, gitignored). A worked tutorial example, `longshot_fade_example`, ships in `edge_catcher/runner/strategies_example.py` — copy it to `strategies_local.py` and edit:
-
-```python
-from edge_catcher.runner.strategies import Strategy, Signal
-
-class MyStrategy(Strategy):
-    name = "my_strategy"
-
-    def on_trade(self, trade, market, context) -> list[Signal]:
-        # Return zero or more Signal objects (action='buy' or 'sell')
-        ...
-```
-
-Strategies are auto-discovered by the backtester and research loop. See [`docs/strategy-guide.md`](docs/strategy-guide.md) for the full walkthrough.
-
----
-
-## Statistical Methodology
-
-### Why t > 3.0 instead of 1.96?
-
-The Harvey-Liu-Zhu (2016) threshold corrects for multiple comparison bias in financial research. At t = 1.96, ~5% of random noise passes significance. Requiring t > 3.0 drops the false discovery rate to <0.3%.
-
-### Why clustered standard errors?
-
-Contracts expiring on the same date share a common shock. Treating them as independent inflates the effective sample size. We cluster by expiration date and use the within-cluster majority outcome as the unit of observation.
-
-### Verdict logic
-
-```
-INSUFFICIENT_DATA    → n < 30 per bucket or < 80 independent observations
-NO_EDGE              → no bucket clears t > 3.0
-INCONCLUSIVE         → mixed signal (some buckets significant, some not)
-EDGE_EXISTS          → signal clears HLZ threshold, edge survives fees
-EDGE_NOT_TRADEABLE   → signal is real but fee-adjusted edge ≤ 0
-```
-
----
-
-## Running Tests
+## Running tests
 
 ```bash
 pytest tests/ -v
 ```
 
-255+ tests run against mocked API responses — no live API key needed.
+1030 tests run fully mocked — no live API keys needed. Tests that exercise the paper trader or FastAPI dashboard skip cleanly when the `[live]` or `[ui]` extras aren't installed; install `[dev,live,ui]` if you want full coverage.
+
+---
+
+## Contributing
+
+PRs welcome on the framework. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution flow and the [roadmap](docs/roadmap.md) for v1.1 candidates.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
