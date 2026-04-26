@@ -22,7 +22,7 @@ edge-catcher is a Python framework for building and validating systematic strate
 - 🔌 **Pluggable adapter registry** — Add a new exchange in ~50 LOC
 - 🧠 **Optional AI (no API key required)** — Auto-detects Claude Code CLI; falls back to Anthropic / OpenAI / OpenRouter
 - 🖥️ **React + FastAPI web UI** — 8 pages: Dashboard, Data Sources, Analyze, Strategize, Research, Hypotheses, Backtest, Settings
-- ✅ **1030 tests** — Fully mocked, runs without live API keys
+- ✅ **900+ tests** — Fully mocked, runs without live API keys
 
 ---
 
@@ -139,7 +139,7 @@ edge_catcher/
 api/               FastAPI backend
 ui/                React + Vite frontend (8 pages)
 config/            Public market configs (per category)
-tests/             1030 tests across 77 files
+tests/             900+ tests across 75 files
 ```
 
 ### Privacy by design
@@ -171,7 +171,7 @@ The runtime auto-discovers and merges these at load time. You never commit resea
 pytest tests/ -v
 ```
 
-1030 tests run fully mocked — no live API keys needed. Tests that exercise the paper trader or FastAPI dashboard skip cleanly when the `[live]` or `[ui]` extras aren't installed; install `[dev,live,ui]` if you want full coverage.
+900+ tests run fully mocked — no live API keys needed. Tests that exercise the paper trader or FastAPI dashboard skip cleanly when the `[live]` or `[ui]` extras aren't installed; install `[dev,live,ui]` if you want full coverage.
 
 ---
 
