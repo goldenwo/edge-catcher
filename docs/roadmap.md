@@ -42,6 +42,10 @@ Bigger pieces that need design + implementation time:
 - **Docker / cloud deployment guide** — `docker-compose.yml` for local dev, plus a "deploy to a Linux VPS" walkthrough.
 - **mypy / pyright type-check CI** — currently ruff-only; type checking would catch a meaningful class of bugs.
 - **Public reporting-module delegation pattern** — example showing how to wire `python -m edge_catcher.reporting` into a daily cron + your delivery channel of choice.
+- **Desktop-app UX** — install once, launch, and the UI opens automatically — no separate `uvicorn` + `npm run dev` dance. Three plausible shapes, ordered by effort:
+  - `edge-catcher launch` CLI command — starts FastAPI + opens default browser to `localhost`. Optional `pystray` tray icon. Lowest friction; works for technical and casual users alike.
+  - **Pywebview wrapper** — Python opens a native OS window pointing at the embedded FastAPI. No browser chrome. Feels like a real lightweight desktop app.
+  - **Tauri shell + Python sidecar** — proper installable binary with native menus and signed builds. The React+Vite UI is already Tauri-friendly. Right answer when shipping to non-Python users matters.
 
 ## Beyond v1.1
 
