@@ -10,7 +10,16 @@ from edge_catcher.notifications.envelope import DeliveryResult, Notification
 
 
 class FileChannel:
-	"""Append-only JSONL notification log."""
+	"""Append-only JSONL notification log.
+
+	Single-writer assumption: this adapter does NOT take a file lock.
+	POSIX guarantees append-atomicity only for writes smaller than
+	PIPE_BUF (4096 bytes on Linux). Concurrent writers from multiple
+	processes (e.g. two cron jobs targeting the same path) MAY interleave
+	if a record exceeds that limit. Typical notification records are
+	~500 bytes — well under the limit — but if you embed large payloads,
+	either serialize callers or write to per-process paths.
+	"""
 
 	def __init__(self, name: str, path: str) -> None:
 		self.name = name
