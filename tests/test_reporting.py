@@ -296,14 +296,30 @@ class TestErrorReportToNotification:
 
 
 class TestOpenPositions:
-	def test_returns_list_of_dicts(self):
+	def test_returns_list_of_dicts(self, tmp_path):
+		"""Schema lock for an open row: open_positions returns dicts with exactly
+		{strategy, series_ticker, count} keys and count is an int. Uses a tmp DB
+		with a guaranteed open row so the loop is not vacuously satisfied (the
+		bundled demo fixture has zero open rows)."""
 		from edge_catcher.reporting import generate_report
-		from pathlib import Path
-		fixture = Path("edge_catcher/data/examples/paper_trades_demo.db")
-		report = generate_report(fixture, date="2026-04-25")
+		import sqlite3
+		db = tmp_path / "schema_check.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		# Mix of settled + open: open MUST appear in open_positions, settled MUST NOT.
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'won',  50, 1, 10,   1, '2026-04-25T12:00:00Z')")
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'open', 50, 1, NULL, 1, NULL)")
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
 		assert "open_positions" in report
 		assert isinstance(report["open_positions"], list)
-		# All items are dicts with the expected schema:
+		assert len(report["open_positions"]) >= 1, "fixture has 1 open row, helper must return it"
+		# Schema lock — loop now actually executes:
 		for row in report["open_positions"]:
 			assert set(row.keys()) == {"strategy", "series_ticker", "count"}
 			assert isinstance(row["count"], int)
