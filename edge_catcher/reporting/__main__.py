@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -36,6 +37,15 @@ from edge_catcher.reporting.notify import error_report_to_notification, report_t
 
 
 _DEFAULT_NOTIFY_CONFIG = Path("config.local") / "notifications.yaml"
+
+# Redact email-like patterns from error strings before printing the per-channel
+# results table to stderr. Cron logs often go to centralized aggregators; user
+# identifiers in error messages should not leak by accident.
+_EMAIL_RE = re.compile(r"[\w\.\+\-]+@[\w\.\-]+\.[A-Za-z]{2,}")
+
+
+def _redact(s: str) -> str:
+	return _EMAIL_RE.sub("<email>", s)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -78,7 +88,7 @@ def _print_results_table(results: dict[str, DeliveryResult]) -> None:
 			tail = f"{int(r.latency_ms)}ms"
 			status = "OK"
 		else:
-			err = (r.error or "").replace("\n", " ")
+			err = _redact((r.error or "").replace("\n", " "))
 			tail = err[:80]
 			status = "FAIL"
 		print(f"{name:<20} {status:<7} {tail}", file=sys.stderr)

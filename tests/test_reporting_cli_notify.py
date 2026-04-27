@@ -311,6 +311,42 @@ def test_no_notify_byte_for_byte_matches_golden(capsys, monkeypatch):
 	)
 
 
+def test_results_table_redacts_emails_in_error_tail(tmp_path, capsys, monkeypatch):
+	"""Email addresses in r.error must be redacted before printing the
+	stderr table — ops cron logs may surface user identifiers otherwise."""
+	from edge_catcher.notifications.envelope import DeliveryResult
+	from edge_catcher.notifications import loader
+
+	class _LeakyChannel:
+		def __init__(self, name):
+			self.name = name
+
+		def send(self, notification):
+			return DeliveryResult(
+				channel_name=self.name,
+				success=False,
+				error="535 5.7.8 Username/Password not accepted: alice@example.com",
+				latency_ms=0.1,
+			)
+
+	monkeypatch.setitem(loader._TYPE_TO_CLASS, "leaky", _LeakyChannel)
+	monkeypatch.setitem(loader._REQUIRED_FIELDS, "leaky", set())
+	monkeypatch.setitem(loader._OPTIONAL_FIELDS, "leaky", set())
+
+	cfg = tmp_path / "n.yaml"
+	cfg.write_text("channels:\n  bad:\n    type: leaky\n", encoding="utf-8")
+	from edge_catcher.reporting.__main__ import main
+	rc = main([
+		"--db", str(FIXTURE_DB), "--notify-config", str(cfg),
+		"--notify", "bad",
+	])
+	captured = capsys.readouterr()
+	assert rc == 1
+	# Email redacted from the table.
+	assert "alice@example.com" not in captured.err
+	assert "<email>" in captured.err
+
+
 # --- Subprocess test: verify the package entry point still works.
 
 def test_subprocess_entry_point_smoke():
