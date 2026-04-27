@@ -50,6 +50,11 @@ def test_record_shape(tmp_path: Path):
 	assert set(rec.keys()) == {"ts", "channel", "title", "body", "severity", "payload"}
 	assert rec["channel"] == "my_channel"
 	assert rec["severity"] == "warn"
+	# Lock the no-payload case too: payload key MUST be present and MUST be None.
+	ch.send(Notification(title="t2", body="b2"))
+	rec2 = json.loads(target.read_text(encoding="utf-8").splitlines()[1])
+	assert set(rec2.keys()) == {"ts", "channel", "title", "body", "severity", "payload"}
+	assert rec2["payload"] is None
 
 
 def test_permission_error_caught(tmp_path: Path, monkeypatch):
