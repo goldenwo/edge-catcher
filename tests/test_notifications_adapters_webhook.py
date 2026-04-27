@@ -1,8 +1,6 @@
 """Tests for WebhookChannel — generic style + HTTP error handling."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import httpx
 import pytest
 
@@ -81,3 +79,30 @@ def test_generic_http_error_caught(monkeypatch):
 	r = ch.send(Notification(title="T", body="B"))
 	assert r.success is False
 	assert "connect refused" in (r.error or "") or "HTTPError" in (r.error or "")
+
+
+def test_discord_payload_shape(monkeypatch):
+	calls = _patch_post(monkeypatch, FakeResponse(204))
+	ch = WebhookChannel(name="d", url="https://discord/hook", style="discord")
+	ch.send(Notification(title="T", body="B", severity="info"))
+	url, body = calls[0]
+	assert "embeds" in body
+	embed = body["embeds"][0]
+	assert embed["title"] == "T"
+	assert embed["description"] == "B"
+	assert embed["color"] == 0x5865F2  # info = blurple
+	assert "footer" in embed
+	assert "T" in embed["footer"]["text"] and "Z" in embed["footer"]["text"]
+
+
+@pytest.mark.parametrize("severity,color", [
+	("info", 0x5865F2),
+	("warn", 0xFAA61A),
+	("error", 0xED4245),
+])
+def test_discord_severity_color(monkeypatch, severity, color):
+	calls = _patch_post(monkeypatch, FakeResponse(204))
+	ch = WebhookChannel(name="d", url="https://discord/hook", style="discord")
+	ch.send(Notification(title="T", body="B", severity=severity))
+	body = calls[0][1]
+	assert body["embeds"][0]["color"] == color

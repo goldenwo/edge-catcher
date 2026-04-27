@@ -30,6 +30,13 @@ class WebhookChannel:
 		self.style = style
 		self.timeout_seconds = timeout_seconds
 
+	# Class-level constant — Discord embed color per severity.
+	_DISCORD_COLORS = {
+		"info": 0x5865F2,
+		"warn": 0xFAA61A,
+		"error": 0xED4245,
+	}
+
 	def send(self, notification: Notification) -> DeliveryResult:
 		t0 = time.perf_counter()
 		ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -70,5 +77,13 @@ class WebhookChannel:
 				"payload": n.payload,
 				"ts": ts,
 			}
-		# Other styles filled in by Task 6 + 7.
+		if self.style == "discord":
+			return {
+				"embeds": [{
+					"title": n.title,
+					"description": n.body,
+					"color": self._DISCORD_COLORS.get(n.severity, self._DISCORD_COLORS["info"]),
+					"footer": {"text": ts},
+				}],
+			}
 		raise NotImplementedError(f"style {self.style!r} not yet implemented")
