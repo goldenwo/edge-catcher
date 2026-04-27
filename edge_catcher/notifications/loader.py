@@ -42,7 +42,7 @@ _OPTIONAL_FIELDS: dict[str, set[str]] = {
 	"stdout": set(),
 	"file": set(),
 	"webhook": {"style", "timeout_seconds"},
-	"smtp": {"use_tls"},
+	"smtp": {"use_tls", "timeout_seconds"},
 }
 
 _SUPPORTED_VERSION = 1

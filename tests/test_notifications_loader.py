@@ -249,3 +249,21 @@ def test_malformed_yaml_raises(tmp_path):
 	p = _write(tmp_path, "channels:\n  d:\n    type: [this is not a string\n")
 	with pytest.raises(NotificationConfigError, match="malformed"):
 		load_channels(p)
+
+
+def test_smtp_timeout_seconds_loads_from_yaml(tmp_path, monkeypatch):
+	monkeypatch.setenv("U", "u"); monkeypatch.setenv("P", "p")
+	p = _write(tmp_path, """\
+channels:
+  e:
+    type: smtp
+    host: h
+    port: 587
+    user: ${U}
+    password: ${P}
+    from: f@x
+    to: [t@x]
+    timeout_seconds: 5.0
+""")
+	channels = load_channels(p)
+	assert channels["e"].timeout_seconds == 5.0

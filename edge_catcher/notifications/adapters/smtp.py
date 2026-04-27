@@ -22,6 +22,7 @@ class SMTPChannel:
 		from_addr: str,
 		to: list[str],
 		use_tls: bool = True,
+		timeout_seconds: float = 10.0,
 	) -> None:
 		self.name = name
 		self.host = host
@@ -31,6 +32,7 @@ class SMTPChannel:
 		self.from_addr = from_addr
 		self.to = list(to)
 		self.use_tls = use_tls
+		self.timeout_seconds = timeout_seconds
 
 	def send(self, notification: Notification) -> DeliveryResult:
 		t0 = time.perf_counter()
@@ -48,7 +50,7 @@ class SMTPChannel:
 
 		smtp_conn = None
 		try:
-			smtp_conn = smtplib.SMTP(self.host, self.port, timeout=10)
+			smtp_conn = smtplib.SMTP(self.host, self.port, timeout=self.timeout_seconds)
 			if self.use_tls:
 				smtp_conn.starttls()
 			smtp_conn.login(self.user, self.password)

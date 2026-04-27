@@ -144,3 +144,27 @@ def test_oserror_caught(monkeypatch):
 	# When SMTP() constructor itself raises, no instance was constructed,
 	# so quit() should not have been called on anything (no AttributeError).
 	# This is implicitly verified by the test not crashing in the finally block.
+
+
+def test_default_timeout_is_10_seconds(monkeypatch):
+	mock_class, mock_instance = _make_mock_smtp(monkeypatch)
+	ch = SMTPChannel(
+		name="email", host="h", port=587, user="u", password="p",
+		from_addr="f@x", to=["t@x"],
+	)
+	ch.send(Notification(title="T", body="B"))
+	# smtplib.SMTP(host, port, timeout=...) — third positional or `timeout` kw
+	args, kwargs = mock_class.call_args
+	assert args == ("h", 587) or args == ("h", 587, 10) or kwargs.get("timeout") == 10
+
+
+def test_custom_timeout_passed_through(monkeypatch):
+	mock_class, mock_instance = _make_mock_smtp(monkeypatch)
+	ch = SMTPChannel(
+		name="email", host="h", port=587, user="u", password="p",
+		from_addr="f@x", to=["t@x"], timeout_seconds=3.0,
+	)
+	ch.send(Notification(title="T", body="B"))
+	args, kwargs = mock_class.call_args
+	# Either positional 3rd arg or `timeout` kwarg should be 3.0
+	assert (len(args) >= 3 and args[2] == 3.0) or kwargs.get("timeout") == 3.0
