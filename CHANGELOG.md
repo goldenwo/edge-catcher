@@ -5,6 +5,17 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`generate_report` adds `open_positions` and `all_time_by_strategy` fields** — additive; existing keys/values unchanged. Surfaces the data the daily P&L formatter needs to produce a rich Discord-friendly summary without an LLM in the loop.
+- **`report_to_notification` produces a multi-section body** — Yesterday / All-time-by-strategy / Portfolio / Open-positions sections in plain text + simple markdown. Empty-day handling explicit ("No settled trades."). Renders well across all four adapters (Discord embed, Slack mrkdwn, SMTP, stdout). Replaces the v1.1.0 single-line body, which was minimum-viable for a generic helper.
+
+### Changed
+
+- **`tests/fixtures/reporting_cli_no_notify_golden.json` rebaselined** — locks the v1.2.0 JSON shape (adds `open_positions` + `all_time_by_strategy`). Existing v1.1.x consumers reading specific keys continue to work; consumers doing strict byte-equality against the v1.1.0 output need to refresh their baseline.
+
 ## [1.1.0] — 2026-04-27
 
 ### Added
