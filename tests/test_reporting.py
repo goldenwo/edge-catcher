@@ -265,6 +265,85 @@ class TestReportToNotification:
 		assert n.severity == "error"
 		assert "MALFORMED" in n.title
 
+	def test_rich_body_has_yesterday_section(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "2026-04-26",
+			"all_time": {
+				"net_pnl_usd": 11.12, "win_rate_pct": 60.0,
+				"closed_trades": 20, "wins": 12, "net_pnl_cents": 1112,
+				"deployed_usd": 0.98, "roi_deployed_pct": 1134.69,
+				"avg_pnl_cents": 55.6,
+			},
+			"today": {"settled_count": 2, "pnl_cents": 100, "pnl_usd": 1.0},
+			"today_by_strategy": [
+				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
+				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
+				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
+			],
+			"all_time_by_strategy": [
+				{"strategy": "debut-fade", "closed_trades": 19, "wins": 12, "net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2},
+				{"strategy": "flow-fade",  "closed_trades": 1,  "wins": 1,  "net_pnl_cents": 75,   "net_pnl_usd": 0.75,  "win_rate_pct": 100.0},
+			],
+			"open_positions": [
+				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
+			],
+		}
+		n = report_to_notification(report)
+		# Yesterday section: each (strategy, series) appears once with W/L counts.
+		assert "Yesterday" in n.body
+		assert "debut-fade / KXETH: 1W / 1L" in n.body
+		assert "flow-fade / KXBTC: 1W / 0L" in n.body
+
+	def test_rich_body_has_all_time_by_strategy_section(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		n = report_to_notification(report)
+		assert "All-time by strategy" in n.body
+		assert "debut-fade: 19 trades" in n.body
+		assert "63.2%" in n.body or "WR: 12/19" in n.body  # accept either rendering
+
+	def test_rich_body_has_portfolio_section(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		n = report_to_notification(report)
+		assert "Portfolio" in n.body
+		assert "$11.12" in n.body  # net_pnl_usd
+		assert "1134" in n.body    # roi_deployed_pct (no need for exact decimal)
+		assert "60" in n.body      # overall win rate
+
+	def test_rich_body_has_open_positions_section(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		n = report_to_notification(report)
+		assert "Open positions" in n.body
+		assert "debut-fade/KXSOL" in n.body or "debut-fade / KXSOL" in n.body
+
+	# Helper to keep the test fixtures DRY:
+	def _sample_report(self):
+		return {
+			"date": "2026-04-26",
+			"all_time": {
+				"net_pnl_usd": 11.12, "win_rate_pct": 60.0,
+				"closed_trades": 20, "wins": 12, "net_pnl_cents": 1112,
+				"deployed_usd": 0.98, "roi_deployed_pct": 1134.69,
+				"avg_pnl_cents": 55.6,
+			},
+			"today": {"settled_count": 2, "pnl_cents": 100, "pnl_usd": 1.0},
+			"today_by_strategy": [
+				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
+				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
+				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
+			],
+			"all_time_by_strategy": [
+				{"strategy": "debut-fade", "closed_trades": 19, "wins": 12, "net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2},
+				{"strategy": "flow-fade",  "closed_trades": 1,  "wins": 1,  "net_pnl_cents": 75,   "net_pnl_usd": 0.75,  "win_rate_pct": 100.0},
+			],
+			"open_positions": [
+				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
+			],
+		}
+
 
 class TestErrorReportToNotification:
 	def test_severity_is_error(self):
