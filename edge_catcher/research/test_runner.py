@@ -30,6 +30,12 @@ FEE_MODELS: dict[str, float] = {
 @dataclass
 class TestResult:
 	"""Result of a statistical hypothesis test."""
+
+	# Tell pytest this is a domain class, not a test class. Without this,
+	# pytest tries to collect TestResult (and its `__init__`) wherever it's
+	# imported into a test module and emits a PytestCollectionWarning.
+	__test__ = False
+
 	verdict: str
 	z_stat: float
 	fee_adjusted_edge: float
@@ -877,6 +883,9 @@ class MomentumAlignmentTest(StatisticalTest):
 
 class TestRunner:
 	"""Dispatches hypothesis configs to the appropriate StatisticalTest."""
+
+	# Tell pytest this is a domain class, not a test class.
+	__test__ = False
 
 	def __init__(self) -> None:
 		self.test_types: dict[str, StatisticalTest] = {}

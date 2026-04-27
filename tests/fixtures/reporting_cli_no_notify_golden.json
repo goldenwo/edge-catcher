@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "date": "2026-01-01",
+  "all_time": {
+    "total_trades": 20,
+    "open_trades": 0,
+    "closed_trades": 20,
+    "wins": 12,
+    "losses": 8,
+    "win_rate_pct": 60.0,
+    "net_pnl_cents": 1112,
+    "net_pnl_usd": 11.12,
+    "avg_pnl_cents": 55.6,
+    "fees_cents": 20,
+    "deployed_cents": 98,
+    "deployed_usd": 0.98,
+    "roi_deployed_pct": 1134.69
+  },
+  "today": {
+    "settled_count": 0,
+    "pnl_cents": 0,
+    "pnl_usd": 0.0
+  },
+  "today_by_strategy": []
+}
