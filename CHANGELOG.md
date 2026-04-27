@@ -5,6 +5,18 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-04-27
+
+### Added
+
+- **`edge_catcher.notifications`** — pluggable notification delivery layer with `stdout`, `file`, `webhook` (discord/slack/generic styles), and `smtp` adapters. YAML-configured at `config.local/notifications.yaml` with env-var interpolation and a forward-compat `version:` field. Used by the reporting CLI's new `--notify`, `--notify-config`, `--quiet` flags. See [docs/upgrade-1.1.md](docs/upgrade-1.1.md) for upgrade + cron-wiring instructions.
+- **`config/notifications.example.yaml`** — sanitized template with all four adapter types and discord/slack webhook examples.
+- **Reporting CLI** — `--notify <name>` (repeatable), `--notify-config <path>`, `--quiet`. Backward-compatible: invocations without `--notify` keep the existing JSON-to-stdout behavior byte-for-byte (locked by a golden-file test).
+
+### Deprecated
+
+- `edge_catcher/monitors/notifications.py` — paper-trader-internal Discord webhook helper. Will be migrated onto `edge_catcher.notifications` in a future release (see roadmap v1.2 candidate); existing callers continue to work in the meantime.
+
 ## [1.0.1] — 2026-04-26
 
 ### Added
@@ -71,5 +83,6 @@ Built with the support of Anthropic Claude (Opus + Sonnet + Haiku) for code revi
 
 ---
 
+[1.1.0]: https://github.com/goldenwo/edge-catcher/releases/tag/v1.1.0
 [1.0.1]: https://github.com/goldenwo/edge-catcher/releases/tag/v1.0.1
 [1.0.0]: https://github.com/goldenwo/edge-catcher/releases/tag/v1.0.0
