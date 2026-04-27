@@ -252,7 +252,8 @@ def test_malformed_yaml_raises(tmp_path):
 
 
 def test_smtp_timeout_seconds_loads_from_yaml(tmp_path, monkeypatch):
-	monkeypatch.setenv("U", "u"); monkeypatch.setenv("P", "p")
+	monkeypatch.setenv("U", "u")
+	monkeypatch.setenv("P", "p")
 	p = _write(tmp_path, """\
 channels:
   e:
