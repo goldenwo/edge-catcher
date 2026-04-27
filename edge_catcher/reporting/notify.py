@@ -129,8 +129,18 @@ def _section_portfolio(at: dict) -> str:
 	)
 
 
+# Cap to keep total body under Discord's 4096-char embed-description limit.
+# Each "strategy/series (N)" entry is ~25-40 chars; 30 entries fits comfortably
+# under 4096 with headroom for the other 3 sections.
+_OPEN_POSITIONS_DISPLAY_LIMIT = 30
+
+
 def _section_open_positions(rows: list) -> str:
 	if not rows:
 		return "**Open positions:** None."
-	parts = [f"{r['strategy']}/{r['series_ticker']} ({r['count']})" for r in rows]
-	return "**Open positions:** " + ", ".join(parts)
+	displayed = rows[:_OPEN_POSITIONS_DISPLAY_LIMIT]
+	parts = [f"{r['strategy']}/{r['series_ticker']} ({r['count']})" for r in displayed]
+	body = "**Open positions:** " + ", ".join(parts)
+	if len(rows) > _OPEN_POSITIONS_DISPLAY_LIMIT:
+		body += f", …({len(rows) - _OPEN_POSITIONS_DISPLAY_LIMIT} more)"
+	return body

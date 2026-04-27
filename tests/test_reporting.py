@@ -392,6 +392,38 @@ class TestReportToNotification:
 		report["today"]["pnl_cents"] = -50
 		assert report_to_notification(report).severity == "warn"
 
+	def test_open_positions_capped_at_30(self):
+		"""Discord rejects embed descriptions > 4096 chars. _section_open_positions
+		must cap row display at the documented limit and emit a '…(N more)'
+		marker so the rich body stays under the limit even with many opens."""
+		from edge_catcher.reporting.notify import report_to_notification, _OPEN_POSITIONS_DISPLAY_LIMIT
+		total = _OPEN_POSITIONS_DISPLAY_LIMIT + 20  # 50 rows; 20 will be truncated
+		report = self._sample_report()
+		# total open positions across distinct (strategy, series) pairs:
+		report["open_positions"] = [
+			{"strategy": f"s{i // 10}", "series_ticker": f"K{i % 10}", "count": 1}
+			for i in range(total)
+		]
+		n = report_to_notification(report)
+		# Cap kicks in — marker must state the number of truncated entries:
+		truncated = total - _OPEN_POSITIONS_DISPLAY_LIMIT
+		assert f"({truncated} more)" in n.body, (
+			f"expected '({truncated} more)' marker; got: {n.body!r}"
+		)
+		# Sanity: the total body stays well under Discord's 4096-char limit.
+		assert len(n.body) < 4096, f"body length {len(n.body)} exceeds Discord limit"
+
+	def test_open_positions_under_limit_no_truncation(self):
+		"""Below the cap, no '…(N more)' marker appears."""
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["open_positions"] = [
+			{"strategy": "s1", "series_ticker": f"K{i}", "count": 1}
+			for i in range(5)
+		]
+		n = report_to_notification(report)
+		assert "more)" not in n.body, "should not truncate when under cap"
+
 	# Helper to keep the test fixtures DRY:
 	def _sample_report(self):
 		return {
