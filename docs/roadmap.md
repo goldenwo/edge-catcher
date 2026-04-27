@@ -24,12 +24,7 @@
 
 ## Short-term polish (v1.0.x)
 
-Small, low-risk improvements that didn't make the v1 cut:
-
-- **Demo fixture with `fill_size > 1`** — makes the reporting regression test strict (the "deployed = entry_price × fill_size" assertion currently can't fully distinguish from the buggy `SUM(entry_price)` formula because all fixture rows have `fill_size = 1`).
-- **GitHub issue + PR templates** — `.github/ISSUE_TEMPLATE/` + `.github/pull_request_template.md`.
-- **`CODE_OF_CONDUCT.md`** — standard contributor agreement.
-- **Resource limits in `deploy/paper-trader.service`** — match `edge-catcher-download.service`'s `MemoryMax` / `CPUQuota` / `Nice` settings, or add a comment explaining intentional omission.
+All four v1.0.x items shipped between v1.0.0 and the next tag — see the **Unreleased** section of [CHANGELOG.md](../CHANGELOG.md) for the full list. New small polish items can be added back here as they come up.
 
 ## v1.1 candidates (when motivated)
 
