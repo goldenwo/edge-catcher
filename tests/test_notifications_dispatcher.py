@@ -73,7 +73,7 @@ def test_latency_ms_populated_for_caught_exception():
 		name = "slow"
 
 		def send(self, n):
-			_time.sleep(0.01)  # 10 ms
+			_time.sleep(0.02)  # 20 ms
 			raise RuntimeError("boom")
 
 	results = send(Notification(title="t", body="b"), [SlowFakeRaise()])
