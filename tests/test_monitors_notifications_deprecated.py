@@ -20,3 +20,40 @@ def test_import_emits_deprecation_warning():
 	assert "edge_catcher.monitors.notifications" in msg
 	assert "deprecated" in msg.lower()
 	assert "edge_catcher.notifications" in msg  # points at the replacement
+
+
+def test_pyproject_filter_actually_matches_deprecation_message():
+	"""Regression: the prior filter `ignore::DeprecationWarning:edge_catcher.monitors.notifications`
+	was a no-op because the warning is emitted with stacklevel=2, so its reported
+	module is the CALLER (monitors.dispatch / monitors.engine), not
+	monitors.notifications itself. A module-targeted filter never matched.
+
+	The fix uses a message-regex filter, which IS robust against stacklevel
+	attribution. This test introspects warnings.filters at runtime and confirms
+	at least one registered 'ignore' entry would actually match the deprecation
+	message — catching any future regression to a module-targeted filter.
+	"""
+	target_msg = (
+		"edge_catcher.monitors.notifications is deprecated; "
+		"use edge_catcher.notifications for new code. "
+		"This module will be migrated onto the unified notifications layer "
+		"in a future release."
+	)
+	matched = False
+	for action, message_regex, category, _module_regex, _lineno in warnings.filters:
+		if action != "ignore":
+			continue
+		# The filter's category must be DeprecationWarning or a parent (e.g. Warning).
+		if not issubclass(DeprecationWarning, category):
+			continue
+		if message_regex is None:
+			continue
+		if message_regex.search(target_msg):
+			matched = True
+			break
+	assert matched, (
+		"No registered 'ignore' DeprecationWarning filter matches the "
+		"monitors.notifications deprecation message. The pyproject.toml "
+		"filterwarnings entry is either missing or targets the wrong field. "
+		f"Current warnings.filters: {warnings.filters}"
+	)

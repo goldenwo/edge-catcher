@@ -57,5 +57,11 @@ filterwarnings = [
 	# per spec §11. Suppress the noise from internal-caller imports during pytest;
 	# the test_monitors_notifications_deprecated test still verifies the warning
 	# fires by using catch_warnings + simplefilter("always") locally.
-	"ignore::DeprecationWarning:edge_catcher.monitors.notifications",
+	#
+	# Filter-spec note: pytest matches the `module` field against the warning's
+	# REPORTED location (governed by `stacklevel`). monitors.notifications uses
+	# stacklevel=2, so the warning is attributed to the CALLER (monitors.dispatch
+	# / monitors.engine), not monitors.notifications itself. Targeting the message
+	# regex is robust against stacklevel changes and importer-module identity.
+	"ignore:edge_catcher.monitors.notifications is deprecated:DeprecationWarning",
 ]
