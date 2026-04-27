@@ -10,9 +10,18 @@ import asyncio
 import logging
 import os
 import time
+import warnings
 from collections.abc import Awaitable, Callable
 
 import httpx
+
+warnings.warn(
+	"edge_catcher.monitors.notifications is deprecated; use edge_catcher.notifications "
+	"for new code. This module will be migrated onto the unified notifications layer "
+	"in a future release.",
+	DeprecationWarning,
+	stacklevel=2,
+)
 
 logger = logging.getLogger(__name__)
 
