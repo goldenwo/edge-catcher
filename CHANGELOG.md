@@ -5,6 +5,21 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`CODE_OF_CONDUCT.md`** — adopts Contributor Covenant 2.1 by reference; reporting goes through GitHub private security advisories or issues.
+- **GitHub issue + PR templates** — `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md` and `.github/pull_request_template.md` give contributors a structured intake form and a reviewer-friendly PR checklist.
+- **Resource limits on `deploy/paper-trader.service`** — `MemoryMax=512M`, `CPUQuota=50%`, `Nice=10`. Sized for a small VPS or 8GB SBC; comment calls out when to raise them.
+
+### Changed
+
+- **Demo fixture has a `fill_size > 1` row.** Row `A-01` now ships with `fill_size=4` so `SUM(entry_price * fill_size)` is arithmetically distinct from the buggy `SUM(entry_price)` formula. The reporting regression test now fails the bug instead of merely guarding the SQL shape. Fixture totals updated: net_pnl 821¢ → 1112¢, deployed 89¢ → 98¢ (counts and fees unchanged).
+- **`CONTRIBUTING.md`** — drops the stale `public-release-v1` branch reference (merged into `main`); test count refreshed to "~900+" to match the public clone reality.
+- **`README.md`** — leaner structure (badges, four-stage flow diagram, doc table). Test count corrected to match public-clone reality.
+- **`docs/roadmap.md`** — desktop-app UX added as a v1.1 candidate; v1.0.x polish section trimmed as items shipped.
+
 ## [1.0.0] — 2026-04-25
 
 Initial public release. The framework, adapter registry, research agent, paper trader, capture/replay pipeline, and UI are all open source under MIT.
