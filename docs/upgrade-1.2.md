@@ -8,6 +8,12 @@ v1.2.0 makes `python -m edge_catcher.reporting --notify` produce a multi-section
 - **`report_to_notification` produces a rich multi-section body** with: Yesterday breakdown by strategy/series, All-time per-strategy summary, Portfolio stats, Open positions.
 - **Discord embeds, Slack blocks, SMTP plain-text, file-JSONL audit logs** — all render the new body correctly without per-channel formatter changes.
 
+## Channel privacy reminder
+
+The rich body includes strategy names and series tickers from your `paper_trades` DB. Per the project's private-file conventions, strategy names live in `monitors/strategies_local.py` (gitignored). They will appear in the Discord/Slack/SMTP body now.
+
+For private channels (the typical paper-trader-on-a-Pi setup), this is fine. If you're delivering to a public channel for status visibility, consider routing through `style: generic` with a downstream renderer that aggregates away the strategy/series detail.
+
 ## Migration: retire LLM-formatter daily P&L cron
 
 If your daily P&L is delivered through an LLM-formatter agent (e.g., the `paper-trader-daily-pnl` job in `~/.openclaw/cron/jobs.json` calling Claude Haiku to format), you can now replace it with a direct shell-cron invocation.
@@ -22,7 +28,7 @@ Replace the OpenClaw agent job with a crontab entry:
     DISCORD_PNL_WEBHOOK_URL=https://discord.com/api/webhooks/.../... \
     /usr/bin/python3 -m edge_catcher.reporting \
         --db data/paper_trades_v2.db \
-        --date "$(TZ=America/New_York date -d 'yesterday' +%Y-%m-%d)" \
+        --date "$(TZ=America/New_York date -d 'yesterday' +\%Y-\%m-\%d)" \
         --notify-config config.local/notifications.yaml \
         --notify pnl_discord \
         --quiet
@@ -39,7 +45,7 @@ If you prefer keeping the schedule in `~/.openclaw/cron/jobs.json` (e.g., for vi
 
 ```
 Run this command and report the exit code:
-exec `cd /home/openclaw/edge-catcher && python3 -m edge_catcher.reporting --db data/paper_trades_v2.db --date $(TZ=America/New_York date -d 'yesterday' +%Y-%m-%d) --notify-config config.local/notifications.yaml --notify pnl_discord --quiet`
+exec `cd /home/openclaw/edge-catcher && python3 -m edge_catcher.reporting --db data/paper_trades_v2.db --date $(TZ=America/New_York date -d 'yesterday' +\%Y-\%m-\%d) --notify-config config.local/notifications.yaml --notify pnl_discord --quiet`
 ```
 
 The agent becomes a thin shim. Lower value than Option A unless OpenClaw's scheduler integration is critical.
@@ -80,6 +86,8 @@ The Discord embed gets the rich body in its description; the JSONL file gets one
 | Discord embed shows raw asterisks (`**Section:**`) instead of bold | Style not set to `discord` (defaulted to `generic`) | Set `style: discord` on the webhook channel. |
 | Yesterday section says "No settled trades." but you know there were trades | `--date` argument is wrong (UTC vs EDT mismatch) | Confirm the cron date computation matches the EDT-bucket convention used by `generate_report`. |
 | Test suite fails on byte-for-byte golden after upgrade | You're running v1.1.x tests against v1.2.x code (or vice versa) | Pull the latest tests; the golden file is rebaselined per release that changes report shape. |
+| Daily P&L stopped being delivered after migration | Unescaped `%` in cron line | Replace `+%Y-%m-%d` with `+\%Y-\%m-\%d` (cron interprets unescaped `%` as command-stdin terminator) |
+| Slack channel renders `**Section:**` literally | The body uses Discord-flavored bold; Slack mrkdwn uses single `*asterisks*`. Per-channel formatting is deferred to v1.3+. | Use Discord for now, or accept the cosmetic on Slack. |
 
 ## Reverting to v1.1.x
 
