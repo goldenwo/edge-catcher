@@ -32,7 +32,10 @@ def test_generate_report_returns_expected_keys():
 def test_all_time_math():
 	"""Verifies hand-computed totals against the fixture.
 
-	Fixture: 20 closed rows (12W/8L), net pnl 821c, deployed 89c, fees 20c.
+	Fixture: 20 closed rows (12W/8L), net pnl 1112c, deployed 98c, fees 20c.
+	One row (id=1) has fill_size=4 so deployed_cents = SUM(entry_price*fill_size)
+	is arithmetically distinct from the buggy SUM(entry_price) formula (=89), and
+	pnl scales accordingly (row 1 settles 4*(100-3) - 1 = 387c).
 	"""
 	report = generate_report(FIXTURE_DB)
 	at = report["all_time"]
@@ -41,16 +44,16 @@ def test_all_time_math():
 	assert at["closed_trades"] == 20
 	assert at["wins"] == 12
 	assert at["losses"] == 8
-	assert at["net_pnl_cents"] == 821
-	assert at["net_pnl_usd"] == 8.21
+	assert at["net_pnl_cents"] == 1112
+	assert at["net_pnl_usd"] == 11.12
 	assert at["fees_cents"] == 20
-	assert at["deployed_cents"] == 89
-	assert at["deployed_usd"] == 0.89
+	assert at["deployed_cents"] == 98
+	assert at["deployed_usd"] == 0.98
 	assert at["win_rate_pct"] == 60.0
-	# ROI = 821 / 89 * 100 = 922.47%
-	assert at["roi_deployed_pct"] == round(821 / 89 * 100, 2)
-	# avg = 821 / 20 = 41.05c
-	assert at["avg_pnl_cents"] == round(821 / 20, 1)
+	# ROI = 1112 / 98 * 100 = 1134.69%
+	assert at["roi_deployed_pct"] == round(1112 / 98 * 100, 2)
+	# avg = 1112 / 20 = 55.6c
+	assert at["avg_pnl_cents"] == round(1112 / 20, 1)
 
 
 def test_today_filter_uses_exit_time_2026_04_01():
@@ -100,8 +103,10 @@ def test_missing_db_returns_error():
 
 def test_deployed_uses_entry_price_times_fill_size_not_just_entry_price():
 	"""Regression test: the OLD bug summed entry_price alone (per-contract cents),
-	not entry_price * fill_size. This test catches that regression by verifying
-	the deployed value matches the multiplied formula, NOT the unmultiplied one.
+	not entry_price * fill_size. The fixture intentionally contains at least one
+	row with fill_size > 1, so SUM(entry_price * fill_size) is arithmetically
+	distinct from SUM(entry_price) and the assertion below actually fails the
+	bug instead of just guarding the SQL shape.
 	"""
 	report = generate_report(FIXTURE_DB)
 	con = sqlite3.connect(str(FIXTURE_DB))
@@ -114,12 +119,15 @@ def test_deployed_uses_entry_price_times_fill_size_not_just_entry_price():
 		"FROM paper_trades WHERE status IN ('won','lost')"
 	).fetchone()[0]
 	con.close()
+	# Fixture invariant: the two formulas must produce different totals so the
+	# regression guard is meaningful. If this assertion ever trips, someone
+	# regenerated the fixture without preserving a fill_size > 1 row.
+	assert correct != buggy, (
+		f"fixture lost its fill_size>1 row: SUM(entry_price*fill_size)={correct} "
+		f"== SUM(entry_price)={buggy}; regression guard is now toothless"
+	)
 	assert report["all_time"]["deployed_cents"] == correct
-	# Safety: this assertion passes trivially when all fill_size == 1 (correct == buggy).
-	# The current fixture has all fill_size == 1, so this test guards the SQL shape
-	# but does not distinguish the two formulas arithmetically. The real regression
-	# guarantee comes from reading edge_catcher/reporting/__init__.py.
-	assert report["all_time"]["deployed_cents"] != buggy or correct == buggy
+	assert report["all_time"]["deployed_cents"] != buggy
 
 
 def test_cli_prints_json_for_fixture():
@@ -137,7 +145,7 @@ def test_cli_prints_json_for_fixture():
 	)
 	data = json.loads(result.stdout)
 	assert data["all_time"]["closed_trades"] == 20
-	assert data["all_time"]["net_pnl_cents"] == 821
+	assert data["all_time"]["net_pnl_cents"] == 1112
 
 
 def test_cli_returns_nonzero_on_missing_db():

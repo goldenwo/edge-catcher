@@ -83,7 +83,11 @@ def _row_values(
 	"""Compute the full paper_trades row for one test case."""
 	entry_time = _BASE + timedelta(days=minute_offset % 3, minutes=minute_offset)
 	exit_time = entry_time + timedelta(minutes=12)  # within 15 minutes
-	fill_size = 1
+	# One row uses fill_size > 1 so SUM(entry_price * fill_size) is arithmetically
+	# distinct from SUM(entry_price). This keeps the deployed-math regression test
+	# (test_deployed_uses_entry_price_times_fill_size_not_just_entry_price) honest
+	# instead of merely guarding the SQL shape.
+	fill_size = 4 if ticker_suffix == "A-01" else 1
 
 	# Entry fee is the Kalshi standard taker fee on the entry leg. The live
 	# engine always charges this — see TradeStore.record_trade.
