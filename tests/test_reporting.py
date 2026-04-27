@@ -252,3 +252,32 @@ class TestReportToNotification:
 		# someone adds a defensive copy.deepcopy() that would silently
 		# allow mutations to drift between caller and adapter.
 		assert n.payload is report
+
+
+class TestErrorReportToNotification:
+	def test_severity_is_error(self):
+		from edge_catcher.reporting.notify import error_report_to_notification
+		n = error_report_to_notification({"date": "2026-04-26", "error": "DB not found"})
+		assert n.severity == "error"
+
+	def test_title_marks_failure(self):
+		from edge_catcher.reporting.notify import error_report_to_notification
+		n = error_report_to_notification({"date": "2026-04-26", "error": "x"})
+		assert "FAILED" in n.title
+		assert "2026-04-26" in n.title
+
+	def test_body_includes_error(self):
+		from edge_catcher.reporting.notify import error_report_to_notification
+		n = error_report_to_notification({"date": "x", "error": "specific error msg"})
+		assert "specific error msg" in n.body
+
+	def test_payload_is_full_report(self):
+		from edge_catcher.reporting.notify import error_report_to_notification
+		report = {"date": "x", "error": "y"}
+		n = error_report_to_notification(report)
+		assert n.payload is report
+
+	def test_handles_missing_date(self):
+		from edge_catcher.reporting.notify import error_report_to_notification
+		n = error_report_to_notification({"error": "no date"})
+		assert "unknown" in n.title.lower()

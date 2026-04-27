@@ -217,6 +217,48 @@ def test_quiet_without_notify_warns(capsys):
 	assert "--quiet" in captured.err
 
 
+def test_error_path_dispatches_notification(tmp_path, capsys, monkeypatch):
+	"""When generate_report returns {"error": ...} and --notify is set,
+	dispatch an error-severity notification before exiting 1."""
+	# Force generate_report to return an error.
+	from edge_catcher.reporting import __main__ as cli
+	monkeypatch.setattr(
+		cli, "generate_report",
+		lambda db, date=None: {"date": "2026-04-26", "error": "DB unreadable"},
+	)
+	cfg = tmp_path / "n.yaml"
+	cfg.write_text("channels:\n  console:\n    type: stdout\n", encoding="utf-8")
+	rc = cli.main([
+		"--db", str(FIXTURE_DB), "--notify-config", str(cfg),
+		"--notify", "console",
+	])
+	captured = capsys.readouterr()
+	assert rc == 1
+	# Notification must have been dispatched (StdoutChannel writes to stdout).
+	assert "FAILED" in captured.out
+	assert "DB unreadable" in captured.out
+	# Stderr table also showed the channel.
+	assert "console" in captured.err
+	assert "OK" in captured.err
+	# Error JSON still on stdout (no --quiet).
+	assert '"error"' in captured.out
+
+
+def test_error_path_no_notify_unchanged(tmp_path, capsys, monkeypatch):
+	"""--notify NOT set + error: behavior unchanged from v1.0.x."""
+	from edge_catcher.reporting import __main__ as cli
+	monkeypatch.setattr(
+		cli, "generate_report",
+		lambda db, date=None: {"date": "x", "error": "boom"},
+	)
+	rc = cli.main(["--db", str(FIXTURE_DB)])
+	captured = capsys.readouterr()
+	assert rc == 1
+	assert '"error"' in captured.out
+	# No stderr table (no notify).
+	assert "channel" not in captured.err
+
+
 # --- Subprocess test: verify the package entry point still works.
 
 def test_subprocess_entry_point_smoke():

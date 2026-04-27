@@ -4,6 +4,22 @@ from __future__ import annotations
 from edge_catcher.notifications import Notification
 
 
+def error_report_to_notification(report: dict) -> Notification:
+	"""Build an error-severity Notification when generate_report returned an error.
+
+	Title carries the date if present; body shows the error message; severity is 'error';
+	payload is the full error report.
+	"""
+	date = report.get("date", "unknown")
+	err = report.get("error", "unknown error")
+	return Notification(
+		title=f"Daily P&L FAILED — {date}",
+		body=f"Error: {err}",
+		severity="error",
+		payload=report,
+	)
+
+
 def report_to_notification(report: dict) -> Notification:
 	"""Convert generate_report() output into a Notification.
 

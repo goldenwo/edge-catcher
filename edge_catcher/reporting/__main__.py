@@ -32,7 +32,7 @@ from edge_catcher.notifications import (
 	send,
 )
 from edge_catcher.reporting import generate_report
-from edge_catcher.reporting.notify import report_to_notification
+from edge_catcher.reporting.notify import error_report_to_notification, report_to_notification
 
 
 _DEFAULT_NOTIFY_CONFIG = Path("config.local") / "notifications.yaml"
@@ -93,9 +93,29 @@ def main(argv: list[str] | None = None) -> int:
 		)
 	report = generate_report(args.db, date=args.date)
 	if "error" in report:
-		# Existing behavior: print the JSON anyway so callers can see the error
-		# detail. indent=2 + default=str matches v1.0.x format exactly.
-		print(json.dumps(report, indent=2, default=str), file=sys.stdout)
+		# If --notify is set, dispatch an error-severity notification before exiting.
+		if args.notify:
+			try:
+				all_channels = load_channels(args.notify_config)
+			except NotificationConfigError as exc:
+				# Config broken AND report broken — surface both, prefer config exit code.
+				print(f"notification config error: {exc}", file=sys.stderr)
+				print(json.dumps(report, indent=2, default=str), file=sys.stdout)
+				return 2
+			missing = [n for n in args.notify if n not in all_channels]
+			if missing:
+				print(
+					f"unknown channel(s): {missing}; defined: {sorted(all_channels)}",
+					file=sys.stderr,
+				)
+				print(json.dumps(report, indent=2, default=str), file=sys.stdout)
+				return 2
+			notification = error_report_to_notification(report)
+			selected = [all_channels[n] for n in args.notify]
+			results = send(notification, selected)
+			_print_results_table(results)
+		if not args.quiet:
+			print(json.dumps(report, indent=2, default=str), file=sys.stdout)
 		return 1
 
 	if not args.notify:
