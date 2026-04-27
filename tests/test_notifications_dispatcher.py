@@ -39,6 +39,7 @@ def test_collects_results_in_order():
 	assert results["a"].success is True
 	assert results["b"].success is False
 	assert results["c"].success is True
+	assert results["a"].latency_ms == 1.0  # adapter-reported latency passes through
 
 
 def test_returns_dict_keyed_by_name():
