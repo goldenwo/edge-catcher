@@ -75,6 +75,10 @@ def _section_yesterday(date: str, by_strategy: list) -> str:
 		if status in ("won", "lost"):
 			agg[key][status] += row["count"]
 			agg[key]["pnl_cents"] += row["pnl_cents"]
+	if not agg:
+		# All rows had a status outside ("won", "lost") — degrade to the same
+		# message as the empty-input case rather than emit a dangling header.
+		return f"**Yesterday ({date}):** No settled trades."
 	lines = [f"**Yesterday ({date}):**"]
 	for (strategy, series), stats in sorted(agg.items()):
 		w, l = stats["won"], stats["lost"]

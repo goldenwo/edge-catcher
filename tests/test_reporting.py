@@ -319,6 +319,29 @@ class TestReportToNotification:
 		assert "Open positions" in n.body
 		assert "debut-fade/KXSOL" in n.body or "debut-fade / KXSOL" in n.body
 
+	def test_yesterday_section_handles_all_non_won_lost_statuses(self):
+		"""Latent-bug guard: if today_by_strategy has rows but ALL have a
+		status outside ('won','lost') — e.g., a future schema addition like
+		'pending' — the formatter MUST NOT emit a dangling section header.
+		It should fall back to the same 'No settled trades.' message as the
+		empty-input case."""
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		# Replace today_by_strategy with rows that have unexpected statuses:
+		report["today_by_strategy"] = [
+			{"strategy": "s", "series_ticker": "X", "status": "pending",   "count": 1, "pnl_cents": 0},
+			{"strategy": "s", "series_ticker": "Y", "status": "cancelled", "count": 2, "pnl_cents": 0},
+		]
+		n = report_to_notification(report)
+		assert "No settled trades" in n.body
+		# Dangling header check: there must NOT be a "Yesterday (date):" line
+		# followed immediately by a blank line + the next section header.
+		# Equivalently: the Yesterday line must contain the "No settled" text.
+		yesterday_line = next(line for line in n.body.split("\n") if line.startswith("**Yesterday"))
+		assert "No settled trades" in yesterday_line, (
+			f"dangling Yesterday header: {yesterday_line!r}"
+		)
+
 	# Helper to keep the test fixtures DRY:
 	def _sample_report(self):
 		return {
