@@ -21,5 +21,12 @@ RestartSec=5
 StartLimitIntervalSec=600
 StartLimitBurst=10
 
+# Resource limits — paper trader is a steady-state daemon, not a batch job.
+# Defaults sized for a small VPS or SBC (e.g. Raspberry Pi 4/5 8GB). Adjust
+# upward if you run many strategies, large orderbook windows, or extra series.
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+
 [Install]
 WantedBy=multi-user.target
