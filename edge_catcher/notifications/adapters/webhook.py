@@ -86,4 +86,22 @@ class WebhookChannel:
 					"footer": {"text": ts},
 				}],
 			}
+		if self.style == "slack":
+			return {
+				"text": n.title,
+				"blocks": [
+					{
+						"type": "section",
+						"text": {"type": "mrkdwn", "text": n.body},
+					},
+					{"type": "divider"},
+					{
+						"type": "context",
+						"elements": [{
+							"type": "mrkdwn",
+							"text": f"_severity: {n.severity} · {ts}_",
+						}],
+					},
+				],
+			}
 		raise NotImplementedError(f"style {self.style!r} not yet implemented")

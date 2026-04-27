@@ -106,3 +106,20 @@ def test_discord_severity_color(monkeypatch, severity, color):
 	ch.send(Notification(title="T", body="B", severity=severity))
 	body = calls[0][1]
 	assert body["embeds"][0]["color"] == color
+
+
+def test_slack_payload_shape(monkeypatch):
+	calls = _patch_post(monkeypatch, FakeResponse(204))
+	ch = WebhookChannel(name="s", url="https://slack/hook", style="slack")
+	ch.send(Notification(title="T", body="B", severity="error"))
+	body = calls[0][1]
+	assert body["text"] == "T"
+	blocks = body["blocks"]
+	assert blocks[0]["type"] == "section"
+	assert blocks[0]["text"]["type"] == "mrkdwn"
+	assert blocks[0]["text"]["text"] == "B"
+	assert blocks[1]["type"] == "divider"
+	assert blocks[2]["type"] == "context"
+	context_text = blocks[2]["elements"][0]["text"]
+	assert "error" in context_text  # severity
+	assert "T" in context_text and "Z" in context_text  # iso ts
