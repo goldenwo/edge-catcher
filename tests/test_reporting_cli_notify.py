@@ -175,7 +175,7 @@ def test_stderr_table_format(tmp_path, capsys):
 	#   <name padded to 20+ chars> <status (OK|FAIL) padded to 7 chars> <tail>
 	# where tail is "<int>ms" on success and an error string on failure.
 	row = next(
-		l for l in captured.err.splitlines() if "console" in l and "OK" in l
+		line for line in captured.err.splitlines() if "console" in line and "OK" in line
 	)
 	# Lock 3-column structure with at least one whitespace between columns.
 	match = re.match(r"^(?P<name>console\s*)\s+(?P<status>OK)\s+(?P<tail>\S+)$", row)
@@ -198,7 +198,7 @@ def test_table_header_present(tmp_path, capsys):
 	captured = capsys.readouterr()
 	stderr_lines = captured.err.splitlines()
 	# First non-empty line is the header.
-	non_empty = [l for l in stderr_lines if l.strip()]
+	non_empty = [line for line in stderr_lines if line.strip()]
 	assert "channel" in non_empty[0]
 	assert "status" in non_empty[0]
 	assert "latency" in non_empty[0]
