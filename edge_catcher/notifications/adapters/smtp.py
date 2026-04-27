@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import smtplib
 import time
 from email.message import EmailMessage
 
 from edge_catcher.notifications.envelope import DeliveryResult, Notification
+
+logger = logging.getLogger(__name__)
 
 
 class SMTPChannel:
@@ -67,7 +70,8 @@ class SMTPChannel:
 				try:
 					smtp_conn.quit()
 				except Exception:
-					pass  # don't override the original error
+					# Don't override the original error; surface under DEBUG for developers.
+					logger.debug("SMTP quit() failed", exc_info=True)
 
 		return DeliveryResult(
 			channel_name=self.name,

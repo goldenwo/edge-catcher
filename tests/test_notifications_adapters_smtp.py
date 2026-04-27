@@ -190,3 +190,26 @@ def test_header_with_crlf_returns_failed_result_not_raise(monkeypatch):
 	assert r.latency_ms >= 0
 	# SMTP() should never have been constructed because the message build failed first.
 	mock_class.assert_not_called()
+
+
+def test_quit_failure_logged_not_swallowed(monkeypatch, caplog):
+	"""When smtp_conn.quit() raises in finally, the failure is logged at
+	DEBUG (developer-visible) but does NOT propagate or override the
+	primary outcome."""
+	import logging as _logging
+
+	mock_class, mock_instance = _make_mock_smtp(monkeypatch)
+	# Make quit() raise to exercise the except clause.
+	mock_instance.quit.side_effect = OSError("connection already closed")
+	ch = SMTPChannel(
+		name="email", host="h", port=587, user="u", password="p",
+		from_addr="f@x", to=["t@x"],
+	)
+	with caplog.at_level(_logging.DEBUG, logger="edge_catcher.notifications.adapters.smtp"):
+		r = ch.send(Notification(title="T", body="B"))
+	# Send itself succeeded (mocks all return ok).
+	assert r.success is True
+	# quit() was called and raised; the failure was logged not propagated.
+	mock_instance.quit.assert_called_once()
+	debug_records = [rec for rec in caplog.records if rec.levelno == _logging.DEBUG]
+	assert any("quit" in rec.getMessage().lower() for rec in debug_records)
