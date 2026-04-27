@@ -38,9 +38,9 @@ class FileChannel:
 				"payload": notification.payload,
 			}
 			with open(self.path, "a", encoding="utf-8") as fh:
-				fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+				fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 				fh.flush()
-		except OSError as exc:
+		except (OSError, TypeError) as exc:
 			return DeliveryResult(
 				channel_name=self.name,
 				success=False,
