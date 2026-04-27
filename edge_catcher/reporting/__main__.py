@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from edge_catcher.notifications import (
+	DeliveryResult,
 	NotificationConfigError,
 	load_channels,
 	send,
@@ -62,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
 	return p
 
 
-def _print_results_table(results: dict) -> None:
+def _print_results_table(results: dict[str, DeliveryResult]) -> None:
 	"""Print the per-channel delivery results to stderr.
 
 	Format spec (locked by tests):
@@ -85,6 +86,11 @@ def _print_results_table(results: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
 	args = _build_parser().parse_args(argv)
+	if args.quiet and not args.notify:
+		print(
+			"warning: --quiet has no effect without --notify; ignoring",
+			file=sys.stderr,
+		)
 	report = generate_report(args.db, date=args.date)
 	if "error" in report:
 		# Existing behavior: print the JSON anyway so callers can see the error

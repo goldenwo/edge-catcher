@@ -204,6 +204,19 @@ def test_table_header_present(tmp_path, capsys):
 	assert "latency" in non_empty[0]
 
 
+def test_quiet_without_notify_warns(capsys):
+	"""--quiet without --notify is a footgun — warn the user."""
+	from edge_catcher.reporting.__main__ import main
+	rc = main(["--db", str(FIXTURE_DB), "--quiet"])
+	captured = capsys.readouterr()
+	assert rc == 0
+	# JSON still goes to stdout (--quiet has no effect without --notify).
+	assert '"all_time"' in captured.out
+	# But user gets warned about the no-op flag.
+	assert "warning" in captured.err.lower()
+	assert "--quiet" in captured.err
+
+
 # --- Subprocess test: verify the package entry point still works.
 
 def test_subprocess_entry_point_smoke():
