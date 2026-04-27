@@ -342,6 +342,50 @@ class TestReportToNotification:
 			f"dangling Yesterday header: {yesterday_line!r}"
 		)
 
+	def test_empty_yesterday_says_no_settled_trades(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["today_by_strategy"] = []  # no trades yesterday
+		report["today"]["pnl_cents"] = 0
+		n = report_to_notification(report)
+		assert "No settled trades" in n.body
+
+	def test_empty_open_positions_says_none(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["open_positions"] = []
+		n = report_to_notification(report)
+		assert "Open positions:" in n.body
+		assert "None" in n.body
+
+	def test_no_all_time_strategies_omits_section(self):
+		"""Brand-new DB with only open trades: the all-time-by-strategy section
+		is omitted entirely (no empty header)."""
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["all_time_by_strategy"] = []
+		n = report_to_notification(report)
+		# Section header MUST NOT appear when there's nothing to list:
+		assert "All-time by strategy" not in n.body
+
+	def test_negative_pnl_no_plus_sign(self):
+		"""A negative total PnL renders without a leading '+'."""
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["all_time"]["net_pnl_cents"] = -555
+		report["all_time"]["net_pnl_usd"] = -5.55
+		n = report_to_notification(report)
+		# No "+$-5.55" or "+-5.55" — sign handling must be correct
+		assert "+$-" not in n.body
+		assert "-$5.55" in n.body or "$-5.55" in n.body  # either rendering OK
+
+	def test_severity_warn_when_today_pnl_negative(self):
+		"""Already covered by an existing test, but lock again under rich-body context."""
+		from edge_catcher.reporting.notify import report_to_notification
+		report = self._sample_report()
+		report["today"]["pnl_cents"] = -50
+		assert report_to_notification(report).severity == "warn"
+
 	# Helper to keep the test fixtures DRY:
 	def _sample_report(self):
 		return {
