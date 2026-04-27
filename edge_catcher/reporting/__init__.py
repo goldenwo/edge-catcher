@@ -24,7 +24,7 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 
 	Returns:
 		dict with keys: timestamp, date, all_time, today, today_by_strategy,
-		or {'error': str} if the DB doesn't exist.
+		open_positions, or {'error': str} if the DB doesn't exist.
 	"""
 	if not Path(db_path).exists():
 		return {"error": f"DB not found at {db_path}"}
@@ -34,6 +34,7 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 		all_time = _all_time_stats(con)
 		today = _today_stats(con, date_str)
 		today_by_strategy = _today_by_strategy(con, date_str)
+		open_positions = _open_positions(con)
 	finally:
 		con.close()
 	return {
@@ -42,6 +43,7 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 		"all_time": all_time,
 		"today": today,
 		"today_by_strategy": today_by_strategy,
+		"open_positions": open_positions,
 	}
 
 
@@ -110,5 +112,22 @@ def _today_by_strategy(con: sqlite3.Connection, date_str: str) -> list[dict]:
 	).fetchall()
 	return [
 		{"strategy": r[0], "series_ticker": r[1], "status": r[2], "count": r[3], "pnl_cents": r[4]}
+		for r in rows
+	]
+
+
+def _open_positions(con: sqlite3.Connection) -> list[dict]:
+	rows = con.execute(
+		"""SELECT
+			strategy,
+			series_ticker,
+			COUNT(*) AS n
+		FROM paper_trades
+		WHERE status = 'open'
+		GROUP BY strategy, series_ticker
+		ORDER BY strategy, series_ticker"""
+	).fetchall()
+	return [
+		{"strategy": r[0], "series_ticker": r[1], "count": r[2]}
 		for r in rows
 	]

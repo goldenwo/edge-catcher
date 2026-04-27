@@ -293,3 +293,56 @@ class TestErrorReportToNotification:
 		from edge_catcher.reporting.notify import error_report_to_notification
 		n = error_report_to_notification({"error": "no date"})
 		assert "unknown" in n.title.lower()
+
+
+class TestOpenPositions:
+	def test_returns_list_of_dicts(self):
+		from edge_catcher.reporting import generate_report
+		from pathlib import Path
+		fixture = Path("edge_catcher/data/examples/paper_trades_demo.db")
+		report = generate_report(fixture, date="2026-04-25")
+		assert "open_positions" in report
+		assert isinstance(report["open_positions"], list)
+		# All items are dicts with the expected schema:
+		for row in report["open_positions"]:
+			assert set(row.keys()) == {"strategy", "series_ticker", "count"}
+			assert isinstance(row["count"], int)
+
+	def test_empty_when_no_open(self, tmp_path):
+		"""A DB with only settled trades returns open_positions=[]."""
+		from edge_catcher.reporting import generate_report
+		import sqlite3
+		db = tmp_path / "settled_only.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		con.execute(
+			"INSERT INTO paper_trades VALUES ('s1', 'KX', 'won', 50, 1, 10, 1, '2026-04-25T12:00:00Z')"
+		)
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
+		assert report["open_positions"] == []
+
+	def test_groups_by_strategy_and_series(self, tmp_path):
+		"""Two opens with same (strategy, series) collapse into one row with count=2."""
+		from edge_catcher.reporting import generate_report
+		import sqlite3
+		db = tmp_path / "open_dupes.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		con.execute("INSERT INTO paper_trades VALUES ('debut-fade', 'KXETH', 'open', 50, 1, NULL, 1, NULL)")
+		con.execute("INSERT INTO paper_trades VALUES ('debut-fade', 'KXETH', 'open', 51, 1, NULL, 1, NULL)")
+		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KXBTC', 'open', 60, 1, NULL, 1, NULL)")
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
+		open_pos = {(r["strategy"], r["series_ticker"]): r["count"] for r in report["open_positions"]}
+		assert open_pos == {("debut-fade", "KXETH"): 2, ("flow-fade", "KXBTC"): 1}
