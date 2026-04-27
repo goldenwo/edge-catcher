@@ -362,3 +362,92 @@ class TestOpenPositions:
 		report = generate_report(db, date="2026-04-25")
 		open_pos = {(r["strategy"], r["series_ticker"]): r["count"] for r in report["open_positions"]}
 		assert open_pos == {("debut-fade", "KXETH"): 2, ("flow-fade", "KXBTC"): 1}
+
+
+class TestAllTimeByStrategy:
+	def test_returns_list_of_dicts(self):
+		from edge_catcher.reporting import generate_report
+		from pathlib import Path
+		fixture = Path("edge_catcher/data/examples/paper_trades_demo.db")
+		report = generate_report(fixture, date="2026-04-25")
+		assert "all_time_by_strategy" in report
+		assert isinstance(report["all_time_by_strategy"], list)
+		for row in report["all_time_by_strategy"]:
+			assert set(row.keys()) == {
+				"strategy", "closed_trades", "wins", "net_pnl_cents",
+				"net_pnl_usd", "win_rate_pct",
+			}
+
+	def test_excludes_open_trades(self, tmp_path):
+		"""Open trades MUST NOT count toward closed_trades / wins / pnl."""
+		from edge_catcher.reporting import generate_report
+		import sqlite3
+		db = tmp_path / "mixed.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		# 1 won, 1 lost, 1 open — the open should not appear or count.
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'won',  50, 1,  10, 1, '2026-04-25T12:00:00Z')")
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'lost', 50, 1, -10, 1, '2026-04-25T13:00:00Z')")
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'open', 50, 1, NULL, 1, NULL)")
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
+		s1 = next(r for r in report["all_time_by_strategy"] if r["strategy"] == "s1")
+		assert s1["closed_trades"] == 2
+		assert s1["wins"] == 1
+		assert s1["net_pnl_cents"] == 0  # +10 + -10
+		assert s1["win_rate_pct"] == 50.0
+
+	def test_per_strategy_breakdown(self, tmp_path):
+		"""Two strategies with different win rates surface separately."""
+		from edge_catcher.reporting import generate_report
+		import sqlite3
+		db = tmp_path / "two_strats.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		# debut-fade: 3W / 1L = 75% WR, +20¢ net (10+10+10-10)
+		for pnl in (10, 10, 10, -10):
+			status = "won" if pnl > 0 else "lost"
+			con.execute(
+				"INSERT INTO paper_trades VALUES ('debut-fade', 'KX', ?, 50, 1, ?, 1, '2026-04-25T12:00:00Z')",
+				(status, pnl),
+			)
+		# flow-fade: 1W / 1L = 50% WR, +0¢ net
+		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'won',  50, 1,  20, 1, '2026-04-25T12:00:00Z')")
+		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'lost', 50, 1, -20, 1, '2026-04-25T13:00:00Z')")
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
+		by_strat = {r["strategy"]: r for r in report["all_time_by_strategy"]}
+		assert by_strat["debut-fade"]["closed_trades"] == 4
+		assert by_strat["debut-fade"]["wins"] == 3
+		assert by_strat["debut-fade"]["net_pnl_cents"] == 20  # 10+10+10-10
+		assert by_strat["debut-fade"]["win_rate_pct"] == 75.0
+		assert by_strat["flow-fade"]["closed_trades"] == 2
+		assert by_strat["flow-fade"]["wins"] == 1
+		assert by_strat["flow-fade"]["net_pnl_cents"] == 0
+		assert by_strat["flow-fade"]["win_rate_pct"] == 50.0
+
+	def test_empty_when_no_settled(self, tmp_path):
+		from edge_catcher.reporting import generate_report
+		import sqlite3
+		db = tmp_path / "open_only.db"
+		con = sqlite3.connect(str(db))
+		con.execute(
+			"CREATE TABLE paper_trades (strategy TEXT, series_ticker TEXT, status TEXT, "
+			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
+			"exit_time TEXT)"
+		)
+		con.execute("INSERT INTO paper_trades VALUES ('s1', 'KX', 'open', 50, 1, NULL, 1, NULL)")
+		con.commit()
+		con.close()
+		report = generate_report(db, date="2026-04-25")
+		assert report["all_time_by_strategy"] == []
