@@ -280,6 +280,37 @@ def test_bad_config_with_notify_does_not_run_report(tmp_path, capsys, monkeypatc
 	assert called == []
 
 
+def test_no_notify_byte_for_byte_matches_golden(capsys, monkeypatch):
+	"""Lock the v1.0.x JSON output format byte-for-byte. Cron jobs piping
+	stdout to a logger or jq depend on the exact format string
+	`json.dumps(report, indent=2, default=str)` — any drift breaks them."""
+	from datetime import datetime, timezone
+	import edge_catcher.reporting as reporting_module
+	from edge_catcher.reporting.__main__ import main
+
+	# Freeze datetime.now so the timestamp field is deterministic.
+	FROZEN_TS = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+	class FrozenDatetime(datetime):
+		@classmethod
+		def now(cls, tz=None):
+			return FROZEN_TS
+
+	monkeypatch.setattr(reporting_module, "datetime", FrozenDatetime)
+
+	# Date with no trades = deterministic report.
+	rc = main(["--db", str(FIXTURE_DB), "--date", "2026-01-01"])
+	captured = capsys.readouterr()
+	assert rc == 0
+	golden_path = Path(__file__).parent / "fixtures" / "reporting_cli_no_notify_golden.json"
+	expected = golden_path.read_text(encoding="utf-8")
+	assert captured.out == expected, (
+		f"Stdout drift detected. If this is intentional, regenerate the golden:\n"
+		f"  python -m edge_catcher.reporting --db {FIXTURE_DB} --date 2026-01-01 "
+		f"> {golden_path}"
+	)
+
+
 # --- Subprocess test: verify the package entry point still works.
 
 def test_subprocess_entry_point_smoke():
