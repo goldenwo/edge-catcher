@@ -81,13 +81,13 @@ def _section_yesterday(date: str, by_strategy: list) -> str:
 		return f"**Yesterday ({date}):** No settled trades."
 	lines = [f"**Yesterday ({date}):**"]
 	for (strategy, series), stats in sorted(agg.items()):
-		w, l = stats["won"], stats["lost"]
-		total = w + l
+		w, lost = stats["won"], stats["lost"]
+		total = w + lost
 		wr = (w / total * 100) if total else 0
 		pnl_usd = stats["pnl_cents"] / 100
 		sign = "+" if stats["pnl_cents"] >= 0 else ""
 		lines.append(
-			f"  • {strategy} / {series}: {w}W / {l}L | Net: {sign}${pnl_usd:.2f} | WR: {wr:.0f}%"
+			f"  • {strategy} / {series}: {w}W / {lost}L | Net: {sign}${pnl_usd:.2f} | WR: {wr:.0f}%"
 		)
 	return "\n".join(lines)
 

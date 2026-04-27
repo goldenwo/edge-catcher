@@ -282,8 +282,14 @@ class TestReportToNotification:
 				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
 			],
 			"all_time_by_strategy": [
-				{"strategy": "debut-fade", "closed_trades": 19, "wins": 12, "net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2},
-				{"strategy": "flow-fade",  "closed_trades": 1,  "wins": 1,  "net_pnl_cents": 75,   "net_pnl_usd": 0.75,  "win_rate_pct": 100.0},
+				{
+					"strategy": "debut-fade", "closed_trades": 19, "wins": 12,
+					"net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2,
+				},
+				{
+					"strategy": "flow-fade", "closed_trades": 1, "wins": 1,
+					"net_pnl_cents": 75, "net_pnl_usd": 0.75, "win_rate_pct": 100.0,
+				},
 			],
 			"open_positions": [
 				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
@@ -403,8 +409,14 @@ class TestReportToNotification:
 				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
 			],
 			"all_time_by_strategy": [
-				{"strategy": "debut-fade", "closed_trades": 19, "wins": 12, "net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2},
-				{"strategy": "flow-fade",  "closed_trades": 1,  "wins": 1,  "net_pnl_cents": 75,   "net_pnl_usd": 0.75,  "win_rate_pct": 100.0},
+				{
+					"strategy": "debut-fade", "closed_trades": 19, "wins": 12,
+					"net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2,
+				},
+				{
+					"strategy": "flow-fade", "closed_trades": 1, "wins": 1,
+					"net_pnl_cents": 75, "net_pnl_usd": 0.75, "win_rate_pct": 100.0,
+				},
 			],
 			"open_positions": [
 				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
@@ -567,8 +579,14 @@ class TestAllTimeByStrategy:
 				(status, pnl),
 			)
 		# flow-fade: 1W / 1L = 50% WR, +0¢ net
-		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'won',  50, 1,  20, 1, '2026-04-25T12:00:00Z')")
-		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'lost', 50, 1, -20, 1, '2026-04-25T13:00:00Z')")
+		con.execute(
+			"INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'won', "
+			"50, 1, 20, 1, '2026-04-25T12:00:00Z')"
+		)
+		con.execute(
+			"INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'lost', "
+			"50, 1, -20, 1, '2026-04-25T13:00:00Z')"
+		)
 		con.commit()
 		con.close()
 		report = generate_report(db, date="2026-04-25")
