@@ -58,3 +58,27 @@ class TestNotificationConfigError:
 	def test_carries_message(self):
 		err = NotificationConfigError("bad config: foo")
 		assert "bad config: foo" in str(err)
+
+
+class TestChannelProtocol:
+	def test_duck_typed_channel_satisfies_protocol(self):
+		from edge_catcher.notifications.base import Channel
+
+		class FakeChannel:
+			name = "fake"
+
+			def send(self, notification: Notification) -> DeliveryResult:
+				return DeliveryResult(channel_name=self.name, success=True)
+
+		ch = FakeChannel()
+		# Runtime-checkable Protocol — isinstance must accept duck-typed implementations.
+		assert isinstance(ch, Channel)
+
+	def test_missing_send_method_fails_isinstance(self):
+		from edge_catcher.notifications.base import Channel
+
+		class Broken:
+			name = "broken"
+			# no send() method
+
+		assert not isinstance(Broken(), Channel)
