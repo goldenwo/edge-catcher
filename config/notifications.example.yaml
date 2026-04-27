@@ -1,0 +1,44 @@
+# Example notifications config — copy to config.local/notifications.yaml and
+# fill in your real values. The CLI reads from config.local/notifications.yaml
+# by default; pass --notify-config to point elsewhere.
+#
+# Reference: docs/superpowers/specs/2026-04-26-notifications-design.md (or the
+# in-repo equivalent if you've ported the spec to the public docs).
+
+version: 1                            # optional in v1.1; reserved for future schema changes
+
+channels:
+  # Plain text to stdout — useful for cron debugging.
+  console:
+    type: stdout
+
+  # Append JSONL records to a file. Downstream tools can `tail -f | jq`.
+  daily_log:
+    type: file
+    path: /var/log/edge-catcher/notifications.jsonl
+
+  # Discord incoming webhook. Get the URL from your server's
+  # Channel Settings → Integrations → Webhooks.
+  pnl_discord:
+    type: webhook
+    url: ${DISCORD_PNL_WEBHOOK_URL}
+    style: discord                    # discord | slack | generic
+
+  # Slack incoming webhook (Slack app → Incoming Webhooks).
+  ops_slack:
+    type: webhook
+    url: ${SLACK_OPS_WEBHOOK_URL}
+    style: slack
+
+  # SMTP email — Gmail example. Requires app password (regular login is
+  # disabled by Google). For other providers, swap host/port and adjust
+  # use_tls accordingly.
+  ops_email:
+    type: smtp
+    host: smtp.gmail.com
+    port: 587
+    user: ${SMTP_USER}
+    password: ${SMTP_PASSWORD}
+    from: alerts@example.com
+    to: [me@example.com]
+    use_tls: true
