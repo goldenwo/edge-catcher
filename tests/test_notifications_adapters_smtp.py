@@ -155,7 +155,10 @@ def test_default_timeout_is_10_seconds(monkeypatch):
 	ch.send(Notification(title="T", body="B"))
 	# smtplib.SMTP(host, port, timeout=...) — third positional or `timeout` kw
 	args, kwargs = mock_class.call_args
-	assert args == ("h", 587) or args == ("h", 587, 10) or kwargs.get("timeout") == 10
+	# Timeout MUST be passed — either as keyword or as the third positional arg.
+	assert kwargs.get("timeout") == 10 or (len(args) >= 3 and args[2] == 10), (
+		f"timeout=10 was not passed to smtplib.SMTP(): args={args}, kwargs={kwargs}"
+	)
 
 
 def test_custom_timeout_passed_through(monkeypatch):
