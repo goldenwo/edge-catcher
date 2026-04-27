@@ -31,7 +31,7 @@ class FileChannel:
 			with open(self.path, "a", encoding="utf-8") as fh:
 				fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 				fh.flush()
-		except (OSError, PermissionError) as exc:
+		except OSError as exc:
 			return DeliveryResult(
 				channel_name=self.name,
 				success=False,
