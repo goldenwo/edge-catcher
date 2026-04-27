@@ -36,26 +36,26 @@ class SMTPChannel:
 
 	def send(self, notification: Notification) -> DeliveryResult:
 		t0 = time.perf_counter()
-		# 1. Build the body string.
-		text = notification.body
-		if notification.payload is not None:
-			text = f"{text}\n\n{json.dumps(notification.payload, indent=2)}"
-
-		# 2-6. Build EmailMessage in locked sequence (per spec §5.4).
-		msg = EmailMessage()
-		msg["Subject"] = f"[{notification.severity}] {notification.title}"
-		msg["From"] = self.from_addr
-		msg["To"] = ", ".join(self.to)
-		msg.set_content(text)
-
 		smtp_conn = None
 		try:
+			# 1. Build the body string.
+			text = notification.body
+			if notification.payload is not None:
+				text = f"{text}\n\n{json.dumps(notification.payload, indent=2)}"
+
+			# 2-6. Build EmailMessage in locked sequence (per spec §5.4).
+			msg = EmailMessage()
+			msg["Subject"] = f"[{notification.severity}] {notification.title}"
+			msg["From"] = self.from_addr
+			msg["To"] = ", ".join(self.to)
+			msg.set_content(text)
+
 			smtp_conn = smtplib.SMTP(self.host, self.port, timeout=self.timeout_seconds)
 			if self.use_tls:
 				smtp_conn.starttls()
 			smtp_conn.login(self.user, self.password)
 			smtp_conn.send_message(msg, from_addr=self.from_addr, to_addrs=self.to)
-		except (smtplib.SMTPException, OSError) as exc:
+		except (smtplib.SMTPException, OSError, ValueError) as exc:
 			return DeliveryResult(
 				channel_name=self.name,
 				success=False,

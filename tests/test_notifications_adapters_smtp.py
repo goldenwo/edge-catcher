@@ -168,3 +168,25 @@ def test_custom_timeout_passed_through(monkeypatch):
 	args, kwargs = mock_class.call_args
 	# Either positional 3rd arg or `timeout` kwarg should be 3.0
 	assert (len(args) >= 3 and args[2] == 3.0) or kwargs.get("timeout") == 3.0
+
+
+def test_header_with_crlf_returns_failed_result_not_raise(monkeypatch):
+	"""A title containing CR/LF triggers email.errors.HeaderParseError on
+	msg["Subject"] = ... — adapter must catch it (no-raise contract) and
+	return DeliveryResult(success=False), not propagate the exception."""
+	# SMTP class is mocked; we won't reach the network. The exception comes
+	# from EmailMessage construction itself.
+	mock_class, mock_instance = _make_mock_smtp(monkeypatch)
+	ch = SMTPChannel(
+		name="email", host="h", port=587, user="u", password="p",
+		from_addr="f@x", to=["t@x"],
+	)
+	# CRLF injection in title — would be a header-injection attack vector if
+	# accepted; email module raises ValueError to prevent it.
+	r = ch.send(Notification(title="Subject\r\nBcc: attacker@evil", body="B"))
+	assert r.success is False
+	assert r.error  # populated, not None
+	# Latency comes from the adapter (we set t0 first), not the dispatcher.
+	assert r.latency_ms >= 0
+	# SMTP() should never have been constructed because the message build failed first.
+	mock_class.assert_not_called()
