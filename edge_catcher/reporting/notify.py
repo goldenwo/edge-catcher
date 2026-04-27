@@ -27,17 +27,30 @@ def report_to_notification(report: dict) -> Notification:
 	to 'warn' when today's pnl is negative; payload is the full report
 	dict so JSON-aware adapters (file, generic webhook) can consume the
 	structured data.
+
+	If `report` is missing the expected `all_time` or `today` keys,
+	returns an error-severity Notification rather than raising — the
+	CLI's notify path treats this as a delivery-able failure signal.
 	"""
-	at = report["all_time"]
+	at = report.get("all_time")
+	today = report.get("today")
+	date = report.get("date", "unknown")
+	if not isinstance(at, dict) or not isinstance(today, dict):
+		return Notification(
+			title=f"Daily P&L MALFORMED — {date}",
+			body=f"Report missing expected keys (all_time / today). Got: {sorted(report)}",
+			severity="error",
+			payload=report,
+		)
 	body = (
-		f"Net: ${at['net_pnl_usd']:.2f} · "
-		f"WR: {at['win_rate_pct']}% · "
-		f"Trades: {at['closed_trades']} · "
-		f"ROI: {at['roi_deployed_pct']}%"
+		f"Net: ${at.get('net_pnl_usd', 0):.2f} · "
+		f"WR: {at.get('win_rate_pct', 0)}% · "
+		f"Trades: {at.get('closed_trades', 0)} · "
+		f"ROI: {at.get('roi_deployed_pct', 0)}%"
 	)
-	severity = "info" if report["today"]["pnl_cents"] >= 0 else "warn"
+	severity = "info" if today.get("pnl_cents", 0) >= 0 else "warn"
 	return Notification(
-		title=f"Daily P&L — {report['date']}",
+		title=f"Daily P&L — {date}",
 		body=body,
 		severity=severity,
 		payload=report,

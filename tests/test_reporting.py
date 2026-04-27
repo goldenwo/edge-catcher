@@ -253,6 +253,18 @@ class TestReportToNotification:
 		# allow mutations to drift between caller and adapter.
 		assert n.payload is report
 
+	def test_malformed_report_missing_all_time(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		n = report_to_notification({"date": "x", "today": {"pnl_cents": 0}})
+		assert n.severity == "error"
+		assert "MALFORMED" in n.title
+
+	def test_malformed_report_missing_today(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		n = report_to_notification({"date": "x", "all_time": {}})
+		assert n.severity == "error"
+		assert "MALFORMED" in n.title
+
 
 class TestErrorReportToNotification:
 	def test_severity_is_error(self):
