@@ -195,6 +195,24 @@ def test_header_with_crlf_returns_failed_result_not_raise(monkeypatch):
 	mock_class.assert_not_called()
 
 
+def test_non_json_payload_serialized_via_default_str(monkeypatch):
+	"""Non-JSON-native payload values are coerced via default=str rather than
+	raising TypeError out of send()."""
+	from datetime import datetime, timezone
+	mock_class, mock_instance = _make_mock_smtp(monkeypatch)
+	ch = SMTPChannel(
+		name="email", host="h", port=587, user="u", password="p",
+		from_addr="f@x", to=["t@x"],
+	)
+	ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+	r = ch.send(Notification(title="T", body="B", payload={"created_at": ts}))
+	assert r.success is True
+	# Body should contain the str() form of the datetime.
+	msg = mock_instance.send_message.call_args[0][0]
+	content = msg.get_content()
+	assert "2026-01-01" in content
+
+
 def test_quit_failure_logged_not_swallowed(monkeypatch, caplog):
 	"""When smtp_conn.quit() raises in finally, the failure is logged at
 	DEBUG (developer-visible) but does NOT propagate or override the

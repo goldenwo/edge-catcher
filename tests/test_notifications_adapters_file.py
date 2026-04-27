@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from edge_catcher.notifications.adapters.file import FileChannel
@@ -57,10 +58,6 @@ def test_record_shape(tmp_path: Path):
 	assert rec2["payload"] is None
 
 
-from datetime import datetime, timezone
-import json as _json
-
-
 def test_non_json_payload_serialized_via_default_str(tmp_path):
 	"""Non-JSON-native payload values (datetime, Decimal etc.) are coerced via
 	default=str rather than raising TypeError out of send()."""
@@ -69,7 +66,7 @@ def test_non_json_payload_serialized_via_default_str(tmp_path):
 	ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 	r = ch.send(Notification(title="t", body="b", payload={"created_at": ts}))
 	assert r.success is True
-	rec = _json.loads(target.read_text(encoding="utf-8").splitlines()[0])
+	rec = json.loads(target.read_text(encoding="utf-8").splitlines()[0])
 	# default=str coerces datetime to its str() form.
 	assert isinstance(rec["payload"]["created_at"], str)
 	assert "2026-01-01" in rec["payload"]["created_at"]

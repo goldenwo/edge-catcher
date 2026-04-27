@@ -44,7 +44,7 @@ class SMTPChannel:
 			# 1. Build the body string.
 			text = notification.body
 			if notification.payload is not None:
-				text = f"{text}\n\n{json.dumps(notification.payload, indent=2)}"
+				text = f"{text}\n\n{json.dumps(notification.payload, indent=2, default=str)}"
 
 			# 2-6. Build EmailMessage in locked sequence (per spec §5.4).
 			msg = EmailMessage()
@@ -58,7 +58,7 @@ class SMTPChannel:
 				smtp_conn.starttls()
 			smtp_conn.login(self.user, self.password)
 			smtp_conn.send_message(msg, from_addr=self.from_addr, to_addrs=self.to)
-		except (smtplib.SMTPException, OSError, ValueError) as exc:
+		except (smtplib.SMTPException, OSError, ValueError, TypeError) as exc:
 			return DeliveryResult(
 				channel_name=self.name,
 				success=False,
