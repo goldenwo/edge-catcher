@@ -1,27 +1,31 @@
-"""Discord webhook notifications with rate limiting and bounded concurrency.
+"""Paper-trader-internal Discord webhook notifications.
 
-DEPRECATED in v1.1+: prefer `edge_catcher.notifications` for new code.
-This module is paper-trader-internal and will be migrated onto the
-unified notifications layer in a future release. See
-`docs/superpowers/specs/2026-04-26-notifications-design.md` §11.
+This module is intentionally separate from `edge_catcher.notifications`
+(the user-facing pluggable delivery layer) because the two solve
+different problems with different constraints:
+
+- `edge_catcher.notifications` — synchronous, config-driven, multi-adapter
+  delivery for the reporting CLI. No rate limiting, no concurrency control,
+  no async. Designed for low-frequency end-user notifications (daily P&L).
+
+- This module — async (so the trading loop never blocks on HTTP), rate-limited
+  (one webhook call per second, with 429 retry), and bounded-concurrency
+  (max 20 pending tasks, drops overflow). Designed for the paper trader's
+  per-trade Discord-only firehose.
+
+Migration onto the unified layer is NOT planned: doing so would require
+adding async + rate-limiting + concurrency to the user-facing surface,
+which is explicitly out of scope per the v1.1 notifications design.
+The two layers are intentional specialisations, not duplication.
 """
 
 import asyncio
 import logging
 import os
 import time
-import warnings
 from collections.abc import Awaitable, Callable
 
 import httpx
-
-warnings.warn(
-	"edge_catcher.monitors.notifications is deprecated; use edge_catcher.notifications "
-	"for new code. This module will be migrated onto the unified notifications layer "
-	"in a future release.",
-	DeprecationWarning,
-	stacklevel=2,
-)
 
 logger = logging.getLogger(__name__)
 

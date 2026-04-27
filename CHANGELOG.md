@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`config/notifications.example.yaml`** — sanitized template with all four adapter types and discord/slack webhook examples.
 - **Reporting CLI** — `--notify <name>` (repeatable), `--notify-config <path>`, `--quiet`. Backward-compatible: invocations without `--notify` keep the existing JSON-to-stdout behavior.
 
-### Deprecated
+### Notes
 
-- `edge_catcher/monitors/notifications.py` — paper-trader-internal Discord webhook helper. Will be migrated onto `edge_catcher.notifications` in a future release; existing callers continue to work in the meantime.
+- `edge_catcher/monitors/notifications.py` (paper-trader-internal Discord client) is intentionally **not** deprecated by the new layer. The two solve different problems: the new layer is sync + config-driven for the reporting CLI; the monitors helper is async + rate-limited + bounded-concurrency for the trading loop. Migrating one onto the other is not planned (would require adding async + rate-limiting to the user-facing surface, explicitly out of scope per the v1.1 design).
 
 ## [1.0.1] — 2026-04-26
 

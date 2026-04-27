@@ -50,18 +50,3 @@ edge-catcher = "edge_catcher.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = [
-	# The monitors.notifications module emits a DeprecationWarning at import to
-	# signal external callers to migrate to edge_catcher.notifications. Internal
-	# callers (monitors.engine, monitors.dispatch) still use it pending migration
-	# per spec §11. Suppress the noise from internal-caller imports during pytest;
-	# the test_monitors_notifications_deprecated test still verifies the warning
-	# fires by using catch_warnings + simplefilter("always") locally.
-	#
-	# Filter-spec note: pytest matches the `module` field against the warning's
-	# REPORTED location (governed by `stacklevel`). monitors.notifications uses
-	# stacklevel=2, so the warning is attributed to the CALLER (monitors.dispatch
-	# / monitors.engine), not monitors.notifications itself. Targeting the message
-	# regex is robust against stacklevel changes and importer-module identity.
-	"ignore:edge_catcher.monitors.notifications is deprecated:DeprecationWarning",
-]
