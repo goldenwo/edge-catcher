@@ -51,8 +51,7 @@ pytest tests/ -v
 ```
 
 The suite is fully mocked — no live API key or network access needed.
-At the time of writing it runs ~1019 tests in well under a minute on a
-modern laptop.
+It runs ~900+ tests in well under a minute on a modern laptop.
 
 If you add framework code, add tests. If you write strategy-specific or
 research-specific tests, keep them in a gitignored location (e.g.
@@ -106,9 +105,7 @@ hypothesis registry the same way as the tracked ones.
 
 ## Pull request process
 
-- Target `main`. Branch off `main` (or off `public-release-v1` while it
-  is the active integration branch — check the README badge or the most
-  recent merge).
+- Target `main`. Branch off `main`.
 - Keep PRs focused. One concept per PR makes review tractable.
 - Include tests for any new framework code. Strategy-specific tests stay
   in your gitignored fork.
