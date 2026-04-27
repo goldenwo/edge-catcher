@@ -191,6 +191,16 @@ def test_version_string_rejected(tmp_path):
 		load_channels(p)
 
 
+def test_version_true_rejected(tmp_path):
+	# YAML `true` parses to bool True. bool is a subclass of int and
+	# True == 1, so without an explicit bool guard the version check
+	# would silently accept it. Lock the rejection so users get a clear
+	# error rather than a silent miscoercion.
+	p = _write(tmp_path, "version: true\nchannels:\n  d:\n    type: stdout\n")
+	with pytest.raises(NotificationConfigError, match="version"):
+		load_channels(p)
+
+
 def test_smtp_to_must_be_nonempty_list(tmp_path, monkeypatch):
 	monkeypatch.setenv("U", "u")
 	monkeypatch.setenv("P", "p")

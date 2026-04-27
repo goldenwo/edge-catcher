@@ -97,7 +97,7 @@ def load_channels(config_path: Path | str) -> dict[str, Channel]:
 	# the user typed the wrong syntax.
 	if "version" in raw:
 		version = raw["version"]
-		if not isinstance(version, int) or version != _SUPPORTED_VERSION:
+		if isinstance(version, bool) or not isinstance(version, int) or version != _SUPPORTED_VERSION:
 			raise NotificationConfigError(
 				f"config version {version!r} is not supported by this edge-catcher "
 				f"(expected integer version: {_SUPPORTED_VERSION}). "
@@ -154,10 +154,7 @@ def _build_channel(name: str, spec: dict) -> Channel:
 			)
 
 	# Build constructor kwargs with key renames.
-	# Note: env var interpolation was already performed at the text level
-	# before YAML parsing (see _pre_interpolate_text), so values here are
-	# already fully substituted. _interpolate is retained as a no-op safety
-	# pass for any non-string values (int, bool, None) that need no action.
+	# Env var substitution already happened at the text level before yaml.safe_load; no per-value pass is needed.
 	kwargs: dict = {"name": name}
 	for k, v in spec.items():
 		if k == "type":
@@ -176,23 +173,3 @@ def _build_channel(name: str, spec: dict) -> Channel:
 		) from exc
 
 
-def _interpolate(value, channel_name: str, field: str):
-	"""Recursively interpolate ${ENV_VAR} in string values.
-
-	Strings: ${NAME} substring substitution (whole or embedded).
-	Lists: each element interpolated.
-	Other (int, bool, None, dict): passed through unchanged.
-	"""
-	if isinstance(value, str):
-		def replace(m: re.Match) -> str:
-			var = m.group(1)
-			try:
-				return os.environ[var]
-			except KeyError:
-				raise NotificationConfigError(
-					f"env var {var!r} referenced in channels.{channel_name}.{field} is not set"
-				) from None
-		return _ENV_VAR_RE.sub(replace, value)
-	if isinstance(value, list):
-		return [_interpolate(v, channel_name, field) for v in value]
-	return value
