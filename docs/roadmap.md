@@ -42,6 +42,10 @@ Bigger pieces that need design + implementation time:
   - **Pywebview wrapper** — Python opens a native OS window pointing at the embedded FastAPI. No browser chrome. Feels like a real lightweight desktop app.
   - **Tauri shell + Python sidecar** — proper installable binary with native menus and signed builds. The React+Vite UI is already Tauri-friendly. Right answer when shipping to non-Python users matters.
 
+## v1.2 candidates
+
+- **Unified-layer async + middleware → migrate `monitors/notifications.py`** — adds `AsyncChannel` protocol, rate-limiting + bounded-concurrency middleware to `edge_catcher.notifications`. Enables migrating the paper-trader-internal Discord client (`edge_catcher/monitors/notifications.py`, deprecated in v1.1) onto the unified config story. Public users get one notification surface (YAML-config + multi-adapter for the reporting CLI AND the paper trader) instead of two. Spec §11 of the v1.1 notifications design lists this as deferred; the v1.2 cycle should pick it up.
+
 ## Beyond v1.1
 
 Aspirational, no schedule:
