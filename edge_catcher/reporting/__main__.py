@@ -91,27 +91,29 @@ def main(argv: list[str] | None = None) -> int:
 			"warning: --quiet has no effect without --notify; ignoring",
 			file=sys.stderr,
 		)
+
+	# Validate config BEFORE the slow report step — fast-fail bad config.
+	selected = None
+	if args.notify:
+		try:
+			all_channels = load_channels(args.notify_config)
+		except NotificationConfigError as exc:
+			print(f"notification config error: {exc}", file=sys.stderr)
+			return 2
+		missing = [n for n in args.notify if n not in all_channels]
+		if missing:
+			print(
+				f"unknown channel(s): {missing}; defined: {sorted(all_channels)}",
+				file=sys.stderr,
+			)
+			return 2
+		selected = [all_channels[n] for n in args.notify]
+
 	report = generate_report(args.db, date=args.date)
 	if "error" in report:
 		# If --notify is set, dispatch an error-severity notification before exiting.
-		if args.notify:
-			try:
-				all_channels = load_channels(args.notify_config)
-			except NotificationConfigError as exc:
-				# Config broken AND report broken — surface both, prefer config exit code.
-				print(f"notification config error: {exc}", file=sys.stderr)
-				print(json.dumps(report, indent=2, default=str), file=sys.stdout)
-				return 2
-			missing = [n for n in args.notify if n not in all_channels]
-			if missing:
-				print(
-					f"unknown channel(s): {missing}; defined: {sorted(all_channels)}",
-					file=sys.stderr,
-				)
-				print(json.dumps(report, indent=2, default=str), file=sys.stdout)
-				return 2
+		if selected is not None:
 			notification = error_report_to_notification(report)
-			selected = [all_channels[n] for n in args.notify]
 			results = send(notification, selected)
 			_print_results_table(results)
 		if not args.quiet:
@@ -123,23 +125,8 @@ def main(argv: list[str] | None = None) -> int:
 		print(json.dumps(report, indent=2, default=str), file=sys.stdout)
 		return 0
 
-	# Notify path.
-	try:
-		all_channels = load_channels(args.notify_config)
-	except NotificationConfigError as exc:
-		print(f"notification config error: {exc}", file=sys.stderr)
-		return 2
-
-	missing = [n for n in args.notify if n not in all_channels]
-	if missing:
-		print(
-			f"unknown channel(s): {missing}; defined: {sorted(all_channels)}",
-			file=sys.stderr,
-		)
-		return 2
-
+	# Notify path — config already validated above, selected is populated.
 	notification = report_to_notification(report)
-	selected = [all_channels[n] for n in args.notify]
 	results = send(notification, selected)
 	_print_results_table(results)
 

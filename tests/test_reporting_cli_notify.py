@@ -259,6 +259,27 @@ def test_error_path_no_notify_unchanged(tmp_path, capsys, monkeypatch):
 	assert "channel" not in captured.err
 
 
+def test_bad_config_with_notify_does_not_run_report(tmp_path, capsys, monkeypatch):
+	"""Config validation runs BEFORE generate_report when --notify is set,
+	so a bad config aborts fast without paying the report-generation cost."""
+	from edge_catcher.reporting import __main__ as cli
+	called = []
+	def spy_generate_report(*a, **kw):
+		called.append(True)
+		return {"date": "x", "all_time": {}}
+	monkeypatch.setattr(cli, "generate_report", spy_generate_report)
+	rc = cli.main([
+		"--db", str(FIXTURE_DB),
+		"--notify-config", str(tmp_path / "missing.yaml"),
+		"--notify", "anything",
+	])
+	captured = capsys.readouterr()
+	assert rc == 2
+	assert "config" in captured.err.lower() or "not found" in captured.err.lower()
+	# Critical assertion: generate_report was NOT called.
+	assert called == []
+
+
 # --- Subprocess test: verify the package entry point still works.
 
 def test_subprocess_entry_point_smoke():
