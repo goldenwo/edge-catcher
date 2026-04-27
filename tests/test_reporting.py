@@ -183,3 +183,72 @@ def test_cli_accepts_date_argument():
 	data = json.loads(result.stdout)
 	assert data["date"] == "2026-04-03"
 	assert data["today"]["settled_count"] == 8
+
+
+class TestReportToNotification:
+	def test_title_includes_date(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "2026-04-26",
+			"all_time": {
+				"net_pnl_usd": 11.12, "win_rate_pct": 60.0,
+				"closed_trades": 20, "roi_deployed_pct": 1134.69,
+			},
+			"today": {"pnl_cents": 100},
+		}
+		n = report_to_notification(report)
+		assert "2026-04-26" in n.title
+		assert "Daily P&L" in n.title
+
+	def test_body_compact_summary(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "2026-04-26",
+			"all_time": {
+				"net_pnl_usd": 11.12, "win_rate_pct": 60.0,
+				"closed_trades": 20, "roi_deployed_pct": 1134.69,
+			},
+			"today": {"pnl_cents": 100},
+		}
+		n = report_to_notification(report)
+		assert "$11.12" in n.body
+		assert "60" in n.body
+		assert "20" in n.body
+		assert "1134" in n.body
+
+	def test_severity_info_when_today_positive(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "x", "all_time": {"net_pnl_usd": 1, "win_rate_pct": 1, "closed_trades": 1, "roi_deployed_pct": 1},
+			"today": {"pnl_cents": 100},
+		}
+		assert report_to_notification(report).severity == "info"
+
+	def test_severity_warn_when_today_negative(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "x", "all_time": {"net_pnl_usd": 1, "win_rate_pct": 1, "closed_trades": 1, "roi_deployed_pct": 1},
+			"today": {"pnl_cents": -50},
+		}
+		assert report_to_notification(report).severity == "warn"
+
+	def test_severity_info_when_today_zero(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "x", "all_time": {"net_pnl_usd": 0, "win_rate_pct": 0, "closed_trades": 0, "roi_deployed_pct": 0},
+			"today": {"pnl_cents": 0},
+		}
+		assert report_to_notification(report).severity == "info"
+
+	def test_payload_is_full_report(self):
+		from edge_catcher.reporting.notify import report_to_notification
+		report = {
+			"date": "x", "all_time": {"net_pnl_usd": 1, "win_rate_pct": 1, "closed_trades": 1, "roi_deployed_pct": 1},
+			"today": {"pnl_cents": 100},
+		}
+		n = report_to_notification(report)
+		# Spec §6: payload is the full report dict UNMODIFIED. Identity
+		# check (not equality) — locks against future regressions where
+		# someone adds a defensive copy.deepcopy() that would silently
+		# allow mutations to drift between caller and adapter.
+		assert n.payload is report
