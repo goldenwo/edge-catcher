@@ -21,5 +21,16 @@
     "pnl_cents": 0,
     "pnl_usd": 0.0
   },
-  "today_by_strategy": []
+  "today_by_strategy": [],
+  "open_positions": [],
+  "all_time_by_strategy": [
+    {
+      "strategy": "longshot_fade_example",
+      "closed_trades": 20,
+      "wins": 12,
+      "net_pnl_cents": 1112,
+      "net_pnl_usd": 11.12,
+      "win_rate_pct": 60.0
+    }
+  ]
 }

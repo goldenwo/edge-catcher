@@ -281,9 +281,15 @@ def test_bad_config_with_notify_does_not_run_report(tmp_path, capsys, monkeypatc
 
 
 def test_no_notify_byte_for_byte_matches_golden(capsys, monkeypatch):
-	"""Lock the v1.0.x JSON output format byte-for-byte. Cron jobs piping
+	"""Lock the v1.2.0 JSON output format byte-for-byte. Cron jobs piping
 	stdout to a logger or jq depend on the exact format string
-	`json.dumps(report, indent=2, default=str)` — any drift breaks them."""
+	`json.dumps(report, indent=2, default=str)` — any drift breaks them.
+
+	Note: the golden was rebaselined from v1.1.0 to v1.2.0 when the
+	additive open_positions + all_time_by_strategy fields landed.
+	Existing consumers reading only v1.1.0 keys are unaffected — those
+	keys + values are unchanged.
+	"""
 	from datetime import datetime, timezone
 	import edge_catcher.reporting as reporting_module
 	from edge_catcher.reporting.__main__ import main
