@@ -143,6 +143,7 @@ python -m edge_catcher.reporting --db ... \
 | Discord embed shows no color or wrong color | `style:` not set to `discord` | The `webhook` type accepts `style: discord | slack | generic`; default is `generic`. |
 | SMTP delivery fails with "Username and Password not accepted" | Gmail rejects regular passwords for SMTP | Use an app password (Google → Security → App passwords). |
 | `${VAR}` shows up literally in the dispatched payload | The env var IS set but the YAML quoted it as a string | YAML doesn't interpolate inside single-quoted scalars; rewrite `'${VAR}'` as `${VAR}` (unquoted) or `"${VAR}"` (double-quoted). |
+| Daily P&L stopped being delivered after migration | Unescaped `%` in cron line | Replace `+%Y-%m-%d` with `+\%Y-\%m-\%d` (cron interprets unescaped `%` as command-stdin terminator) |
 
 ## What's NOT in v1.1.0 (deferred)
 

@@ -24,7 +24,7 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 
 	Returns:
 		dict with keys: timestamp, date, all_time, today, today_by_strategy,
-		or {'error': str} if the DB doesn't exist.
+		open_positions, all_time_by_strategy, or {'error': str} if the DB doesn't exist.
 	"""
 	if not Path(db_path).exists():
 		return {"error": f"DB not found at {db_path}"}
@@ -34,6 +34,8 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 		all_time = _all_time_stats(con)
 		today = _today_stats(con, date_str)
 		today_by_strategy = _today_by_strategy(con, date_str)
+		open_positions = _open_positions(con)
+		all_time_by_strategy = _all_time_by_strategy(con)
 	finally:
 		con.close()
 	return {
@@ -42,6 +44,8 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 		"all_time": all_time,
 		"today": today,
 		"today_by_strategy": today_by_strategy,
+		"open_positions": open_positions,
+		"all_time_by_strategy": all_time_by_strategy,
 	}
 
 
@@ -112,3 +116,46 @@ def _today_by_strategy(con: sqlite3.Connection, date_str: str) -> list[dict]:
 		{"strategy": r[0], "series_ticker": r[1], "status": r[2], "count": r[3], "pnl_cents": r[4]}
 		for r in rows
 	]
+
+
+def _open_positions(con: sqlite3.Connection) -> list[dict]:
+	rows = con.execute(
+		"""SELECT
+			strategy,
+			series_ticker,
+			COUNT(*) AS n
+		FROM paper_trades
+		WHERE status = 'open'
+		GROUP BY strategy, series_ticker
+		ORDER BY strategy, series_ticker"""
+	).fetchall()
+	return [
+		{"strategy": r[0], "series_ticker": r[1], "count": r[2]}
+		for r in rows
+	]
+
+
+def _all_time_by_strategy(con: sqlite3.Connection) -> list[dict]:
+	rows = con.execute(
+		"""SELECT
+			strategy,
+			COUNT(*) AS closed_trades,
+			SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) AS wins,
+			COALESCE(SUM(pnl_cents), 0) AS net_pnl_cents
+		FROM paper_trades
+		WHERE status IN ('won','lost')
+		GROUP BY strategy
+		ORDER BY strategy"""
+	).fetchall()
+	out = []
+	for strategy, closed, wins, net_pnl in rows:
+		win_rate = (wins / closed * 100) if closed else 0.0
+		out.append({
+			"strategy": strategy,
+			"closed_trades": closed,
+			"wins": wins or 0,
+			"net_pnl_cents": net_pnl,
+			"net_pnl_usd": round(net_pnl / 100, 2),
+			"win_rate_pct": round(win_rate, 1),
+		})
+	return out
