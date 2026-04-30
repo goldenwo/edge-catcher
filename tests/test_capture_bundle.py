@@ -577,3 +577,46 @@ def test_assemble_daily_bundle_includes_strategy_state(tmp_path):
 
 	manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
 	assert "strategy_state_at_start.json" in manifest["files"]
+
+
+# ---------------------------------------------------------------------------
+# Test 1.a — _write_market_state_snapshot must emit schema_version=2 with
+# sorted first_seen and produce byte-identical JSON across writes.
+#
+# Per docs/superpowers/plans/replay-first-seen-fix.md §"Step 1 — write tests"
+# (1.a). This test is RED until Step 2 lands the writer change.
+# ---------------------------------------------------------------------------
+
+
+def test_market_state_snapshot_emits_schema_v2_with_first_seen(tmp_path: Path) -> None:
+	"""The bundle writer must:
+	  1. Emit schema_version == 2.
+	  2. Persist the sorted first_seen ticker set.
+	  3. Produce byte-stable output (sort_keys=True) across repeat writes,
+	     even when tickers were inserted in reverse-alphabetical order.
+	"""
+	from edge_catcher.monitors.capture.bundle import _write_market_state_snapshot
+
+	ms = MarketState()
+	# Reverse-alphabetical insertion order locks in that the writer is
+	# applying sort_keys=True — Python dict iteration is insertion-ordered.
+	for t in ["KXZZZ-T1", "KXMMM-T1", "KXAAA-T1"]:
+		ms.seed_orderbook(t, OrderbookSnapshot([(0.5, 10)], [(0.48, 5)]))
+		ms.register_ticker(t, meta={"event_ticker": t.split("-")[0]})
+		ms.update_price(t, 50)
+
+	out = tmp_path / "snap.json"
+	_write_market_state_snapshot(out, ms)
+	bytes1 = out.read_bytes()
+	_write_market_state_snapshot(out, ms)
+	bytes2 = out.read_bytes()
+	assert bytes1 == bytes2, "writer must be byte-deterministic (sort_keys=True)"
+
+	parsed = json.loads(bytes1)
+	assert parsed["schema_version"] == 2, (
+		f"expected schema_version=2, got {parsed.get('schema_version')!r} — "
+		"writer has not yet been updated for the first_seen fix"
+	)
+	assert parsed["first_seen"] == ["KXAAA-T1", "KXMMM-T1", "KXZZZ-T1"], (
+		f"first_seen must be sorted ascending, got {parsed.get('first_seen')!r}"
+	)
