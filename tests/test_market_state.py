@@ -239,3 +239,34 @@ class TestMarketState:
 		ms.apply_orderbook_delta("TICKER-F", side="yes", price=0.50, delta=-10)
 		ob = ms.get_orderbook("TICKER-F")
 		assert ob.yes_levels == [] or all(q > 0 for _, q in ob.yes_levels)
+
+
+# ---------------------------------------------------------------------------
+# Test 1.c — MarketState.clear() must reset _first_seen so the next price
+# observation is treated as the first again. This is a regression lock for
+# Change 3 in docs/superpowers/plans/replay-first-seen-fix.md (clear discipline).
+# ---------------------------------------------------------------------------
+
+
+class TestClearResetsFirstSeen:
+	def test_clear_empties_first_seen_and_resets_first_observation(self) -> None:
+		"""After clear(), the next update_price for a previously-seen ticker
+		MUST return True, indicating the ticker is being observed for the
+		first time again. Both checks are required:
+		  - _first_seen is empty (state inspection).
+		  - update_price returns True (behavioral contract that strategies see).
+		"""
+		ms = MarketState()
+		assert ms.update_price("KXFOO-T1", 50) is True, "first observation"
+		assert ms.update_price("KXFOO-T1", 51) is False, "second observation"
+
+		ms.clear()
+
+		# Bare state assertion — _first_seen must be empty.
+		assert ms._first_seen == set(), (  # noqa: SLF001
+			f"clear() left _first_seen populated: {ms._first_seen!r}"  # noqa: SLF001
+		)
+		# Behavioural assertion — the very next update_price re-fires first-seen.
+		assert ms.update_price("KXFOO-T1", 52) is True, (
+			"post-clear, the ticker must be treated as first-seen again"
+		)

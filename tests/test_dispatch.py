@@ -232,3 +232,111 @@ def test_dispatch_synthetic_unknown_source_warns_and_returns(call_args: dict) ->
 		"payload": {},
 	}
 	dispatch_message(event, **call_args)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Test 1.c (dispatch contract extension) — MarketState.clear() must propagate
+# all the way to the strategy's TickContext.is_first_observation. Guards
+# against any future dispatch-side caching that would defeat Change 3.
+#
+# Per docs/superpowers/plans/replay-first-seen-fix.md §"Step 1 — write tests"
+# (1.c). Expected GREEN at commit time (Change 3 needs no source change).
+# ---------------------------------------------------------------------------
+
+
+from edge_catcher.monitors.market_state import TickContext  # noqa: E402
+from edge_catcher.monitors.strategy_base import PaperStrategy  # noqa: E402
+
+
+class _CaptureStrategy(PaperStrategy):
+	"""Stub PaperStrategy that just records every TickContext it sees."""
+
+	name = "capture-test"
+	supported_series = ["KXTEST"]
+	default_params: dict = {}
+
+	def __init__(self) -> None:
+		self.captured_contexts: list[TickContext] = []
+
+	def on_tick(self, ctx: TickContext) -> list:
+		self.captured_contexts.append(ctx)
+		return []
+
+
+def _seed_ticker_for_trade_dispatch(ms: MarketState, ticker: str) -> None:
+	"""Make `ticker` ready to receive a trade-dispatched tick.
+
+	`_handle_trade_msg` requires both:
+	  - `get_price_history(ticker) is not None` (i.e. ticker is registered)
+	  - a non-empty orderbook so yes_ask / yes_bid resolve
+	"""
+	ms.register_ticker(ticker, meta={"event_ticker": "KXTEST"})
+	ms.seed_orderbook(
+		ticker,
+		OrderbookSnapshot(
+			yes_levels=[(0.50, 100)],
+			no_levels=[(0.48, 100)],
+		),
+	)
+
+
+def _trade_event(ticker: str, yes_price: float = 0.50) -> dict:
+	return {
+		"source": "ws",
+		"payload": {
+			"type": "trade",
+			"msg": {
+				"market_ticker": ticker,
+				"yes_price": yes_price,
+				"taker_side": "yes",
+				"count": 1,
+			},
+		},
+	}
+
+
+def test_market_state_clear_propagates_to_dispatch(
+	market_state: MarketState, store: TradeStore
+) -> None:
+	"""After MarketState.clear() (and re-seeding to satisfy dispatch's
+	guards), a fresh trade tick MUST surface is_first_observation=True
+	through dispatch — protects against any future dispatch-side caching
+	that would defeat Change 3 (clear discipline).
+	"""
+	ticker = "KXTEST-T1"
+	strat = _CaptureStrategy()
+
+	call_args = dict(
+		config={},
+		market_state=market_state,
+		store=store,
+		strategies=[strat],
+		strat_by_series={"KXTEST": [strat]},
+		pending_states={},
+		dirty=set(),
+		now=_now(),
+	)
+
+	# --- Stage 1: prime the ticker with one trade so it becomes "seen". ---
+	_seed_ticker_for_trade_dispatch(market_state, ticker)
+	dispatch_message(_trade_event(ticker), **call_args)
+	assert len(strat.captured_contexts) == 1, "first dispatch should reach the strategy"
+	assert strat.captured_contexts[-1].is_first_observation is True, (
+		"first observation should be flagged"
+	)
+
+	# Sanity: a second dispatch is NOT first-seen.
+	dispatch_message(_trade_event(ticker), **call_args)
+	assert strat.captured_contexts[-1].is_first_observation is False, (
+		"second observation must not be flagged as first"
+	)
+
+	# --- Stage 2: clear, re-seed (the clear-then-reseed cycle that recovery
+	# does on WS reconnect), then dispatch a new trade. ---
+	market_state.clear()
+	_seed_ticker_for_trade_dispatch(market_state, ticker)
+	dispatch_message(_trade_event(ticker), **call_args)
+	assert strat.captured_contexts[-1].is_first_observation is True, (
+		"after MarketState.clear(), the next dispatched trade tick MUST flag "
+		"is_first_observation=True — Change 3 (clear discipline) is broken if not"
+	)
