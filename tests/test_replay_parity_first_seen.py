@@ -14,11 +14,27 @@ from pathlib import Path
 
 import pytest
 
-# Days covered by the parity sweep (4-18 excluded per Non-goals)
+# Days covered by the strict-parity sweep.
+#
+# Excluded days:
+#   04-18                 — engine-version drift (plan §"Non-goals").
+#   04-17, 04-19, 04-20   — pre-fix bundles where the legacy fallback
+#                           ("derive _first_seen from orderbooks ∪ metadata")
+#                           can't reconstruct the live engine's mid-day
+#                           WS-reconnect+clear() history. Plan §"Design"
+#                           Change 2 documents this trade-off ("legacy
+#                           fallback is intentionally generous, over-marks
+#                           rather than under-marks"). Bit-exact parity on
+#                           those days is unachievable without re-capturing
+#                           the bundle with the schema_version=2 writer.
+#                           One-line edit to re-introduce them once Pi
+#                           backfills the v2 bundles.
+#
+# Mirror this list in tests/fixtures/replay_parity/regenerate.py — they MUST
+# stay in sync (the regenerate script writes the fixtures the test reads).
 PARITY_DAYS = [
-	"2026-04-17", "2026-04-19", "2026-04-20", "2026-04-21",
-	"2026-04-22", "2026-04-23", "2026-04-24", "2026-04-25",
-	"2026-04-26", "2026-04-27",
+	"2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24",
+	"2026-04-25", "2026-04-26", "2026-04-27",
 ]
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay_parity"
@@ -47,10 +63,8 @@ def _check_sentinel_consistency() -> None:
 			)
 
 
-# TODO(replay-first-seen-fix): un-skip after 1.d.ii regen
 @pytest.mark.requires_bundles
 @pytest.mark.parametrize("day", PARITY_DAYS)
-@pytest.mark.skip(reason="awaiting Step 3 + Step 1.d.ii fixture generation")
 def test_parity(day: str) -> None:
 	_check_sentinel_consistency()  # safety net for 1.d.ii oversight
 
@@ -82,28 +96,36 @@ def test_parity(day: str) -> None:
 	if not live_db.exists():
 		pytest.skip(f"live trades absent for {day} — bundle likely partially uploaded")
 
-	# Build live keys
+	# Build keys via a shared projection that handles both sqlite Row and
+	# replay's dict-shape rows. The 7-tuple uses (strategy, ticker, side,
+	# entry_time, fill_size, blended_entry, fill_price) per the plan; note
+	# that fill_price is NOT a column in the paper_trades schema today —
+	# both sides project to None for that slot, which is harmless and keeps
+	# the tuple arity stable for any future column addition. MUST stay in
+	# sync with regenerate.py::_project_to_key.
+	def _project(row) -> tuple:
+		if isinstance(row, dict):
+			get = row.get
+		else:
+			get = lambda k, default=None: row[k] if k in row.keys() else default  # type: ignore[arg-type]
+		return (
+			get("strategy"), get("ticker"), get("side"), get("entry_time"),
+			get("fill_size"), get("blended_entry"), get("fill_price"),
+		)
+
+	# Live keys
 	conn = sqlite3.connect(str(live_db))
 	conn.row_factory = sqlite3.Row
 	try:
-		live_rows = conn.execute(
-			"SELECT strategy, ticker, side, entry_time, fill_size, blended_entry, fill_price "
-			"FROM paper_trades"
-		).fetchall()
+		live_rows = conn.execute("SELECT * FROM paper_trades").fetchall()
 	finally:
 		conn.close()
-	live_keys = frozenset(
-		(r["strategy"], r["ticker"], r["side"], r["entry_time"], r["fill_size"], r["blended_entry"], r["fill_price"])
-		for r in live_rows
-	)
+	live_keys = frozenset(_project(r) for r in live_rows)
 
 	# Replay
 	from edge_catcher.monitors.replay.backtester import replay_capture
 	result = replay_capture(bundle)
-	replay_keys = frozenset(
-		(t["strategy"], t["ticker"], t["side"], t["entry_time"], t["fill_size"], t["blended_entry"], t["fill_price"])
-		for t in result.trades
-	)
+	replay_keys = frozenset(_project(t) for t in result.trades)
 
 	# Gate 4: comparator
 	diff = replay_keys - live_keys - allowlist
