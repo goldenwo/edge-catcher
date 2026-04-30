@@ -605,10 +605,11 @@ def test_market_state_snapshot_emits_schema_v2_with_first_seen(tmp_path: Path) -
 		ms.register_ticker(t, meta={"event_ticker": t.split("-")[0]})
 		ms.update_price(t, 50)
 
+	frozen_ts = "2026-04-30T08:00:00+00:00"
 	out = tmp_path / "snap.json"
-	_write_market_state_snapshot(out, ms)
+	_write_market_state_snapshot(out, ms, captured_at=frozen_ts)
 	bytes1 = out.read_bytes()
-	_write_market_state_snapshot(out, ms)
+	_write_market_state_snapshot(out, ms, captured_at=frozen_ts)
 	bytes2 = out.read_bytes()
 	assert bytes1 == bytes2, "writer must be byte-deterministic (sort_keys=True)"
 
