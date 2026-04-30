@@ -5,6 +5,24 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-04-30
+
+### Fixed
+
+- **Replay parity: `MarketState._first_seen` now persisted in bundles** — the live engine accumulated this set across days/weeks (the set of tickers ever observed), but bundles never serialized it, so replay reported `is_first_observation=True` for every ticker on its first replay-time event. Strategies keying off `is_first_observation` for entry decisions entered spurious replay-only trades that never fired live. Validated bit-exact across 7 days of post-fix paper-trader bundles (2026-04-21 .. 2026-04-27). Older pre-fix bundles hit the legacy fallback's documented mid-day WS-reconnect+`clear()` reconstruction limitation; their parity will improve as new bundles capture under the v2 writer.
+
+### Changed
+
+- **Bundle `market_state_at_start.json` bumps to `schema_version: 2`** — adds a sorted `first_seen` array. Adopts `json.dumps(sort_keys=True)` for byte-stable output (useful for debug-by-diff and the determinism assertion in the new bundle-write test). Pre-v2 bundles remain readable: `_seed_market_state` falls back to deriving `_first_seen` from the union of orderbooks ∪ metadata keys with an info-level log line. The bundle's manifest `schema_version` is intentionally NOT bumped — per-file snapshots are independently versioned (matches the existing convention in `strategy_state_at_start.json`).
+- **`_write_market_state_snapshot` accepts an injectable `captured_at` keyword param** — defaults to `datetime.now(UTC)` so production callers are unaffected, but tests can pass a frozen ISO string for determinism assertions.
+
+### Added
+
+- **`tests/test_replay_parity_first_seen.py`** — 7-day strict-parity harness behind a `requires_bundles` pytest marker (opt-in via `-m requires_bundles`). Verifies `replay_capture(bundle).trades` matches the bundle's `paper_trades_v2_<day>.sqlite` exactly, modulo a per-day allowlist (`[]` for all 7 days at present). Freshness gate fails loud if the cached bundle's `engine_commit` drifts from the fixture's recorded commit.
+- **`tests/fixtures/replay_parity/regenerate.py`** — reproducible fixture-regen script with explicit Goal-table cross-check (`EXPECTED_TRADE_COUNTS`); refuses to write fixtures on parity violation. Exit codes: 0 success / 2 mismatch / 3 bundle missing.
+- **`MARKET_STATE_SCHEMA_VERSION = 2`** module constant in `edge_catcher/monitors/capture/bundle.py` for consumers that need to programmatically version-gate.
+- **Regression tests for `MarketState.clear()`** locking in the WS-reconnect contract (`_first_seen` resets cleanly + the next dispatched tick surfaces `is_first_observation=True` through the strategy's `on_tick`).
+
 ## [1.2.0] — 2026-04-27
 
 ### Added
