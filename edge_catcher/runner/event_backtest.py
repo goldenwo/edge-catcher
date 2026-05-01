@@ -244,7 +244,8 @@ class BacktestResult:
 	per_strategy: dict[str, dict]
 	per_strategy_curves: dict[str, list[tuple[datetime, float]]]
 	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
-	pnl_values: list[float] = field(default_factory=list)  # all per-trade P&L in cents (float matches CompletedTrade.pnl_cents)
+	# All per-trade P&L in cents; float matches CompletedTrade.pnl_cents.
+	pnl_values: list[float] = field(default_factory=list)
 
 	def summary(self) -> str:
 		gross_pnl = self.net_pnl_cents + self.total_fees_paid
