@@ -1,0 +1,89 @@
+# Edge Catcher — local-dev docker compose.
+#
+# Brings up the three components that compose a working paper-trader stack:
+#   - paper-trader  — long-running market loop (the data source of truth)
+#   - api           — FastAPI backend for the UI
+#   - ui            — React + Vite dev server (proxies API calls to `api`)
+#
+# All three share the same image, just with different commands. Override
+# the image tag with EDGE_CATCHER_IMAGE if you've pushed to a registry;
+# leave it empty to build locally.
+#
+# For VPS production deployments see docs/deployment-docker.md §"VPS
+# walkthrough" — that doc covers the same compose with persistent volumes,
+# log rotation, and a reverse-proxy front for the API/UI.
+
+services:
+  paper-trader:
+    image: ${EDGE_CATCHER_IMAGE:-edge-catcher:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Bind the SQLite DBs + capture artifacts to the host so they survive
+      # container recreation. Per CLAUDE.md, data/ is gitignored.
+      - ./data:/app/data
+      - ./config.local:/app/config.local:ro
+      - ./logs:/app/logs
+    command: >
+      python -m edge_catcher paper-trade
+        --config config.local/paper-trader.yaml
+    # Resource limits sized for a small VPS / Pi 4 (8GB). Adjust upward if
+    # you run many strategies, large orderbook windows, or extra series.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  api:
+    image: ${EDGE_CATCHER_IMAGE:-edge-catcher:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - paper-trader
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./config.local:/app/config.local:ro
+    command: >
+      uvicorn api.main:app
+        --host 0.0.0.0
+        --port 8000
+        --log-level info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  ui:
+    image: node:22-slim
+    restart: unless-stopped
+    depends_on:
+      - api
+    working_dir: /app/ui
+    volumes:
+      - ./ui:/app/ui
+      - /app/ui/node_modules  # anonymous volume — keep host node_modules out
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      - VITE_API_URL=http://api:8000
+    command: >
+      sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+
+volumes:
+  # Named volume placeholder — not used by default since the bind mounts
+  # above keep state on the host. Switch to named volumes (and set the
+  # bind mounts to use them) if you prefer container-managed state.
+  edge_data:

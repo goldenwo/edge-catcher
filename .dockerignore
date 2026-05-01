@@ -1,0 +1,53 @@
+# Build context exclusions — keep the image tight and avoid leaking
+# private files into the build cache.
+
+# Worktrees, git
+.git/
+.worktrees/
+.gitignore
+.github/
+
+# Python cache / virtualenv (we build a fresh venv inside the image)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend build artifacts (the UI image builds these separately)
+ui/node_modules/
+ui/dist/
+ui/.vite/
+
+# Local data + reports + logs (per CLAUDE.md private-file rules)
+data/
+reports/
+config.local/
+edge_catcher/runner/strategies_local.py
+edge_catcher/monitors/strategies_local.py
+edge_catcher/hypotheses/local/
+TASK-*.md
+ROADMAP.md
+BACKLOG.md
+TASK.md
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.example
+*.log
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Snapshot / review artifacts
+.claude/
+mypy-baseline.txt
