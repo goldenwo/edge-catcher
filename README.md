@@ -106,6 +106,7 @@ Stages 3 and 4 share the same dispatch path. **A passing replay means your live 
 - **Anthropic / OpenAI / OpenRouter** — fallback providers via `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`
 - **Tasks**: hypothesis formalization, result interpretation, strategy code generation, autonomous ideation
 - **Per-call budget cap** via `EDGE_CATCHER_CC_BUDGET_USD`
+- **Deep dive**: provider trade-offs, cost management, model selection, prompt caching → [docs/llm-providers.md](docs/llm-providers.md)
 
 ---
 
