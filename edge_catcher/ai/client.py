@@ -121,6 +121,11 @@ class LLMClient:
                 "or OPENROUTER_API_KEY in your environment or .env file."
             )
         model = self._resolve_model(task)
+        if model is None:
+            raise LLMError(
+                f"No model resolved for provider={self.provider!r} task={task!r}. "
+                "Set 'model' in the config or add a default to _DEFAULT_MODELS."
+            )
         if self.provider == "anthropic":
             return self._call_anthropic(system_prompt, user_prompt, model)
         if self.provider == "openai":
@@ -215,7 +220,19 @@ class LLMClient:
                 "Prompt cache: created=%d read=%d input=%d output=%d",
                 cache_created, cache_read, usage.input_tokens, usage.output_tokens,
             )
-        return msg.content[0].text
+        # Anthropic ContentBlock is a 12-variant union (TextBlock, ThinkingBlock,
+        # tool-use variants, etc.); only TextBlock has .text. We don't enable
+        # tools or thinking for the formalizer/ideator paths so the first block
+        # is always TextBlock — narrow explicitly so type-checking holds and
+        # the failure mode is loud if someone changes the API call shape.
+        first = msg.content[0]
+        if not isinstance(first, anthropic.types.TextBlock):
+            raise LLMError(
+                f"Anthropic returned a non-text first content block "
+                f"({type(first).__name__}); update _call_anthropic if tool-use "
+                f"or thinking modes were enabled."
+            )
+        return first.text
 
     def _call_openai(self, system_prompt: str, user_prompt: str, model: str) -> str:
         try:
@@ -236,7 +253,15 @@ class LLMClient:
                 "input_tokens": openai_usage.prompt_tokens,
                 "output_tokens": openai_usage.completion_tokens,
             }
-        return resp.choices[0].message.content
+        # OpenAI's chat completion content is Optional[str] in the SDK type
+        # signature (refusal/null cases). For our prompts none of those fire,
+        # but raise loudly if it ever does so the caller doesn't get back "".
+        content = resp.choices[0].message.content
+        if content is None:
+            raise LLMError(
+                "OpenAI returned a null content block; check refusal field on the response."
+            )
+        return content
 
     def _call_openrouter(self, system_prompt: str, user_prompt: str, model: str) -> str:
         try:

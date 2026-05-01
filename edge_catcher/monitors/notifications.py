@@ -11,7 +11,8 @@ import logging
 import os
 import time
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 import httpx
 
@@ -92,6 +93,12 @@ def notify(text: str) -> None:
 		logger.debug("Notification queue full (%d pending), dropping: %s", len(_pending_tasks), text[:80])
 		return
 
-	task = loop.create_task(_notify_fn(text))
+	# Cast: _notify_fn is typed as Callable[[str], Awaitable[None]] for caller
+	# flexibility (override-by-injection in tests), but asyncio.create_task
+	# wants a Coroutine. The runtime contract is satisfied by both adapters
+	# (discord_notify is a coroutine function); the type signature is the
+	# narrower one that mypy can verify.
+	coro: Coroutine[Any, Any, None] = _notify_fn(text)  # type: ignore[assignment]
+	task: asyncio.Task = loop.create_task(coro)
 	_pending_tasks.add(task)
 	task.add_done_callback(_pending_tasks.discard)

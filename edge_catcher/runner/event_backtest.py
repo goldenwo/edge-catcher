@@ -8,7 +8,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 from edge_catcher.fees import ZERO_FEE
 from edge_catcher.storage.db import get_connection
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 @dataclass
 class Position:
 	ticker: str
-	side: str           # 'yes' or 'no'
+	side: Literal['yes', 'no']
 	entry_price: int    # cents (actual price paid, after slippage)
 	entry_time: datetime
 	size: int
@@ -37,7 +37,7 @@ class Position:
 @dataclass
 class CompletedTrade:
 	ticker: str
-	side: str
+	side: Literal['yes', 'no']
 	strategy: str
 	entry_price: int
 	entry_time: datetime
@@ -67,7 +67,7 @@ class Portfolio:
 		self.net_pnl_cents: int = 0
 		self._sum_win_pnl: float = 0.0
 		self._sum_loss_pnl: float = 0.0
-		self._pnl_values: list[int] = []           # all pnl ints — tiny vs full objects
+		self._pnl_values: list[float] = []         # all pnl values — float to match CompletedTrade.pnl_cents
 		self._trade_sample: list[CompletedTrade] = []  # ring buffer, last 100
 		self._per_strategy: dict[str, dict] = {}   # running per-strategy counters
 		self._per_strategy_curves: dict[str, list[tuple[datetime, float]]] = {}  # cumulative P&L curves
@@ -75,7 +75,9 @@ class Portfolio:
 	def _record_trade(self, ct: CompletedTrade) -> None:
 		"""Accumulate a completed trade into running counters. O(1) per trade."""
 		self.total_trades += 1
-		self.net_pnl_cents += ct.pnl_cents
+		# Round to int when accumulating into the integer-cents counter; the
+		# precise float value is preserved in _pnl_values for Sharpe.
+		self.net_pnl_cents += int(round(ct.pnl_cents))
 		self._pnl_values.append(ct.pnl_cents)
 		if ct.pnl_cents > 0:
 			self.wins += 1
@@ -242,7 +244,7 @@ class BacktestResult:
 	per_strategy: dict[str, dict]
 	per_strategy_curves: dict[str, list[tuple[datetime, float]]]
 	trade_sample: list[CompletedTrade]  # last 100 completed trades (ring buffer)
-	pnl_values: list[int] = field(default_factory=list)  # all per-trade P&L in cents
+	pnl_values: list[float] = field(default_factory=list)  # all per-trade P&L in cents (float matches CompletedTrade.pnl_cents)
 
 	def summary(self) -> str:
 		gross_pnl = self.net_pnl_cents + self.total_fees_paid

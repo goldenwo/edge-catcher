@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # POSIX-only file locking. Windows dev machines run tests without contention
 # protection; the Pi is the only production writer.
 try:
-	import fcntl  # type: ignore[import-not-found]
+	import fcntl  # type: ignore[import-not-found,unused-ignore]  # POSIX-only; ignored on Windows
 	_HAS_FCNTL = True
 except ImportError:
 	_HAS_FCNTL = False
@@ -99,7 +99,7 @@ class RawFrameWriter:
 		lock_path = self.output_dir / ".writer.lock"
 		lock_fd = open(lock_path, "w")
 		try:
-			fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+			fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined,unused-ignore]
 		except OSError as e:
 			lock_fd.close()
 			raise CaptureLockError(
@@ -255,7 +255,8 @@ class RawFrameWriter:
 		"""
 		old_day = self._active_date
 		try:
-			self._active_file.close()
+			if self._active_file is not None:
+				self._active_file.close()
 		except Exception as e:  # pragma: no cover
 			log.warning("error closing rotated file: %s", e)
 		self._active_file = None
@@ -333,7 +334,7 @@ class RawFrameWriter:
 		if self._lock_fd is not None:
 			try:
 				if _HAS_FCNTL:
-					fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+					fcntl.flock(self._lock_fd, fcntl.LOCK_UN)  # type: ignore[attr-defined,unused-ignore]
 				self._lock_fd.close()
 			except Exception:  # pragma: no cover
 				pass

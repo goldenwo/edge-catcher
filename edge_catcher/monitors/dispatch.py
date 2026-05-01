@@ -611,7 +611,15 @@ def _handle_synthetic_settlement(store: TradeStore, payload: dict, now: datetime
 	side = payload.get("side")
 	entry_time = payload.get("entry_time")
 	result = payload.get("result")
-	if not all((strategy, ticker, side, entry_time, result)):
+	# Per-key isinstance check (vs `all()`) so mypy narrows each name from
+	# `Any | None` to `str` for the downstream calls.
+	if not (
+		isinstance(strategy, str)
+		and isinstance(ticker, str)
+		and isinstance(side, str)
+		and isinstance(entry_time, str)
+		and isinstance(result, str)
+	):
 		log.warning("synthetic.settlement: incomplete payload, skipping: %r", payload)
 		return
 

@@ -610,7 +610,9 @@ async def run_engine(config_path: Path) -> None:
 					)
 				except (
 					websockets.ConnectionClosed,
-					websockets.InvalidStatusCode,
+					# websockets ≥12 renamed InvalidStatusCode → InvalidStatus.
+					# Catch both for compat across pin ranges.
+					websockets.InvalidStatus,
 					ConnectionError,
 					OSError,
 				) as exc:

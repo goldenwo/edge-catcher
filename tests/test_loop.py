@@ -281,6 +281,7 @@ class TestLoopOrchestratorCancel:
         cancel = threading.Event()
         orch = LoopOrchestrator(
             research_db=db, max_runs=100, grid_only=True,
+            start_date="2026-01-01", end_date="2026-12-31",
             cancel_event=cancel,
         )
         # Set cancel before any work happens
@@ -306,6 +307,7 @@ class TestLoopOrchestratorProgress:
 
         orch = LoopOrchestrator(
             research_db=db, max_runs=5, grid_only=True,
+            start_date="2026-01-01", end_date="2026-12-31",
             on_progress=on_progress,
         )
         h = Hypothesis(strategy="A", data_sources=make_ds(db="k.db", series="SER1"),
