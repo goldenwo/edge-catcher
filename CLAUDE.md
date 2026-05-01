@@ -53,6 +53,7 @@ If a file reveals **what** we trade, **how** we detect edges, or **specific thre
 4. Add `registry.py` defining `<EXCHANGE>_ADAPTERS: list[AdapterMeta]`.
 5. Add import + concat line in `api/adapter_registry.py`.
 6. Wire download dispatch in `api/main.py` (`if meta.exchange == "<exchange>"` branch) and `api/download_service.py` (`adapter_has_data` helper).
+7. Wire CLI download dispatch in `edge_catcher/cli/download.py` — extend `_run_download` to branch on `meta.exchange` and add a `_run_<exchange>_download(args, markets_file, db_path)` handler. Add a regression test in `tests/test_download_resolve.py` that confirms the new exchange's markets-yaml routes to the right adapter.
 
 `AdapterMeta` requires `id`, `exchange`, `name`, `description`, `db_file`, `fee_model`. See `docs/adr/0001-adapter-registry.md` for rationale.
 

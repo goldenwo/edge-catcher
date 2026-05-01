@@ -297,9 +297,24 @@ fixture's specific noise pattern. That's normal; the fixture is too
 small to be statistically meaningful. Real-data results are what
 actually matter.
 
-For Polymarket data, swap `--db-path data/polymarket.db` and configure
-the series in `config/markets-polymarket.yaml`. See [adapter-guide.md](adapter-guide.md)
-for adapter wiring details.
+For Polymarket data, the same `download` command dispatches to the
+Polymarket adapter when you point `--markets` at the polymarket YAML —
+the registry resolves the exchange from the markets file:
+
+```bash
+edge-catcher download --markets config/markets-polymarket.yaml
+
+edge-catcher backtest \
+    --series politics \
+    --db-path data/polymarket.db \
+    --strategy mean_reversion_under_10 \
+    --json
+```
+
+Configure the categories you want in `config/markets-polymarket.yaml`
+(`series:` is a list of category slugs like `politics`, `sports`,
+`crypto`). See [adapter-guide.md](adapter-guide.md) for adapter wiring
+details.
 
 ## Part 8 — Optional: paper-trader graduation
 

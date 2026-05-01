@@ -5,6 +5,9 @@ not full path — so both `config/markets-*.yaml` and `config.local/markets-*.ya
 resolve to the same db_file.
 """
 
+import argparse
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -23,6 +26,114 @@ def test_resolve_db_from_markets_yaml_unknown_raises():
 	from edge_catcher.cli.download import _resolve_db_from_markets_yaml
 	with pytest.raises(ValueError):
 		_resolve_db_from_markets_yaml("config/markets-nonexistent.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Multi-exchange dispatch — _resolve_meta_from_markets_yaml + _run_download
+# routes by meta.exchange. Locks in the fix for the bug where
+# `download --markets config/markets-polymarket.yaml` instantiated
+# KalshiAdapter and crashed with KeyError: 'kalshi'.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+	"markets_yaml, expected_id, expected_exchange",
+	[
+		("config/markets-btc.yaml", "kalshi_btc", "kalshi"),
+		("config/markets-altcrypto.yaml", "kalshi_crypto", "kalshi"),
+		("config/markets-polymarket.yaml", "polymarket_default", "polymarket"),
+	],
+)
+def test_resolve_meta_from_markets_yaml(markets_yaml, expected_id, expected_exchange):
+	"""Returns the AdapterMeta whose markets_yaml matches by Path.name."""
+	from edge_catcher.cli.download import _resolve_meta_from_markets_yaml
+	meta = _resolve_meta_from_markets_yaml(markets_yaml)
+	assert meta.id == expected_id
+	assert meta.exchange == expected_exchange
+
+
+def test_resolve_meta_from_markets_yaml_unknown_raises():
+	from edge_catcher.cli.download import _resolve_meta_from_markets_yaml
+	with pytest.raises(ValueError):
+		_resolve_meta_from_markets_yaml("config/markets-nonexistent.yaml")
+
+
+def _download_args(**overrides):
+	"""Build a minimal argparse Namespace matching the download subcommand."""
+	defaults = dict(
+		db_path=None,
+		config="config",
+		markets=None,
+		dry_run=True,
+		skip_market_scan=False,
+		max_trade_markets=None,
+		priority_series=None,
+	)
+	defaults.update(overrides)
+	return argparse.Namespace(**defaults)
+
+
+def test_run_download_polymarket_yaml_uses_polymarket_adapter(tmp_path):
+	"""Regression: --markets config/markets-polymarket.yaml must route to
+	PolymarketAdapter, not KalshiAdapter. Previously crashed with
+	KeyError: 'kalshi' because KalshiAdapter was hardcoded.
+	"""
+	from edge_catcher.cli import download as dl
+
+	mock_conn = MagicMock()
+	mock_conn.execute.return_value.fetchone.return_value = (0,)
+	mock_conn.execute.return_value.__iter__ = lambda self: iter([])
+
+	mock_kalshi = MagicMock(name="KalshiAdapter")
+	mock_polymarket = MagicMock(name="PolymarketAdapter")
+	mock_polymarket.return_value.collect_markets.return_value = []
+	mock_polymarket.return_value.series = []
+
+	with patch("edge_catcher.storage.db.init_db"), \
+		patch("edge_catcher.storage.db.get_connection", return_value=mock_conn), \
+		patch.object(dl, "_resolve_db_from_markets_yaml", return_value=str(tmp_path / "polymarket.db")), \
+		patch("edge_catcher.adapters.kalshi.KalshiAdapter", mock_kalshi), \
+		patch("edge_catcher.adapters.polymarket.adapter.PolymarketAdapter", mock_polymarket):
+
+		args = _download_args(
+			db_path=str(tmp_path / "polymarket.db"),
+			markets="config/markets-polymarket.yaml",
+		)
+		dl._run_download(args)
+
+	mock_kalshi.assert_not_called()
+	mock_polymarket.assert_called_once()
+
+
+def test_run_download_kalshi_yaml_still_uses_kalshi_adapter(tmp_path):
+	"""Regression guard: kalshi yaml must continue to use KalshiAdapter
+	after the multi-exchange dispatch refactor.
+	"""
+	from edge_catcher.cli import download as dl
+
+	mock_conn = MagicMock()
+	mock_conn.execute.return_value.fetchone.return_value = (0,)
+	mock_conn.execute.return_value.__iter__ = lambda self: iter([])
+
+	mock_kalshi = MagicMock(name="KalshiAdapter")
+	mock_kalshi.return_value.iter_market_pages.return_value = iter([])
+	mock_kalshi.return_value.get_configured_series.return_value = []
+	mock_polymarket = MagicMock(name="PolymarketAdapter")
+
+	with patch("edge_catcher.storage.db.init_db"), \
+		patch("edge_catcher.storage.db.get_connection", return_value=mock_conn), \
+		patch.object(dl, "_resolve_db_from_markets_yaml", return_value=str(tmp_path / "kalshi-btc.db")), \
+		patch("edge_catcher.adapters.kalshi.KalshiAdapter", mock_kalshi), \
+		patch("edge_catcher.adapters.polymarket.adapter.PolymarketAdapter", mock_polymarket):
+
+		args = _download_args(
+			db_path=str(tmp_path / "kalshi-btc.db"),
+			markets="config/markets-btc.yaml",
+		)
+		dl._run_download(args)
+
+	mock_kalshi.assert_called_once()
+	mock_polymarket.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
