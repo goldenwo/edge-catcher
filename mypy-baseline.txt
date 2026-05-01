@@ -27,7 +27,6 @@ edge_catcher/runner/event_backtest.py:0: error: Incompatible types in assignment
 edge_catcher/runner/event_backtest.py:0: error: Argument 1 to "append" of "list" has incompatible type "float"; expected "int"  [arg-type]
 edge_catcher/runner/event_backtest.py:0: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
 edge_catcher/runner/event_backtest.py:0: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
-edge_catcher/runner/strategies_local.py:0: error: Argument "side" to "Signal" has incompatible type "str"; expected "Literal['yes', 'no']"  [arg-type]
 edge_catcher/runner/strategies_example.py:0: error: Argument "side" to "Signal" has incompatible type "str"; expected "Literal['yes', 'no']"  [arg-type]
 edge_catcher/cli/backtest.py:0: note: By default the bodies of untyped functions are not checked, consider using --check-untyped-defs  [annotation-unchecked]
 edge_catcher/monitors/recovery.py:0: error: Unused "type: ignore" comment  [unused-ignore]

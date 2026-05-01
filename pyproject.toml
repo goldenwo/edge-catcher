@@ -54,6 +54,15 @@ edge-catcher = "edge_catcher.__main__:main"
 [tool.mypy]
 python_version = "3.11"
 files = ["edge_catcher"]
+# Exclude gitignored local-only files (per CLAUDE.md private-file rules) so the
+# baseline matches between local dev and CI. These files exist on the developer's
+# machine but not on CI; without this exclusion mypy locally sees errors CI doesn't,
+# and the baseline filter reports 'fixed' errors and fails CI.
+exclude = [
+  '^edge_catcher/runner/strategies_local\.py$',
+  '^edge_catcher/monitors/strategies_local\.py$',
+  '^edge_catcher/hypotheses/local/',
+]
 ignore_missing_imports = true
 # Permissive baseline — type checks existing hints, doesn't require them everywhere.
 # Pre-existing errors snapshotted in mypy-baseline.txt; CI fails on any NEW error
