@@ -33,7 +33,7 @@ from edge_catcher.monitors.metrics import Metrics
 from edge_catcher.monitors.notifications import notify
 from edge_catcher.monitors.sizing import FillSkip, resolve_fill
 from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.monitors.trade_store import TradeStoreProtocol
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def _format_close_message(
 def process_tick(
 	ctx: TickContext,
 	strategies: list[PaperStrategy],
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	config: dict,
 	*,
 	now: datetime,
@@ -174,7 +174,7 @@ def process_tick(
 def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	config: dict,
 	bullet: str = "🔵",
 	*,
@@ -192,7 +192,7 @@ def _handle_signal(
 def _handle_enter(
 	signal: Signal,
 	ctx: TickContext,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	config: dict,
 	bullet: str = "🔵",
 	*,
@@ -267,7 +267,7 @@ def _handle_enter(
 def _handle_exit(
 	signal: Signal,
 	ctx: TickContext,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	bullet: str = "🔵",
 	*,
 	now: datetime,
@@ -393,7 +393,7 @@ def _handle_ticker_msg(
 	msg: dict,
 	config: dict,
 	market_state: MarketState,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	strategies: list[PaperStrategy],
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
@@ -472,7 +472,7 @@ def _handle_trade_msg(
 	msg: dict,
 	config: dict,
 	market_state: MarketState,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	strategies: list[PaperStrategy],
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
@@ -596,7 +596,7 @@ def _handle_synthetic_ticker_discovered(market_state: MarketState, payload: dict
 	_handle_synthetic_rest_orderbook(market_state, payload)
 
 
-def _handle_synthetic_settlement(store: TradeStore, payload: dict, now: datetime) -> None:
+def _handle_synthetic_settlement(store: TradeStoreProtocol, payload: dict, now: datetime) -> None:
 	"""Apply a captured settlement decision from _settlement_poller.
 
 	Resolves the open trade by composite key (strategy, ticker, side, entry_time).
@@ -652,7 +652,7 @@ def dispatch_message(
 	event: dict,
 	config: dict,
 	market_state: MarketState,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	strategies: list[PaperStrategy],
 	strat_by_series: dict[str, list[PaperStrategy]],
 	pending_states: dict[str, dict],
