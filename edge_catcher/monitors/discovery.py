@@ -67,7 +67,7 @@ def discover_strategies(module_path: Path | None = None) -> list[PaperStrategy]:
 			logger.error("Could not create module spec for %s", path)
 			return []
 		module = importlib.util.module_from_spec(spec)
-		spec.loader.exec_module(module)  # type: ignore[union-attr]
+		spec.loader.exec_module(module)
 	except Exception:
 		logger.exception("Error loading strategies file: %s", path)
 		return []

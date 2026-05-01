@@ -136,6 +136,11 @@ def main(argv: list[str] | None = None) -> int:
 		return 0
 
 	# Notify path — config already validated above, selected is populated.
+	# Re-narrow for the type checker: args.notify (line 133) being truthy is
+	# what makes selected non-None here, but mypy can't follow that across
+	# the args namespace. Belt-and-suspenders assertion is cheap.
+	if selected is None:  # pragma: no cover  (unreachable per arg-parse contract)
+		raise RuntimeError("internal: reached notify path with selected=None")
 	notification = report_to_notification(report)
 	results = send(notification, selected)
 	_print_results_table(results)

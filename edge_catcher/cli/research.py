@@ -115,7 +115,9 @@ def run(args) -> None:
 		'kill-registry': _run_kill_registry,
 		'export': _run_export,
 	}
-	handler = handlers.get(subcmd)
+	# `subcmd` is `Any | None` (from getattr with default); normalize to a
+	# string key the dict can look up. None falls through to the else branch.
+	handler = handlers.get(subcmd) if isinstance(subcmd, str) else None
 	if handler:
 		handler(args)
 	else:
@@ -286,7 +288,7 @@ def _run_loop(args) -> None:
 	)
 	exit_code, results = orch.run()
 
-	verdicts = {}
+	verdicts: dict[str, int] = {}
 	for r in results:
 		verdicts[r.verdict] = verdicts.get(r.verdict, 0) + 1
 	print(f"\nLoop complete: {len(results)} runs")

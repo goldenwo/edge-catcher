@@ -317,7 +317,7 @@ def formalize(
 
     # ── append to hypotheses.yaml ─────────────────────────────────────────────
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = {}
+    existing: dict = {}
     if config_path.exists():
         with open(config_path) as f:
             existing = yaml.safe_load(f) or {}

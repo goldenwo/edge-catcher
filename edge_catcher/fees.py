@@ -22,7 +22,7 @@ class FeeModel:
 	name: str
 	description: str
 	formula: str
-	_calc: FeeCalc  # type: ignore[misc]  # frozen dataclass + callable field
+	_calc: FeeCalc  # frozen dataclass + callable field
 
 	def calculate(self, price: int, size: int) -> float:
 		return self._calc(price, size)

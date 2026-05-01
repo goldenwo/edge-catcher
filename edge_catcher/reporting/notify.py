@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Literal
 
 from edge_catcher.notifications import Notification
 
@@ -54,7 +55,7 @@ def report_to_notification(report: dict) -> Notification:
 	]
 	body = "\n\n".join(part for part in body_parts if part)
 
-	severity = "info" if today.get("pnl_cents", 0) >= 0 else "warn"
+	severity: Literal["info", "warn"] = "info" if today.get("pnl_cents", 0) >= 0 else "warn"
 	return Notification(
 		title=f"Daily P&L — {date}",
 		body=body,
