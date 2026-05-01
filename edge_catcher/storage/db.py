@@ -303,19 +303,29 @@ def get_trades_for_ticker(
             (ticker,),
         )
     rows = cursor.fetchall()
-    return [
-        Trade(
+    out: list[Trade] = []
+    for row in rows:
+        # trades.created_time is TEXT NOT NULL per schema (line ~49); _str_to_dt
+        # is the shared coercion helper that handles markets too where the
+        # column IS nullable. Narrow here so the Trade dataclass can keep the
+        # non-Optional annotation that matches how every consumer treats it.
+        created_time = _str_to_dt(row["created_time"])
+        if created_time is None:
+            raise ValueError(
+                f"trades row {row['trade_id']!r} has null created_time; "
+                "schema declares NOT NULL — DB corruption?"
+            )
+        out.append(Trade(
             trade_id=row["trade_id"],
             ticker=row["ticker"],
             yes_price=row["yes_price"],
             no_price=row["no_price"],
             count=row["count"],
             taker_side=row["taker_side"],
-            created_time=_str_to_dt(row["created_time"]),
+            created_time=created_time,
             raw_data=row["raw_data"],
-        )
-        for row in rows
-    ]
+        ))
+    return out
 
 
 def _row_to_market(row: sqlite3.Row) -> Market:

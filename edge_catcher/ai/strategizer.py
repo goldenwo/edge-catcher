@@ -92,7 +92,8 @@ def _parse_strategy_response(response: str) -> tuple[str, str]:
                     if isinstance(item, ast.Assign):
                         for target in item.targets:
                             if (isinstance(target, ast.Name) and target.id == 'name'
-                                    and isinstance(item.value, ast.Constant)):
+                                    and isinstance(item.value, ast.Constant)
+                                    and isinstance(item.value.value, str)):
                                 return code, item.value.value
                 # Fallback to snake_case class name
                 snake = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', node.name)

@@ -185,11 +185,16 @@ def replay_capture(
 		last_ts = recv_ts
 
 		try:
+			# `store` is InMemoryTradeStore (replay-only); dispatch_message's
+			# signature says TradeStore. The two are duck-typed: InMemoryTradeStore
+			# implements every method dispatch_message uses but doesn't inherit
+			# from TradeStore. Future cleanup: extract a TradeStoreProtocol both
+			# implement. For now, suppress the structural-vs-nominal mismatch.
 			dispatch_message(
 				event=event,
 				config=config,
 				market_state=market_state,
-				store=store,
+				store=store,  # type: ignore[arg-type]  # see comment above
 				strategies=strategies,
 				strat_by_series=strat_by_series,
 				pending_states=pending_states,
