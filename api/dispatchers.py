@@ -62,13 +62,15 @@ def _register_builtins() -> None:
 	api.main and api.download_service modules transitively depend on each
 	other during startup.
 	"""
-	from api.download_service import _kalshi_has_data, _coinbase_has_data
-	from api.main import _kalshi_download_target, _coinbase_download_target
+	from api.download_service import _kalshi_has_data, _coinbase_has_data, _polymarket_has_data
+	from api.main import _kalshi_download_target, _coinbase_download_target, _polymarket_download_target
 
 	DOWNLOAD_DISPATCHERS["kalshi"] = _kalshi_download_target
 	DOWNLOAD_DISPATCHERS["coinbase"] = _coinbase_download_target
+	DOWNLOAD_DISPATCHERS["polymarket"] = _polymarket_download_target
 	DATA_CHECK_DISPATCHERS["kalshi"] = _kalshi_has_data
 	DATA_CHECK_DISPATCHERS["coinbase"] = _coinbase_has_data
+	DATA_CHECK_DISPATCHERS["polymarket"] = _polymarket_has_data
 
 
 _register_builtins()

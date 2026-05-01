@@ -15,13 +15,14 @@ from typing import Optional
 from edge_catcher.adapters.base import AdapterMeta  # re-export
 from edge_catcher.adapters.kalshi.registry import KALSHI_ADAPTERS
 from edge_catcher.adapters.coinbase.registry import COINBASE_ADAPTERS
+from edge_catcher.adapters.polymarket.registry import POLYMARKET_ADAPTERS
 from edge_catcher.fees import FeeModel, ZERO_FEE
 
 
 log = logging.getLogger(__name__)
 
 
-ADAPTERS: list[AdapterMeta] = [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS]
+ADAPTERS: list[AdapterMeta] = [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS, *POLYMARKET_ADAPTERS]
 
 
 def get_adapter(adapter_id: str) -> Optional[AdapterMeta]:
