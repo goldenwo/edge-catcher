@@ -276,8 +276,6 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-from datetime import datetime, timezone  # noqa: E402
-
 from edge_catcher.monitors.dispatch import dispatch_message  # noqa: E402
 from edge_catcher.monitors.market_state import (  # noqa: E402
 	MarketState,

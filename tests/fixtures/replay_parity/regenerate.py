@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -91,20 +90,21 @@ def _project_to_key(row) -> tuple:
 	"""Project a trade dict OR sqlite Row to the 7-tuple key.
 
 	Handles both replay output (dict with these keys) and sqlite Row.
+	MUST stay in sync with the matching helper in
+	tests/test_replay_parity_first_seen.py.
 	"""
-	if isinstance(row, dict):
-		get = row.get
-	else:
-		# sqlite3.Row supports indexing by column name
-		get = lambda k, default=None: row[k] if k in row.keys() else default  # type: ignore[arg-type]
+	def _get(key, default=None):
+		if isinstance(row, dict):
+			return row.get(key, default)
+		return row[key] if key in row.keys() else default
 	return (
-		get("strategy"),
-		get("ticker"),
-		get("side"),
-		get("entry_time"),
-		get("fill_size"),
-		get("blended_entry"),
-		get("fill_price"),
+		_get("strategy"),
+		_get("ticker"),
+		_get("side"),
+		_get("entry_time"),
+		_get("fill_size"),
+		_get("blended_entry"),
+		_get("fill_price"),
 	)
 
 
