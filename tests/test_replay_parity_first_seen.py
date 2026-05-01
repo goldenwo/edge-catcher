@@ -104,13 +104,14 @@ def test_parity(day: str) -> None:
 	# the tuple arity stable for any future column addition. MUST stay in
 	# sync with regenerate.py::_project_to_key.
 	def _project(row) -> tuple:
-		if isinstance(row, dict):
-			get = row.get
-		else:
-			get = lambda k, default=None: row[k] if k in row.keys() else default  # type: ignore[arg-type]
+		def _get(key, default=None):
+			# sqlite3.Row supports `key in row.keys()`; dict supports it too.
+			if isinstance(row, dict):
+				return row.get(key, default)
+			return row[key] if key in row.keys() else default
 		return (
-			get("strategy"), get("ticker"), get("side"), get("entry_time"),
-			get("fill_size"), get("blended_entry"), get("fill_price"),
+			_get("strategy"), _get("ticker"), _get("side"), _get("entry_time"),
+			_get("fill_size"), _get("blended_entry"), _get("fill_price"),
 		)
 
 	# Live keys
