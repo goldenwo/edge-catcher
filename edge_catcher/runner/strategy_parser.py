@@ -179,9 +179,17 @@ def compute_code_hash(code: str) -> str:
 			and isinstance(n.value, ast.Constant)
 			and isinstance(n.value.value, str))
 	]
-	for node in sorted(name_assigns, key=lambda n: n.lineno, reverse=True):
-		line_idx = node.lineno - 1
-		old_val = node.value.value
+	# Rename loop var (was reusing `node` from the class-loop above which made
+	# mypy think the type was still ClassDef when we reassigned to Assign).
+	for assign_node in sorted(name_assigns, key=lambda n: n.lineno, reverse=True):
+		line_idx = assign_node.lineno - 1
+		# isinstance check inside the listcomp narrows .value to ast.Constant
+		# (and .value.value to str), but mypy doesn't carry that narrowing
+		# across the comprehension. asserts here for the type-checker; the
+		# listcomp filter guarantees both.
+		assert isinstance(assign_node.value, ast.Constant)
+		old_val = assign_node.value.value
+		assert isinstance(old_val, str)
 		lines[line_idx] = lines[line_idx].replace(f'"{old_val}"', '"_STRATEGY_NAME_"', 1)
 		lines[line_idx] = lines[line_idx].replace(f"'{old_val}'", '"_STRATEGY_NAME_"', 1)
 
@@ -249,11 +257,18 @@ def cleanup_dead_strategies(file_path: Path, dead_names: list[str]) -> list[str]
 	# Remove from bottom to top so line numbers stay valid
 	for node in sorted(to_remove, key=lambda n: n.lineno, reverse=True):
 		start = node.lineno - 1  # 0-indexed
-		end = node.end_lineno     # exclusive
+		# end_lineno is Optional[int] in ast for backward compat; ClassDef
+		# always populates it from python 3.8+. Skip nodes without it rather
+		# than crash mid-loop.
+		original_end = node.end_lineno
+		if original_end is None:
+			logger.warning("ClassDef %s missing end_lineno; skipping cleanup", node.name)
+			continue
+		end = original_end  # exclusive
 		# Also remove blank lines after the class (up to 2)
 		while end < len(lines) and lines[end].strip() == "":
 			end += 1
-			if end - node.end_lineno >= 2:
+			if end - original_end >= 2:
 				break
 		del lines[start:end]
 		removed_names.append(node.name)

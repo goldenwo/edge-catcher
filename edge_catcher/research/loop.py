@@ -49,10 +49,20 @@ class LoopOrchestrator:
 	) -> None:
 		if grid_only and llm_only:
 			raise ValueError("Cannot use both --grid-only and --llm-only")
+		# start_date / end_date drive every downstream Hypothesis + grid sweep
+		# call; the rest of LoopOrchestrator assumes both are populated. The
+		# Optional default in the signature is for caller convenience (CLI
+		# args), but missing values must fail at construction with a clear
+		# message rather than producing TypeErrors deep in GridPlanner.
+		if start_date is None or end_date is None:
+			raise ValueError(
+				f"LoopOrchestrator requires start_date and end_date "
+				f"(got start_date={start_date!r}, end_date={end_date!r})"
+			)
 
 		self.research_db = research_db
-		self.start_date = start_date
-		self.end_date = end_date
+		self.start_date: str = start_date
+		self.end_date: str = end_date
 		self.max_runs = max_runs if max_runs > 0 else sys.maxsize
 		self.max_time_seconds = max_time_minutes * 60 if max_time_minutes else None
 		self.parallel = parallel
@@ -399,7 +409,8 @@ class LoopOrchestrator:
 		logger.info("LLM proposed %d hypothesis configs", len(hypothesis_configs))
 
 		# ── Statistical analysis loop ────────────────────────────────
-		validated: list[tuple[dict, object]] = []
+		from .test_runner import TestResult  # local import to avoid cycle
+		validated: list[tuple[dict, TestResult]] = []
 		tested_count = 0
 		for config in hypothesis_configs:
 			db_path = str(Path("data") / config["db"])
@@ -666,6 +677,7 @@ class LoopOrchestrator:
 		)
 		available = {s["name"] for s in list_strategies(STRATEGIES_LOCAL_PATH)}
 		from .hypothesis import Hypothesis as _H
+		from .data_source_config import make_ds
 		for proposal in novel_proposals:
 			if proposal["name"] not in available:
 				continue
@@ -673,10 +685,12 @@ class LoopOrchestrator:
 			for series in target_series:
 				for db_path, series_list in series_map.items():
 					if series in series_list:
+						# series + db_path go through make_ds → DataSourceConfig
+						# (the legacy direct kwargs were removed when Hypothesis
+						# was refactored; this code path was using the dead API).
 						hypotheses.append(_H(
 							strategy=proposal["name"],
-							series=series,
-							db_path=db_path,
+							data_sources=make_ds(db=Path(db_path).name, series=series),
 							start_date=self.start_date,
 							end_date=self.end_date,
 							fee_pct=self.fee_pct,

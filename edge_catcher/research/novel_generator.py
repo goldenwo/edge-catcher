@@ -7,9 +7,13 @@ import hashlib
 import importlib
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .audit import AuditLog
 from .tracker import Tracker
+
+if TYPE_CHECKING:
+	from .hypothesis import Hypothesis
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +41,7 @@ class NovelStrategyGenerator:
 		client,
 		strategies: list[str],
 		series_map: dict[str, list[str]],
-	) -> list["Hypothesis"]:  # noqa: F821  # Hypothesis imported lazily below to avoid circular import
+	) -> list[Hypothesis]:
 		"""Generate strategy code from a novel proposal and return hypotheses to test."""
 		from edge_catcher.ai.strategizer import _parse_strategy_response
 		from edge_catcher.runner.strategy_parser import (

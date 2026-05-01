@@ -154,8 +154,8 @@ async def fetch_orderbook_snapshot(
 			]
 
 			return OrderbookSnapshot(
-				yes_levels=yes_levels,  # type: ignore[arg-type]
-				no_levels=no_levels,  # type: ignore[arg-type]
+				yes_levels=yes_levels,
+				no_levels=no_levels,
 			)
 
 		except Exception:

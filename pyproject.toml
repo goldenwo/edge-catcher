@@ -34,8 +34,8 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.5",
     "mypy>=1.10",
-    "mypy-baseline>=0.7",
     "types-PyYAML>=6.0",
+    "types-requests>=2.31",
 ]
 ai = [
     "anthropic>=0.40",
@@ -54,19 +54,16 @@ edge-catcher = "edge_catcher.__main__:main"
 [tool.mypy]
 python_version = "3.11"
 files = ["edge_catcher"]
-# Exclude gitignored local-only files (per CLAUDE.md private-file rules) so the
-# baseline matches between local dev and CI. These files exist on the developer's
-# machine but not on CI; without this exclusion mypy locally sees errors CI doesn't,
-# and the baseline filter reports 'fixed' errors and fails CI.
+# Exclude gitignored local-only files (per CLAUDE.md private-file rules) — they
+# exist on developer machines but not on CI, so they shouldn't enter the gate.
 exclude = [
   '^edge_catcher/runner/strategies_local\.py$',
   '^edge_catcher/monitors/strategies_local\.py$',
   '^edge_catcher/hypotheses/local/',
 ]
 ignore_missing_imports = true
-# Permissive baseline — type checks existing hints, doesn't require them everywhere.
-# Pre-existing errors snapshotted in mypy-baseline.txt; CI fails on any NEW error
-# beyond that set. Shrink the baseline incrementally.
+# Strict-ish defaults; baseline cleanup landed all 63 pre-existing errors as
+# real fixes, so the gate is now zero-tolerance: any new type error fails CI.
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true

@@ -272,7 +272,7 @@ def resolve_fill(
 		return FillResult(
 			fill_size=raw_size,
 			blended_price_cents=0,   # signals stale book; trade_store uses entry_price for PnL
-			slippage_cents=0.0,
+			slippage_cents=0,
 			fill_pct=1.0,
 			intended_size=raw_size,
 		)

@@ -185,6 +185,11 @@ class ParameterSensitivityGate(Gate):
 				fee_pct=context.hypothesis.fee_pct,
 			)
 
+			# Narrow Optional → ResearchAgent. The caller (`check`) returns early
+			# when agent is None; this function is only reachable from there.
+			if context.agent is None:
+				logger.error("_run_neighbor reached without agent — caller invariant violated")
+				return None
 			data = context.agent.run_backtest_only(h)
 			self._cleanup(temp_name)
 
