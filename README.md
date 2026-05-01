@@ -119,7 +119,10 @@ Stages 3 and 4 share the same dispatch path. **A passing replay means your live 
 | **Add an exchange** | [adapter-guide.md](docs/adapter-guide.md) |
 | **System design** | [architecture.md](docs/architecture.md) |
 | **P&L reporting** | [reporting.md](docs/reporting.md) |
+| **Deploy with Docker / VPS** | [deployment-docker.md](docs/deployment-docker.md) |
+| **Deploy with systemd (no Docker)** | [deploy/README.md](deploy/README.md) |
 | **Research data flow** | [research-pipeline-data-flow.md](docs/research-pipeline-data-flow.md) |
+| **LLM provider trade-offs** | [llm-providers.md](docs/llm-providers.md) |
 | **What's next** | [roadmap.md](docs/roadmap.md) |
 | **ADRs** | [docs/adr/](docs/adr/) |
 
