@@ -54,13 +54,32 @@ edge-catcher = "edge_catcher.__main__:main"
 [tool.mypy]
 python_version = "3.11"
 files = ["edge_catcher"]
+# Exclude gitignored local-only files (per CLAUDE.md private-file rules) so the
+# baseline matches between local dev and CI. These files exist on the developer's
+# machine but not on CI; without this exclusion mypy locally sees errors CI doesn't,
+# and the baseline filter reports 'fixed' errors and fails CI.
+exclude = [
+  '^edge_catcher/runner/strategies_local\.py$',
+  '^edge_catcher/monitors/strategies_local\.py$',
+  '^edge_catcher/hypotheses/local/',
+]
 ignore_missing_imports = true
 # Permissive baseline — type checks existing hints, doesn't require them everywhere.
-# 67 pre-existing errors snapshotted in mypy-baseline.txt; CI fails on any NEW error
+# Pre-existing errors snapshotted in mypy-baseline.txt; CI fails on any NEW error
 # beyond that set. Shrink the baseline incrementally.
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
+
+# monitors/auth.py uses cryptography's RSA private-key sign() interface.
+# The cryptography library's PrivateKey union changes shape across versions
+# (newer versions add post-quantum types like MLDSAxxPrivateKey, MLKEMxxxPrivateKey),
+# so per-version mypy errors here are environment-dependent and not actionable as
+# a code-quality signal. Ignore for now; revisit if/when we narrow the union via
+# explicit isinstance() checks.
+[[tool.mypy.overrides]]
+module = "edge_catcher.monitors.auth"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
