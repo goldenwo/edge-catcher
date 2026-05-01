@@ -5,6 +5,25 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-05-01
+
+### Fixed
+
+- **Polymarket adapter pagination + 404 robustness** (PR #16) — `collect_markets()` now honors the `dry_run` flag (was silently walking Gamma `/markets` until offset ~100K, hitting Gamma's undocumented offset ceiling with 422 Unprocessable Entity). Now `dry_run` breaks after one page (kalshi-adapter parity), and 422 at offset > 0 is treated as natural end-of-pagination. `collect_trades()` now treats 404 from CLOB (typical for closed/settled markets with no live trade endpoint) as no-trades rather than aborting the sweep.
+- **CLI `download` multi-exchange dispatch** (PR #17) — `edge-catcher download --markets config/markets-polymarket.yaml` previously crashed with `KeyError: 'kalshi'` because `cli/download.py` always instantiated `KalshiAdapter` regardless of the markets file's exchange. The CLI now resolves the `AdapterMeta` from the markets-yaml filename and dispatches by `meta.exchange`, mirroring `api.dispatchers.DOWNLOAD_DISPATCHERS`. Polymarket joins Kalshi as a first-class CLI exchange. Unknown exchanges raise a structured `NotImplementedError` with a hint about Coinbase OHLC's separate subcommands.
+- **`edge_catcher.adapters.polymarket.__init__` re-exports `PolymarketAdapter`** (PR #16) — kalshi-package parity; `from edge_catcher.adapters.polymarket import PolymarketAdapter` now works.
+
+### Changed
+
+- **`monitors/auth.py` narrows `load_pem_private_key`'s return to `RSAPrivateKey`** via `isinstance` (PR #16) — the cryptography library's union return type changes shape across versions (newer releases add post-quantum types like `MLDSAxxPrivateKey`, `MLKEMxxxPrivateKey`); the explicit narrow makes the subsequent `.sign(...)` call type-check on every supported release. The per-module `[[tool.mypy.overrides]] ignore_errors = true` is removed; mypy is now clean here without suppression.
+- **`TradeStoreProtocol` extracted in `monitors/trade_store.py`** (PR #16) — structural protocol that both `TradeStore` (SQLite) and `InMemoryTradeStore` (replay) satisfy nominally without inheritance. `monitors/dispatch.py` now annotates every `store: …` parameter as `TradeStoreProtocol`; the `# type: ignore[arg-type]` at `monitors/replay/backtester.py:197` is removed. No behavior change — protocols are erased at runtime.
+
+### Added
+
+- **`CONTRIBUTING.md` "Type-checking" section** (PR #16) — formalizes the v1.3.0 zero-tolerance mypy gate with override-discipline guidance; the PR-process bullet now requires running `mypy edge_catcher api` alongside ruff and pytest.
+- **`CLAUDE.md` "Adding a new exchange" step 7** (PR #17) — reminds future contributors to wire CLI dispatch alongside the API one.
+- **6 dispatch regression tests in `tests/test_download_resolve.py`** (PR #17) — parametrized `_resolve_meta` cases, unknown-raises, Polymarket dispatch, Kalshi dispatch regression guard.
+
 ## [1.3.0] — 2026-05-01
 
 ### Added
