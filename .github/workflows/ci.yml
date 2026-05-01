@@ -22,5 +22,12 @@ jobs:
           pip install -e .[dev,ai,ui]
       - name: Lint
         run: ruff check .
+      - name: Type-check (mypy + baseline)
+        run: |
+          # mypy runs on edge_catcher/ per pyproject.toml [tool.mypy].
+          # mypy-baseline filters out the snapshotted error set in
+          # mypy-baseline.txt; CI fails if any NEW type error appears.
+          # Shrink the baseline incrementally by fixing real errors.
+          mypy 2>&1 | mypy-baseline filter
       - name: Test
         run: pytest tests/ -v
