@@ -5,6 +5,26 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-01
+
+### Added
+
+- **Polymarket adapter** (`edge_catcher.adapters.polymarket`) — second exchange, parallel structure to Kalshi. Uses Gamma's public market-metadata API + CLOB's public trades API (no auth required). 24-test suite plus a live-API smoke verified 5 markets fetched and 1 trade projected end-to-end. Wires through `api/adapter_registry.py` so existing download/backtest/UI flows work transparently. New config: `config/markets-polymarket.yaml`.
+- **Docker deployment path** — `Dockerfile`, `docker-compose.yml`, `.dockerignore`, and `docs/deployment-docker.md` (~280-line full VPS walkthrough). Image build verified. Adds a turnkey path for users who'd rather not hand-provision a Pi.
+- **`docs/tutorial.md`** — 30-minute build-your-first-strategy walkthrough that takes the reader from hypothesis through real-data graduation; complements the existing 5-minute `quickstart.md`.
+- **`docs/llm-providers.md`** — ~225-line deep-dive on the multi-provider LLM layer (Anthropic / OpenAI / OpenRouter / Together). Covers env-var setup, model selection, and observed cost/latency tradeoffs.
+- **`docs/reporting.md` "Wiring up delivery" section** — formalizes the `--notify` delegation pattern shipped in v1.1; replaces older prose that pre-dated the turnkey flag.
+
+### Changed
+
+- **mypy zero-tolerance CI gate** — `Type-check (mypy)` step now runs between Lint and Test in `.github/workflows/ci.yml`. Type checking is enforced strictly: the baseline is empty and any new error fails the build. Adds `mypy` + `types-PyYAML` + `types-requests` as dev deps.
+- **63 pre-existing mypy errors cleared at the source** rather than baselined. Real defects surfaced and fixed in the process: dead `Hypothesis(series=, db_path=)` API call in `research/loop.py` (now `data_sources=`), `pnl_cents` float→int silent precision loss in event backtester, ast `end_lineno` Optional handling in `strategy_parser.py`, tighter narrowing in `ai/client.py` and `monitors/dispatch.py`.
+
+### Fixed
+
+- **websockets `InvalidStatus` rename compat** — `monitors/engine.py` reconnect path now catches both `InvalidStatus` (websockets ≥ 13) and `InvalidStatusCode` (older) via a `getattr` fallback. Earlier pin compatibility hot-path didn't survive the rename; this restores it.
+- **Tutorial CLI references** — `docs/tutorial.md` was published in v1.2.1 with four references that didn't match the actual CLI surface: Part 4 sample JSON used `win_rate_pct`/`per_strategy: [...]` (actual: `win_rate` fraction + `per_strategy: {}` dict); Part 5 referenced a non-existent `--show-trades` flag; Part 6 referenced a non-existent `--param key=v1,v2` sweep syntax; Part 7 referenced `download --series` (actual: `download --markets FILE`). All four corrected to match the live CLI; smoke-tested against the bundled `demo_markets.db` fixture.
+
 ## [1.2.1] — 2026-04-30
 
 ### Fixed
