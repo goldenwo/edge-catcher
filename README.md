@@ -115,6 +115,7 @@ Stages 3 and 4 share the same dispatch path. **A passing replay means your live 
 | | |
 |--|--|
 | **Get started** | [quickstart.md](docs/quickstart.md) — 5-minute walkthrough |
+| **Build your first strategy** | [tutorial.md](docs/tutorial.md) — 30-min end-to-end |
 | **Write a strategy** | [strategy-guide.md](docs/strategy-guide.md) |
 | **Add an exchange** | [adapter-guide.md](docs/adapter-guide.md) |
 | **System design** | [architecture.md](docs/architecture.md) |
