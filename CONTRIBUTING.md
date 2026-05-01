@@ -67,6 +67,25 @@ Style is configured in [`ruff.toml`](ruff.toml): pycodestyle errors,
 pyflakes, warnings (no full default rule set), with tab-indentation
 exceptions because the codebase uses tabs.
 
+## Type-checking
+
+```bash
+mypy edge_catcher api
+```
+
+The CI gate is **zero-tolerance** as of v1.3.0 — any new type error
+fails the build. mypy config lives in `pyproject.toml` under
+`[tool.mypy]`. A handful of legacy modules use targeted
+`[[tool.mypy.overrides]]` entries when an upstream library's union
+types vary across versions; prefer fixing types at the source over
+adding new overrides.
+
+If you cannot avoid an override, narrow it to the smallest possible
+scope (one module, specific error code) and leave a comment explaining
+the upstream constraint. Stale overrides eventually rot — adding a TODO
+that names the version you'd like to upgrade to (e.g. `cryptography>=46`)
+keeps cleanup possible later.
+
 ## How to add an exchange
 
 See [`docs/adapter-guide.md`](docs/adapter-guide.md) for the full
@@ -111,8 +130,9 @@ hypothesis registry the same way as the tracked ones.
   in your gitignored fork.
 - Update relevant docs (`README.md`, `docs/*.md`, ADRs) when behavior or
   surface area changes.
-- Run `ruff check .` and `pytest tests/` locally before opening the PR.
-  CI runs the same against Python 3.11 and 3.12.
+- Run `ruff check .`, `mypy edge_catcher api`, and `pytest tests/`
+  locally before opening the PR. CI runs the same three checks against
+  Python 3.11 and 3.12 — all three are required for merge.
 - Do not commit anything from `data/`, `reports/`, `config.local/`,
   `scripts/`, or `edge_catcher/monitors/strategies_local.py` — these are
   gitignored for a reason.

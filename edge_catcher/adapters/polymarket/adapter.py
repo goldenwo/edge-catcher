@@ -220,7 +220,19 @@ class PolymarketAdapter(PredictionMarketAdapter):
 			# refine via the YAML config.
 			# (No-op when series_filter is empty.)
 
-			batch = self._get(f"{self.gamma_base}/markets", params=params)
+			try:
+				batch = self._get(f"{self.gamma_base}/markets", params=params)
+			except requests.exceptions.HTTPError as exc:
+				# Gamma rejects offsets beyond an undocumented hard ceiling
+				# with a 422; treat that as natural end-of-pagination so a
+				# liquid-but-finite category doesn't crash the whole sweep.
+				if exc.response is not None and exc.response.status_code == 422 and offset > 0:
+					logger.info(
+						"gamma /markets returned 422 at offset=%d; treating as end-of-pagination",
+						offset,
+					)
+					break
+				raise
 			if not isinstance(batch, list):
 				raise ValueError(
 					f"gamma /markets returned non-list (got {type(batch).__name__}); "
@@ -245,6 +257,9 @@ class PolymarketAdapter(PredictionMarketAdapter):
 				out.append(self._raw_market_to_market(raw, series_filter))
 			# Stop when we get a partial page (last page).
 			if len(batch) < self.pagination_limit:
+				break
+			# In dry_run mode only one page is fetched (parity with Kalshi adapter).
+			if self.dry_run:
 				break
 			offset += len(batch)
 		return out
@@ -318,7 +333,15 @@ class PolymarketAdapter(PredictionMarketAdapter):
 		filtered out client-side (CLOB doesn't expose a since-filter on
 		this endpoint as of the docs we have).
 		"""
-		raw_trades = self._get(f"{self.clob_base}/markets/{ticker}/trades")
+		try:
+			raw_trades = self._get(f"{self.clob_base}/markets/{ticker}/trades")
+		except requests.exceptions.HTTPError as exc:
+			# Closed/settled markets routinely have no live CLOB trade endpoint —
+			# CLOB returns 404. Treat as empty rather than failing the whole sweep.
+			if exc.response is not None and exc.response.status_code == 404:
+				logger.debug("clob /markets/%s/trades returned 404 — treating as no trades", ticker)
+				return []
+			raise
 		if not isinstance(raw_trades, list):
 			raise ValueError(
 				f"clob /markets/{ticker}/trades returned non-list "

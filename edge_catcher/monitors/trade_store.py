@@ -5,9 +5,57 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+
+
+class TradeStoreProtocol(Protocol):
+	"""Structural interface dispatch_message + helpers depend on.
+
+	Both the SQLite-backed `TradeStore` and the replay `InMemoryTradeStore`
+	satisfy this protocol nominally — without inheritance — so dispatch and
+	settlement code can accept either. Methods listed here are exactly the
+	ones touched by `monitors/dispatch.py`; if dispatch grows to need a new
+	store method, mirror it on both implementations and add the signature
+	here.
+	"""
+
+	def record_trade(
+		self,
+		ticker: str,
+		entry_price: int,
+		strategy: str,
+		side: str,
+		series_ticker: str,
+		intended_size: int = ...,
+		fill_size: int = ...,
+		blended_entry: Optional[int] = ...,
+		book_depth: Optional[int] = ...,
+		fill_pct: Optional[float] = ...,
+		slippage_cents: Optional[float] = ...,
+		book_snapshot: Optional[str] = ...,
+		*,
+		now: datetime,
+	) -> int: ...
+
+	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None: ...
+
+	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None: ...
+
+	def get_open_trades(self) -> list[dict[str, Any]]: ...
+
+	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None: ...
+
+	def get_open_trades_for(self, strategy: str, ticker: str) -> list[dict[str, Any]]: ...
+
+	def save_state(self, strategy: str, state_dict: dict[str, Any]) -> None: ...
+
+	def load_state(self, strategy: str) -> dict[str, Any]: ...
+
+	def load_all_states(self) -> dict[str, dict[str, Any]]: ...
+
+	def close(self) -> None: ...
 
 
 class DuplicateOpenTradeError(Exception):
