@@ -183,12 +183,13 @@ fields:
   "total_trades": 3,            // trades the strategy entered
   "wins": 2,
   "losses": 1,
-  "win_rate_pct": 66.7,
+  "win_rate": 0.667,            // fraction, not percent
   "net_pnl_cents": 18,
   "sharpe": 0.81,
-  "per_strategy": [
-    {"strategy": "mean_reversion_under_10", "trades": 3, "net_pnl_cents": 18, ...}
-  ]
+  "per_strategy": {
+    "mean_reversion_under_10": {"total_trades": 3, "wins": 2, "net_pnl_cents": 18, ...}
+  },
+  "trade_log": [...]            // per-trade detail (Part 5)
 }
 ```
 
@@ -199,19 +200,24 @@ the price range visible in Part 2's sqlite query.
 
 ## Part 5 — Read the per-trade output
 
-Aggregate stats hide failure modes. Drop `--json` and pass
-`--show-trades` to see each entry/exit:
+Aggregate stats hide failure modes. Every backtest also writes the full
+result — including a per-trade `trade_log` — to
+`reports/backtests/backtest_result.json`. Inspect it with `jq`:
 
 ```bash
 edge-catcher backtest \
     --series DEMO_SERIES \
     --db-path edge_catcher/data/examples/demo_markets.db \
     --strategy mean_reversion_under_10 \
-    --show-trades
+    --json > /dev/null
+
+jq '.trade_log[] | {ticker, side, entry_price, exit_price, entry_time, exit_time, pnl_cents, exit_reason}' \
+   reports/backtests/backtest_result.json
 ```
 
-For each trade, you get the entry price, exit price, holding period, and
-the reason string the strategy attached. Look for:
+Each row gives the entry price, exit price, hold period (entry/exit
+timestamps), P&L, and the `exit_reason` string the strategy attached.
+Look for:
 
 - **Trades that entered at the bottom of the price range** — these are
   what your hypothesis predicted; if they're profitable, the edge is
@@ -227,37 +233,56 @@ logic is too lax. Tighten `exit_threshold` and re-run.
 
 ## Part 6 — Iterate (parameter sweep)
 
-The naive way: edit the constructor defaults, re-run, edit, re-run.
-For 2-3 iterations that's fine. Past that, use the parameter sweep:
+Strategy `__init__` parameters are auto-exposed as CLI flags. Snake-case
+names become kebab-case (`entry_threshold` → `--entry-threshold`):
 
 ```bash
 edge-catcher backtest \
     --series DEMO_SERIES \
     --db-path edge_catcher/data/examples/demo_markets.db \
     --strategy mean_reversion_under_10 \
-    --param entry_threshold=5,8,10,15 \
-    --param exit_threshold=5,10,15 \
-    --json | jq '.[] | {params, win_rate_pct, sharpe, net_pnl_cents}'
+    --entry-threshold 8 \
+    --exit-threshold 10 \
+    --json | jq '{win_rate, sharpe, net_pnl_cents}'
 ```
 
-This runs a 4×3 grid (12 backtests) and dumps a row per param combo.
+For 2-3 iterations, edit the values and re-run. Past that, sweep in a
+shell loop:
+
+```bash
+for et in 5 8 10 15; do
+  for xt in 5 10 15; do
+    edge-catcher backtest \
+        --series DEMO_SERIES \
+        --db-path edge_catcher/data/examples/demo_markets.db \
+        --strategy mean_reversion_under_10 \
+        --entry-threshold "$et" --exit-threshold "$xt" \
+        --json | jq -c "{entry: $et, exit: $xt, win_rate, sharpe, net_pnl_cents}"
+  done
+done
+```
+
+This runs a 4×3 grid (12 backtests) and prints a row per param combo.
 Sort by Sharpe to find the most stable params; sort by `net_pnl_cents`
 to find the best raw return. They usually disagree — pick what matches
 your evaluation criterion.
 
-The autonomous research loop (`edge-catcher research run`) automates
-this further: it generates parameter grids from a hypothesis YAML and
-runs them in parallel, plus statistical tests on whether the edge is
-real or noise. See [research-pipeline-data-flow.md](research-pipeline-data-flow.md)
-when you want that level of rigor.
+For a more rigorous workflow — hypothesis YAMLs, statistical tests,
+parallel execution — see the autonomous research loop
+(`edge-catcher research sweep --strategy mean_reversion_under_10`) and
+[research-pipeline-data-flow.md](research-pipeline-data-flow.md).
 
 ## Part 7 — Graduate to real data
 
 Replace the demo fixture with a real exchange DB:
 
 ```bash
-# Kalshi (requires API key in .env per docs/quickstart.md)
-edge-catcher download --series KXBTCD
+# Kalshi (requires API key in .env per docs/quickstart.md).
+# markets-btc.yaml configures the KXBTC series family (D/W/M/15M); the
+# downloader writes everything to data/kalshi-btc.db per the adapter
+# registry. To download a different category (sports, weather, …),
+# point --markets at the matching config/markets-*.yaml file.
+edge-catcher download --markets config/markets-btc.yaml
 
 edge-catcher backtest \
     --series KXBTCD \
