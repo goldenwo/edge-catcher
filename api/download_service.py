@@ -93,6 +93,87 @@ def run_kalshi_download(
 		state.running = False
 
 
+def run_polymarket_download(
+	adapter_id: str,
+	state,
+	start_date: str | None = None,
+	markets_yaml_path: str | None = None,
+	db_file: str | None = None,
+) -> None:
+	"""Run Polymarket download (Gamma markets + CLOB trades), updating state.
+
+	Mirrors run_kalshi_download in shape: discover markets via the Gamma
+	API, then fetch trade history per market via CLOB. Polymarket has no
+	auth so no api_key parameter is needed.
+	"""
+	from datetime import datetime, timezone
+
+	from edge_catcher.adapters.polymarket.adapter import PolymarketAdapter
+	from edge_catcher.storage.db import (
+		get_connection,
+		get_markets_by_series,
+		init_db,
+		upsert_market,
+		upsert_trades_batch,
+	)
+
+	db = Path(db_file) if db_file else validate_db("polymarket.db")
+
+	state.running = True
+	state.progress = "Initializing..."
+	state.rows_fetched = 0
+	state.error = None
+
+	try:
+		init_db(db)
+		config_file = Path(markets_yaml_path) if markets_yaml_path else markets_yaml()
+		adapter = PolymarketAdapter(config_path=config_file)
+		conn = get_connection(db)
+		try:
+			markets = adapter.collect_markets()
+			for m in markets:
+				upsert_market(conn, m)
+			conn.commit()
+			state.progress = f"Markets: {len(markets)} fetched"
+			if hasattr(state, 'markets_fetched'):
+				state.markets_fetched = len(markets)
+
+			existing_tickers = {
+				r[0] for r in conn.execute("SELECT DISTINCT ticker FROM trades")
+			}
+			markets_with_vol: list = []
+			for series in adapter.series or [m.series_ticker for m in markets]:
+				for m in get_markets_by_series(conn, series):
+					if (m.volume is None or (m.volume or 0) > 0) and m.ticker not in existing_tickers:
+						markets_with_vol.append(m)
+			markets_with_vol.sort(key=lambda m: m.volume or 0, reverse=True)
+
+			total = len(markets_with_vol)
+			trades_count = 0
+			for i, market in enumerate(markets_with_vol, 1):
+				state.progress = f"Trades: {i}/{total} markets"
+				trades = adapter.collect_trades(market.ticker, since=start_date)
+				if trades:
+					upsert_trades_batch(conn, trades)
+					conn.commit()
+					trades_count += len(trades)
+					if hasattr(state, 'trades_fetched'):
+						state.trades_fetched = trades_count
+			state.rows_fetched = trades_count
+		finally:
+			conn.close()
+
+		state.last_run = datetime.now(timezone.utc).isoformat()
+		state.progress = "Complete"
+		save_adapter_history(adapter_id, state.last_run)
+	except Exception as exc:
+		logger.error("Polymarket adapter download failed: %s", exc)
+		state.error = str(exc)
+		state.progress = f"Error: {exc}"
+	finally:
+		state.running = False
+
+
 def run_coinbase_download(
 	adapter_id: str,
 	state,
@@ -173,6 +254,12 @@ def _kalshi_has_data(meta, conn) -> bool:
 		f"SELECT COUNT(*) FROM markets WHERE series_ticker IN ({placeholders})", series
 	).fetchone()[0]
 	return count > 0
+
+
+def _polymarket_has_data(meta, conn) -> bool:
+	"""Polymarket markets+trades table layout matches Kalshi's, so we delegate
+	to the same shape-check (config-driven series filter against markets table)."""
+	return _kalshi_has_data(meta, conn)
 
 
 def _coinbase_has_data(meta, conn) -> bool:
