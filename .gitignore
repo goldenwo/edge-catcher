@@ -8,6 +8,13 @@ edge_catcher/monitors/strategies_local.py
 docs/superpowers/
 docs/research-pipeline-data-flow.md
 
+# Replay-parity fixtures contain per-trade timing/size/price data and
+# strategy/series identifiers — regenerated locally via
+# tests/fixtures/replay_parity/regenerate.py against bundles in data/bundles/.
+# Sentinel + allowlist files are tracked (small, no per-trade data).
+tests/fixtures/replay_parity/*.expected.json
+tests/fixtures/replay_parity/.fixtures_present
+
 # Data and databases
 data/
 *.db

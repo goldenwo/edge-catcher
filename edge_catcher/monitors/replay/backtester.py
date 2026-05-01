@@ -326,6 +326,23 @@ def _seed_market_state(market_state: MarketState, bundle: Path, prior_bundle: Op
 	for ticker, meta in state.get("metadata", {}).items():
 		market_state.register_ticker(ticker, meta=meta)
 
+	# Replay-parity seed: see docs/superpowers/plans/replay-first-seen-fix.md
+	# This is the ONLY legitimate place to write MarketState._first_seen
+	# directly outside update_price.
+	schema_version = state.get("schema_version", 1)
+	if schema_version >= 2 and "first_seen" in state:
+		market_state._first_seen.update(state["first_seen"])  # noqa: SLF001
+	else:
+		log.info(
+			"_seed_market_state: snapshot lacks schema_version>=2 first_seen field; "
+			"deriving from orderbooks+metadata keys (legacy fallback, may over-mark)"
+		)
+		# NOTE: read keys from the parsed JSON (state.get(...)), NOT from
+		# market_state._orderbooks post-seed — coupling to seeding completeness
+		# would mask future seeder bugs.
+		market_state._first_seen.update(state.get("orderbooks", {}).keys())  # noqa: SLF001
+		market_state._first_seen.update(state.get("metadata", {}).keys())  # noqa: SLF001
+
 
 def _seed_open_trades(store: InMemoryTradeStore, bundle: Path, prior_bundle: Optional[Path | str]) -> None:
 	"""Seed from the PRIOR day's open_trades_at_start.sqlite. See spec §4.6 step 6."""

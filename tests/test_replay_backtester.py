@@ -262,3 +262,180 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 
 	# --- Stage 6: the store now reflects the mutation ---
 	assert store.load_state("counter-strat") == {"counter": 6}
+
+
+# ---------------------------------------------------------------------------
+# Test 1.b — _seed_market_state must derive is_first_observation correctly
+# under v2 (carries first_seen), legacy (no schema_version), and v1 (explicit
+# old version) envelopes. Verified BOTH at the strategy contract layer
+# (dispatch_message → ctx.is_first_observation) AND directly via
+# update_price's return value (defense-in-depth).
+#
+# Per docs/superpowers/plans/replay-first-seen-fix.md §"Step 1 — write tests"
+# (1.b). RED until Step 3 lands the reader change.
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+from edge_catcher.monitors.dispatch import dispatch_message  # noqa: E402
+from edge_catcher.monitors.market_state import (  # noqa: E402
+	MarketState,
+	OrderbookSnapshot,
+	TickContext,
+)
+from edge_catcher.monitors.replay.backtester import _seed_market_state  # noqa: E402
+from edge_catcher.monitors.strategy_base import PaperStrategy  # noqa: E402
+from edge_catcher.monitors.trade_store import TradeStore  # noqa: E402
+
+
+class _CaptureStrategyB(PaperStrategy):
+	"""Stub strategy that records every TickContext it sees."""
+
+	name = "capture-b"
+	supported_series = ["KXSEED", "KXNOTSEEN"]
+	default_params: dict = {}
+
+	def __init__(self) -> None:
+		self.captured_contexts: list[TickContext] = []
+
+	def on_tick(self, ctx: TickContext) -> list:
+		self.captured_contexts.append(ctx)
+		return []
+
+
+def _trade_event_for(ticker: str) -> dict:
+	return {
+		"source": "ws",
+		"payload": {
+			"type": "trade",
+			"msg": {
+				"market_ticker": ticker,
+				"yes_price": 0.50,
+				"taker_side": "yes",
+				"count": 1,
+			},
+		},
+	}
+
+
+def _ensure_dispatch_preconditions(ms: MarketState, ticker: str) -> None:
+	"""`_handle_trade_msg` requires both a registered ticker (price_history
+	is not None) AND a populated orderbook (yes_ask/yes_bid resolve).
+
+	The point of test 1.b is what `is_first_observation` evaluates to — NOT
+	whether the ticker happens to be present. So we explicitly satisfy the
+	dispatch guards without touching `_first_seen` (`seed_orderbook` and
+	`register_ticker` do not mutate `_first_seen`).
+	"""
+	ms.register_ticker(ticker, meta={"event_ticker": ticker.split("-")[0]})
+	ms.seed_orderbook(
+		ticker,
+		OrderbookSnapshot(
+			yes_levels=[(0.50, 100)],
+			no_levels=[(0.48, 100)],
+		),
+	)
+
+
+_ENVELOPES = {
+	"v2": {
+		"schema_version": 2,
+		"first_seen": ["KXSEED-T1"],
+		"orderbooks": {},
+		"metadata": {},
+	},
+	"legacy_no_version": {
+		"orderbooks": {"KXSEED-T1": {"yes_levels": [], "no_levels": []}},
+		"metadata": {},
+	},
+	"v1_explicit": {
+		"schema_version": 1,
+		"orderbooks": {"KXSEED-T1": {"yes_levels": [], "no_levels": []}},
+		"metadata": {},
+	},
+}
+
+
+@pytest.mark.parametrize("schema_label,envelope", list(_ENVELOPES.items()))
+def test_seed_market_state_derives_first_seen(
+	schema_label: str, envelope: dict, tmp_path: Path
+) -> None:
+	"""For each envelope shape, `_seed_market_state` must produce a state
+	such that:
+
+	  - dispatching a `trade` event for "KXSEED-T1" → ctx.is_first_observation == False
+	    (because the prior bundle already saw it; replay continuity is the
+	    whole point of the seed).
+	  - dispatching a `trade` event for "KXNOTSEEN-T1" → ctx.is_first_observation == True
+	    (a genuinely new ticker for this replay day).
+
+	Defense-in-depth: a second, independent MarketState seeded the same way
+	must also report the matching booleans directly from `update_price`.
+	"""
+	prior = tmp_path / "2026-04-14"
+	prior.mkdir()
+	bundle = tmp_path / "2026-04-15"
+	bundle.mkdir()
+	(prior / "market_state_at_start.json").write_text(
+		json.dumps(envelope), encoding="utf-8"
+	)
+
+	# --- Strategy-visible contract via dispatch_message ---
+	ms = MarketState()
+	_seed_market_state(ms, bundle, prior_bundle=prior)
+
+	# Make the two tickers passable through dispatch's guards. This must NOT
+	# mutate _first_seen (sanity-check that explicitly).
+	_first_seen_before = set(ms._first_seen)  # noqa: SLF001
+	_ensure_dispatch_preconditions(ms, "KXSEED-T1")
+	_ensure_dispatch_preconditions(ms, "KXNOTSEEN-T1")
+	assert ms._first_seen == _first_seen_before, (  # noqa: SLF001
+		"register_ticker/seed_orderbook unexpectedly mutated _first_seen — "
+		"that would invalidate this test's premise"
+	)
+
+	strat = _CaptureStrategyB()
+	store = TradeStore(tmp_path / f"store_{schema_label}.db")
+	try:
+		call_args = dict(
+			config={},
+			market_state=ms,
+			store=store,
+			strategies=[strat],
+			strat_by_series={"KXSEED": [strat], "KXNOTSEEN": [strat]},
+			pending_states={},
+			dirty=set(),
+			now=datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc),
+		)
+
+		dispatch_message(_trade_event_for("KXSEED-T1"), **call_args)
+		assert len(strat.captured_contexts) == 1, (
+			f"[{schema_label}] dispatch did not reach the strategy for KXSEED-T1"
+		)
+		assert strat.captured_contexts[-1].is_first_observation is False, (
+			f"[{schema_label}] KXSEED-T1 was in the prior-bundle first_seen set "
+			"(or implied by the legacy/v1 orderbook entry); the seeded MarketState "
+			"must NOT report this as a first observation"
+		)
+
+		dispatch_message(_trade_event_for("KXNOTSEEN-T1"), **call_args)
+		assert len(strat.captured_contexts) == 2, (
+			f"[{schema_label}] dispatch did not reach the strategy for KXNOTSEEN-T1"
+		)
+		assert strat.captured_contexts[-1].is_first_observation is True, (
+			f"[{schema_label}] KXNOTSEEN-T1 was NOT in the prior-bundle state; "
+			"its first dispatched trade must be flagged as first observation"
+		)
+	finally:
+		store.close()
+
+	# --- Defense-in-depth: direct update_price on a fresh MarketState ---
+	ms2 = MarketState()
+	_seed_market_state(ms2, bundle, prior_bundle=prior)
+	assert ms2.update_price("KXSEED-T1", 50) is False, (
+		f"[{schema_label}] update_price for the seeded ticker must return False"
+	)
+	assert ms2.update_price("KXNOTSEEN-T1", 50) is True, (
+		f"[{schema_label}] update_price for an un-seeded ticker must return True"
+	)
