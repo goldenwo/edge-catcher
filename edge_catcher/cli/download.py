@@ -1,15 +1,19 @@
-"""Download commands — Kalshi market data and Coinbase OHLC."""
+"""Download commands — Kalshi / Polymarket market data and Coinbase OHLC."""
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+	from edge_catcher.adapters.base import AdapterMeta
 
 
-def _resolve_db_from_markets_yaml(markets_yaml: str) -> str:
-	"""Look up db_file from ADAPTERS by markets_yaml filename.
+def _resolve_meta_from_markets_yaml(markets_yaml: str) -> "AdapterMeta":
+	"""Look up the AdapterMeta from ADAPTERS by markets_yaml filename.
 
 	Matches on Path.name so config/ and config.local/ variants of the
-	same markets file resolve to the same db_file (users put private
-	market overrides in config.local/; the db_file mapping stays the
+	same markets file resolve to the same adapter (users put private
+	market overrides in config.local/; the registry mapping stays the
 	same).
 
 	Raises ValueError if no adapter declares this markets filename.
@@ -21,14 +25,54 @@ def _resolve_db_from_markets_yaml(markets_yaml: str) -> str:
 		if adapter.markets_yaml is None:
 			continue
 		if Path(adapter.markets_yaml).name == target_name:
-			return adapter.db_file
+			return adapter
 	raise ValueError(
 		f"No adapter found for markets_yaml={markets_yaml!r}. "
 		f"Declare it in the appropriate edge_catcher/adapters/<exchange>/registry.py"
 	)
 
 
+def _resolve_db_from_markets_yaml(markets_yaml: str) -> str:
+	"""Convenience wrapper — returns just the db_file from the matched meta.
+
+	Kept as a thin shim so existing callers and tests don't break after the
+	multi-exchange dispatch refactor.
+	"""
+	return _resolve_meta_from_markets_yaml(markets_yaml).db_file
+
+
 def _run_download(args) -> None:
+	"""Multi-exchange download dispatcher.
+
+	Resolves the AdapterMeta from --markets and routes to the per-exchange
+	handler keyed off meta.exchange. Mirrors api/dispatchers.DOWNLOAD_DISPATCHERS
+	but in CLI flavor (stdout output, no thread/state object).
+	"""
+	config_dir = getattr(args, 'config', 'config')
+	markets_file = Path(args.markets) if args.markets else Path(config_dir) / "markets-btc.yaml"
+
+	meta = _resolve_meta_from_markets_yaml(str(markets_file))
+
+	# Derive DB path from the resolved adapter when not explicitly provided.
+	if args.db_path:
+		db_path = Path(args.db_path)
+	else:
+		db_path = Path(meta.db_file)
+
+	if meta.exchange == "kalshi":
+		_run_kalshi_download(args, markets_file, db_path)
+	elif meta.exchange == "polymarket":
+		_run_polymarket_download(args, markets_file, db_path)
+	else:
+		raise ValueError(
+			f"`download` does not support exchange {meta.exchange!r} "
+			f"(adapter={meta.id!r}). Use the adapter-specific subcommand "
+			f"(e.g. `download-btc` for Coinbase OHLC)."
+		)
+
+
+def _run_kalshi_download(args, markets_file: Path, db_path: Path) -> None:
+	"""Kalshi download flow — markets pages + trades by volume priority."""
 	from edge_catcher.adapters.kalshi import KalshiAdapter
 	from edge_catcher.storage.db import (
 		get_connection,
@@ -39,16 +83,6 @@ def _run_download(args) -> None:
 	)
 
 	logger = logging.getLogger(__name__)
-
-	config_dir = getattr(args, 'config', 'config')
-	markets_file = Path(args.markets) if args.markets else Path(config_dir) / "markets-btc.yaml"
-
-	# Derive DB path from the adapter registry when not explicitly provided —
-	# source of truth for markets_yaml → db_file mapping is per-exchange registry.py.
-	if args.db_path:
-		db_path = Path(args.db_path)
-	else:
-		db_path = Path(_resolve_db_from_markets_yaml(str(markets_file)))
 
 	init_db(db_path)
 	adapter = KalshiAdapter(
@@ -121,6 +155,94 @@ def _run_download(args) -> None:
 			+ (f" (skipped {skipped} already in DB)" if skipped else "")
 			+ (f" (capped at {max_trade_markets})" if max_trade_markets else "")
 		)
+
+		for i, market in enumerate(all_markets_with_vol, 1):
+			trades = adapter.collect_trades(market.ticker)
+			if trades:
+				upsert_trades_batch(conn, trades)
+				conn.commit()
+				total_trades += len(trades)
+				print(
+					f"  Market {i}/{total_tickers}: {market.ticker} "
+					f"(vol={market.volume}) — {len(trades)} trades "
+					f"(total: {total_trades})"
+				)
+			else:
+				if i % 50 == 0:
+					print(f"  Progress: {i}/{total_tickers} markets processed...")
+
+	finally:
+		conn.close()
+
+	print(
+		f"\nDownload complete: {total_markets} markets, {total_trades} trades"
+	)
+
+
+def _run_polymarket_download(args, markets_file: Path, db_path: Path) -> None:
+	"""Polymarket download flow — Gamma markets + CLOB trades.
+
+	Mirrors api/download_service.run_polymarket_download in shape but writes
+	to stdout (no progress-state object). Polymarket has no auth and no
+	priority-series concept; markets are collected in one Gamma call, then
+	per-market trades fetched from CLOB.
+	"""
+	from edge_catcher.adapters.polymarket.adapter import PolymarketAdapter
+	from edge_catcher.storage.db import (
+		get_connection,
+		get_markets_by_series,
+		init_db,
+		upsert_market,
+		upsert_trades_batch,
+	)
+
+	logger = logging.getLogger(__name__)
+
+	init_db(db_path)
+	adapter = PolymarketAdapter(
+		config_path=markets_file,
+		dry_run=args.dry_run,
+	)
+
+	conn = get_connection(db_path)
+	try:
+		if not args.skip_market_scan:
+			markets = adapter.collect_markets()
+			for m in markets:
+				upsert_market(conn, m)
+			conn.commit()
+			total_markets = len(markets)
+			logger.info(f"Polymarket market download complete: {total_markets} markets saved")
+			print(f"Downloaded {total_markets} markets total.")
+		else:
+			total_markets = conn.execute("SELECT COUNT(*) FROM markets").fetchone()[0]
+			print(f"Skipping market scan — using {total_markets:,} markets already in DB.")
+
+		# Collect markets-with-volume across the configured series. Polymarket
+		# adapters track `series` as a list of category slugs on the adapter
+		# itself; an empty list means "all categories", in which case we walk
+		# every series_ticker we just upserted.
+		series_list = adapter.series or sorted({
+			row[0] for row in conn.execute("SELECT DISTINCT series_ticker FROM markets")
+		})
+
+		existing_trade_tickers = {
+			row[0] for row in conn.execute("SELECT DISTINCT ticker FROM trades")
+		}
+		all_markets_with_vol = []
+		for series in series_list:
+			for m in get_markets_by_series(conn, series):
+				if (m.volume is None or (m.volume or 0) > 0) and m.ticker not in existing_trade_tickers:
+					all_markets_with_vol.append(m)
+		all_markets_with_vol.sort(key=lambda m: m.volume or 0, reverse=True)
+
+		max_trade_markets = getattr(args, "max_trade_markets", None)
+		if max_trade_markets:
+			all_markets_with_vol = all_markets_with_vol[:max_trade_markets]
+
+		total_tickers = len(all_markets_with_vol)
+		total_trades = 0
+		logger.info(f"Downloading trades for {total_tickers} polymarket markets")
 
 		for i, market in enumerate(all_markets_with_vol, 1):
 			trades = adapter.collect_trades(market.ticker)
