@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 # doesn't have this sentinel so silent upload failures can't cause data loss.
 UPLOADED_SENTINEL = ".uploaded"
 
+MARKET_STATE_SCHEMA_VERSION = 2
+
 
 def assemble_daily_bundle(
 	capture_date: date,
@@ -168,7 +170,12 @@ def _git_state(repo_root: Path) -> tuple[str, bool]:
 		return "unknown", False
 
 
-def _write_market_state_snapshot(path: Path, market_state: MarketState) -> None:
+def _write_market_state_snapshot(
+	path: Path,
+	market_state: MarketState,
+	*,
+	captured_at: str | None = None,
+) -> None:
 	"""Serialize orderbooks and ticker metadata to a JSON file that the
 	replay's ``_seed_market_state`` can read back.
 
@@ -177,6 +184,12 @@ def _write_market_state_snapshot(path: Path, market_state: MarketState) -> None:
 	a ticker seeded from a REST snapshot before its metadata fetch lands).
 	``all_tickers()`` only reflects registered tickers, not seeded books,
 	which would drop snapshots from the bundle.
+
+	Args:
+		path:        Destination path for the JSON snapshot file.
+		market_state: Live MarketState to serialize.
+		captured_at: ISO-8601 timestamp to embed. Defaults to ``datetime.now(UTC)``
+		             when omitted. Inject a frozen string in tests for byte-stable output.
 	"""
 	orderbooks: dict[str, dict] = {}
 	for ticker, ob in market_state._orderbooks.items():  # noqa: SLF001
@@ -189,11 +202,13 @@ def _write_market_state_snapshot(path: Path, market_state: MarketState) -> None:
 		if meta:
 			metadata[ticker] = meta
 	state = {
-		"captured_at": datetime.now(timezone.utc).isoformat(),
+		"schema_version": MARKET_STATE_SCHEMA_VERSION,
+		"captured_at": captured_at if captured_at is not None else datetime.now(timezone.utc).isoformat(),
 		"orderbooks": orderbooks,
 		"metadata": metadata,
+		"first_seen": sorted(market_state._first_seen),  # noqa: SLF001
 	}
-	path.write_text(json.dumps(state), encoding="utf-8")
+	path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
 
 
 def _write_open_trades_slice(db_path: Path, dst: Path) -> None:

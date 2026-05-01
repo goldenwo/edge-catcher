@@ -50,6 +50,9 @@ edge-catcher = "edge_catcher.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+	"requires_bundles: tests that require local R2-downloaded bundles in data/bundles/<day>/",
+]
 filterwarnings = [
 	# The monitors.notifications module emits a DeprecationWarning at import to
 	# signal external callers to migrate to edge_catcher.notifications. Internal
