@@ -173,17 +173,108 @@ python -m edge_catcher.reporting --db data/paper_trades.db \
 
 ## Wiring up delivery
 
-The framework intentionally stops at JSON. Most users wire their own
-delivery channel — a small wrapper script that calls
-`generate_report` (or the CLI), formats the relevant fields into a
-message, and ships it via Discord webhook / Slack incoming webhook /
-email / push notification. Keep that wrapper in your gitignored
-`scripts/` directory; it tends to bake in API tokens and channel IDs
-that don't belong in the public tree.
+Two patterns, pick whichever matches your setup.
 
-A typical cron entry on a research machine:
+### Direct delegation via `--notify` (recommended, v1.1+)
+
+The reporting CLI accepts `--notify <channel>` and `--notify-config <path>`,
+which delegate delivery to the [`edge_catcher.notifications`](../README.md#notifications)
+adapter layer — Discord webhook, Slack incoming webhook, SMTP, or
+file-JSONL audit log. No wrapper script needed; channels live in YAML.
+
+**Setup:**
+
+1. Create `config.local/notifications.yaml` (gitignored — it carries
+   webhook URLs and other secrets). Start from
+   [`config/notifications.example.yaml`](../config/notifications.example.yaml).
+
+   ```yaml
+   version: 1
+   channels:
+     daily-pnl:
+       type: webhook
+       style: discord
+       url: ${DISCORD_PNL_WEBHOOK_URL}
+       title_prefix: "[paper-trader]"
+   ```
+
+2. Set the corresponding env var in `.env` (also gitignored):
+
+   ```
+   DISCORD_PNL_WEBHOOK_URL=https://discord.com/api/webhooks/.../...
+   ```
+
+3. Verify the channel resolves before scheduling cron:
+
+   ```bash
+   python -m edge_catcher.reporting \
+     --db data/paper_trades.db \
+     --notify daily-pnl \
+     --notify-config config.local/notifications.yaml
+   ```
+
+   You should see a delivery line like
+   `daily-pnl  ok  204  117ms` and the message in your Discord.
+   `--quiet` suppresses the JSON dump on stdout if you only want the
+   delivery to happen (cron-friendly).
+
+**Cron entry** — single command, no wrapper script to maintain:
 
 ```cron
-# 07:45 ET daily: post settled-yesterday report to Discord
+# Daily P&L at 07:45 local time. Note: any literal `%` in the cron line
+# must be escaped as `\%` per Vixie cron spec — see docs/upgrade-1.1.md
+# §"Vixie cron escapes" if your daily P&L silently stops delivering.
+45 7 * * * cd /opt/edge-catcher && \
+    /usr/bin/python3 -m edge_catcher.reporting \
+        --db data/paper_trades.db \
+        --notify daily-pnl \
+        --notify-config config.local/notifications.yaml \
+        --quiet \
+        >> /var/log/edge-catcher/daily-pnl.log 2>&1
+```
+
+**Multi-channel delivery** — pass `--notify` more than once to fan out
+the same report to multiple destinations on a single run:
+
+```bash
+python -m edge_catcher.reporting \
+    --db data/paper_trades.db \
+    --notify daily-pnl \
+    --notify ops-jsonl \
+    --notify-config config.local/notifications.yaml
+```
+
+`ops-jsonl` here is a `type: file` channel (append a JSONL audit log
+that ops scrapes); `daily-pnl` is the Discord webhook above. Both fire
+on the same run; the per-channel `DeliveryResult` rows summarize success,
+HTTP status, and latency in the table the CLI prints (or in the log file
+when redirected from cron).
+
+**Rich body (v1.2+)** — the CLI produces a 4-section message body
+(Yesterday by strategy/series, All-time per-strategy, Portfolio stats,
+Open positions) information-equivalent to an LLM-formatted summary.
+Renders cleanly across all four channel styles. See
+[upgrade-1.2.md](upgrade-1.2.md) for migrating off an LLM-formatter cron
+pattern, and the channel-privacy reminder for routing strategy/series
+names to the right audience.
+
+**Error reporting** — if `generate_report` returns an error dict (DB
+missing, schema drift, etc.), the CLI dispatches an error-severity
+notification on the same channel set BEFORE exiting non-zero. You'll
+see the failure in your Discord/Slack instead of having to scrape the
+cron log.
+
+### Custom wrapper script (still supported)
+
+If you need formatting beyond what `report_to_notification` produces, or
+you're delivering to a destination the notifications layer doesn't yet
+adapt (e.g. a custom internal API), keep a small wrapper script:
+
+```cron
+# 07:45 ET daily: custom-formatted report
 45 7 * * * cd /opt/edge-catcher && python scripts/post_daily_pnl.py
 ```
+
+Put the script in `scripts/` (gitignored per the project's private-file
+convention) — it tends to bake in API tokens and channel IDs that don't
+belong in the public tree.
