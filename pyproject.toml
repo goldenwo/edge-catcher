@@ -68,16 +68,6 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 
-# monitors/auth.py uses cryptography's RSA private-key sign() interface.
-# The cryptography library's PrivateKey union changes shape across versions
-# (newer versions add post-quantum types like MLDSAxxPrivateKey, MLKEMxxxPrivateKey),
-# so per-version mypy errors here are environment-dependent and not actionable as
-# a code-quality signal. Ignore for now; revisit if/when we narrow the union via
-# explicit isinstance() checks.
-[[tool.mypy.overrides]]
-module = "edge_catcher.monitors.auth"
-ignore_errors = true
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
