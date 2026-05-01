@@ -611,8 +611,12 @@ async def run_engine(config_path: Path) -> None:
 				except (
 					websockets.ConnectionClosed,
 					# websockets ≥12 renamed InvalidStatusCode → InvalidStatus.
-					# Catch both for compat across pin ranges.
+					# pyproject pin is `websockets>=12.0` so InvalidStatus is
+					# always present; the getattr fallback keeps this resilient
+					# if the floor ever gets loosened backwards (re-collapses
+					# to InvalidStatus on ≥12, where the legacy name is gone).
 					websockets.InvalidStatus,
+					getattr(websockets, "InvalidStatusCode", websockets.InvalidStatus),
 					ConnectionError,
 					OSError,
 				) as exc:
