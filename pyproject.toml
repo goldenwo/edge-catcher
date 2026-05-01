@@ -33,6 +33,9 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.5",
+    "mypy>=1.10",
+    "mypy-baseline>=0.7",
+    "types-PyYAML>=6.0",
 ]
 ai = [
     "anthropic>=0.40",
@@ -47,6 +50,17 @@ ui = [
 
 [project.scripts]
 edge-catcher = "edge_catcher.__main__:main"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["edge_catcher"]
+ignore_missing_imports = true
+# Permissive baseline — type checks existing hints, doesn't require them everywhere.
+# 67 pre-existing errors snapshotted in mypy-baseline.txt; CI fails on any NEW error
+# beyond that set. Shrink the baseline incrementally.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
