@@ -27,5 +27,6 @@ def test_central_adapters_list_is_concat_of_per_exchange_lists():
 	from api.adapter_registry import ADAPTERS
 	from edge_catcher.adapters.kalshi.registry import KALSHI_ADAPTERS
 	from edge_catcher.adapters.coinbase.registry import COINBASE_ADAPTERS
+	from edge_catcher.adapters.polymarket.registry import POLYMARKET_ADAPTERS
 
-	assert list(ADAPTERS) == [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS]
+	assert list(ADAPTERS) == [*KALSHI_ADAPTERS, *COINBASE_ADAPTERS, *POLYMARKET_ADAPTERS]

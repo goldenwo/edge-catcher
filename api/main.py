@@ -59,6 +59,7 @@ from api.tasks import (
 from api.download_service import (
 	run_kalshi_download as _run_kalshi_download,
 	run_coinbase_download as _run_coinbase_download,
+	run_polymarket_download as _run_polymarket_download,
 	run_legacy_download as _run_legacy_download,
 	save_api_key as _save_api_key,
 	clear_api_key as _clear_api_key,
@@ -460,6 +461,12 @@ def _kalshi_download_target(adapter_id, meta, req, state):
     if not meta.markets_yaml:
         raise HTTPException(status_code=500, detail=f"Kalshi adapter {adapter_id!r} missing markets_yaml")
     return _run_kalshi_download, (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
+
+
+def _polymarket_download_target(adapter_id, meta, req, state):
+    if not meta.markets_yaml:
+        raise HTTPException(status_code=500, detail=f"Polymarket adapter {adapter_id!r} missing markets_yaml")
+    return _run_polymarket_download, (adapter_id, state, req.start_date, meta.markets_yaml, meta.db_file)
 
 
 def _coinbase_download_target(adapter_id, meta, req, state):

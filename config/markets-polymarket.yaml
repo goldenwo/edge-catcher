@@ -1,0 +1,27 @@
+# Polymarket adapter — public Gamma + CLOB endpoints, no auth.
+#
+# `series` is a list of category slugs (e.g. politics, sports, crypto). An
+# empty list pulls markets from all categories. The adapter matches the
+# value against each market's `category` field AND against the `slug` of
+# every event the market is associated with — case-insensitive.
+#
+# `statuses`:
+#   - "closed":  markets that have resolved (best for backtests)
+#   - "open"   /  "active":  live markets (for live data collection)
+#   Default is ["closed"] for backtest-friendly historical data.
+adapters:
+  polymarket:
+    enabled: true
+    gamma_base: "https://gamma-api.polymarket.com"
+    clob_base: "https://clob.polymarket.com"
+    rate_limit_seconds: 0.5
+    series:
+      - politics
+      - sports
+      - crypto
+    statuses:
+      - closed
+    min_available_ram_pct: 10
+    pagination:
+      default_limit: 100
+      max_limit: 500
