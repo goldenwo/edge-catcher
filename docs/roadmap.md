@@ -2,7 +2,7 @@
 
 > This roadmap describes what's likely to land if the project keeps moving. Items are not commitments. PRs and issues welcome on anything below.
 
-## v1.0.0 — Initial public release (current)
+## v1.0.0 — Released 2026-04-25
 
 **What ships:**
 - Event-driven backtester with fee-adjusted P&L, Sharpe ratio, win rate
@@ -34,7 +34,11 @@ All four v1.0.x items shipped between v1.0.0 and the next tag — see the [CHANG
 
 - ✅ **Rich multi-section daily P&L formatter** — `report_to_notification` now produces a 4-section body (Yesterday breakdown by strategy/series, All-time per-strategy summary, Portfolio stats, Open positions) information-equivalent to an LLM-formatted summary. `generate_report` adds `open_positions` + `all_time_by_strategy` fields (additive; v1.1.x consumers unaffected). Open-positions section caps at 30 rows with `…(N more)` overflow marker so the body stays under Discord's 4096-char embed-description limit. See [docs/upgrade-1.2.md](upgrade-1.2.md) for retiring an LLM-formatter daily P&L cron pattern.
 
-## v1.3 candidates — UI parity for v1.1.0 + v1.2.0 features
+## v1.3.0 + v1.3.1 — Released 2026-05-01
+
+Two patch releases the same day. v1.3.0 closed out the recommended-order infra/adapters/docs backlog (previously listed under "v1.1 candidates"): **Polymarket adapter** (second exchange under the registry pattern, validating the dispatch-by-`AdapterMeta` design with a real second exchange; public-API only, no auth), **mypy zero-tolerance CI gate** (`Type-check (mypy)` step between Lint and Test, 63 pre-existing errors cleared at the source), **Docker deployment path** (`Dockerfile` + `docker-compose.yml` + ~280-line VPS walkthrough at [docs/deployment-docker.md](deployment-docker.md)), **`docs/tutorial.md`** (30-minute build-your-first-strategy walkthrough), **`docs/llm-providers.md`** (~225-line multi-provider deep-dive), and the **public reporting-module delegation pattern** ([docs/reporting.md](reporting.md) "Wiring up delivery" section). v1.3.1 followed up with Polymarket adapter pagination + 404 robustness surfaced by a live-API smoke (`dry_run` honored, 422 at offset > 0 treated as natural end-of-pagination, CLOB 404 treated as no-trades), CLI `download` multi-exchange dispatch (Polymarket joins Kalshi as a first-class CLI exchange), `monitors/auth.py` `isinstance` narrowing on `load_pem_private_key` (drops the per-module mypy override; survives cryptography library's expanding union return type across versions), and `TradeStoreProtocol` extracted in `monitors/trade_store.py` (drops `# type: ignore` in replay backtester). See [CHANGELOG.md](../CHANGELOG.md) `[1.3.0]` + `[1.3.1]` for full details.
+
+## v1.4 candidates — UI parity for v1.1.0 + v1.2.0 features
 
 The UI (React + Vite + FastAPI under `ui/` and `api/`) currently surfaces only research / backtest / hypothesis flows. None of the v1.1.0 / v1.2.0 operational surface (notifications layer, reporting CLI flags, rich P&L formatter, paper-trader state) has a UI today. Adding it is the natural next cycle — public users get a one-stop interface that matches what's now available on the CLI side.
 
@@ -46,12 +50,12 @@ Recommended order (highest leverage first; can be re-shuffled):
 4. **Paper-trader live monitor** — read-only view of the running paper trader's state (active strategies, open positions, recent fills, today's P&L). Requires a state-export endpoint on the paper trader (or shared SQLite read against `paper_trades.db`). ~1-2 sessions; the harder design question is "what do non-Pi users see if no paper trader is running locally?" — likely a "Not running" empty state + a link to docs.
 5. **Settings → Notifications subsection** — extend the existing `Settings.tsx` page (currently AI-provider-only) to include the notifications config editor as a sub-section, instead of a standalone page. Cosmetic but better discoverability.
 
-Out of scope for the v1.3 cycle (intentional):
+Out of scope for the v1.4 cycle (intentional):
 - "Deploy to Pi" / one-click cron migration. Per-user infrastructure is too varied to template; docs/upgrade-1.x.md guides remain the canonical path.
 
-## v1.4 candidates — Desktop-app UX (formerly v1.1 candidate #7)
+## v1.5 candidates — Desktop-app UX (formerly v1.1 candidate #7)
 
-Promoted from "v1.1 candidate" to a dedicated v1.4 cycle since v1.3 will already pull substantial UI work. Goal: install once, launch once, the UI opens automatically — no separate `uvicorn` + `npm run dev` dance for end users. Three plausible shapes, ordered by effort:
+Promoted from "v1.1 candidate" to a dedicated v1.5 cycle since v1.4 will pull substantial UI work. Goal: install once, launch once, the UI opens automatically — no separate `uvicorn` + `npm run dev` dance for end users. Three plausible shapes, ordered by effort:
 
 - `edge-catcher launch` CLI command — starts FastAPI + opens default browser to `localhost`. Optional `pystray` tray icon. Lowest friction; works for technical and casual users alike. ~1 session.
 - **Pywebview wrapper** — Python opens a native OS window pointing at the embedded FastAPI. No browser chrome. Feels like a real lightweight desktop app. ~2 sessions.
@@ -59,20 +63,9 @@ Promoted from "v1.1 candidate" to a dedicated v1.4 cycle since v1.3 will already
 
 Pick the shape that matches actual user demand. The CLI launcher (option 1) is the no-regret first step and unlocks the other two later.
 
-## v1.1 candidates (still relevant — recommended order)
+## v1.6+ candidates
 
-Bigger pieces that need design + implementation time. Numbered by recommended-execution order (highest leverage first; can be re-shuffled to fit your priorities):
-
-1. **mypy / pyright type-check CI** — currently ruff-only; type checking would catch a meaningful class of bugs (would have caught several issues found via review-loops on the v1.1.0 / v1.2.0 work). Small scope (~1-2 sessions), no runtime behavior change. Land before subsequent feature work so new PRs have the type checker as a CI gate.
-2. **Polymarket adapter** — concretely exercises the dispatch registry refactor with a second prediction-market exchange. Architectural validation: surfaces hidden coupling NOW with one new exchange, not later with five. ~1-2 sessions.
-3. **Public reporting-module delegation pattern** — small doc + example showing how to wire `python -m edge_catcher.reporting --notify` into a daily cron + delivery channel. ~1-2 hours; complements [docs/upgrade-1.1.md](upgrade-1.1.md) and [docs/upgrade-1.2.md](upgrade-1.2.md).
-4. **Tutorial walkthrough docs** — "Build your first strategy end-to-end" covering: write a `Strategy`, run a backtest, examine results, iterate. Goes deeper than the quickstart. Right after Polymarket validates the architecture so the docs reflect the validated API.
-5. **Multi-provider LLM onboarding deep-dive** — current README has a short section; full guide would cover provider trade-offs, model-selection per task, cost management, claude-code CLI vs API.
-6. **Docker / cloud deployment guide** — `docker-compose.yml` for local dev, plus a "deploy to a Linux VPS" walkthrough. Substantive; touches infrastructure assumptions.
-
-## v1.5+ candidates
-
-- **Unified-layer async + middleware → migrate `monitors/notifications.py`** — adds `AsyncChannel` protocol, rate-limiting + bounded-concurrency middleware to `edge_catcher.notifications`. Enables migrating the paper-trader-internal Discord client (`edge_catcher/monitors/notifications.py`, deprecated in v1.1) onto the unified config story. Public users get one notification surface (YAML-config + multi-adapter for the reporting CLI AND the paper trader) instead of two. Was tagged as v1.2 candidate but has been pushed back as v1.3+v1.4 take priority.
+- **Unified-layer async + middleware → migrate `monitors/notifications.py`** — adds `AsyncChannel` protocol, rate-limiting + bounded-concurrency middleware to `edge_catcher.notifications`. Enables migrating the paper-trader-internal Discord client (`edge_catcher/monitors/notifications.py`, deprecated in v1.1) onto the unified config story. Public users get one notification surface (YAML-config + multi-adapter for the reporting CLI AND the paper trader) instead of two. Was tagged as v1.2 candidate but has been pushed back as v1.4 (UI parity) and v1.5 (Desktop-app UX) take priority.
 
 ## Beyond
 

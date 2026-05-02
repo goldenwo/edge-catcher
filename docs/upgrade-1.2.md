@@ -87,7 +87,7 @@ The Discord embed gets the rich body in its description; the JSONL file gets one
 | Yesterday section says "No settled trades." but you know there were trades | `--date` argument is wrong (UTC vs EDT mismatch) | Confirm the cron date computation matches the EDT-bucket convention used by `generate_report`. |
 | Test suite fails on byte-for-byte golden after upgrade | You're running v1.1.x tests against v1.2.x code (or vice versa) | Pull the latest tests; the golden file is rebaselined per release that changes report shape. |
 | Daily P&L stopped being delivered after migration | Unescaped `%` in cron line | Replace `+%Y-%m-%d` with `+\%Y-\%m-\%d` (cron interprets unescaped `%` as command-stdin terminator) |
-| Slack channel renders `**Section:**` literally | The body uses Discord-flavored bold; Slack mrkdwn uses single `*asterisks*`. Per-channel formatting is deferred to v1.3+. | Use Discord for now, or accept the cosmetic on Slack. |
+| Slack channel renders `**Section:**` literally | The body uses Discord-flavored bold; Slack mrkdwn uses single `*asterisks*`. Per-channel formatting is deferred to a future release. | Use Discord for now, or accept the cosmetic on Slack. |
 
 ## Reverting to v1.1.x
 
