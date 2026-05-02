@@ -182,7 +182,7 @@ pytest tests/ -v
 
 ## Contributing
 
-PRs welcome on the framework. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution flow and the [roadmap](docs/roadmap.md) for v1.1 candidates.
+PRs welcome on the framework. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution flow and the [roadmap](docs/roadmap.md) for v1.4+ candidates.
 
 ---
 
