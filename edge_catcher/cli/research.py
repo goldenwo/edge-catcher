@@ -58,14 +58,18 @@ def register(subparsers) -> None:
 	rs_loop.add_argument("--parallel", type=int, default=1,
 	                     help="Concurrent backtests (default: 1)")
 	rs_loop.add_argument("--fee-pct", type=float, default=1.0, dest="fee_pct")
-	# Defaults to None so the backtester runs on all available data per
-	# series. The data in these DBs is a rolling recent window, not a full
-	# year — hardcoding a 2025 range silently excludes real data for series
-	# whose history starts in late 2025 / 2026. The temporal_consistency
-	# gate handles None-date hypotheses by querying the DB for the series
-	# range itself.
-	rs_loop.add_argument("--start", default=None, help="Start date ISO (default: all data)")
-	rs_loop.add_argument("--end", default=None, help="End date ISO (default: all data)")
+	# Default to a rolling 1-year window ending today if the user omits
+	# --start / --end. LoopOrchestrator + GridPlanner require concrete
+	# string dates; passing None reaches loop.py:53 and raises ValueError
+	# even though earlier comments claimed "None means all data" — the
+	# temporal_consistency gate's per-series range handling never plumbed
+	# through. A dynamic end_date avoids the trap of hardcoded date
+	# ranges silently excluding data from series whose history extends
+	# beyond the hardcoded window. Resolution happens in _run_loop.
+	rs_loop.add_argument("--start", default=None,
+	                     help="Start date ISO (default: today - 365 days)")
+	rs_loop.add_argument("--end", default=None,
+	                     help="End date ISO (default: today)")
 	rs_loop.add_argument("--max-llm-calls", type=int, default=10, dest="max_llm_calls",
 	                     help="Cap on LLM API calls in ideation phase (default: 10)")
 	rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",
@@ -265,14 +269,29 @@ def _run_report(args) -> None:
 	print(f"Report saved to {output_path}.json and {output_path}.md")
 
 
+def _resolve_loop_dates(start: str | None, end: str | None) -> tuple[str, str]:
+	"""Resolve --start / --end defaults: rolling 1-year window ending today.
+
+	LoopOrchestrator and GridPlanner require concrete ISO date strings,
+	so None values must be resolved before construction. Dynamic dates
+	avoid the silent-data-exclusion footgun of hardcoded windows.
+	"""
+	from datetime import date, timedelta
+	today = date.today()
+	resolved_end = end if end is not None else today.isoformat()
+	resolved_start = start if start is not None else (today - timedelta(days=365)).isoformat()
+	return resolved_start, resolved_end
+
+
 def _run_loop(args) -> None:
 	from edge_catcher.research.loop import LoopOrchestrator
 	research_db = getattr(args, 'research_db', 'data/research.db')
 	force = getattr(args, 'force', False)
+	start_date, end_date = _resolve_loop_dates(args.start, args.end)
 	orch = LoopOrchestrator(
 		research_db=research_db,
-		start_date=args.start,
-		end_date=args.end,
+		start_date=start_date,
+		end_date=end_date,
 		max_runs=args.max_runs,
 		max_time_minutes=args.max_time,
 		parallel=args.parallel,
