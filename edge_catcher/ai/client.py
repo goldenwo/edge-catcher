@@ -183,10 +183,25 @@ class LLMClient:
             )
         except subprocess.TimeoutExpired:
             raise LLMError("Claude Code CLI timed out after 5 minutes")
+        stdout = proc.stdout.strip()
+        stderr_detail = proc.stderr.strip()
         if proc.returncode != 0:
-            detail = proc.stderr.strip() or proc.stdout.strip()
+            # Salvage the LLM response when the CLI prints valid output but
+            # exits non-zero due to a downstream-of-response failure (most
+            # commonly a SessionEnd hook getting cancelled during shutdown
+            # in `-p` mode). Real failures — auth, quota, model-not-found —
+            # produce empty stdout because the response was never generated,
+            # so they still surface as LLMError.
+            if stdout:
+                logger.warning(
+                    "Claude Code CLI exited %d but stdout has content; "
+                    "salvaging response. stderr: %s",
+                    proc.returncode, stderr_detail or "(empty)",
+                )
+                return stdout
+            detail = stderr_detail or stdout
             raise LLMError(f"Claude Code CLI failed (exit {proc.returncode}): {detail}")
-        return proc.stdout.strip()
+        return stdout
 
     def _call_anthropic(self, system_prompt: str, user_prompt: str, model: str) -> str:
         try:
