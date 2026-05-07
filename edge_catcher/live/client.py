@@ -27,6 +27,16 @@ from edge_catcher.live.errors import (
 # version-dependent — keep base_url host-only and prepend here).
 _KALSHI_REST_PREFIX = "/trade-api/v2"
 
+# Kalshi's create-order API expects verbose underscored time-in-force names
+# (`good_till_canceled`, `immediate_or_cancel`, `fill_or_kill`). Our public
+# OrderRequest API uses short Pythonic names (`gtc`/`ioc`/`fok`) for CLI
+# ergonomics; we translate at the wire boundary in _build_place_body.
+_TIF_TO_KALSHI: dict[str, str] = {
+	"gtc": "good_till_canceled",
+	"ioc": "immediate_or_cancel",
+	"fok": "fill_or_kill",
+}
+
 OrderAction = Literal["buy", "sell"]
 OrderSide = Literal["yes", "no"]
 OrderType = Literal["limit"]  # 'market' explicitly excluded — see Q9 in design notes
@@ -330,7 +340,7 @@ class KalshiOrderClient:
 			"side": req.side,
 			"ticker": req.ticker,
 			"type": "limit",
-			"time_in_force": req.time_in_force,
+			"time_in_force": _TIF_TO_KALSHI[req.time_in_force],
 			"client_order_id": req.client_order_id,
 		}
 		if req.side == "yes":

@@ -166,6 +166,36 @@ def test_place_buy_includes_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	assert captured_body[0]["yes_price"] == 5
 
 
+def test_place_translates_tif_short_to_kalshi_verbose(cfg, audit, signing_env, tmp_path):
+	"""Wire format of time_in_force must be Kalshi's verbose underscored values
+	(`good_till_canceled` / `immediate_or_cancel` / `fill_or_kill`), NOT our
+	short Pythonic CLI form (`gtc`/`ioc`/`fok`). Regression guard: integration
+	test caught Kalshi rejecting `ioc` with `Field validation 'oneof'` error.
+	"""
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	captured_bodies: list[dict] = []
+	def handler(request: httpx.Request) -> httpx.Response:
+		captured_bodies.append(json.loads(request.content))
+		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+
+	for short, verbose in (
+		("gtc", "good_till_canceled"),
+		("ioc", "immediate_or_cancel"),
+		("fok", "fill_or_kill"),
+	):
+		captured_bodies.clear()
+		req = OrderRequest(
+			ticker="X", action="buy", side="yes", count=1,
+			limit_price_cents=1, time_in_force=short,
+		)
+		c.place(req)
+		assert captured_bodies[0]["time_in_force"] == verbose, (
+			f"short {short!r} should translate to verbose {verbose!r} on the wire, "
+			f"got {captured_bodies[0]['time_in_force']!r}"
+		)
+
+
 def test_place_sell_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	captured_body = []
