@@ -21,11 +21,12 @@ def test_no_args_prints_help_returns_2(capsys):
 
 
 def test_balance_missing_env_var_exits_5(monkeypatch, tmp_path, capsys):
-	"""Missing KALSHI_KEY_ID surfaces as `LIVE ERROR: ...` (exit 5) per spec §Error handling.
+	"""Missing KALSHI_LIVE_KEY_ID surfaces as `LIVE ERROR: ...` (exit 5) per spec §Error handling.
 
 	Regression guard: auth.py raises bare KeyError; cli.main() must catch and convert
 	to the LiveError exit path so the user sees a friendly message instead of a Python
-	traceback.
+	traceback. Live trader uses the LIVE-suffixed env vars (separate trade-scope key
+	from the paper trader's read-only key).
 	"""
 	cfg_path = tmp_path / "live-trader.yaml"
 	audit_path = tmp_path / "a.jsonl"
@@ -36,14 +37,14 @@ def test_balance_missing_env_var_exits_5(monkeypatch, tmp_path, capsys):
 		"edge_catcher.live.cli.load_config",
 		lambda: _load_cfg_from(cfg_path),
 	)
-	monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
-	monkeypatch.delenv("KALSHI_PRIVATE_KEY", raising=False)
+	monkeypatch.delenv("KALSHI_LIVE_KEY_ID", raising=False)
+	monkeypatch.delenv("KALSHI_LIVE_PRIVATE_KEY", raising=False)
 
 	rc = main(["balance"])
 	assert rc == 5
 	err = capsys.readouterr().err
 	assert "LIVE ERROR" in err
-	assert "KALSHI_KEY_ID" in err
+	assert "KALSHI_LIVE_KEY_ID" in err
 
 
 def test_place_yes_skip_calls_client(monkeypatch, tmp_path, signing_env_cli):
@@ -289,6 +290,11 @@ def test_positions_non_empty_prints_each(monkeypatch, tmp_path, capsys, signing_
 
 @pytest.fixture
 def signing_env_cli(monkeypatch):
+	"""Set KALSHI_LIVE_KEY_ID + KALSHI_LIVE_PRIVATE_KEY for CLI tests.
+
+	Live trader's client.py reads from the LIVE-suffixed env vars (so a leaked
+	read-only paper-trader key cannot place orders). Tests must mirror that.
+	"""
 	from cryptography.hazmat.primitives import serialization
 	from cryptography.hazmat.primitives.asymmetric import rsa
 	key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -297,5 +303,5 @@ def signing_env_cli(monkeypatch):
 		format=serialization.PrivateFormat.PKCS8,
 		encryption_algorithm=serialization.NoEncryption(),
 	)
-	monkeypatch.setenv("KALSHI_KEY_ID", "test")
-	monkeypatch.setenv("KALSHI_PRIVATE_KEY", pem.decode())
+	monkeypatch.setenv("KALSHI_LIVE_KEY_ID", "test-live")
+	monkeypatch.setenv("KALSHI_LIVE_PRIVATE_KEY", pem.decode())

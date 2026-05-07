@@ -70,7 +70,12 @@ def make_mock_client(cfg, audit, transport):
 
 @pytest.fixture
 def signing_env(monkeypatch):
-	"""Set KALSHI_KEY_ID + KALSHI_PRIVATE_KEY for tests that exercise signing."""
+	"""Set KALSHI_LIVE_KEY_ID + KALSHI_LIVE_PRIVATE_KEY for tests that exercise signing.
+
+	The live trader's client.py reads from the LIVE-suffixed env vars (so a
+	leaked read-only paper-trader key cannot place orders). Tests must mirror
+	that — set the LIVE vars, not the default ones.
+	"""
 	from cryptography.hazmat.primitives import serialization
 	from cryptography.hazmat.primitives.asymmetric import rsa
 	key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -79,8 +84,8 @@ def signing_env(monkeypatch):
 		format=serialization.PrivateFormat.PKCS8,
 		encryption_algorithm=serialization.NoEncryption(),
 	)
-	monkeypatch.setenv("KALSHI_KEY_ID", "test-key")
-	monkeypatch.setenv("KALSHI_PRIVATE_KEY", pem.decode())
+	monkeypatch.setenv("KALSHI_LIVE_KEY_ID", "test-live-key")
+	monkeypatch.setenv("KALSHI_LIVE_PRIVATE_KEY", pem.decode())
 
 
 def test_place_exceeds_absolute_max_raises_before_http(cfg, audit, signing_env):

@@ -202,7 +202,16 @@ class KalshiOrderClient:
 
 		while True:
 			try:
-				headers = make_auth_headers(method, full_path)
+				# Live trader uses a separate trade-scope Kalshi key so a leak
+				# of the paper trader's read-only key (KALSHI_KEY_ID) cannot
+				# place orders. Both keys live in `.env`; auth.py reads them
+				# by env-var name.
+				headers = make_auth_headers(
+					method,
+					full_path,
+					key_id_env="KALSHI_LIVE_KEY_ID",
+					private_key_env="KALSHI_LIVE_PRIVATE_KEY",
+				)
 				resp = self._http.request(method, full_path, json=json, headers=headers)
 				response_status = resp.status_code
 				try:
