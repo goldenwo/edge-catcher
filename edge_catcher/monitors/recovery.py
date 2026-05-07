@@ -8,7 +8,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from edge_catcher.monitors.auth import KALSHI_REST_BASE
+from edge_catcher.adapters.kalshi.auth import KALSHI_REST_BASE
 from edge_catcher.monitors.market_state import (
 	MarketState,
 	OrderbookSnapshot,

@@ -14,14 +14,12 @@ KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
 
 
-def make_auth_headers(path: str = WS_PATH) -> dict[str, str]:
-	"""Generate signed Kalshi API headers for the given path.
+def make_auth_headers(method: str = "GET", path: str = WS_PATH) -> dict[str, str]:
+	"""Sign request and return Kalshi auth headers.
 
-	Kalshi mandates RSA keys for API auth; we narrow `load_pem_private_key`'s
-	cross-algorithm return union (Ed25519 / DSA / EC / post-quantum types in
-	newer cryptography releases) to `RSAPrivateKey` via isinstance so the
-	subsequent `.sign(...)` call matches RSA's signature on every supported
-	library version.
+	Signs `ts_ms + method + path` with RSA-PSS-SHA256 using the env-loaded
+	private key. Method and path default to GET + WS_PATH for backwards
+	compatibility with the paper trader's WebSocket auth path.
 	"""
 	key_id = os.environ["KALSHI_KEY_ID"]
 	private_key_pem = os.environ["KALSHI_PRIVATE_KEY"].encode()
@@ -30,22 +28,18 @@ def make_auth_headers(path: str = WS_PATH) -> dict[str, str]:
 	)
 	if not isinstance(private_key, RSAPrivateKey):
 		raise ValueError(
-			f"KALSHI_PRIVATE_KEY must be an RSA private key (got {type(private_key).__name__}). "
-			"Kalshi API auth requires RSA-PSS-SHA256 signatures."
+			f"KALSHI_PRIVATE_KEY must be an RSA private key (got "
+			f"{type(private_key).__name__}). Kalshi API auth requires RSA-PSS-SHA256."
 		)
 	ts_ms = str(int(time.time() * 1000))
-	msg = ts_ms + "GET" + path
+	msg = ts_ms + method + path
 	sig = private_key.sign(
 		msg.encode(),
-		padding.PSS(
-			mgf=padding.MGF1(hashes.SHA256()),
-			salt_length=padding.PSS.MAX_LENGTH,
-		),
+		padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
 		hashes.SHA256(),
 	)
-	sig_b64 = base64.b64encode(sig).decode()
 	return {
 		"KALSHI-ACCESS-KEY": key_id,
-		"KALSHI-ACCESS-SIGNATURE": sig_b64,
+		"KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
 		"KALSHI-ACCESS-TIMESTAMP": ts_ms,
 	}
