@@ -72,9 +72,12 @@ def list_dbs(data_dir: Path = _DATA_DIR) -> list[DbInfo]:
 			finally:
 				con.close()
 			stat = path.stat()
-		except (sqlite3.OperationalError, FileNotFoundError) as exc:
-			# No paper_trades table, locked, corrupt, not-a-sqlite, OR
-			# file vanished mid-iteration (paper trader rotation race).
+		except (sqlite3.DatabaseError, FileNotFoundError) as exc:
+			# Catches the DatabaseError hierarchy (OperationalError for
+			# missing-table/locked, plain DatabaseError for "file is not
+			# a database" / corrupt bytes) AND FileNotFoundError for
+			# the paper-trader-rotation TOCTOU race. One bad file does
+			# not 500 the whole list.
 			logger.warning("list_dbs: skipping %s: %s", path.name, exc)
 			continue
 		out.append(DbInfo(
