@@ -85,6 +85,24 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </NavLink>
         </nav>
 
+        <span className="text-[10px] font-medium tracking-wider text-gray-500 uppercase mb-2 px-3 mt-4">
+          Operations
+        </span>
+        <nav className="flex flex-col gap-0.5 mb-6">
+          <NavLink
+            to="/reports"
+            className={({ isActive }) =>
+              `flex items-center px-3 py-2 rounded text-sm transition-colors ${
+                isActive
+                  ? 'bg-gray-800 text-white'
+                  : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+              }`
+            }
+          >
+            Reports
+          </NavLink>
+        </nav>
+
         <div className="border-t border-gray-800 pt-4">
           <NavLink
             to="/settings"
