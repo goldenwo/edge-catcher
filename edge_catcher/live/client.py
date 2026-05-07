@@ -142,7 +142,13 @@ class KalshiOrderClient:
 		return self._parse_order(order_json, fallback_request=req)
 
 	def cancel(self, order_id: str) -> CancelResult:
-		raise NotImplementedError
+		path = f"/portfolio/orders/{order_id}"
+		response = self._delete(path, op="cancel")
+		return CancelResult(
+			order_id=order_id,
+			status=(response.get("order", {}) or {}).get("status", "canceled"),
+			raw=response,
+		)
 
 	def status(self, order_id: str) -> Order:
 		raise NotImplementedError

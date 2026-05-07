@@ -16,7 +16,7 @@ from edge_catcher.live.client import (
 )
 from edge_catcher.live.config import LiveConfig
 from edge_catcher.live.audit import AuditLogger
-from edge_catcher.live.errors import CapExceededError, OrderRejected
+from edge_catcher.live.errors import CapExceededError, KalshiAPIError, OrderAlreadyFinal, OrderRejected
 
 
 @pytest.fixture
@@ -203,3 +203,53 @@ def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, tmp_pat
 	row = json.loads((cfg2.audit_log_path).read_text().strip().split("\n")[-1])
 	assert row["retries"] == 1
 	assert row["outcome"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — cancel() tests
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_happy_path(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	captured = []
+	def handler(request: httpx.Request) -> httpx.Response:
+		captured.append(request)
+		return httpx.Response(200, json={"order": {"order_id": "ord-1", "status": "canceled"}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	result = c.cancel("ord-1")
+	assert result.order_id == "ord-1"
+	assert result.status == "canceled"
+	# DELETE method used
+	assert captured[0].method == "DELETE"
+	assert captured[0].url.path == "/trade-api/v2/portfolio/orders/ord-1"
+
+
+def test_cancel_404_raises_order_already_final(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(404, json={"error": {"message": "order_not_found"}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	with pytest.raises(OrderAlreadyFinal) as exc:
+		c.cancel("missing-id")
+	assert exc.value.status == 404
+
+
+def test_cancel_409_raises_order_already_final(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(409, json={"error": {"message": "already filled"}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	with pytest.raises(OrderAlreadyFinal):
+		c.cancel("filled-id")
+
+
+def test_cancel_other_4xx_raises_kalshi_api_error(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(401, json={"error": {"message": "unauthorized"}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	with pytest.raises(KalshiAPIError) as exc:
+		c.cancel("any-id")
+	# Specifically NOT OrderAlreadyFinal
+	assert not isinstance(exc.value, OrderAlreadyFinal)
