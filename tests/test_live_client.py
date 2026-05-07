@@ -153,6 +153,14 @@ def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
 
 
 def test_place_buy_includes_buy_max_cost(cfg, audit, signing_env, tmp_path):
+	"""buy_max_cost on BUY orders MUST include the Kalshi fee, not just principal.
+
+	Kalshi enforces buy_max_cost as the total-cost-INCLUDING-FEES ceiling. If
+	we sent only `principal`, Kalshi can't allocate the order at any matchable
+	price and rejects with `fill_or_kill_insufficient_resting_volume` (their
+	misleadingly-named "I can't make this order work" error). Discovered during
+	integration testing — see PR #24 history.
+	"""
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	captured_body = []
 	def handler(request: httpx.Request) -> httpx.Response:
@@ -161,8 +169,10 @@ def test_place_buy_includes_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
 	c.place(req)
-	# 10 × 5¢ = 50¢ exposure → buy_max_cost = 50 cents
-	assert captured_body[0]["buy_max_cost"] == 50
+	# 10 × 5¢ principal = 50¢; STANDARD_FEE on (price=5, count=10) = 4¢; total = 54¢
+	from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+	expected_fee = int(STANDARD_FEE.calculate(5, 10))
+	assert captured_body[0]["buy_max_cost"] == 50 + expected_fee
 	assert captured_body[0]["yes_price"] == 5
 
 

@@ -9,6 +9,7 @@ from typing import Literal
 import httpx
 
 from edge_catcher.adapters.kalshi.auth import make_auth_headers
+from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.live.audit import AuditLogger, AuditEvent
 from edge_catcher.live.config import (
 	LiveConfig,
@@ -352,8 +353,17 @@ class KalshiOrderClient:
 		# Belt-and-suspenders with ABSOLUTE_MAX_ORDER_DOLLARS. Excluded on sells —
 		# Kalshi rejects the field for non-buy actions, and sell_position_floor
 		# is owned by D (execution policy) per Open Question 2.
+		#
+		# IMPORTANT: Kalshi's buy_max_cost enforcement caps total cost INCLUDING
+		# the per-contract fee. If buy_max_cost < principal + fee, Kalshi rejects
+		# the order with the (misleadingly-named) "fill_or_kill_insufficient_
+		# resting_volume" error. We therefore add the STANDARD_FEE estimate to
+		# the principal to compute the effective ceiling. This was discovered
+		# during integration testing — see PR #24's integration-test journey.
 		if req.action == "buy":
-			body["buy_max_cost"] = int(round(req.exposure_dollars * 100))
+			principal_cents = req.count * req.limit_price_cents
+			fee_cents = int(STANDARD_FEE.calculate(req.limit_price_cents, req.count))
+			body["buy_max_cost"] = principal_cents + fee_cents
 		return body
 
 	def _parse_order(self, data: dict, fallback_request: OrderRequest | None = None) -> Order:
