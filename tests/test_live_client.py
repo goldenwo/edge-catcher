@@ -253,3 +253,59 @@ def test_cancel_other_4xx_raises_kalshi_api_error(cfg, audit, signing_env, tmp_p
 		c.cancel("any-id")
 	# Specifically NOT OrderAlreadyFinal
 	assert not isinstance(exc.value, OrderAlreadyFinal)
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — status() / balance() / positions() tests
+# ---------------------------------------------------------------------------
+
+
+def test_status_happy_path(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		assert request.method == "GET"
+		assert request.url.path == "/trade-api/v2/portfolio/orders/ord-1"
+		return httpx.Response(200, json={"order": {
+			"order_id": "ord-1", "ticker": "X", "side": "yes", "action": "buy",
+			"count": 10, "yes_price": 5, "time_in_force": "gtc",
+			"status": "resting", "filled_count": 3,
+		}})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	o = c.status("ord-1")
+	assert o.order_id == "ord-1"
+	assert o.filled_count == 3
+
+
+def test_balance_happy_path(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(200, json={"balance": 19500})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	bal = c.balance()
+	assert bal.balance_cents == 19500
+
+
+def test_positions_empty(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(200, json={"market_positions": []})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	assert c.positions() == []
+
+
+def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(200, json={"market_positions": [
+			{"ticker": "X", "position": 10, "average_position_cost": 5},
+			{"ticker": "Y", "position": -3, "average_position_cost": 95},
+		]})
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+	positions = c.positions()
+	assert len(positions) == 2
+	assert positions[0].ticker == "X"
+	assert positions[0].count == 10
+	assert positions[0].side == "yes"
+	# Negative position interpreted as no-side
+	assert positions[1].side == "no"
+	assert positions[1].count == 3

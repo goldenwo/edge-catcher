@@ -151,13 +151,23 @@ class KalshiOrderClient:
 		)
 
 	def status(self, order_id: str) -> Order:
-		raise NotImplementedError
+		path = f"/portfolio/orders/{order_id}"
+		response = self._get(path, op="status")
+		return self._parse_order(response.get("order", response))
 
 	def balance(self) -> Balance:
-		raise NotImplementedError
+		path = "/portfolio/balance"
+		response = self._get(path, op="balance")
+		return Balance(
+			balance_cents=int(response.get("balance", 0)),
+			raw=response,
+		)
 
 	def positions(self) -> list[Position]:
-		raise NotImplementedError
+		path = "/portfolio/positions"
+		response = self._get(path, op="positions")
+		raw = response.get("market_positions", [])
+		return [self._parse_position(p) for p in raw]
 
 	# ------------------------------------------------------------------
 	# Internal request layer
