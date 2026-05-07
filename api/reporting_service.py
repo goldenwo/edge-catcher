@@ -37,18 +37,25 @@ class DbInfo:
 	row_count: int  # paper_trades row count, 0 if table missing
 
 
-def list_dbs(data_dir: Path = _DATA_DIR) -> list[DbInfo]:
+def list_dbs(data_dir: Path | None = None) -> list[DbInfo]:
 	"""Discover *.db files in data_dir. Sorted by mtime desc (most-recent first).
+
+	`data_dir=None` → read the module-level `_DATA_DIR` AT CALL TIME so tests
+	(and route handlers) can `monkeypatch.setattr("...reporting_service._DATA_DIR", ...)`
+	to override without re-importing. Default-arg-as-Path would freeze the
+	module-import-time value (Python gotcha).
 
 	Skips files that don't have a paper_trades table — they're not reportable.
 	Returns empty list if data_dir doesn't exist.
 
 	Each candidate file is opened READ-ONLY via SQLite URI mode
 	(`file:<path>?mode=ro`) to coexist with an actively-writing paper trader.
-	Per-file `sqlite3.OperationalError` (locked / corrupt / not-a-sqlite-file
+	Per-file `sqlite3.DatabaseError` (locked / corrupt / not-a-sqlite-file
 	ending in .db) is caught and the file is skipped with a logged warning —
 	one bad file does not 500 the whole list.
 	"""
+	if data_dir is None:
+		data_dir = _DATA_DIR
 	if not data_dir.exists():
 		return []
 	out: list[DbInfo] = []
@@ -89,14 +96,17 @@ def list_dbs(data_dir: Path = _DATA_DIR) -> list[DbInfo]:
 	return out
 
 
-def run_report(db_name: str, date: str | None, data_dir: Path = _DATA_DIR) -> dict:
+def run_report(db_name: str, date: str | None, data_dir: Path | None = None) -> dict:
 	"""Run generate_report against {data_dir}/{db_name}.
 
-	Validates db_name is a basename only (no slashes, no traversal),
-	validates date is YYYY-MM-DD if provided. Raises ValueError on bad
-	inputs, FileNotFoundError if the resolved path doesn't exist or if
-	generate_report returns an error-shaped dict.
+	`data_dir=None` → read `_DATA_DIR` at call time (same monkeypatch-friendly
+	pattern as `list_dbs`). Validates db_name is a basename only (no slashes,
+	no traversal), validates date is YYYY-MM-DD if provided. Raises
+	ValueError on bad inputs, FileNotFoundError if the resolved path doesn't
+	exist or if generate_report returns an error-shaped dict.
 	"""
+	if data_dir is None:
+		data_dir = _DATA_DIR
 	# Reject empty string + path-traversal characters. Empty string is
 	# the load-bearing check: `data_dir / ""` resolves to `data_dir`,
 	# which exists, which would silently bypass the FileNotFoundError
