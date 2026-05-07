@@ -127,9 +127,32 @@ function ReportForm(_props: {
   onGenerate: () => void;
 }): JSX.Element | null { return null }
 
-function TodayHero(_props: {
+function TodayHero({ today, date, all_time }: {
   today: TodayStats; date: string; all_time: AllTimeStats;
-}): JSX.Element | null { return null }
+}): JSX.Element {
+  let subtitle: string
+  if (today.settled_count === 0 && all_time.total_trades > 0) {
+    subtitle = `0 settled on ${date} — trader has all-time activity, just nothing closed today (try a prior date).`
+  } else if (today.settled_count === 0) {
+    subtitle = `0 settled on ${date} — no trades in this DB yet. Run the paper trader to start populating data.`
+  } else {
+    const sign = all_time.roi_deployed_pct >= 0 ? '+' : ''
+    subtitle = `${today.settled_count} settled · ROI on deployed ${sign}${all_time.roi_deployed_pct}%`
+  }
+  return (
+    <section>
+      <div className="rounded-lg border border-gray-800 bg-gray-900 px-6 py-5">
+        <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">
+          Today's P&amp;L · {date}
+        </div>
+        <div className={`font-mono text-3xl font-semibold ${pnlClass(today.pnl_cents)}`}>
+          {fmtPnlUsd(today.pnl_cents)}
+        </div>
+        <div className="text-xs text-gray-500 mt-2 font-mono">{subtitle}</div>
+      </div>
+    </section>
+  )
+}
 
 function TodayByStrategySection(_props: {
   rows: TodayByStrategyRow[]; date: string;
