@@ -129,19 +129,42 @@ def _print_place_confirmation(req: OrderRequest, cfg) -> None:
 
 
 def _do_cancel(args: argparse.Namespace, client: KalshiOrderClient) -> int:
-	raise NotImplementedError
+	if not args.yes:
+		ans = input(f"Cancel order {args.order_id}? [y/N]: ").strip().lower()
+		if ans not in ("y", "yes"):
+			print("Aborted.")
+			return 1
+	result = client.cancel(args.order_id)
+	print(f"Cancelled order_id={result.order_id} status={result.status}")
+	return 0
 
 
 def _do_status(args: argparse.Namespace, client: KalshiOrderClient) -> int:
-	raise NotImplementedError
+	order = client.status(args.order_id)
+	print(f"order_id={order.order_id}")
+	print(f"  ticker:    {order.ticker}")
+	print(f"  side:      {order.side} ({order.action})")
+	print(f"  count:     {order.count} ({order.filled_count} filled)")
+	print(f"  price:     {order.limit_price_cents}c")
+	print(f"  tif:       {order.time_in_force}")
+	print(f"  status:    {order.status}")
+	return 0
 
 
 def _do_balance(client: KalshiOrderClient) -> int:
-	raise NotImplementedError
+	bal = client.balance()
+	print(f"balance: ${bal.balance_cents / 100:.2f}")
+	return 0
 
 
 def _do_positions(client: KalshiOrderClient) -> int:
-	raise NotImplementedError
+	positions = client.positions()
+	if not positions:
+		print("(no open positions)")
+		return 0
+	for p in positions:
+		print(f"  {p.ticker:30s} {p.side} count={p.count} avg=${p.average_price_cents / 100:.4f}")
+	return 0
 
 
 if __name__ == "__main__":
