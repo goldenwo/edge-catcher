@@ -165,3 +165,98 @@ def test_list_dbs_handles_file_disappearing_mid_iteration(tmp_path, monkeypatch)
 	monkeypatch.setattr("api.reporting_service.sqlite3.connect", flaky_connect)
 	result = list_dbs(data_dir=tmp_path)
 	assert len(result) == 1  # one survives
+
+
+# ── run_report happy path ──────────────────────────────────────────────────
+
+
+def test_run_report_valid_db(tmp_path):
+	"""Valid DB returns the full generate_report shape."""
+	db_path = tmp_path / "paper_trades.db"
+	_make_paper_trades_db(db_path, row_count=3)
+	result = run_report("paper_trades.db", date="2026-05-02", data_dir=tmp_path)
+	expected_keys = {
+		"timestamp", "date", "all_time", "today",
+		"today_by_strategy", "open_positions", "all_time_by_strategy",
+	}
+	assert expected_keys.issubset(result.keys())
+	assert result["date"] == "2026-05-02"
+	assert result["all_time"]["total_trades"] == 3
+
+
+def test_run_report_default_date(tmp_path):
+	"""date=None passes through to generate_report (CLI parity)."""
+	db_path = tmp_path / "paper_trades.db"
+	_make_paper_trades_db(db_path)
+	result = run_report("paper_trades.db", date=None, data_dir=tmp_path)
+	assert result["date"]  # non-empty
+
+
+# ── run_report validation + edge contracts ─────────────────────────────────
+
+
+@pytest.mark.parametrize("bad_name", ["../etc/passwd", "..\\windows\\sys", "..", ""])
+def test_run_report_invalid_db_name(tmp_path, bad_name):
+	"""Path-traversal characters and empty string raise ValueError."""
+	with pytest.raises(ValueError, match="invalid db name"):
+		run_report(bad_name, date=None, data_dir=tmp_path)
+
+
+@pytest.mark.parametrize("bad_date", ["2026/05/02", "2026-5-2", "today", "20260502"])
+def test_run_report_malformed_date(tmp_path, bad_date):
+	"""Non-ISO date format raises ValueError."""
+	_make_paper_trades_db(tmp_path / "x.db")
+	with pytest.raises(ValueError, match="invalid date format"):
+		run_report("x.db", date=bad_date, data_dir=tmp_path)
+
+
+def test_run_report_unknown_basename(tmp_path):
+	"""Unknown DB raises FileNotFoundError."""
+	with pytest.raises(FileNotFoundError):
+		run_report("nonexistent.db", date=None, data_dir=tmp_path)
+
+
+def test_run_report_corrupt_db(tmp_path):
+	"""Corrupt bytes named *.db → sqlite3.DatabaseError bubbles up uncaught."""
+	bad = tmp_path / "corrupt.db"
+	bad.write_bytes(b"\x00" * 1024)  # real bytes, not sparse
+	with pytest.raises(sqlite3.DatabaseError):
+		run_report("corrupt.db", date=None, data_dir=tmp_path)
+
+
+def test_run_report_generate_report_returns_error_dict(tmp_path, monkeypatch):
+	"""generate_report returning {error: ...} is normalized to FileNotFoundError."""
+	_make_paper_trades_db(tmp_path / "x.db")
+	monkeypatch.setattr(
+		"api.reporting_service.generate_report",
+		lambda *a, **kw: {"error": "synthetic"},
+	)
+	with pytest.raises(FileNotFoundError, match="synthetic"):
+		run_report("x.db", date=None, data_dir=tmp_path)
+
+
+def test_run_report_resolved_path_inside_data_dir(tmp_path):
+	"""For accepted inputs, the resolved path stays within data_dir."""
+	_make_paper_trades_db(tmp_path / "ok.db")
+	db_path = (tmp_path / "ok.db").resolve()
+	assert db_path.is_relative_to(tmp_path.resolve())
+
+
+# ── _DATA_DIR cwd-anchoring lock ───────────────────────────────────────────
+
+
+def test_data_dir_default_anchored_to_repo(tmp_path, monkeypatch):
+	"""_DATA_DIR resolves to repo_root/data regardless of cwd."""
+	import importlib
+
+	# Capture the expected anchored path (uses __file__ resolution)
+	expected = (Path(reporting_service.__file__).resolve().parents[1] / "data")
+
+	monkeypatch.chdir(tmp_path)
+	importlib.reload(reporting_service)
+
+	assert reporting_service._DATA_DIR == expected, (
+		f"_DATA_DIR drifted with cwd: got {reporting_service._DATA_DIR}, expected {expected}"
+	)
+	# Also: must NOT be cwd/data (would indicate the broken cwd-relative form)
+	assert reporting_service._DATA_DIR != (tmp_path / "data")
