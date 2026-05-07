@@ -20,6 +20,32 @@ def test_no_args_prints_help_returns_2(capsys):
 	assert "place" in out and "cancel" in out
 
 
+def test_balance_missing_env_var_exits_5(monkeypatch, tmp_path, capsys):
+	"""Missing KALSHI_KEY_ID surfaces as `LIVE ERROR: ...` (exit 5) per spec §Error handling.
+
+	Regression guard: auth.py raises bare KeyError; cli.main() must catch and convert
+	to the LiveError exit path so the user sees a friendly message instead of a Python
+	traceback.
+	"""
+	cfg_path = tmp_path / "live-trader.yaml"
+	audit_path = tmp_path / "a.jsonl"
+	cfg_path.write_text(
+		f"cli_max_order_dollars: 1.00\naudit_log_path: {audit_path}\n"
+	)
+	monkeypatch.setattr(
+		"edge_catcher.live.cli.load_config",
+		lambda: _load_cfg_from(cfg_path),
+	)
+	monkeypatch.delenv("KALSHI_KEY_ID", raising=False)
+	monkeypatch.delenv("KALSHI_PRIVATE_KEY", raising=False)
+
+	rc = main(["balance"])
+	assert rc == 5
+	err = capsys.readouterr().err
+	assert "LIVE ERROR" in err
+	assert "KALSHI_KEY_ID" in err
+
+
 def test_place_yes_skip_calls_client(monkeypatch, tmp_path, signing_env_cli):
 	"""--yes skips the prompt and calls client.place."""
 	cfg_path = tmp_path / "live-trader.yaml"

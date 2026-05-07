@@ -43,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
 		except LiveError as e:
 			print(f"LIVE ERROR: {e}", file=sys.stderr)
 			return 5
+		except KeyError as e:
+			# Missing required env var (KALSHI_KEY_ID / KALSHI_PRIVATE_KEY).
+			# auth.py raises bare KeyError; surface it via the LiveError exit
+			# path per spec §Error handling.
+			print(f"LIVE ERROR: Missing required env var: {e}", file=sys.stderr)
+			return 5
 
 
 def _build_parser() -> argparse.ArgumentParser:
