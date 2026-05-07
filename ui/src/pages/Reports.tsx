@@ -154,13 +154,61 @@ function TodayHero({ today, date, all_time }: {
   )
 }
 
-function TodayByStrategySection(_props: {
+function TodayByStrategySection({ rows, date }: {
   rows: TodayByStrategyRow[]; date: string;
-}): JSX.Element | null { return null }
+}): JSX.Element {
+  return (
+    <section>
+      <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">
+        Today by strategy
+      </h2>
+      <div className="rounded-lg border border-gray-800 bg-gray-900 overflow-hidden font-mono text-xs">
+        <div className="grid grid-cols-[2fr_2fr_1fr_1fr_1fr] px-4 py-2 bg-gray-950 text-gray-500 uppercase text-[10px]">
+          <span>Strategy</span><span>Series</span>
+          <span className="text-right">N</span>
+          <span className="text-right">P&amp;L</span>
+          <span className="text-right">Status</span>
+        </div>
+        {rows.length === 0 ? (
+          <div className="px-4 py-3 text-gray-500 text-xs">No settled trades on {date}.</div>
+        ) : rows.map((r, i) => (
+          <div key={i} className="grid grid-cols-[2fr_2fr_1fr_1fr_1fr] px-4 py-2 border-t border-gray-800">
+            <span>{r.strategy}</span><span>{r.series_ticker}</span>
+            <span className="text-right">{r.count}</span>
+            <span className={`text-right ${pnlClass(r.pnl_cents)}`}>{fmtPnlUsd(r.pnl_cents)}</span>
+            <span className="text-right">{r.status}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
 
-function OpenPositionsSection(_props: {
+function OpenPositionsSection({ rows }: {
   rows: OpenPositionRow[];
-}): JSX.Element | null { return null }
+}): JSX.Element {
+  return (
+    <section>
+      <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wider mb-3">
+        Open positions
+      </h2>
+      <div className="rounded-lg border border-gray-800 bg-gray-900 overflow-hidden font-mono text-xs">
+        <div className="grid grid-cols-[2fr_2fr_1fr] px-4 py-2 bg-gray-950 text-gray-500 uppercase text-[10px]">
+          <span>Strategy</span><span>Series</span>
+          <span className="text-right">N</span>
+        </div>
+        {rows.length === 0 ? (
+          <div className="px-4 py-3 text-gray-500 text-xs">No open positions.</div>
+        ) : rows.map((r, i) => (
+          <div key={i} className="grid grid-cols-[2fr_2fr_1fr] px-4 py-2 border-t border-gray-800">
+            <span>{r.strategy}</span><span>{r.series_ticker}</span>
+            <span className="text-right">{r.count}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
 
 function AllTimeSection(_props: { stats: AllTimeStats }): JSX.Element | null { return null }
 
