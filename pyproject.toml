@@ -73,6 +73,7 @@ no_implicit_optional = true
 testpaths = ["tests"]
 markers = [
 	"requires_bundles: tests that require local R2-downloaded bundles in data/bundles/<day>/",
+	"live: integration tests that hit prod Kalshi (gated by LIVE_TRADER_LIVE_TEST=1)",
 ]
 filterwarnings = [
 	# The monitors.notifications module emits a DeprecationWarning at import to
