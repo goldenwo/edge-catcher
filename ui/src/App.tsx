@@ -9,6 +9,7 @@ import Strategize from './pages/Strategize'
 import Backtest from './pages/Backtest'
 import Settings from './pages/Settings'
 import Research from './pages/Research'
+import Reports from './pages/Reports'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/research" element={<Research />} />
+            <Route path="/reports" element={<Reports />} />
             {/* Redirects for old routes */}
             <Route path="/results" element={<Navigate to="/analyze" replace />} />
             <Route path="/formalize" element={<Navigate to="/hypotheses?tab=create" replace />} />

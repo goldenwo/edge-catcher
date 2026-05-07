@@ -6,7 +6,7 @@ import logging
 import os
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api.auth import check_auth
 from api.adapter_registry import get_adapter
+from api import reporting_service
 from api.config_helpers import (
 	validate_db as _validate_db,
 	config_path as _config_path,
@@ -1134,6 +1135,31 @@ def storage_vacuum(_: None = Depends(check_auth)) -> dict:
         "after_mb": after["db_size_mb"],
         "saved_mb": round(before["db_size_mb"] - after["db_size_mb"], 4),
     }
+
+
+# ── reporting (v1.4.0) ────────────────────────────────────────────────────────
+
+
+@app.get("/api/reporting/dbs")
+def reporting_dbs(_: None = Depends(check_auth)) -> dict:
+	"""Discover *.db files under data/. Read-only sqlite probe; coexists with live writers."""
+	return {"dbs": [asdict(d) for d in reporting_service.list_dbs()]}
+
+
+@app.get("/api/reporting/run")
+def reporting_run(
+	db: str,
+	date: Optional[str] = None,
+	_: None = Depends(check_auth),
+) -> dict:
+	"""Run generate_report on data/{db} for the given date (defaults to today UTC)."""
+	try:
+		return reporting_service.run_report(db, date)
+	except ValueError as exc:
+		raise HTTPException(status_code=400, detail=str(exc))
+	except FileNotFoundError:
+		raise HTTPException(status_code=404, detail=f"DB not found: {db}")
+	# sqlite3.DatabaseError (corrupt DB) intentionally bubbles to FastAPI 500.
 
 
 # ── static UI (production) ────────────────────────────────────────────────────

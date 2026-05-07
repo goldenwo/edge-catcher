@@ -5,6 +5,20 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-07
+
+### Added
+
+- **Reports page** (`/reports`) — UI surface for `python -m edge_catcher.reporting`. Pick a date, pick a DB from `data/*.db`, see today's P&L hero, today by strategy/series breakdown, open positions, all-time stats (4 KPI cards), all-time by strategy, and the raw JSON expandable. New API endpoints `GET /api/reporting/dbs` (auto-discovered list with row counts + relative mtime labels) and `GET /api/reporting/run?db=&date=` (returns the full `generate_report` dict). New "Operations" nav section between Research and Settings — anchors home for upcoming v1.4 follow-ups (Notifications config editor, Send-to-channel button, Paper-trader live monitor).
+- **Service layer** at `api/reporting_service.py` — pure functions `list_dbs()` and `run_report()`. SQLite probes use read-only URI mode (`file:<path>?mode=ro`) so the list endpoint coexists with an actively-writing paper trader (Pi WAL-mode runtime). Cross-platform path handling via `Path.as_uri()`. Per-file `sqlite3.DatabaseError` and `FileNotFoundError` are caught and skipped with a logged warning — one bad file does not 500 the whole list. `_DATA_DIR` is anchored against repo root via `Path(__file__).resolve().parents[1] / "data"`, so the route works regardless of uvicorn's launch cwd.
+- **Test coverage** — 25 unit tests in `tests/test_reporting_service.py` (path traversal, WAL coexistence, locked-DB graceful skip, corrupt-bytes skip, file-disappearing-mid-iteration, error-dict normalization, cwd-anchor lock) + 6 FastAPI TestClient integration tests in `tests/test_api_reporting.py` covering 200/400/404/500 paths.
+
+### Notes
+
+- **No DB schema migration.** Reads existing `paper_trades` table verbatim (schema established in v1.1.0).
+- **Pi runtime: zero-impact.** Reports is a UI-only addition; existing CLI / cron P&L delivery on the Pi continues unchanged. No cutover required.
+- **Auth posture inherited.** Reports endpoints use the project's existing `Depends(check_auth)` convention (Bearer-token check that's a no-op when `API_KEY` env var is unset). Frontend Bearer-attachment is a pre-existing project-wide gap (only `DataSources.tsx` attaches via `localStorage.getItem('ec_token')`); v1.4.0 inherits the as-is posture, deferring a cross-cutting fix to a future release.
+
 ## [1.3.1] — 2026-05-01
 
 ### Fixed

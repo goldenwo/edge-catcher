@@ -355,3 +355,76 @@ export const research = {
     }
   },
 }
+
+// ── Reporting (v1.4.0) ─────────────────────────────────────────────────────
+
+export interface DbInfo {
+  name: string
+  size_mb: number
+  mtime: string
+  row_count: number
+}
+
+export interface AllTimeStats {
+  total_trades: number
+  open_trades: number
+  closed_trades: number
+  wins: number
+  losses: number
+  win_rate_pct: number
+  net_pnl_cents: number
+  net_pnl_usd: number
+  avg_pnl_cents: number
+  fees_cents: number
+  deployed_cents: number
+  deployed_usd: number
+  roi_deployed_pct: number
+}
+
+export interface TodayStats {
+  settled_count: number
+  pnl_cents: number
+  pnl_usd: number
+}
+
+export interface TodayByStrategyRow {
+  strategy: string
+  series_ticker: string
+  status: string
+  count: number
+  pnl_cents: number
+}
+
+export interface OpenPositionRow {
+  strategy: string
+  series_ticker: string
+  count: number
+}
+
+export interface AllTimeByStrategyRow {
+  strategy: string
+  closed_trades: number
+  wins: number
+  net_pnl_cents: number
+  net_pnl_usd: number
+  win_rate_pct: number
+}
+
+export interface Report {
+  timestamp: string
+  date: string
+  all_time: AllTimeStats
+  today: TodayStats
+  today_by_strategy: TodayByStrategyRow[]
+  open_positions: OpenPositionRow[]
+  all_time_by_strategy: AllTimeByStrategyRow[]
+}
+
+export const reporting = {
+  listDbs: () => cachedReq<{ dbs: DbInfo[] }>('/api/reporting/dbs', 10_000),
+  runReport: (db: string, date?: string) => {
+    const p = new URLSearchParams({ db })
+    if (date) p.set('date', date)
+    return req<Report>(`/api/reporting/run?${p}`)
+  },
+}
