@@ -30,14 +30,14 @@ before any capital — paper or real — gets deployed:
 3. **Replay backtest.** Slow, high-fidelity verdict. Replays a captured
    daily bundle (compressed JSONL of every WS frame plus state
    snapshots) through the exact `dispatch_message` path the live paper
-   trader uses, via `edge_catcher.monitors.replay.backtester`. Seeds
+   trader uses, via `edge_catcher.engine.replay.backtester`. Seeds
    `MarketState`, open trades, and strategy state from the prior day's
    bundle. Answers "would replay produce the same trades as live?".
    Slower than the event backtester because it walks every WS frame in
    order, but bit-exact reproducible.
 
 4. **Paper trader.** P&L source of truth. The live paper trader
-   (`edge_catcher.monitors.engine`) runs the same dispatch path against
+   (`edge_catcher.engine.engine`) runs the same dispatch path against
    the live Kalshi WS feed, records trades to a `paper_trades` SQLite
    DB, and captures every event for replay.
 
@@ -88,7 +88,7 @@ so the replay backtester is opt-in too. Set `capture.enabled: true`
 to turn the pipeline on.
 
 When enabled, the live paper trader writes every WS frame it sees to
-a `RawFrameWriter` (`monitors/capture/writer.py`). At UTC midnight, a
+a `RawFrameWriter` (`engine/capture/writer.py`). At UTC midnight, a
 rotation callback assembles a **daily bundle**:
 
 - Compressed JSONL of every dispatched event for the day
@@ -99,9 +99,9 @@ rotation callback assembles a **daily bundle**:
 - A "day slice" — the prior 24h of relevant context
 
 The bundle is uploaded via the configured transport
-(`monitors/capture/transport.py` — `local` writes to a directory,
+(`engine/capture/transport.py` — `local` writes to a directory,
 `r2` uploads to Cloudflare R2) and the raw working file is deleted.
-The replay backtester (`monitors/replay/backtester.py`) can take any
+The replay backtester (`engine/replay/backtester.py`) can take any
 bundle and reproduce that day bit-exact: it instantiates a fresh
 engine, seeds it from the state snapshots, and walks the JSONL through
 the same `dispatch_message` function the live engine uses. This is
@@ -178,7 +178,7 @@ from **private** (gitignored, edge-revealing):
 | Tracked | Gitignored |
 |---------|------------|
 | Framework code (`edge_catcher/`, `api/`, `ui/`) | `config.local/`, `edge_catcher/hypotheses/local/` |
-| Example configs (`config/`) | `edge_catcher/monitors/strategies_local.py` |
+| Example configs (`config/`) | `edge_catcher/engine/strategies_local.py` |
 | `strategies_example.py` (tutorial) | `scripts/`, `reports/` |
 | Framework tests (`tests/`) | `tests/test_local_*.py`, `tests/test_flow_*.py` |
 | Public docs (`docs/`) | `docs/superpowers/` |

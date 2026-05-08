@@ -114,7 +114,7 @@ def test_replay_parity_against_live_bundle():
 	Strict mode (REPLAY_PARITY_STRICT=1): any divergence fails the test.
 	Default mode: collects all divergences into a structured report.
 	"""
-	from edge_catcher.monitors.replay.backtester import replay_capture
+	from edge_catcher.engine.replay.backtester import replay_capture
 
 	bundle_path = Path(os.environ[PARITY_BUNDLE_ENV])
 	assert bundle_path.exists(), f"bundle not found: {bundle_path}"
@@ -208,7 +208,7 @@ def test_replay_runs_without_errors():
 	If the bundle is malformed (missing manifest, broken strategies_local.py,
 	empty JSONL) this test surfaces the problem before any parity logic runs.
 	"""
-	from edge_catcher.monitors.replay.backtester import replay_capture
+	from edge_catcher.engine.replay.backtester import replay_capture
 
 	bundle_path = Path(os.environ[PARITY_BUNDLE_ENV])
 	result = replay_capture(bundle_path)

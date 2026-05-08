@@ -9,14 +9,14 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from edge_catcher.adapters.kalshi.auth import KALSHI_REST_BASE
-from edge_catcher.monitors.market_state import (
+from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
 	_is_tradeable_cents,
 )
 
 if TYPE_CHECKING:
-	from edge_catcher.monitors.capture.writer import RawFrameWriter
+	from edge_catcher.engine.capture.writer import RawFrameWriter
 
 log = logging.getLogger(__name__)
 

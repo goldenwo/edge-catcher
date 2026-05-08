@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from edge_catcher.monitors.capture.transport import LocalTransport
+from edge_catcher.engine.capture.transport import LocalTransport
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ def _mock_s3_client() -> MagicMock:
 def test_r2_transport_upload_bundle_sends_each_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	"""R2Transport.upload_bundle should call s3.upload_file once per regular
 	file under the bundle directory, keying on posix-style relative paths."""
-	from edge_catcher.monitors.capture.transport import R2Transport
+	from edge_catcher.engine.capture.transport import R2Transport
 
 	# Build a bundle with a nested structure
 	bundle = tmp_path / "bundle"
@@ -138,7 +138,7 @@ def test_r2_transport_upload_bundle_sends_each_file(tmp_path: Path, monkeypatch:
 
 	# Stub boto3.client -> MagicMock
 	mock_client = _mock_s3_client()
-	import edge_catcher.monitors.capture.transport as transport_mod
+	import edge_catcher.engine.capture.transport as transport_mod
 	monkeypatch.setattr(transport_mod, "_s3_client_factory", lambda **kw: mock_client)
 
 	transport = R2Transport(
@@ -164,7 +164,7 @@ def test_r2_transport_upload_bundle_sends_each_file(tmp_path: Path, monkeypatch:
 def test_r2_transport_download_bundle_fetches_each_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	"""R2Transport.download_bundle should list objects under the prefix and
 	download each one to the matching relative path under local_path."""
-	from edge_catcher.monitors.capture.transport import R2Transport
+	from edge_catcher.engine.capture.transport import R2Transport
 
 	mock_client = _mock_s3_client()
 	# paginator.paginate(...) yields pages with "Contents": [{Key: ...}, ...]
@@ -183,7 +183,7 @@ def test_r2_transport_download_bundle_fetches_each_object(tmp_path: Path, monkey
 
 	mock_client.download_file = MagicMock(side_effect=fake_download)
 
-	import edge_catcher.monitors.capture.transport as transport_mod
+	import edge_catcher.engine.capture.transport as transport_mod
 	monkeypatch.setattr(transport_mod, "_s3_client_factory", lambda **kw: mock_client)
 
 	transport = R2Transport(
@@ -203,7 +203,7 @@ def test_r2_transport_download_bundle_fetches_each_object(tmp_path: Path, monkey
 def test_r2_transport_reads_credentials_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 	"""When constructor args are None, R2Transport falls back to the
 	provider-neutral CAPTURE_TRANSPORT_* env vars."""
-	from edge_catcher.monitors.capture.transport import R2Transport
+	from edge_catcher.engine.capture.transport import R2Transport
 
 	monkeypatch.setenv("CAPTURE_TRANSPORT_BUCKET", "env-bucket")
 	monkeypatch.setenv("CAPTURE_TRANSPORT_ENDPOINT_URL", "https://env.example.com")
@@ -216,7 +216,7 @@ def test_r2_transport_reads_credentials_from_env(monkeypatch: pytest.MonkeyPatch
 		captured.update(kwargs)
 		return _mock_s3_client()
 
-	import edge_catcher.monitors.capture.transport as transport_mod
+	import edge_catcher.engine.capture.transport as transport_mod
 	monkeypatch.setattr(transport_mod, "_s3_client_factory", capturing_factory)
 
 	R2Transport()  # no explicit args

@@ -1,7 +1,7 @@
 """Tests for market state models: OrderbookSnapshot, FillResult, TickContext, MarketState."""
 
 import pytest
-from edge_catcher.monitors.market_state import (
+from edge_catcher.engine.market_state import (
 	OrderbookSnapshot,
 	TickContext,
 	MarketState,

@@ -1,4 +1,4 @@
-"""Tests for edge_catcher.monitors.discovery."""
+"""Tests for edge_catcher.engine.discovery."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from edge_catcher.monitors.discovery import (
+from edge_catcher.engine.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
 	load_config,
 )
-from edge_catcher.monitors.strategy_base import PaperStrategy
+from edge_catcher.engine.strategy_base import Strategy
 
 
 # ---------------------------------------------------------------------------
@@ -22,9 +22,9 @@ from edge_catcher.monitors.strategy_base import PaperStrategy
 # ---------------------------------------------------------------------------
 
 _MINIMAL_STRATEGY_SRC = textwrap.dedent("""\
-	from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
+	from edge_catcher.engine.strategy_base import Strategy, Signal
 
-	class MyStrat(PaperStrategy):
+	class MyStrat(Strategy):
 		name = "my-strat"
 		supported_series = ["SERIES_A"]
 		default_params = {}
@@ -59,7 +59,7 @@ def _make_config(extra: dict | None = None) -> dict:
 	return cfg
 
 
-class _StubStrat(PaperStrategy):
+class _StubStrat(Strategy):
 	name = "stub"
 	supported_series = ["SERIES_A"]
 	default_params = {"foo": 1}
@@ -114,14 +114,14 @@ class TestDiscoverStrategies:
 		""")
 		strats_file = _write_strategies_file(tmp_path, src)
 		result = discover_strategies(strats_file)
-		# Only MyStrat is a PaperStrategy subclass
+		# Only MyStrat is a Strategy subclass
 		assert len(result) == 1
 		assert result[0].name == "my-strat"
 
 	def test_ignores_paper_strategy_itself(self, tmp_path: Path) -> None:
-		"""PaperStrategy base class must not be returned."""
+		"""Strategy base class must not be returned."""
 		src = textwrap.dedent("""\
-			from edge_catcher.monitors.strategy_base import PaperStrategy
+			from edge_catcher.engine.strategy_base import Strategy
 		""")
 		strats_file = _write_strategies_file(tmp_path, src)
 		result = discover_strategies(strats_file)
@@ -130,7 +130,7 @@ class TestDiscoverStrategies:
 	def test_discovers_multiple_strategies(self, tmp_path: Path) -> None:
 		src = _MINIMAL_STRATEGY_SRC + textwrap.dedent("""\
 
-			class SecondStrat(PaperStrategy):
+			class SecondStrat(Strategy):
 				name = "second-strat"
 				supported_series = ["SERIES_B"]
 				default_params = {}
@@ -148,7 +148,7 @@ class TestDiscoverStrategies:
 # ---------------------------------------------------------------------------
 
 class TestGetEnabledStrategies:
-	def _strat(self, name: str = "stub") -> PaperStrategy:
+	def _strat(self, name: str = "stub") -> Strategy:
 		s = _StubStrat()
 		s.name = name  # type: ignore[assignment]
 		return s
@@ -243,7 +243,7 @@ class TestGetEnabledStrategies:
 
 	def test_allows_all_supported_series(self) -> None:
 		"""All requested series are in supported_series → no error."""
-		class MultiSeries(PaperStrategy):
+		class MultiSeries(Strategy):
 			name = "multi"
 			supported_series = ["SERIES_A", "SERIES_B", "SERIES_C"]
 			default_params = {}
@@ -265,7 +265,7 @@ class TestGetEnabledStrategies:
 		config series is permitted. This is the opt-out for strategies
 		that genuinely work on any series (e.g. framework test fixtures).
 		"""
-		class AnySeries(PaperStrategy):
+		class AnySeries(Strategy):
 			name = "any"
 			supported_series: list[str] = []
 			default_params = {}
@@ -342,8 +342,8 @@ class TestManifestSupportedSeries:
 			},
 		}
 
-	def _strat_with_whitelist(self, whitelist: list[str]) -> PaperStrategy:
-		class _S(PaperStrategy):
+	def _strat_with_whitelist(self, whitelist: list[str]) -> Strategy:
+		class _S(Strategy):
 			name = "my-strat"
 			supported_series = whitelist
 			default_params: dict = {}

@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from edge_catcher.monitors.market_state import FillResult, OrderbookSnapshot
+from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -296,3 +296,76 @@ def resolve_fill(
 		return FillSkip(reason="below_min_fill")
 
 	return fill
+
+
+# ---------------------------------------------------------------------------
+# PaperExecutor
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402 — imported here to keep the pure-function block above clean
+
+from edge_catcher.engine.executor import OrderRequest, OrderResult  # noqa: E402
+from edge_catcher.engine.market_state import MarketState  # noqa: E402
+
+
+class PaperExecutor:
+	"""Simulated executor — walks the orderbook in MarketState, returns deterministic fills.
+
+	Composes the module-level pure functions (resolve_fill / walk_book_with_ceiling /
+	compute_raw_size) with the Executor protocol shape. No new fill semantics — paper
+	behavior is byte-exact across the migration.
+
+	Fees: NOT computed here. trade_store.record_trade computes them via
+	STANDARD_FEE.calculate at row-write time. The OrderResult.fees_cents field is
+	deferred to D when LiveExecutor needs to surface Kalshi-reported fees.
+	"""
+
+	def __init__(self, market_state: MarketState, config: dict) -> None:
+		# `config` is the same dict threaded through the engine. The
+		# resolve_fill function above (lines 195-298, ported verbatim from the
+		# pre-G monitors/sizing.py) reads:
+		#   config["sizing"]:
+		#     - risk_per_trade_cents      (int)
+		#     - max_slippage_cents        (int)
+		#     - min_fill                  (int — NOT "min_fill_size")
+		#     - require_fresh_book        (bool, optional, default True)
+		# No new keys introduced by G.
+		self._ms = market_state
+		self._config = config
+
+	def place(self, req: OrderRequest) -> OrderResult:
+		# MarketState.get_orderbook returns Optional; the dispatch path defaults
+		# to an empty OrderbookSnapshot for unseeded tickers (see
+		# engine/dispatch.py:465), and resolve_fill treats empty books as a
+		# FillSkip(empty_book) when require_fresh_book is on. Match that
+		# semantics here so the executor never sees a None book.
+		snapshot = self._ms.get_orderbook(req.ticker) or OrderbookSnapshot([], [])
+		fill_or_skip = resolve_fill(
+			self._config, req.limit_price_cents, req.side, snapshot,
+		)
+		if isinstance(fill_or_skip, FillSkip):
+			return OrderResult(
+				status="rejected",
+				intended_size=req.size_contracts,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				book_depth=snapshot.depth,
+				book_snapshot=None,
+				rejection_reason=fill_or_skip.reason,
+			)
+		fill = fill_or_skip                              # FillResult
+		side_levels = (
+			snapshot.yes_levels if req.side == "yes" else snapshot.no_levels
+		)
+		return OrderResult(
+			status="filled",
+			intended_size=fill.intended_size,
+			filled_size=fill.fill_size,
+			blended_entry_cents=fill.blended_price_cents,  # 0-sentinel preserved verbatim
+			fill_pct=fill.fill_pct,
+			slippage_cents=fill.slippage_cents,
+			book_depth=snapshot.depth,
+			book_snapshot=json.dumps(side_levels),
+		)

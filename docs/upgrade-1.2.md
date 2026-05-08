@@ -10,7 +10,7 @@ v1.2.0 makes `python -m edge_catcher.reporting --notify` produce a multi-section
 
 ## Channel privacy reminder
 
-The rich body includes strategy names and series tickers from your `paper_trades` DB. Per the project's private-file conventions, strategy names live in `monitors/strategies_local.py` (gitignored). They will appear in the Discord/Slack/SMTP body now.
+The rich body includes strategy names and series tickers from your `paper_trades` DB. Per the project's private-file conventions, strategy names live in `engine/strategies_local.py` (gitignored — moved from `monitors/` in the v1.5 paper-migration). They will appear in the Discord/Slack/SMTP body now.
 
 For private channels (the typical paper-trader-on-a-Pi setup), this is fine. If you're delivering to a public channel for status visibility, consider routing through `style: generic` with a downstream renderer that aggregates away the strategy/series detail.
 

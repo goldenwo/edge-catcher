@@ -1,28 +1,22 @@
-"""Discord webhook notifications with rate limiting and bounded concurrency.
+"""Discord webhook notifications — engine signal-flow notify path.
 
-DEPRECATED in v1.1+: prefer `edge_catcher.notifications` for new code.
-This module is paper-trader-internal and will be migrated onto the
-unified notifications layer in a future release. See
-`docs/superpowers/specs/2026-04-26-notifications-design.md` §11.
+Thin facade kept inside the engine package through G's transition. The unified
+`edge_catcher.notifications` package has a different envelope-based API; engine
+dispatch's `notify(text)` callable shape stays unchanged here so paper trader
+behavior is byte-exact across the migration.
+
+# TODO(E/CR-1): migrate onto edge_catcher.notifications (unified package).
+# Owned by sub-project E's spec; not G's scope.
 """
 
 import asyncio
 import logging
 import os
 import time
-import warnings
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 import httpx
-
-warnings.warn(
-	"edge_catcher.monitors.notifications is deprecated; use edge_catcher.notifications "
-	"for new code. This module will be migrated onto the unified notifications layer "
-	"in a future release.",
-	DeprecationWarning,
-	stacklevel=2,
-)
 
 logger = logging.getLogger(__name__)
 

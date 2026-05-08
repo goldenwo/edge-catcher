@@ -1,0 +1,10 @@
+[
+  {
+    "strategy": "synthetic_tick",
+    "ticker": "SYN-TEST-T1",
+    "side": "yes",
+    "fill_size": 4,
+    "blended_entry": 50,
+    "status": "open"
+  }
+]

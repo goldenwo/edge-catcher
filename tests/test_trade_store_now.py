@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.engine.trade_store import TradeStore
 
 
 @pytest.fixture
@@ -138,7 +138,7 @@ def test_settle_trade_rejects_naive_datetime(store: TradeStore, fixed_now: datet
 
 def test_record_trade_raises_on_duplicate_open(store: TradeStore, fixed_now: datetime) -> None:
 	"""Two record_trade calls with the same (strategy, ticker, side, entry_time) must fail."""
-	from edge_catcher.monitors.trade_store import DuplicateOpenTradeError
+	from edge_catcher.engine.trade_store import DuplicateOpenTradeError
 
 	store.record_trade(
 		ticker="KXTEST-26APR14",

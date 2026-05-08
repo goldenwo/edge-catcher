@@ -30,7 +30,7 @@ expected to live outside the public tree.
 | `edge_catcher/runner/strategies.py` | tracked | base class + reusable mixins |
 | `edge_catcher/runner/strategies_example.py` | tracked | tutorial strategy |
 | `edge_catcher/runner/strategies_local.py` | tracked | example local file (deliberately empty/safe) |
-| `edge_catcher/monitors/strategies_local.py` | **gitignored** | your paper-trader strategies |
+| `edge_catcher/engine/strategies_local.py` | **gitignored** | your paper-trader strategies |
 | `config/` | tracked | example configs |
 | `config.local/` | **gitignored** | your hypotheses, alert configs, secrets |
 | `edge_catcher/hypotheses/local/` | **gitignored** | your private hypothesis modules |
@@ -103,9 +103,11 @@ with the backtester `Strategy` interface — copy
 `edge_catcher/runner/strategies_example.py` to `strategies_local.py`,
 rename, edit, and the auto-discovery picks it up.
 
-The paper-trader uses a separate `PaperStrategy` base class with an
-`on_tick` callback; it is more involved and most contributors will not
-need to touch it.
+The paper-trader uses a separate `Strategy` base class (from
+`edge_catcher.engine.strategy_base`, distinct from the runner's
+`Strategy` in `edge_catcher.runner.strategies`) with an `on_tick`
+callback; it is more involved and most contributors will not need to
+touch it.
 
 ## How to add a hypothesis
 
@@ -134,7 +136,7 @@ hypothesis registry the same way as the tracked ones.
   locally before opening the PR. CI runs the same three checks against
   Python 3.11 and 3.12 — all three are required for merge.
 - Do not commit anything from `data/`, `reports/`, `config.local/`,
-  `scripts/`, or `edge_catcher/monitors/strategies_local.py` — these are
+  `scripts/`, or `edge_catcher/engine/strategies_local.py` — these are
   gitignored for a reason.
 
 ## Code style

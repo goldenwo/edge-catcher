@@ -17,7 +17,7 @@ Brief description of what this PR changes and why.
 - [ ] I ran `ruff check .` locally and it passes
 - [ ] I added tests for new framework code
 - [ ] I updated relevant docs (`README.md`, `docs/*.md`, ADRs) if behavior or surface area changed
-- [ ] I did **not** include any private/gitignored content (`config.local/`, `scripts/`, `reports/`, `monitors/strategies_local.py`, `hypotheses/local/`, `data/`)
+- [ ] I did **not** include any private/gitignored content (`config.local/`, `scripts/`, `reports/`, `engine/strategies_local.py`, `hypotheses/local/`, `data/`)
 
 ## Linked issues
 

@@ -30,6 +30,7 @@ reports/
 config.local/
 edge_catcher/runner/strategies_local.py
 edge_catcher/monitors/strategies_local.py
+edge_catcher/engine/strategies_local.py
 edge_catcher/hypotheses/local/
 TASK-*.md
 ROADMAP.md

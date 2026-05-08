@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from edge_catcher.monitors.trade_store import (
+from edge_catcher.engine.trade_store import (
 	DuplicateOpenTradeError,
 	InMemoryTradeStore,
 	TradeStore,

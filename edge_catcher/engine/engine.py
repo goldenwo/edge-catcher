@@ -15,39 +15,41 @@ import httpx
 import websockets
 
 from edge_catcher.adapters.kalshi.auth import KALSHI_WS_URL, make_auth_headers
-from edge_catcher.monitors.capture.bundle import (
+from edge_catcher.engine.capture.bundle import (
 	assemble_daily_bundle,
 	delete_raw_jsonl,
 	mark_bundle_uploaded,
 	prune_old_bundles,
 )
-from edge_catcher.monitors.capture.transport import (
+from edge_catcher.engine.capture.transport import (
 	CaptureTransport,
 	LocalTransport,
 	R2Transport,
 )
-from edge_catcher.monitors.capture.writer import RawFrameWriter
-from edge_catcher.monitors.discovery import (
+from edge_catcher.engine.capture.writer import RawFrameWriter
+from edge_catcher.engine.discovery import (
 	discover_strategies,
 	get_enabled_strategies,
 	load_config,
 )
-from edge_catcher.monitors.dispatch import (
+from edge_catcher.engine.dispatch import (
 	_format_close_message,
 	_pnl_label,
 	dispatch_message,
 )
-from edge_catcher.monitors.metrics import Metrics
-from edge_catcher.monitors.market_state import MarketState
-from edge_catcher.monitors.notifications import notify
-from edge_catcher.monitors.recovery import (
+from edge_catcher.engine.executor import Executor
+from edge_catcher.engine.executors.paper import PaperExecutor
+from edge_catcher.engine.metrics import Metrics
+from edge_catcher.engine.market_state import MarketState
+from edge_catcher.engine.notifications import notify
+from edge_catcher.engine.recovery import (
 	check_market_result,
 	fetch_active_tickers_for_series,
 	fetch_orderbook_snapshot,
 	run_recovery,
 )
-from edge_catcher.monitors.strategy_base import PaperStrategy
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.engine.strategy_base import Strategy
+from edge_catcher.engine.trade_store import TradeStore
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,7 @@ log = logging.getLogger(__name__)
 async def _settlement_poller(
 	store: TradeStore,
 	client: httpx.AsyncClient,
-	strategies: list[PaperStrategy],
+	strategies: list[Strategy],
 	pending_states: dict[str, dict],
 	metrics: Metrics | None = None,
 	interval: int = 60,
@@ -196,7 +198,7 @@ async def _summary_logger(
 
 async def _state_flusher(
 	store: TradeStore,
-	strategies: list[PaperStrategy],
+	strategies: list[Strategy],
 	pending_states: dict[str, dict],
 	dirty: set[str],
 	interval: int = 5,
@@ -462,11 +464,17 @@ def _build_capture_transport(capture_cfg: dict) -> Optional[CaptureTransport]:
 	return None
 
 
-async def run_engine(config_path: Path) -> None:
+async def run_engine(
+	config_path: Path,
+	executor: Executor | None = None,
+) -> None:
 	"""Main engine loop — connect WS, dispatch ticks, manage background tasks.
 
 	Args:
 		config_path: Path to the YAML config file.
+		executor: Pluggable execution endpoint. Defaults to ``PaperExecutor``
+			constructed against ``MarketState`` + ``config``. Sub-project D
+			provides ``LiveExecutor`` for live trading.
 	"""
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
@@ -483,6 +491,17 @@ async def run_engine(config_path: Path) -> None:
 	state_flush_interval = recovery_cfg.get("state_flush_interval", 5)
 	store = TradeStore(db_path)
 	market_state = MarketState(limit=price_history_limit)
+
+	# Construct the default PaperExecutor if no executor was injected. PaperExecutor
+	# takes (market_state, config) — fees compute inside trade_store.record_trade,
+	# so no fee_model parameter is required.
+	if executor is None:
+		executor = PaperExecutor(market_state=market_state, config=config)
+
+	# Cutover-verification beacon. Pi cutover step 5 greps journalctl for this
+	# exact substring to prove the engine/ package is loaded (NOT monitors/).
+	# Generic "Engine starting" is shared with the OLD engine; this line is unique.
+	log.info("engine[G]: paper executor wired, package=edge_catcher.engine")
 
 	# Capture pipeline (default disabled — the `capture:` block in config
 	# opts in per-deploy). The writer is best-effort; if capture is disabled
@@ -592,7 +611,7 @@ async def run_engine(config_path: Path) -> None:
 		]
 
 		# Build strategy lookup by series
-		strat_by_series: dict[str, list[PaperStrategy]] = {}
+		strat_by_series: dict[str, list[Strategy]] = {}
 		for strat in strategies:
 			strat_series = _series_for_strategy(config, strat.name)
 			for s in strat_series:
@@ -606,6 +625,7 @@ async def run_engine(config_path: Path) -> None:
 						config, market_state, store, strategies,
 						strat_by_series, pending_states, active_series,
 						client, ws_ref, dirty_strategies,
+						executor,
 						capture_writer=capture_writer,
 					)
 				except (
@@ -648,13 +668,14 @@ async def _ws_loop(
 	config: dict,
 	market_state: MarketState,
 	store: TradeStore,
-	strategies: list[PaperStrategy],
-	strat_by_series: dict[str, list[PaperStrategy]],
+	strategies: list[Strategy],
+	strat_by_series: dict[str, list[Strategy]],
 	pending_states: dict[str, dict],
 	active_series: list[str],
 	client: httpx.AsyncClient,
 	ws_ref: list,
 	dirty: set[str],
+	executor: Executor,
 	capture_writer: RawFrameWriter | None = None,
 ) -> None:
 	"""Single WS connection lifecycle — connect, subscribe, process messages."""
@@ -713,6 +734,7 @@ async def _ws_loop(
 					{"source": "ws", "payload": msg},
 					config, market_state, store,
 					strategies, strat_by_series, pending_states, dirty,
+					executor,
 					now=now,
 				)
 			except Exception:

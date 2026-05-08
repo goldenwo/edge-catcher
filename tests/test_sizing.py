@@ -1,15 +1,15 @@
-"""Tests for edge_catcher.monitors.sizing."""
+"""Tests for edge_catcher.engine.executors.paper."""
 
 import pytest
 
-from edge_catcher.monitors.sizing import (
+from edge_catcher.engine.executors.paper import (
 	compute_raw_size,
 	validate_sizing_config,
 	resolve_fill,
 	FillSkip,
 )
-from edge_catcher.monitors.market_state import OrderbookSnapshot, FillResult
-from edge_catcher.monitors.sizing import walk_book_with_ceiling
+from edge_catcher.engine.market_state import OrderbookSnapshot, FillResult
+from edge_catcher.engine.executors.paper import walk_book_with_ceiling
 
 
 class TestComputeRawSize:

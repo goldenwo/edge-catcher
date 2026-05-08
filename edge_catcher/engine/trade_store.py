@@ -16,7 +16,7 @@ class TradeStoreProtocol(Protocol):
 	Both the SQLite-backed `TradeStore` and the replay `InMemoryTradeStore`
 	satisfy this protocol nominally — without inheritance — so dispatch and
 	settlement code can accept either. Methods listed here are exactly the
-	ones touched by `monitors/dispatch.py`; if dispatch grows to need a new
+	ones touched by `engine/dispatch.py`; if dispatch grows to need a new
 	store method, mirror it on both implementations and add the signature
 	here.
 	"""

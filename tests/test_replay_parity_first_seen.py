@@ -124,7 +124,7 @@ def test_parity(day: str) -> None:
 	live_keys = frozenset(_project(r) for r in live_rows)
 
 	# Replay
-	from edge_catcher.monitors.replay.backtester import replay_capture
+	from edge_catcher.engine.replay.backtester import replay_capture
 	result = replay_capture(bundle)
 	replay_keys = frozenset(_project(t) for t in result.trades)
 

@@ -151,7 +151,7 @@ tests/             900+ tests across 75 files
 
 The framework ships publicly; **your strategies stay yours**. Private zones are gitignored:
 
-- `edge_catcher/runner/strategies_local.py` (and `monitors/strategies_local.py`)
+- `edge_catcher/runner/strategies_local.py` (and `engine/strategies_local.py`)
 - `edge_catcher/hypotheses/local/`
 - `config.local/`
 - `scripts/` (analysis)

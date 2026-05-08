@@ -7,7 +7,7 @@ with different callbacks** — strategies are not portable between them.
 | Engine | Base class | Callback | Module |
 |--------|-----------|----------|--------|
 | Event backtester (research / parameter sweeps) | `Strategy` | `on_trade(trade, market, portfolio)` | `edge_catcher.runner.strategies` |
-| Paper trader (live + replay backtester) | `PaperStrategy` | `on_tick(ctx)` | `edge_catcher.monitors.strategy_base` |
+| Paper trader (live + replay backtester) | `Strategy` | `on_tick(ctx)` | `edge_catcher.engine.strategy_base` |
 
 Most users start with the event backtester. The paper trader has more
 moving parts (live state, orderbook handling, dispatch plumbing) and is
@@ -35,7 +35,7 @@ overwrite it locally.
 
 The runner-side `strategies_local.py` is *tracked* (and intentionally
 inert in the public repo). Only the paper-trader copy at
-`edge_catcher/monitors/strategies_local.py` is gitignored — see
+`edge_catcher/engine/strategies_local.py` is gitignored — see
 `CONTRIBUTING.md` for the full public/private split.
 
 ### Auto-discovery
@@ -206,7 +206,7 @@ class MyFiltered(VolumeMixin, MyStrategy):
 
 ## Paper-trader strategies
 
-The paper trader (`edge_catcher.monitors`) runs a live WS feed and
+The paper trader (`edge_catcher.engine`) runs a live WS feed and
 calls strategies on every tick. Most users will not need to write one
 of these — the event backtester is the right place to iterate on
 hypotheses.
@@ -214,10 +214,10 @@ hypotheses.
 If you do, the shape is:
 
 ```python
-from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
+from edge_catcher.engine.strategy_base import Strategy, Signal
 
 
-class MyPaper(PaperStrategy):
+class MyPaper(Strategy):
     name = "my_paper"
     supported_series = ["MY_SERIES"]
     default_params = {"threshold": 50}
@@ -230,7 +230,7 @@ class MyPaper(PaperStrategy):
 ```
 
 Paper-trader strategies live in
-`edge_catcher/monitors/strategies_local.py` (gitignored — your live
+`edge_catcher/engine/strategies_local.py` (gitignored — your live
 strategies stay private). The paper trader handles sizing, dispatch,
 position state, and capture/replay; you implement only the decision
 logic in `on_tick`.

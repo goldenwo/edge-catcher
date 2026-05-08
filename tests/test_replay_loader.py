@@ -23,7 +23,7 @@ import zstandard as zstd
 
 def test_loader_yields_events_in_recv_seq_order(tmp_path: Path) -> None:
 	"""Events must be sorted by recv_seq, not by on-disk order."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -40,7 +40,7 @@ def test_loader_yields_events_in_recv_seq_order(tmp_path: Path) -> None:
 
 def test_loader_skips_header_line(tmp_path: Path) -> None:
 	"""The header line (with ``header: true``) must not appear in the output."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -55,7 +55,7 @@ def test_loader_skips_header_line(tmp_path: Path) -> None:
 
 def test_loader_skips_malformed_lines(tmp_path: Path) -> None:
 	"""Malformed JSON lines must be silently skipped, not raise."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -74,7 +74,7 @@ def test_loader_skips_malformed_lines(tmp_path: Path) -> None:
 
 def test_loader_skips_blank_lines(tmp_path: Path) -> None:
 	"""Empty / whitespace-only lines must be silently skipped."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -96,7 +96,7 @@ def test_loader_skips_blank_lines(tmp_path: Path) -> None:
 def test_loader_decompresses_zstd(tmp_path: Path) -> None:
 	"""A .jsonl.zst file should decompress transparently and yield the
 	same events as the uncompressed version would."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	content = (
 		json.dumps({"schema_version": 1, "header": True}) + "\n"
@@ -123,7 +123,7 @@ def test_loader_decompresses_zstd(tmp_path: Path) -> None:
 def test_loader_skips_oversized_lines(tmp_path: Path) -> None:
 	"""A single line exceeding MAX_LINE_BYTES must be skipped (log-and-continue),
 	not cause a crash or memory blowup."""
-	from edge_catcher.monitors.replay.loader import MAX_LINE_BYTES, read_jsonl_window
+	from edge_catcher.engine.replay.loader import MAX_LINE_BYTES, read_jsonl_window
 
 	# Craft a payload that exceeds MAX_LINE_BYTES when serialized
 	oversized_payload = {"blob": "x" * (MAX_LINE_BYTES + 1000)}
@@ -149,7 +149,7 @@ def test_loader_skips_oversized_lines(tmp_path: Path) -> None:
 
 def test_loader_ticker_filter_keeps_matching_ws_events(tmp_path: Path) -> None:
 	"""With a ticker filter set, ws events for other tickers should be dropped."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -168,7 +168,7 @@ def test_loader_ticker_filter_keeps_matching_synthetic_events(tmp_path: Path) ->
 	"""With a ticker filter set, synthetic events whose payload has a
 	matching `ticker` field should be kept. Unknown shapes always pass
 	so heartbeat/metadata events aren't accidentally dropped."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
@@ -188,7 +188,7 @@ def test_loader_ticker_filter_keeps_matching_synthetic_events(tmp_path: Path) ->
 
 def test_loader_no_filter_passes_everything(tmp_path: Path) -> None:
 	"""ticker_filter=None yields every event."""
-	from edge_catcher.monitors.replay.loader import read_jsonl_window
+	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(

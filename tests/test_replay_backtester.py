@@ -1,4 +1,4 @@
-"""Unit tests for edge_catcher.monitors.replay.backtester helpers.
+"""Unit tests for edge_catcher.engine.replay.backtester helpers.
 
 Targets the helper functions directly — parity test coverage lives in
 test_replay_parity.py and requires a real bundle fixture via env var.
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.replay.backtester import _seed_strategy_state
-from edge_catcher.monitors.trade_store import InMemoryTradeStore
+from edge_catcher.engine.replay.backtester import _seed_strategy_state
+from edge_catcher.engine.trade_store import InMemoryTradeStore
 
 
 def _write_envelope(path: Path, states: dict) -> None:
@@ -124,10 +124,10 @@ def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 	  - ReplayResult.store field
 	  - end-of-replay flush loop
 	"""
-	from edge_catcher.monitors.replay.backtester import replay_capture
-	from edge_catcher.monitors.strategy_base import PaperStrategy
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
 
-	class NoopStrategy(PaperStrategy):
+	class NoopStrategy(Strategy):
 		name = "counter-strat"
 		supported_series = ["KXTEST"]
 		default_params: dict = {}
@@ -189,12 +189,13 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 	fighting dispatch.py's WS message parsing and market_state priming.
 	"""
 	from datetime import datetime, timezone
-	from edge_catcher.monitors.replay.backtester import _seed_strategy_state
-	from edge_catcher.monitors.market_state import OrderbookSnapshot, TickContext
-	from edge_catcher.monitors.dispatch import process_tick
-	from edge_catcher.monitors.strategy_base import PaperStrategy
+	from edge_catcher.engine.replay.backtester import _seed_strategy_state
+	from edge_catcher.engine.market_state import OrderbookSnapshot, TickContext
+	from edge_catcher.engine.dispatch import process_tick
+	from edge_catcher.engine.strategy_base import Strategy
+	from tests._executor_helper import _make_executor_for_ctx
 
-	class CounterStrategy(PaperStrategy):
+	class CounterStrategy(Strategy):
 		name = "counter-strat"
 		supported_series = ["KXTEST"]
 		default_params: dict = {}
@@ -246,7 +247,7 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 		is_first_observation=True,
 	)
 	now = datetime.now(timezone.utc)
-	process_tick(ctx, [strat], store, config={}, now=now)
+	process_tick(ctx, [strat], store, config={}, executor=_make_executor_for_ctx(ctx, {}), now=now)
 
 	# The mutation lands in pending_states because persisted_state
 	# and pending_states["counter-strat"] are the same dict object.
@@ -276,18 +277,18 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-from edge_catcher.monitors.dispatch import dispatch_message  # noqa: E402
-from edge_catcher.monitors.market_state import (  # noqa: E402
+from edge_catcher.engine.dispatch import dispatch_message  # noqa: E402
+from edge_catcher.engine.market_state import (  # noqa: E402
 	MarketState,
 	OrderbookSnapshot,
 	TickContext,
 )
-from edge_catcher.monitors.replay.backtester import _seed_market_state  # noqa: E402
-from edge_catcher.monitors.strategy_base import PaperStrategy  # noqa: E402
-from edge_catcher.monitors.trade_store import TradeStore  # noqa: E402
+from edge_catcher.engine.replay.backtester import _seed_market_state  # noqa: E402
+from edge_catcher.engine.strategy_base import Strategy  # noqa: E402
+from edge_catcher.engine.trade_store import TradeStore  # noqa: E402
 
 
-class _CaptureStrategyB(PaperStrategy):
+class _CaptureStrategyB(Strategy):
 	"""Stub strategy that records every TickContext it sees."""
 
 	name = "capture-b"
@@ -396,6 +397,7 @@ def test_seed_market_state_derives_first_seen(
 	strat = _CaptureStrategyB()
 	store = TradeStore(tmp_path / f"store_{schema_label}.db")
 	try:
+		from edge_catcher.engine.executors.paper import PaperExecutor as _PaperExec
 		call_args = dict(
 			config={},
 			market_state=ms,
@@ -404,6 +406,7 @@ def test_seed_market_state_derives_first_seen(
 			strat_by_series={"KXSEED": [strat], "KXNOTSEEN": [strat]},
 			pending_states={},
 			dirty=set(),
+			executor=_PaperExec(market_state=ms, config={}),
 			now=datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc),
 		)
 

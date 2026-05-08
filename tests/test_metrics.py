@@ -2,7 +2,7 @@
 
 import pytest
 
-from edge_catcher.monitors.metrics import Metrics
+from edge_catcher.engine.metrics import Metrics
 
 
 def test_metrics_starts_at_zero():

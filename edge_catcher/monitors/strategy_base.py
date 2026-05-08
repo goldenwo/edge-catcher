@@ -1,48 +1,21 @@
-"""Paper trading strategy base class and signal types."""
+"""Bundle-compat shim — re-exports for ``edge_catcher.engine.strategy_base``.
 
-from __future__ import annotations
+Pre-cutover daily bundles capture a copy of the running ``strategies_local.py``,
+which at the time inherited from ``PaperStrategy`` imported from
+``edge_catcher.monitors.strategy_base``. Sub-project G renames the base class
+to ``Strategy`` and moves it to ``edge_catcher.engine.strategy_base``; this
+shim keeps the OLD import + class name resolvable so the replay backtester
+can load those captured strategy files when sweeping historical R2 bundles
+for the cutover-gate parity check.
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
+Active code MUST import ``Strategy`` from ``edge_catcher.engine.strategy_base``.
+This shim exists ONLY so old bundles + Pi-side rollback continue to resolve
+their imports through the deferred-retirement window. After ``monitors/`` is
+fully retired (follow-up PR after >=3 stable Pi days on the new engine), this
+file goes away.
+"""
 
-from edge_catcher.monitors.market_state import TickContext
+from edge_catcher.engine.strategy_base import Signal
+from edge_catcher.engine.strategy_base import Strategy as PaperStrategy
 
-
-@dataclass
-class Signal:
-	"""What a strategy wants to do — enter or exit."""
-	action: str         # "enter" or "exit"
-	ticker: str
-	side: str           # "yes" or "no"
-	series: str
-	strategy: str
-	reason: str
-	trade_id: Optional[int] = None  # required for "exit" signals
-	intended_size: Optional[int] = None  # deprecated: engine resolves sizing via pipeline
-
-
-class PaperStrategy(ABC):
-	"""Base class for all paper trading strategies."""
-
-	name: str
-	supported_series: list[str]
-	default_params: dict
-	emoji: str = "🔵"  # color bullet shown in notifications
-
-	@abstractmethod
-	def on_tick(self, ctx: TickContext) -> list[Signal]:
-		"""Called on every WS tick. Return entry/exit signals or empty list."""
-		...
-
-	def on_settle(self, trade: dict, state: dict) -> None:
-		"""Optional — called when an open trade settles.
-		state is the strategy's persisted state. Mutations flushed immediately.
-		"""
-		pass
-
-	def on_startup(self, ctx: dict) -> None:
-		"""Optional — called once after recovery, before WS loop starts.
-		ctx: {"open_positions": [...], "active_tickers": [...], "state": {...}}
-		"""
-		pass
+__all__ = ["PaperStrategy", "Signal"]

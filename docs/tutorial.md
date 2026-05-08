@@ -322,16 +322,17 @@ If real-data backtests show edge that survives walk-forward + parameter
 sensitivity, the next step is paper-trading the strategy live to verify
 execution fidelity matches the backtest.
 
-Paper trader uses a *different* base class — `PaperStrategy` from
-`edge_catcher.monitors.strategy_base` — because the live engine has
-state the event backtester doesn't model (orderbook, dispatch plumbing,
-sizing pipeline). You'll port the strategy, not move it.
+Paper trader uses a *different* base class — also named `Strategy`,
+imported from `edge_catcher.engine.strategy_base` (distinct from
+`edge_catcher.runner.strategies.Strategy`) — because the live engine
+has state the event backtester doesn't model (orderbook, dispatch
+plumbing, sizing pipeline). You'll port the strategy, not move it.
 
 The port is mechanical:
 
 | Event backtester | Paper trader |
 |---|---|
-| `class X(Strategy):` | `class X(PaperStrategy):` |
+| `class X(runner.Strategy):` | `class X(engine.Strategy):` |
 | `def on_trade(self, trade, market, portfolio)` | `def on_tick(self, ctx)` |
 | Returns `list[Signal]` | Returns `list[Signal]` |
 | `trade.yes_price` (cents) | `ctx.yes_ask` (cents) for entries; `ctx.yes_bid` for exits |
@@ -339,7 +340,7 @@ The port is mechanical:
 
 See [strategy-guide.md](strategy-guide.md) §"Paper trader strategies"
 for the full mapping. The paper-trader port lives in
-`edge_catcher/monitors/strategies_local.py` (also gitignored).
+`edge_catcher/engine/strategies_local.py` (also gitignored).
 
 ## What you've learned
 
@@ -353,8 +354,8 @@ After this tutorial you should be able to:
 
 ## Next reads
 
-- [strategy-guide.md](strategy-guide.md) — the full `Strategy` /
-  `PaperStrategy` API reference
+- [strategy-guide.md](strategy-guide.md) — the full `Strategy` API
+  reference for both the runner backtester and the paper trader
 - [research-pipeline-data-flow.md](research-pipeline-data-flow.md) — how
   the autonomous research loop turns hypotheses into validated edges
 - [adapter-guide.md](adapter-guide.md) — adding a new exchange beyond
