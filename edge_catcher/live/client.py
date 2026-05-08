@@ -1,6 +1,7 @@
 """Kalshi REST order placement client — Python API."""
 
 from __future__ import annotations
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,13 @@ OrderSide = Literal["yes", "no"]
 OrderType = Literal["limit"]  # 'market' explicitly excluded — see Q9 in design notes
 TimeInForce = Literal["gtc", "ioc", "fok"]
 
+# client_order_id is forwarded to Kalshi as the idempotency key. Restrict to
+# URL-safe alphanumerics + ``-_`` so the value survives JSON encoding, log
+# rendering, and any downstream system that consumes the audit trail without
+# ambiguity. 64 chars covers UUID4 (36) plus prefix headroom for keys like
+# ``{strategy}-{ticker}-{ms_ts}`` produced by engine.dispatch.
+_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 
 @dataclass
 class OrderRequest:
@@ -55,6 +63,13 @@ class OrderRequest:
 	time_in_force: TimeInForce = "gtc"
 	# client_order_id is auto-generated on place() if absent.
 	client_order_id: str | None = None
+
+	def __post_init__(self) -> None:
+		if self.client_order_id is not None and not _CLIENT_ORDER_ID_PATTERN.match(self.client_order_id):
+			raise ValueError(
+				f"client_order_id must match {_CLIENT_ORDER_ID_PATTERN.pattern}, "
+				f"got {self.client_order_id!r}"
+			)
 
 	@property
 	def exposure_dollars(self) -> float:

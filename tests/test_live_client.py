@@ -41,6 +41,61 @@ def test_order_request_default_tif_gtc():
 	assert req.time_in_force == "gtc"
 
 
+def test_order_request_accepts_uuid4_client_order_id():
+	import uuid
+	req = OrderRequest(
+		ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+		client_order_id=str(uuid.uuid4()),
+	)
+	assert req.client_order_id is not None
+
+
+def test_order_request_accepts_dispatch_style_client_order_id():
+	# Mirrors edge_catcher.engine.dispatch._make_client_order_id format:
+	# `{strategy}-{ticker}-{ms_ts}`.
+	req = OrderRequest(
+		ticker="KXSOL15M-26MAY09H06", action="buy", side="yes",
+		count=1, limit_price_cents=1,
+		client_order_id="strat-34-KXSOL15M-1715195456789",
+	)
+	assert req.client_order_id == "strat-34-KXSOL15M-1715195456789"
+
+
+def test_order_request_accepts_underscores_and_hyphens():
+	req = OrderRequest(
+		ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+		client_order_id="bt_v2-abc_123-XYZ",
+	)
+	assert req.client_order_id == "bt_v2-abc_123-XYZ"
+
+
+@pytest.mark.parametrize("bad", [
+	"",                                        # empty
+	"a" * 65,                                  # too long (max 64)
+	"has spaces",                              # whitespace
+	"with/slash",                              # forward slash
+	"with\\backslash",                         # backslash
+	"with.dot",                                # dot
+	"with:colon",                              # colon
+	"with@at",                                 # at-sign
+	"unicode-ümläut",                          # non-ASCII
+	"newline\nin-id",                          # control char
+	"<script>alert(1)</script>",               # injection-shaped
+])
+def test_order_request_rejects_invalid_client_order_id(bad):
+	with pytest.raises(ValueError, match="client_order_id must match"):
+		OrderRequest(
+			ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+			client_order_id=bad,
+		)
+
+
+def test_order_request_none_client_order_id_passes():
+	# None is the default — auto-generated UUID4 is assigned in place() later.
+	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
+	assert req.client_order_id is None
+
+
 def test_client_init_and_close(cfg, audit):
 	client = KalshiOrderClient(cfg, audit)
 	client.close()
