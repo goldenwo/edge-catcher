@@ -5,7 +5,7 @@ from pathlib import Path
 
 def _run_paper_trade(args) -> None:
 	import asyncio
-	from edge_catcher.monitors.engine import run_engine
+	from edge_catcher.engine.engine import run_engine
 
 	asyncio.run(run_engine(config_path=Path(args.config)))
 
