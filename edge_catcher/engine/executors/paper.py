@@ -304,8 +304,8 @@ def resolve_fill(
 
 import json  # noqa: E402 — imported here to keep the pure-function block above clean
 
-from edge_catcher.engine.executor import OrderRequest, OrderResult
-from edge_catcher.engine.market_state import MarketState
+from edge_catcher.engine.executor import OrderRequest, OrderResult  # noqa: E402
+from edge_catcher.engine.market_state import MarketState  # noqa: E402
 
 
 class PaperExecutor:

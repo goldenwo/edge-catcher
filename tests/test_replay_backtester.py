@@ -192,7 +192,6 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 	from edge_catcher.engine.replay.backtester import _seed_strategy_state
 	from edge_catcher.engine.market_state import OrderbookSnapshot, TickContext
 	from edge_catcher.engine.dispatch import process_tick
-	from edge_catcher.engine.executors.paper import PaperExecutor
 	from edge_catcher.engine.strategy_base import Strategy
 	from tests._executor_helper import _make_executor_for_ctx
 

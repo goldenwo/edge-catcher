@@ -17,12 +17,11 @@ Invariants (see capture/replay spec §4.7):
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any, Literal, cast
 
-from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
+from edge_catcher.engine.executor import Executor, OrderRequest
 from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
