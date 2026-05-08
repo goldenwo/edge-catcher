@@ -147,6 +147,53 @@ def test_assemble_bundle_creates_all_expected_files(
 	assert (bundle_path / "manifest.json").exists()
 
 
+def test_assemble_bundle_strategies_source_is_engine_not_monitors(
+	tmp_path: Path,
+	capture_dir: Path,
+	trade_db: Path,
+	market_state: MarketState,
+) -> None:
+	"""Lock-in for the post-G migration: bundle.py MUST copy
+	strategies_local.py from ``engine/``, never ``monitors/``.
+
+	Why this test exists: discovery loads ``engine/strategies_local.py``
+	(see edge_catcher/engine/discovery.py:_DEFAULT_STRATEGIES_PATH). If
+	bundle.py drifts back to ``monitors/strategies_local.py`` (the
+	rollback-safety copy), every captured bundle silently encodes the
+	WRONG code and post-cutover replay diverges from live the next day.
+
+	Setup gives the repo BOTH paths with distinguishable content; we then
+	assert the bundle picked up the engine/ flavor and ignored monitors/.
+	"""
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
+
+	repo = tmp_path / "repo_dual"
+	(repo / "edge_catcher" / "engine").mkdir(parents=True)
+	(repo / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo / "config.local").mkdir(parents=True)
+	(repo / "edge_catcher" / "engine" / "strategies_local.py").write_text(
+		"# ENGINE_FLAVOR\n", encoding="utf-8"
+	)
+	(repo / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+		"# MONITORS_FLAVOR\n", encoding="utf-8"
+	)
+	(repo / "config.local" / "paper-trader.yaml").write_text(
+		"strategies: {test: {enabled: true}}\n", encoding="utf-8"
+	)
+
+	bundle_path = assemble_daily_bundle(
+		capture_date=date(2026, 4, 14),
+		capture_dir=capture_dir,
+		repo_root=repo,
+		db_path=trade_db,
+		market_state=market_state,
+	)
+
+	bundled = (bundle_path / "strategies_local.py").read_text(encoding="utf-8")
+	assert "ENGINE_FLAVOR" in bundled
+	assert "MONITORS_FLAVOR" not in bundled
+
+
 def test_bundle_jsonl_zstd_round_trips(
 	tmp_path: Path,
 	capture_dir: Path,
