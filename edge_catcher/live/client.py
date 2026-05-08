@@ -335,12 +335,16 @@ class KalshiOrderClient:
 	# ------------------------------------------------------------------
 
 	def _build_place_body(self, req: OrderRequest) -> dict:
+		# Kalshi's CreateOrderRequest schema does NOT include a `type` field —
+		# the presence of yes_price/no_price implicitly indicates a limit order.
+		# Sending an unexpected `type` causes Kalshi to reject with the
+		# misleadingly-named `fill_or_kill_insufficient_resting_volume` error.
+		# (Discovered during integration testing — see PR #24's journey.)
 		body: dict = {
 			"action": req.action,
 			"count": req.count,
 			"side": req.side,
 			"ticker": req.ticker,
-			"type": "limit",
 			"time_in_force": _TIF_TO_KALSHI[req.time_in_force],
 			"client_order_id": req.client_order_id,
 		}
