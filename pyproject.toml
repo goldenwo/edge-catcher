@@ -60,6 +60,7 @@ files = ["edge_catcher"]
 exclude = [
   '^edge_catcher/runner/strategies_local\.py$',
   '^edge_catcher/monitors/strategies_local\.py$',
+  '^edge_catcher/engine/strategies_local\.py$',
   '^edge_catcher/hypotheses/local/',
 ]
 ignore_missing_imports = true

@@ -75,8 +75,13 @@ def assemble_daily_bundle(
 	dst_jsonl = bundle_dir / f"kalshi_engine_{day_str}.jsonl.zst"
 	_compress_zstd(src_jsonl, dst_jsonl)
 
-	# 2. Copy strategies_local.py from the repo checkout.
-	strategies_src = repo_root / "edge_catcher" / "monitors" / "strategies_local.py"
+	# 2. Copy strategies_local.py from the repo checkout. Source MUST track the
+	# engine's discovery target (see engine/discovery.py:_DEFAULT_STRATEGIES_PATH)
+	# so the bundle captures the EXACT code the live engine just ran. Sub-project
+	# G moved discovery to ``engine/strategies_local.py``; if this path is wrong,
+	# every captured bundle silently encodes the wrong code and post-cutover
+	# replay diverges from live.
+	strategies_src = repo_root / "edge_catcher" / "engine" / "strategies_local.py"
 	if strategies_src.exists():
 		shutil.copy2(strategies_src, bundle_dir / "strategies_local.py")
 	else:

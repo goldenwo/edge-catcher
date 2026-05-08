@@ -1,7 +1,7 @@
 """Tests for the bundle retention helpers.
 
 Covers ``mark_bundle_uploaded``, ``delete_raw_jsonl``, and ``prune_old_bundles``
-in ``edge_catcher/monitors/capture/bundle.py``, plus the rotation callback
+in ``edge_catcher/engine/capture/bundle.py``, plus the rotation callback
 end-to-end retention flow.
 
 Without retention, the Pi's raw JSONL accumulates at ~1.5 GB/day and fills

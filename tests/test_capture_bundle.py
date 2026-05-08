@@ -41,9 +41,9 @@ def capture_dir(tmp_path: Path) -> Path:
 def repo_root(tmp_path: Path) -> Path:
 	"""A fake repo checkout with the files bundle.py is expected to copy."""
 	root = tmp_path / "repo"
-	(root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(root / "edge_catcher" / "engine").mkdir(parents=True)
 	(root / "config.local").mkdir(parents=True)
-	(root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+	(root / "edge_catcher" / "engine" / "strategies_local.py").write_text(
 		"# stub strategies_local for bundle test\n", encoding="utf-8"
 	)
 	(root / "config.local" / "paper-trader.yaml").write_text(
@@ -299,13 +299,13 @@ def test_bundle_missing_strategies_file_warns_but_succeeds(
 	market_state: MarketState,
 	caplog: pytest.LogCaptureFixture,
 ) -> None:
-	"""If repo_root/edge_catcher/monitors/strategies_local.py is missing,
+	"""If repo_root/edge_catcher/engine/strategies_local.py is missing,
 	bundle should log a warning and still produce every other artifact.
 	The replay can still run if the dev workstation provides the strategies."""
 	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	empty_repo = tmp_path / "empty_repo"
-	(empty_repo / "edge_catcher" / "monitors").mkdir(parents=True)
+	(empty_repo / "edge_catcher" / "engine").mkdir(parents=True)
 	(empty_repo / "config.local").mkdir(parents=True)
 	(empty_repo / "config.local" / "paper-trader.yaml").write_text("x: y\n", encoding="utf-8")
 	# No strategies_local.py
@@ -520,9 +520,9 @@ def test_assemble_daily_bundle_includes_strategy_state(tmp_path):
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
 	repo_root = tmp_path / "repo"
-	(repo_root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo_root / "edge_catcher" / "engine").mkdir(parents=True)
 	(repo_root / "config.local").mkdir()
-	(repo_root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+	(repo_root / "edge_catcher" / "engine" / "strategies_local.py").write_text(
 		"# fixture\n", encoding="utf-8"
 	)
 	(repo_root / "config.local" / "paper-trader.yaml").write_text(
