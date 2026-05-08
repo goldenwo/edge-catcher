@@ -95,6 +95,22 @@ def test_discord_payload_shape(monkeypatch):
 	assert "T" in embed["footer"]["text"] and "Z" in embed["footer"]["text"]
 
 
+def test_discord_payload_disables_mention_parsing(monkeypatch):
+	"""Strategy names containing @everyone / @here / @user must not ping the
+	channel — Discord's allowed_mentions: {parse: []} disables all mention
+	parsing for the post.
+	"""
+	calls = _patch_post(monkeypatch, FakeResponse(204))
+	ch = WebhookChannel(name="d", url="https://discord/hook", style="discord")
+	ch.send(Notification(
+		title="@everyone alert",
+		body="strategy `@here-fader` triggered",
+		severity="warn",
+	))
+	body = calls[0][1]
+	assert body["allowed_mentions"] == {"parse": []}
+
+
 @pytest.mark.parametrize("severity,color", [
 	("info", 0x5865F2),
 	("warn", 0xFAA61A),

@@ -14,6 +14,12 @@ WebhookStyle = Literal["discord", "slack", "generic"]
 
 _HTTP_BODY_TRUNCATE = 200
 
+# Disable @everyone / @here / @user / @role parsing in Discord webhook posts.
+# A strategy name or rendered audit body containing "@everyone" should appear
+# as literal text, not mass-ping the channel. See _build_payload's discord
+# branch where this is attached to the outer payload object.
+_DISCORD_ALLOWED_MENTIONS: dict[str, list] = {"parse": []}
+
 
 class WebhookChannel:
 	"""HTTP webhook delivery."""
@@ -85,6 +91,7 @@ class WebhookChannel:
 					"color": self._DISCORD_COLORS.get(n.severity, self._DISCORD_COLORS["info"]),
 					"footer": {"text": ts},
 				}],
+				"allowed_mentions": _DISCORD_ALLOWED_MENTIONS,
 			}
 		if self.style == "slack":
 			return {

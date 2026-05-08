@@ -49,7 +49,10 @@ def test_discord_notify_posts_to_paper_webhook_url(monkeypatch):
 	mock_post.assert_called_once()
 	args, kwargs = mock_post.call_args
 	assert args[0] == "https://discord.com/api/webhooks/PAPER-TEST"
-	assert kwargs["json"] == {"content": "hello world"}
+	assert kwargs["json"] == {
+		"content": "hello world",
+		"allowed_mentions": {"parse": []},
+	}
 
 
 def test_discord_notify_falls_back_to_logs_webhook(monkeypatch):
