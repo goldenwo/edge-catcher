@@ -26,6 +26,14 @@ _MAX_PENDING: int = 20  # max queued notification tasks
 _pending_tasks: set[asyncio.Task] = set()
 _client: httpx.AsyncClient | None = None
 
+# Discord's "allowed_mentions" controls which @-mentions in `content` are
+# parsed into pings. Setting "parse": [] disables ALL mentions (@everyone,
+# @here, @user, @role) so a strategy name or rendered audit line containing
+# `@everyone` literally appears as text instead of mass-pinging the channel.
+# Markdown injection (bold/italic/links) is cosmetic-tier and handled at the
+# call site; mention injection is the security-critical vector.
+_DISCORD_ALLOWED_MENTIONS: dict[str, list] = {"parse": []}
+
 
 def _get_client() -> httpx.AsyncClient:
 	"""Reuse a single httpx client for all notifications."""
@@ -51,7 +59,10 @@ async def discord_notify(text: str) -> None:
 	_last_notify_time = time.monotonic()
 	try:
 		client = _get_client()
-		resp = await client.post(url, json={"content": text})
+		resp = await client.post(
+			url,
+			json={"content": text, "allowed_mentions": _DISCORD_ALLOWED_MENTIONS},
+		)
 		if resp.status_code == 429:
 			retry_after = float(resp.headers.get("Retry-After", "2"))
 			await asyncio.sleep(retry_after)

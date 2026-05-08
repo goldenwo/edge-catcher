@@ -31,6 +31,7 @@ class TestDiscordNotify:
 		mock_client.post.assert_called_once()
 		call_args = mock_client.post.call_args
 		assert call_args[1]["json"]["content"] == "test message"
+		assert call_args[1]["json"]["allowed_mentions"] == {"parse": []}
 
 
 class TestNotifySync:
