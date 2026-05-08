@@ -13,7 +13,7 @@
 | `tests/test_local_*.py` | Any local/private test files |
 | `edge_catcher/runner/strategies_local.py` | Private strategy implementations |
 | `edge_catcher/hypotheses/local/` | Private hypothesis analysis |
-| `edge_catcher/monitors/strategies_local.py` | Paper trader strategy definitions |
+| `edge_catcher/engine/strategies_local.py` | Paper trader strategy definitions |
 | `config.local/` | Local config overrides |
 | `reports/` | All backtest reports and findings |
 | `data/` | All databases |
@@ -33,9 +33,10 @@ If a file reveals **what** we trade, **how** we detect edges, or **specific thre
 
 - `edge_catcher/` — core Python package
   - `runner/` — backtester engine + strategies framework
-  - `monitors/` — paper trader engine, dispatch, capture/replay pipeline
+  - `engine/` — paper trader engine, dispatch, capture/replay pipeline
     - `capture/` — daily bundle assembly (`bundle.py`), R2 transport (`transport.py`), raw frame writer (`writer.py`)
     - `replay/` — replay backtester (`backtester.py`), JSONL loader (`loader.py`)
+    - `executors/` — execution backends (`paper.py`); D adds `live.py`
   - `research/` — automated hypothesis testing agent
   - `adapters/` — market data adapters (Kalshi, Coinbase)
   - `storage/` — database layer
@@ -63,7 +64,7 @@ Two backtester engines exist for different stages of the research pipeline:
 
 **Event backtester** (`runner/event_backtest.py`) — fast hypothesis discovery. Replays historical trade events from the DB against strategy logic. Used for quick sweeps over parameter space. Does NOT reproduce live execution fidelity (no orderbook state, no synthetic settlement, no dispatch plumbing). Use for "does this signal have directional edge?" questions.
 
-**Replay backtester** (`monitors/replay/backtester.py`) — execution fidelity verdict. Replays a captured daily bundle (JSONL + strategies + config + state snapshots) through the exact same `dispatch_message` path the live paper trader uses. Seeds MarketState, open trades, and strategy state from the prior day's bundle. Use for "does replay produce the same trades as live?" questions. Entry point: `replay_capture(bundle_path)`.
+**Replay backtester** (`engine/replay/backtester.py`) — execution fidelity verdict. Replays a captured daily bundle (JSONL + strategies + config + state snapshots) through the exact same `dispatch_message` path the live paper trader uses. Seeds MarketState, open trades, and strategy state from the prior day's bundle. Use for "does replay produce the same trades as live?" questions. Entry point: `replay_capture(bundle_path)`.
 
 **Four-stage filter** for strategy validation:
 1. **Hypothesis** → does the signal exist? (research agent)
