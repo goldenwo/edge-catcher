@@ -13,6 +13,7 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "pandas>=2.0",
+    "pydantic>=2.0",
     "scipy>=1.11",
     "numpy>=1.24",
     "statsmodels>=0.14",
@@ -72,6 +73,7 @@ no_implicit_optional = true
 testpaths = ["tests"]
 markers = [
 	"requires_bundles: tests that require local R2-downloaded bundles in data/bundles/<day>/",
+	"live: integration tests that hit prod Kalshi (gated by LIVE_TRADER_LIVE_TEST=1)",
 ]
 filterwarnings = [
 	# The monitors.notifications module emits a DeprecationWarning at import to
