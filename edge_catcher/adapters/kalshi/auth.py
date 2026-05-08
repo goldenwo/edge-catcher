@@ -24,7 +24,9 @@ def make_auth_headers(
 	"""Sign request and return Kalshi auth headers.
 
 	Signs `ts_ms + method + path` with RSA-PSS-SHA256 using the env-loaded
-	private key. Method and path default to GET + WS_PATH for backwards
+	private key, where `path` is the URL path with any query string stripped
+	(Kalshi signs the path component only — including the query string yields
+	401 Unauthorized). Method and path default to GET + WS_PATH for backwards
 	compatibility with the paper trader's WebSocket auth path.
 
 	`key_id_env` and `private_key_env` name the environment variables to
@@ -43,7 +45,8 @@ def make_auth_headers(
 			f"{type(private_key).__name__}). Kalshi API auth requires RSA-PSS-SHA256."
 		)
 	ts_ms = str(int(time.time() * 1000))
-	msg = ts_ms + method + path
+	sign_path = path.split("?", 1)[0]
+	msg = ts_ms + method + sign_path
 	sig = private_key.sign(
 		msg.encode(),
 		padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
