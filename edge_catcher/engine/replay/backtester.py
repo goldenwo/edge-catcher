@@ -246,6 +246,16 @@ def _load_bundle_strategies(bundle: Path, manifest: dict) -> list[Strategy]:
 	which would pick up the dev workspace's cached module from ``sys.modules``
 	instead of the bundle's copy. Using a synthetic module name based on the
 	bundle's engine_commit keeps multiple bundles loadable in the same process.
+
+	**Trust model.** ``exec_module`` runs arbitrary Python from the bundle file.
+	The trust boundary is the R2 bucket: anyone with write access to the
+	configured ``R2_BUCKET`` can insert a strategies_local.py that runs at
+	replay time on the operator's dev workstation. Today this is a single-
+	tenant operator-controlled bucket, so the trust path is ok. Before
+	exposing replay to third-party bundles (e.g. a multi-user research
+	share), add either bundle signature verification at upload time or a
+	``trust_bundle_code: false`` config flag that fails closed when the
+	bundle source isn't signed.
 	"""
 	strat_file = bundle / "strategies_local.py"
 	if not strat_file.exists():
@@ -302,8 +312,9 @@ def _check_engine_version(bundle: Path, manifest: dict) -> None:
 			text=True,
 			stderr=subprocess.DEVNULL,
 			cwd=str(Path(__file__).resolve().parent.parent.parent.parent),
+			timeout=10,  # never block replay startup on a hung git
 		).strip()
-	except (subprocess.CalledProcessError, FileNotFoundError):
+	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
 		log.warning("replay_capture: could not determine dev engine commit")
 		return
 	bundle_commit = manifest.get("engine_commit", "unknown")

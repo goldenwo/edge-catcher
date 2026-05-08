@@ -155,23 +155,30 @@ def _compress_zstd(src: Path, dst: Path, level: int = 10) -> None:
 def _git_state(repo_root: Path) -> tuple[str, bool]:
 	"""Return (commit_sha, dirty_flag). Returns ('unknown', False) if git is
 	unavailable or the directory isn't a git repo — bundles can still be
-	assembled off-repo."""
+	assembled off-repo.
+
+	A 10-second timeout guards against hung git invocations (e.g. lock
+	contention from a parallel ``git gc``); rotation must be best-effort
+	and never block the engine thread on git.
+	"""
 	try:
 		commit = subprocess.check_output(
 			["git", "rev-parse", "HEAD"],
 			cwd=str(repo_root),
 			text=True,
 			stderr=subprocess.DEVNULL,
+			timeout=10,
 		).strip()
 		porcelain = subprocess.check_output(
 			["git", "status", "--porcelain"],
 			cwd=str(repo_root),
 			text=True,
 			stderr=subprocess.DEVNULL,
+			timeout=10,
 		).strip()
 		dirty = porcelain != ""
 		return commit, dirty
-	except (subprocess.CalledProcessError, FileNotFoundError):
+	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
 		return "unknown", False
 
 
