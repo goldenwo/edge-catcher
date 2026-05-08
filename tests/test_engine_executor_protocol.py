@@ -16,7 +16,11 @@ def test_order_request_is_frozen():
 		strategy="debut-fade",
 		client_order_id="debut-fade-KXSOL15M-1715000000000",
 	)
-	with pytest.raises(Exception):  # FrozenInstanceError or TypeError on slots
+	# CPython 3.11 raises FrozenInstanceError on assignment to a frozen
+	# slotted dataclass (3.12 raises AttributeError). Accept either; do NOT
+	# use bare Exception which would mask unrelated regressions.
+	from dataclasses import FrozenInstanceError
+	with pytest.raises((FrozenInstanceError, AttributeError)):
 		req.size_contracts = 20  # type: ignore[misc]
 
 

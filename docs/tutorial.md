@@ -354,8 +354,8 @@ After this tutorial you should be able to:
 
 ## Next reads
 
-- [strategy-guide.md](strategy-guide.md) — the full `Strategy` /
-  `PaperStrategy` API reference
+- [strategy-guide.md](strategy-guide.md) — the full `Strategy` API
+  reference for both the runner backtester and the paper trader
 - [research-pipeline-data-flow.md](research-pipeline-data-flow.md) — how
   the autonomous research loop turns hypotheses into validated edges
 - [adapter-guide.md](adapter-guide.md) — adding a new exchange beyond

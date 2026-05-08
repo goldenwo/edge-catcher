@@ -321,8 +321,9 @@ class PaperExecutor:
 	"""
 
 	def __init__(self, market_state: MarketState, config: dict) -> None:
-		# `config` is the same dict threaded through the engine.
-		# resolve_fill (per the preserved monitors/sizing.py:226-230 logic) reads:
+		# `config` is the same dict threaded through the engine. The
+		# resolve_fill function above (lines 195-298, ported verbatim from the
+		# pre-G monitors/sizing.py) reads:
 		#   config["sizing"]:
 		#     - risk_per_trade_cents      (int)
 		#     - max_slippage_cents        (int)

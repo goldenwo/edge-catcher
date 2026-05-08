@@ -88,7 +88,7 @@ so the replay backtester is opt-in too. Set `capture.enabled: true`
 to turn the pipeline on.
 
 When enabled, the live paper trader writes every WS frame it sees to
-a `RawFrameWriter` (`monitors/capture/writer.py`). At UTC midnight, a
+a `RawFrameWriter` (`engine/capture/writer.py`). At UTC midnight, a
 rotation callback assembles a **daily bundle**:
 
 - Compressed JSONL of every dispatched event for the day
@@ -99,9 +99,9 @@ rotation callback assembles a **daily bundle**:
 - A "day slice" — the prior 24h of relevant context
 
 The bundle is uploaded via the configured transport
-(`monitors/capture/transport.py` — `local` writes to a directory,
+(`engine/capture/transport.py` — `local` writes to a directory,
 `r2` uploads to Cloudflare R2) and the raw working file is deleted.
-The replay backtester (`monitors/replay/backtester.py`) can take any
+The replay backtester (`engine/replay/backtester.py`) can take any
 bundle and reproduce that day bit-exact: it instantiates a fresh
 engine, seeds it from the state snapshots, and walks the JSONL through
 the same `dispatch_message` function the live engine uses. This is

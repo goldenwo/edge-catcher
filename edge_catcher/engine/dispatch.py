@@ -198,6 +198,11 @@ def _make_client_order_id(sig: Signal, now: datetime) -> str:
 	"""Build an idempotency key for the order. Paper records but does not enforce
 	uniqueness; D will tighten when wiring LiveExecutor (Kalshi requires
 	idempotency on retries).
+
+	# TODO(D): millisecond resolution can collide on a burst replay or two
+	# strategies firing on the same ticker in the same ms. Before LiveExecutor
+	# starts depending on this for Kalshi idempotency, append a short uuid4 or
+	# a per-process monotonic counter so the key is guaranteed unique.
 	"""
 	return f"{sig.strategy}-{sig.ticker}-{int(now.timestamp() * 1000)}"
 

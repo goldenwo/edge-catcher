@@ -103,9 +103,11 @@ with the backtester `Strategy` interface — copy
 `edge_catcher/runner/strategies_example.py` to `strategies_local.py`,
 rename, edit, and the auto-discovery picks it up.
 
-The paper-trader uses a separate `PaperStrategy` base class with an
-`on_tick` callback; it is more involved and most contributors will not
-need to touch it.
+The paper-trader uses a separate `Strategy` base class (from
+`edge_catcher.engine.strategy_base`, distinct from the runner's
+`Strategy` in `edge_catcher.runner.strategies`) with an `on_tick`
+callback; it is more involved and most contributors will not need to
+touch it.
 
 ## How to add a hypothesis
 
