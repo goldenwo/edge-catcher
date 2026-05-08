@@ -1,4 +1,4 @@
-"""Paper trading strategy base class and signal types."""
+"""Engine strategy base class and signal types — runs both paper and live trades."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
-from edge_catcher.monitors.market_state import TickContext
+from edge_catcher.engine.market_state import TickContext
 
 
 @dataclass
@@ -22,8 +22,8 @@ class Signal:
 	intended_size: Optional[int] = None  # deprecated: engine resolves sizing via pipeline
 
 
-class PaperStrategy(ABC):
-	"""Base class for all paper trading strategies."""
+class Strategy(ABC):
+	"""Base class for engine strategies — runs in both paper and live modes."""
 
 	name: str
 	supported_series: list[str]
