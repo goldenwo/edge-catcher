@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
@@ -233,10 +233,15 @@ def _handle_enter(
 	# size_contracts from config["sizing"]["risk_per_trade_cents"] / entry_price;
 	# G threads the request shape through but defers sizing to the executor's
 	# internal pipeline (D will refactor sizing into a pre-executor step).
+	#
+	# Signal.side is typed as plain `str` for strategy-author ergonomics
+	# (strategies build sides from data); OrderRequest.side narrows to
+	# Literal["yes", "no"]. Cast at the boundary — pre-G dispatch did no
+	# runtime validation here, so neither do we (byte-exact preservation).
 	req = OrderRequest(
 		ticker=signal.ticker,
 		series=signal.series,
-		side=signal.side,
+		side=cast(Literal["yes", "no"], signal.side),
 		size_contracts=0,
 		limit_price_cents=entry_price,
 		strategy=signal.strategy,

@@ -305,7 +305,7 @@ def resolve_fill(
 import json  # noqa: E402 — imported here to keep the pure-function block above clean
 
 from edge_catcher.engine.executor import OrderRequest, OrderResult
-from edge_catcher.engine.market_state import MarketState  # type: ignore[assignment]
+from edge_catcher.engine.market_state import MarketState
 
 
 class PaperExecutor:
@@ -333,7 +333,12 @@ class PaperExecutor:
 		self._config = config
 
 	def place(self, req: OrderRequest) -> OrderResult:
-		snapshot = self._ms.get_orderbook(req.ticker)
+		# MarketState.get_orderbook returns Optional; the dispatch path defaults
+		# to an empty OrderbookSnapshot for unseeded tickers (see
+		# engine/dispatch.py:465), and resolve_fill treats empty books as a
+		# FillSkip(empty_book) when require_fresh_book is on. Match that
+		# semantics here so the executor never sees a None book.
+		snapshot = self._ms.get_orderbook(req.ticker) or OrderbookSnapshot([], [])
 		fill_or_skip = resolve_fill(
 			self._config, req.limit_price_cents, req.side, snapshot,
 		)
@@ -345,7 +350,7 @@ class PaperExecutor:
 				blended_entry_cents=0,
 				fill_pct=0.0,
 				slippage_cents=0,
-				book_depth=snapshot.depth if snapshot is not None else None,
+				book_depth=snapshot.depth,
 				book_snapshot=None,
 				rejection_reason=fill_or_skip.reason,
 			)
