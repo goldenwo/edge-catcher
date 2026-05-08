@@ -14,7 +14,7 @@ from typing import Any, Optional
 import httpx
 import websockets
 
-from edge_catcher.monitors.auth import KALSHI_WS_URL, make_auth_headers
+from edge_catcher.adapters.kalshi.auth import KALSHI_WS_URL, make_auth_headers
 from edge_catcher.monitors.capture.bundle import (
 	assemble_daily_bundle,
 	delete_raw_jsonl,
