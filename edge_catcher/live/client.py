@@ -352,22 +352,15 @@ class KalshiOrderClient:
 			body["yes_price"] = req.limit_price_cents
 		else:
 			body["no_price"] = req.limit_price_cents
-		# Kalshi-side enforcement: pass buy_max_cost (cents) on BUY orders so even
-		# if our client-side calculation is wrong, Kalshi caps the order's notional.
-		# Belt-and-suspenders with ABSOLUTE_MAX_ORDER_DOLLARS. Excluded on sells —
-		# Kalshi rejects the field for non-buy actions, and sell_position_floor
-		# is owned by D (execution policy) per Open Question 2.
-		#
-		# IMPORTANT: Kalshi's buy_max_cost enforcement caps total cost INCLUDING
-		# the per-contract fee. If buy_max_cost < principal + fee, Kalshi rejects
-		# the order with the (misleadingly-named) "fill_or_kill_insufficient_
-		# resting_volume" error. We therefore add the STANDARD_FEE estimate to
-		# the principal to compute the effective ceiling. This was discovered
-		# during integration testing — see PR #24's integration-test journey.
-		if req.action == "buy":
-			principal_cents = req.count * req.limit_price_cents
-			fee_cents = int(STANDARD_FEE.calculate(req.limit_price_cents, req.count))
-			body["buy_max_cost"] = principal_cents + fee_cents
+		# `buy_max_cost` is intentionally NOT sent. Kalshi treats it as a hard
+		# total-cost ceiling and rejects with the misleadingly-named
+		# `fill_or_kill_insufficient_resting_volume` error if our value is even
+		# 1¢ below their internal calculation (rounding/fee drift). Cap safety
+		# is already provided by two other layers:
+		#   1. ABSOLUTE_MAX_ORDER_DOLLARS = $50, hardcoded in client.place()
+		#   2. cli_max_order_dollars, enforced in cli._do_place()
+		# Sub-project D (execution policy) can revisit buy_max_cost as a
+		# Kalshi-side third layer if the rounding rule is ever published.
 		return body
 
 	def _parse_order(self, data: dict, fallback_request: OrderRequest | None = None) -> Order:

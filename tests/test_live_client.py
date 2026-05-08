@@ -152,14 +152,11 @@ def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
 	assert "/trade-api/v2/portfolio/orders" in captured_url[0]
 
 
-def test_place_buy_includes_buy_max_cost(cfg, audit, signing_env, tmp_path):
-	"""buy_max_cost on BUY orders MUST include the Kalshi fee, not just principal.
-
-	Kalshi enforces buy_max_cost as the total-cost-INCLUDING-FEES ceiling. If
-	we sent only `principal`, Kalshi can't allocate the order at any matchable
-	price and rejects with `fill_or_kill_insufficient_resting_volume` (their
-	misleadingly-named "I can't make this order work" error). Discovered during
-	integration testing — see PR #24 history.
+def test_place_does_not_send_buy_max_cost(cfg, audit, signing_env, tmp_path):
+	"""buy_max_cost is NOT sent — Kalshi's enforcement of it is opaque enough
+	that even principal+estimated_fee gets rejected. Cap safety is provided by
+	ABSOLUTE_MAX_ORDER_DOLLARS (library) + cli_max_order_dollars (CLI).
+	Discovered during integration testing — see PR #24 history.
 	"""
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	captured_body = []
@@ -169,10 +166,7 @@ def test_place_buy_includes_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
 	c.place(req)
-	# 10 × 5¢ principal = 50¢; STANDARD_FEE on (price=5, count=10) = 4¢; total = 54¢
-	from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
-	expected_fee = int(STANDARD_FEE.calculate(5, 10))
-	assert captured_body[0]["buy_max_cost"] == 50 + expected_fee
+	assert "buy_max_cost" not in captured_body[0]
 	assert captured_body[0]["yes_price"] == 5
 
 
@@ -206,7 +200,9 @@ def test_place_translates_tif_short_to_kalshi_verbose(cfg, audit, signing_env, t
 		)
 
 
-def test_place_sell_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
+def test_place_sell_also_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
+	"""Sanity check: sells continue to omit buy_max_cost (we don't send it for
+	any action — see test_place_does_not_send_buy_max_cost)."""
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	captured_body = []
 	def handler(request: httpx.Request) -> httpx.Response:
@@ -215,7 +211,6 @@ def test_place_sell_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="sell", side="yes", count=10, limit_price_cents=5)
 	c.place(req)
-	# Sells do NOT set buy_max_cost (Kalshi rejects unknown-context fields)
 	assert "buy_max_cost" not in captured_body[0]
 
 
