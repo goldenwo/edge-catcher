@@ -9,7 +9,6 @@ from typing import Literal
 import httpx
 
 from edge_catcher.adapters.kalshi.auth import make_auth_headers
-from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.live.audit import AuditLogger, AuditEvent
 from edge_catcher.live.config import (
 	LiveConfig,
