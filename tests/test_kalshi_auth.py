@@ -55,6 +55,45 @@ def test_delete_method_supported(rsa_keypair_in_env):
 	assert headers["KALSHI-ACCESS-KEY"] == "test-key-id"
 
 
+def test_query_string_stripped_before_signing(rsa_keypair_in_env):
+	"""Kalshi signs the URL path component only — including a query string in
+	the signed message yields 401 Unauthorized. The signature for
+	`/foo?bar=baz` must verify against the path-only message `/foo`.
+	"""
+	with patch("edge_catcher.adapters.kalshi.auth.time.time", return_value=1700000000.0):
+		headers = make_auth_headers("GET", "/trade-api/v2/portfolio/orders?status=resting")
+	expected_msg = (
+		str(int(1700000000.0 * 1000)) + "GET" + "/trade-api/v2/portfolio/orders"
+	)
+	sig = base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"])
+	rsa_keypair_in_env.public_key().verify(
+		sig,
+		expected_msg.encode(),
+		padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+		hashes.SHA256(),
+	)
+
+
+def test_query_string_strip_only_first_question_mark(rsa_keypair_in_env):
+	"""Edge case: a `?` later in the query string must not re-enter the signed
+	path. `path.split('?', 1)[0]` keeps only the prefix before the first `?`.
+	"""
+	with patch("edge_catcher.adapters.kalshi.auth.time.time", return_value=1700000000.0):
+		headers = make_auth_headers(
+			"GET", "/trade-api/v2/portfolio/orders?status=resting&q=a?b"
+		)
+	expected_msg = (
+		str(int(1700000000.0 * 1000)) + "GET" + "/trade-api/v2/portfolio/orders"
+	)
+	sig = base64.b64decode(headers["KALSHI-ACCESS-SIGNATURE"])
+	rsa_keypair_in_env.public_key().verify(
+		sig,
+		expected_msg.encode(),
+		padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+		hashes.SHA256(),
+	)
+
+
 def test_non_rsa_key_raises_valueerror(monkeypatch):
 	"""Ed25519 key in env should raise ValueError, not silently break sig verification."""
 	from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
