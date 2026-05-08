@@ -5,6 +5,46 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-08
+
+This release contains the foundation for the live-execution cycle: sub-project A (order placement primitive in PR #24), an auth-signing hardening (PR #25), and sub-project G (paper migration onto a unified engine in PR #26). Together they relocate kalshi auth out of the paper-trader namespace into a shared adapters location, fix a query-string-signing edge case before live trading depends on it, and stand up the `edge_catcher.engine` package + Executor Protocol that B/C/D/E/F will extend.
+
+### Added
+
+- **Sub-project A — Order placement primitive (PR #24).** Live-trader's order-place + cancel HTTP layer split out from paper-trader scaffolding. Moves `make_auth_headers` from `monitors/auth.py` to `edge_catcher/adapters/kalshi/auth.py` (auth is shared exchange code, not paper-specific) and extends it to sign arbitrary `(method, path)` pairs for POST/DELETE. New `LiveClient` with order placement primitives and a Kalshi-error class hierarchy. Foundation for sub-project D's LiveExecutor.
+- **Sub-project G — Paper migration onto unified engine (PR #26).** Extracts a shared `engine/` package from `edge_catcher/monitors/`, defines a sync `Executor.place(req) -> OrderResult` Protocol, and ports the orderbook-walk fill simulation as `PaperExecutor`. Foundation for sub-projects B/C/D/E/F (live execution, order state machine, risk gates, daemon refactor, UI/audit) — all build on the new Executor contract.
+- **`edge_catcher.engine` package** — relocated from `edge_catcher.monitors`: `dispatch`, `market_state`, `strategy_base`, `recovery`, `discovery`, `metrics`, `trade_store`, `notifications`, `capture/`, `replay/`, `engine`. The pre-G `monitors/` shape is preserved on disk through a deferred-retirement window (follow-up PR after ≥3 stable Pi days will delete `monitors/{__init__,market_state,strategy_base}.py`).
+- **`edge_catcher.engine.executor`** — `Executor` Protocol + `OrderRequest` / `OrderResult` frozen-slotted dataclasses. Protocol-growth invariant documented: additive-only fields, no reordering/removal, new status literals require dispatch-side branch updates.
+- **`PaperExecutor`** at `edge_catcher.engine.executors.paper.PaperExecutor` — wraps the existing `resolve_fill` / `walk_book_with_ceiling` / `compute_raw_size` pure functions into the Executor protocol shape. Byte-exact behavior preservation (proven by parity sweep — see Verification).
+- **Bundle-compat shims** at `edge_catcher/monitors/{market_state,strategy_base}.py` — minimal re-exports (`Strategy as PaperStrategy` for backward compat) so pre-cutover R2 bundles' `strategies_local.py` files still resolve through the new replay path.
+- **New tests:** `tests/test_engine_executor_protocol.py` (6 tests covering OrderRequest immutability, OrderResult shape variants, structural-typing); `tests/test_engine_paper_executor_wrap.py` (3 tests confirming the wrap preserves resolve_fill semantics); `tests/test_engine_dispatch_executor_wiring.py` (5 tests on dispatch's `Executor.place` integration with exact-kwargs assertion); `tests/test_engine_notifications_relocation.py` (3 tests pinning the Discord webhook wire-shape across the relocation); `tests/test_engine_replay_smoke.py` + `tests/fixtures/synthetic_bundle/` (end-to-end smoke through the new replay path with a public-safe synthetic strategy); `test_assemble_bundle_strategies_source_is_engine_not_monitors` (regression test pinning bundle.py's source path to `engine/`, not `monitors/`).
+
+### Changed
+
+- **kalshi auth path-signing hardened (PR #25).** `make_auth_headers` strips the query-string from the path before signing — Kalshi's signature spec covers the URL path, not the query. Pre-fix, any GET with query parameters (e.g. `/markets?status=active`) would produce a signature that included the `?status=active` substring, which the server rejected on its expected canonical-form recompute. Affects future live trading (paper trader didn't hit this codepath).
+- **`PaperStrategy` → `Strategy`** (in `edge_catcher.engine.strategy_base`). Old name still importable through the `monitors/strategy_base.py` shim during the deferred-retirement window.
+- **Cutover lever** at `cli/paper_trade.py:8` flipped from `from edge_catcher.monitors.engine import run_engine` to `from edge_catcher.engine.engine import run_engine`. systemd `ExecStart=` is unchanged; Pi cutover is `git pull` + scp of `engine/strategies_local.py` + `systemctl restart`.
+- **`engine/capture/bundle.py`** — `strategies_src` path now reads from `edge_catcher/engine/strategies_local.py` (was `monitors/`) so post-cutover daily bundles encode the actual code the live engine runs. (Pre-merge spec-review-loop caught this latent path-drift bug; would have triggered a quiet replay-divergence incident 24-48h after Pi cutover.)
+- **mypy:** added `'^edge_catcher/engine/strategies_local\.py$'` to exclude list (private-file rules apply equally to the engine-side strategies file).
+- **Docs swept:** `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `docs/strategy-guide.md`, `docs/tutorial.md`, `docs/architecture.md`, `docs/roadmap.md`, `docs/upgrade-1.2.md`, `.github/pull_request_template.md`, `.dockerignore` — all references to `edge_catcher.monitors.*` / `monitors/strategies_local.py` updated to `engine/`. Historical `CHANGELOG.md` entries (v1.0.0–v1.4.0) intentionally left at their release-time paths.
+
+### Verification
+
+- **Local pytest:** 1295 passed, 4 skipped (residuals are pre-existing in private/gitignored files).
+- **mypy + ruff:** clean.
+- **CI:** test (3.11) PASS · test (3.12) PASS.
+- **Parity sweep CUTOVER GATE:** 11/11 R2 bundles byte-exact between pre-G and post-G replay paths (PASS=11, DIFF=0, OLD_FAIL=0, NEW_FAIL=0).
+- **spec-review-loop on plan:** 3 rounds CONVERGED. Round 1 caught the bundle.py source-path bug; round 2 added the regression test; round 3 ten-invariant verification clean.
+- **Independent code-review (Opus):** APPROVE-WITH-NOTES; 7 suggestions applied.
+- **Independent security-review (Opus):** SAFE-WITH-FIXES; cheap defensive items applied (subprocess timeouts, bundle trust-model docstring); 3 medium findings documented as carry-forwards for sub-project D (LiveExecutor's pre-live hardening backlog).
+- **Pi cutover:** `paper-trader.service` restarted at 2026-05-08 12:52:40 EDT. Cutover beacon `engine[G]: paper executor wired, package=edge_catcher.engine` present in `/var/log/edge-catcher/paper-trader.log`. NRestarts=0. Recovery completed (160 tickers / 7 series). Strategy state preserved (debut-fade dedup intact). Daily P&L cron manually fired post-cutover: `pnl_discord OK 246ms`.
+
+### Notes
+
+- **Rollback safety.** `monitors/strategies_local.py` stays untouched on the Pi disk through the deferred-retirement window; the cutover is a copy, never a rename. `git revert` of the merge commit restores the full `monitors/` codepath; the rollback file is then immediately loadable.
+- **Sub-project G is foundation only.** B/C/D/E/F are explicitly out of scope for this release. LiveExecutor (D) lands separately and will inherit the security carry-forwards documented in PR #26 (client_order_id validation, bundle trust model, Discord content escaping).
+- **Follow-up PR** retires `monitors/{__init__,market_state,strategy_base}.py` after ≥3 stable Pi days on the new engine.
+
 ## [1.4.0] — 2026-05-07
 
 ### Added
