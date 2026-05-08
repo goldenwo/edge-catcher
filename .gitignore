@@ -107,6 +107,9 @@ pi-*.py
 exports/
 
 paper-trader.yaml
+# Synthetic bundle fixture is public-safe — not a real config, just a
+# minimal sizing block so the engine/replay smoke test runs in CI.
+!tests/fixtures/synthetic_bundle/**/paper-trader.yaml
 
 # Local private-infra paper-trader log stash (never tracked)
 private-infra_paper_trader_logs/
