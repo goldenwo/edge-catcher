@@ -33,7 +33,7 @@ from typing import Optional
 
 import zstandard as zstd
 
-from edge_catcher.monitors.market_state import MarketState
+from edge_catcher.engine.market_state import MarketState
 
 log = logging.getLogger(__name__)
 

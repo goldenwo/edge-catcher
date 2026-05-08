@@ -1,6 +1,6 @@
 """Replay backtester for captured orderbook bundles.
 
-Reads bundles produced by ``edge_catcher.monitors.capture.bundle.assemble_daily_bundle``
+Reads bundles produced by ``edge_catcher.engine.capture.bundle.assemble_daily_bundle``
 and dispatches their events through the same ``dispatch.py`` code path as the
 live trader. The parity test in ``tests/test_replay_parity.py`` is the
 correctness gate.
