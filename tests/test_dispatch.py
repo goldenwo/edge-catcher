@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 from edge_catcher.engine.trade_store import TradeStore
 
@@ -47,6 +48,7 @@ def call_args(market_state: MarketState, store: TradeStore) -> dict:
 		strat_by_series={},
 		pending_states={},
 		dirty=set(),
+		executor=PaperExecutor(market_state=market_state, config={}),
 		now=_now(),
 	)
 
@@ -314,6 +316,7 @@ def test_market_state_clear_propagates_to_dispatch(
 		strat_by_series={"KXTEST": [strat]},
 		pending_states={},
 		dirty=set(),
+		executor=PaperExecutor(market_state=market_state, config={}),
 		now=_now(),
 	)
 

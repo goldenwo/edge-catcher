@@ -609,7 +609,6 @@ def _handle_synthetic_rest_orderbook(market_state: MarketState, payload: dict) -
 	the post-parse `yes_levels` / `no_levels` so the replay doesn't re-parse
 	the raw Kalshi response.
 	"""
-	from edge_catcher.monitors.market_state import OrderbookSnapshot
 	ticker = payload.get("ticker")
 	if not ticker:
 		return
