@@ -1,4 +1,4 @@
-"""Unit tests for edge_catcher.monitors.replay.backtester helpers.
+"""Unit tests for edge_catcher.engine.replay.backtester helpers.
 
 Targets the helper functions directly — parity test coverage lives in
 test_replay_parity.py and requires a real bundle fixture via env var.
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.replay.backtester import _seed_strategy_state
-from edge_catcher.monitors.trade_store import InMemoryTradeStore
+from edge_catcher.engine.replay.backtester import _seed_strategy_state
+from edge_catcher.engine.trade_store import InMemoryTradeStore
 
 
 def _write_envelope(path: Path, states: dict) -> None:
@@ -124,10 +124,10 @@ def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 	  - ReplayResult.store field
 	  - end-of-replay flush loop
 	"""
-	from edge_catcher.monitors.replay.backtester import replay_capture
-	from edge_catcher.monitors.strategy_base import PaperStrategy
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
 
-	class NoopStrategy(PaperStrategy):
+	class NoopStrategy(Strategy):
 		name = "counter-strat"
 		supported_series = ["KXTEST"]
 		default_params: dict = {}
@@ -189,12 +189,12 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 	fighting dispatch.py's WS message parsing and market_state priming.
 	"""
 	from datetime import datetime, timezone
-	from edge_catcher.monitors.replay.backtester import _seed_strategy_state
-	from edge_catcher.monitors.market_state import OrderbookSnapshot, TickContext
-	from edge_catcher.monitors.dispatch import process_tick
-	from edge_catcher.monitors.strategy_base import PaperStrategy
+	from edge_catcher.engine.replay.backtester import _seed_strategy_state
+	from edge_catcher.engine.market_state import OrderbookSnapshot, TickContext
+	from edge_catcher.engine.dispatch import process_tick
+	from edge_catcher.engine.strategy_base import Strategy
 
-	class CounterStrategy(PaperStrategy):
+	class CounterStrategy(Strategy):
 		name = "counter-strat"
 		supported_series = ["KXTEST"]
 		default_params: dict = {}
@@ -276,18 +276,18 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-from edge_catcher.monitors.dispatch import dispatch_message  # noqa: E402
-from edge_catcher.monitors.market_state import (  # noqa: E402
+from edge_catcher.engine.dispatch import dispatch_message  # noqa: E402
+from edge_catcher.engine.market_state import (  # noqa: E402
 	MarketState,
 	OrderbookSnapshot,
 	TickContext,
 )
-from edge_catcher.monitors.replay.backtester import _seed_market_state  # noqa: E402
-from edge_catcher.monitors.strategy_base import PaperStrategy  # noqa: E402
-from edge_catcher.monitors.trade_store import TradeStore  # noqa: E402
+from edge_catcher.engine.replay.backtester import _seed_market_state  # noqa: E402
+from edge_catcher.engine.strategy_base import Strategy  # noqa: E402
+from edge_catcher.engine.trade_store import TradeStore  # noqa: E402
 
 
-class _CaptureStrategyB(PaperStrategy):
+class _CaptureStrategyB(Strategy):
 	"""Stub strategy that records every TickContext it sees."""
 
 	name = "capture-b"

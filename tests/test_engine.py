@@ -6,15 +6,15 @@ import pytest
 
 pytest.importorskip("websockets", reason="paper-trader engine tests require the [live] extra")
 
-from edge_catcher.monitors.market_state import (
+from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
 	TickContext,
 )
-from edge_catcher.monitors.metrics import Metrics
-from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
-from edge_catcher.monitors.trade_store import TradeStore
-from edge_catcher.monitors.dispatch import (
+from edge_catcher.engine.metrics import Metrics
+from edge_catcher.engine.strategy_base import Strategy, Signal
+from edge_catcher.engine.trade_store import TradeStore
+from edge_catcher.engine.dispatch import (
 	_format_close_message,
 	_format_enter_message,
 	_handle_orderbook_delta,
@@ -24,7 +24,7 @@ from edge_catcher.monitors.dispatch import (
 	_pnl_label,
 	process_tick,
 )
-from edge_catcher.monitors.engine import (
+from edge_catcher.engine.engine import (
 	_collect_active_series,
 	_series_for_strategy,
 )
@@ -44,7 +44,7 @@ def _now() -> datetime:
 # Stub strategies
 # ---------------------------------------------------------------------------
 
-class StubStrategy(PaperStrategy):
+class StubStrategy(Strategy):
 	"""Enters on first observation."""
 	name = "stub"
 	supported_series = ["TEST"]
@@ -60,7 +60,7 @@ class StubStrategy(PaperStrategy):
 		return []
 
 
-class ExitStrategy(PaperStrategy):
+class ExitStrategy(Strategy):
 	"""Exits any open position."""
 	name = "exit-stub"
 	supported_series = ["TEST"]
@@ -190,7 +190,7 @@ class TestProcessTick:
 	def test_strategy_exception_does_not_crash(self, store, config):
 		"""A strategy that raises should not prevent other strategies from running."""
 
-		class CrashStrategy(PaperStrategy):
+		class CrashStrategy(Strategy):
 			name = "crash"
 			supported_series = ["TEST"]
 			default_params = {}
@@ -213,12 +213,12 @@ class TestProcessTick:
 		# yes_bid=0 → no_ask=100 — degenerate entry with zero upside
 		ob = OrderbookSnapshot(yes_levels=[(0.90, 20)], no_levels=[(1.00, 20)])
 
-		class NoSideStub(PaperStrategy):
+		class NoSideStub(Strategy):
 			name = "no-stub"
 			supported_series = ["TEST"]
 			default_params = {}
 			def on_tick(self, ctx):
-				from edge_catcher.monitors.strategy_base import Signal
+				from edge_catcher.engine.strategy_base import Signal
 				if ctx.is_first_observation:
 					return [Signal(action="enter", ticker=ctx.ticker, side="no",
 						series=ctx.series, strategy=self.name, reason="test")]
@@ -318,7 +318,7 @@ class TestHandleTickerMsg:
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 
 		# Use a no-side entry strategy instead
-		class NoSideStub(PaperStrategy):
+		class NoSideStub(Strategy):
 			name = "no-stub"
 			supported_series = ["KXBTC15M"]
 			default_params = {}
@@ -343,7 +343,7 @@ class TestHandleTickerMsg:
 		"""TickContext.event_ticker should strip the -Tnnnn suffix."""
 		ms, store, strategies, strat_by_series, pending_states, config = setup
 
-		class EventCheckStub(PaperStrategy):
+		class EventCheckStub(Strategy):
 			name = "event-check"
 			supported_series = ["KXBTC15M"]
 			default_params = {}
@@ -594,7 +594,7 @@ class TestHandleTradeMsg:
 			"strategies": {"stub": {"enabled": True, "series": ["KXBTC15M"]}},
 		}
 
-		class TradeAwareStub(PaperStrategy):
+		class TradeAwareStub(Strategy):
 			"""Records taker_side and trade_count seen on each tick."""
 			name = "trade-stub"
 			supported_series = ["KXBTC15M"]
@@ -709,7 +709,7 @@ class TestHandleTradeMsg:
 		"""
 		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
 
-		class BidAskCheckStub(PaperStrategy):
+		class BidAskCheckStub(Strategy):
 			name = "bid-check"
 			supported_series = ["KXBTC15M"]
 			default_params = {}

@@ -1,4 +1,4 @@
-"""Tests for edge_catcher.monitors.trade_store."""
+"""Tests for edge_catcher.engine.trade_store."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.engine.trade_store import TradeStore
 
 
 def _now() -> datetime:

@@ -10,20 +10,20 @@ def test_import_emits_deprecation_warning():
 	# (If the module was already imported by an earlier test, the warning
 	# was already emitted and a re-import won't re-fire it. importlib.reload
 	# re-runs module-level code.)
-	import edge_catcher.monitors.notifications as mod
+	import edge_catcher.engine.notifications as mod
 	with warnings.catch_warnings(record=True) as captured:
 		warnings.simplefilter("always")
 		importlib.reload(mod)
 	deprecation = [w for w in captured if issubclass(w.category, DeprecationWarning)]
 	assert len(deprecation) >= 1
 	msg = str(deprecation[0].message)
-	assert "edge_catcher.monitors.notifications" in msg
+	assert "edge_catcher.engine.notifications" in msg
 	assert "deprecated" in msg.lower()
 	assert "edge_catcher.notifications" in msg  # points at the replacement
 
 
 def test_pyproject_filter_actually_matches_deprecation_message():
-	"""Regression: the prior filter `ignore::DeprecationWarning:edge_catcher.monitors.notifications`
+	"""Regression: the prior filter `ignore::DeprecationWarning:edge_catcher.engine.notifications`
 	was a no-op because the warning is emitted with stacklevel=2, so its reported
 	module is the CALLER (monitors.dispatch / monitors.engine), not
 	monitors.notifications itself. A module-targeted filter never matched.
@@ -34,7 +34,7 @@ def test_pyproject_filter_actually_matches_deprecation_message():
 	message — catching any future regression to a module-targeted filter.
 	"""
 	target_msg = (
-		"edge_catcher.monitors.notifications is deprecated; "
+		"edge_catcher.engine.notifications is deprecated; "
 		"use edge_catcher.notifications for new code. "
 		"This module will be migrated onto the unified notifications layer "
 		"in a future release."

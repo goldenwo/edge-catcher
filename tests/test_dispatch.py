@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.dispatch import dispatch_message
-from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.trade_store import TradeStore
 
 
 def _now() -> datetime:
@@ -244,12 +244,12 @@ def test_dispatch_synthetic_unknown_source_warns_and_returns(call_args: dict) ->
 # ---------------------------------------------------------------------------
 
 
-from edge_catcher.monitors.market_state import TickContext  # noqa: E402
-from edge_catcher.monitors.strategy_base import PaperStrategy  # noqa: E402
+from edge_catcher.engine.market_state import TickContext  # noqa: E402
+from edge_catcher.engine.strategy_base import Strategy  # noqa: E402
 
 
-class _CaptureStrategy(PaperStrategy):
-	"""Stub PaperStrategy that just records every TickContext it sees."""
+class _CaptureStrategy(Strategy):
+	"""Stub Strategy that just records every TickContext it sees."""
 
 	name = "capture-test"
 	supported_series = ["KXTEST"]

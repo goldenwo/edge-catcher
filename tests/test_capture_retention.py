@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.monitors.capture.bundle import (
+from edge_catcher.engine.capture.bundle import (
 	UPLOADED_SENTINEL,
 	delete_raw_jsonl,
 	mark_bundle_uploaded,
@@ -232,9 +232,9 @@ def test_rotation_callback_deletes_raw_and_marks_uploaded(
 	import time
 	from unittest.mock import MagicMock
 	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
-	import edge_catcher.monitors.engine as engine_mod
-	from edge_catcher.monitors.engine import _make_rotation_callback
-	from edge_catcher.monitors.market_state import MarketState
+	import edge_catcher.engine.engine as engine_mod
+	from edge_catcher.engine.engine import _make_rotation_callback
+	from edge_catcher.engine.market_state import MarketState
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
@@ -288,9 +288,9 @@ def test_rotation_callback_keeps_raw_when_assembly_fails(
 	operator can reassemble manually."""
 	import time
 	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
-	import edge_catcher.monitors.engine as engine_mod
-	from edge_catcher.monitors.engine import _make_rotation_callback
-	from edge_catcher.monitors.market_state import MarketState
+	import edge_catcher.engine.engine as engine_mod
+	from edge_catcher.engine.engine import _make_rotation_callback
+	from edge_catcher.engine.market_state import MarketState
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
@@ -329,9 +329,9 @@ def test_rotation_callback_no_transport_skips_sentinel_and_prune(
 	must be manually managed."""
 	import time
 	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
-	import edge_catcher.monitors.engine as engine_mod
-	from edge_catcher.monitors.engine import _make_rotation_callback
-	from edge_catcher.monitors.market_state import MarketState
+	import edge_catcher.engine.engine as engine_mod
+	from edge_catcher.engine.engine import _make_rotation_callback
+	from edge_catcher.engine.market_state import MarketState
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
@@ -385,9 +385,9 @@ def test_rotation_callback_keeps_raw_when_delete_flag_false(
 	"""delete_raw_after_bundle=False preserves the raw JSONL (debugging mode)."""
 	import time
 	pytest.importorskip("websockets", reason="rotation callback tests require the [live] extra")
-	import edge_catcher.monitors.engine as engine_mod
-	from edge_catcher.monitors.engine import _make_rotation_callback
-	from edge_catcher.monitors.market_state import MarketState
+	import edge_catcher.engine.engine as engine_mod
+	from edge_catcher.engine.engine import _make_rotation_callback
+	from edge_catcher.engine.market_state import MarketState
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()

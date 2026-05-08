@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from edge_catcher.monitors.capture.writer import (
+from edge_catcher.engine.capture.writer import (
 	CaptureLockError,
 	RawFrameWriter,
 )

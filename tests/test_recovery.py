@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 class TestFetchActiveTickersForSeries:
 	def test_returns_active_tickers(self):
 		"""Should return all market tickers for an active series."""
-		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+		from edge_catcher.engine.recovery import fetch_active_tickers_for_series
 
 		events_response = MagicMock(
 			status_code=200,
@@ -45,7 +45,7 @@ class TestFetchActiveTickersForSeries:
 
 	def test_handles_api_error_returns_empty(self):
 		"""Should return ([], False) gracefully when the API call fails."""
-		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+		from edge_catcher.engine.recovery import fetch_active_tickers_for_series
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=Exception("network error"))
@@ -56,7 +56,7 @@ class TestFetchActiveTickersForSeries:
 
 	def test_handles_non_200_status_returns_empty(self):
 		"""Should return ([], False) when events endpoint returns non-200."""
-		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+		from edge_catcher.engine.recovery import fetch_active_tickers_for_series
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -70,7 +70,7 @@ class TestFetchActiveTickersForSeries:
 
 	def test_partial_market_error_returns_unreliable(self):
 		"""When events succeeds but one market call fails, reliable should be False."""
-		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+		from edge_catcher.engine.recovery import fetch_active_tickers_for_series
 
 		events_response = MagicMock(
 			status_code=200,
@@ -98,7 +98,7 @@ class TestFetchActiveTickersForSeries:
 
 	def test_paginates_markets_via_cursor(self):
 		"""Should follow cursor to fetch additional pages of markets."""
-		from edge_catcher.monitors.recovery import fetch_active_tickers_for_series
+		from edge_catcher.engine.recovery import fetch_active_tickers_for_series
 
 		events_response = MagicMock(
 			status_code=200,
@@ -130,7 +130,7 @@ class TestFetchActiveTickersForSeries:
 class TestFetchOrderbookSnapshot:
 	def test_returns_snapshot_with_correct_levels(self):
 		"""Should parse yes/no levels from orderbook_fp response."""
-		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+		from edge_catcher.engine.recovery import fetch_orderbook_snapshot
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -150,7 +150,7 @@ class TestFetchOrderbookSnapshot:
 
 	def test_returns_none_on_api_error(self):
 		"""Should return None when the API call raises."""
-		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+		from edge_catcher.engine.recovery import fetch_orderbook_snapshot
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=Exception("timeout"))
@@ -160,7 +160,7 @@ class TestFetchOrderbookSnapshot:
 
 	def test_returns_none_on_non_200_status(self):
 		"""Should return None for non-200 responses (except 429 which retries)."""
-		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+		from edge_catcher.engine.recovery import fetch_orderbook_snapshot
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -179,7 +179,7 @@ class TestFetchOrderbookSnapshot:
 		not tradeable on Kalshi (integer cents only) and must not reach the
 		in-memory book or downstream walk_book/stale-fallback logic.
 		"""
-		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+		from edge_catcher.engine.recovery import fetch_orderbook_snapshot
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -209,7 +209,7 @@ class TestFetchOrderbookSnapshot:
 
 	def test_retries_on_429(self):
 		"""Should retry once on 429 and succeed on second attempt."""
-		from edge_catcher.monitors.recovery import fetch_orderbook_snapshot
+		from edge_catcher.engine.recovery import fetch_orderbook_snapshot
 
 		rate_limit = MagicMock(
 			status_code=429,
@@ -235,7 +235,7 @@ class TestFetchOrderbookSnapshot:
 class TestCheckMarketResult:
 	def test_returns_result_string(self):
 		"""Should return the result field from the market response."""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -248,7 +248,7 @@ class TestCheckMarketResult:
 
 	def test_returns_none_when_no_result(self):
 		"""Should return None if the market has no result field."""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -267,7 +267,7 @@ class TestCheckMarketResult:
 		trades were miscategorized as 'lost' with exit_price=0 because the
 		empty-string result was passed through to store.settle_trade.
 		"""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -280,7 +280,7 @@ class TestCheckMarketResult:
 
 	def test_handles_api_error_returns_none(self):
 		"""Should return None on exception."""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=Exception("network error"))
@@ -290,7 +290,7 @@ class TestCheckMarketResult:
 
 	def test_retries_on_429_up_to_3_times(self):
 		"""Should retry up to 3 times on 429, returning result on eventual success."""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		rate_limit = MagicMock(status_code=429, json=lambda: {})
 		success = MagicMock(
@@ -305,7 +305,7 @@ class TestCheckMarketResult:
 
 	def test_returns_none_after_3_429s(self):
 		"""Should return None if all 3 retry attempts get 429."""
-		from edge_catcher.monitors.recovery import check_market_result
+		from edge_catcher.engine.recovery import check_market_result
 
 		rate_limit = MagicMock(status_code=429, json=lambda: {})
 		mock_client = AsyncMock()
@@ -318,7 +318,7 @@ class TestCheckMarketResult:
 class TestFetchMarketMeta:
 	def test_returns_expected_fields(self):
 		"""Should extract expiration_time, status, result, event_ticker."""
-		from edge_catcher.monitors.recovery import fetch_market_meta
+		from edge_catcher.engine.recovery import fetch_market_meta
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(return_value=MagicMock(
@@ -343,7 +343,7 @@ class TestFetchMarketMeta:
 
 	def test_returns_empty_dict_on_error(self):
 		"""Should return {} on any error."""
-		from edge_catcher.monitors.recovery import fetch_market_meta
+		from edge_catcher.engine.recovery import fetch_market_meta
 
 		mock_client = AsyncMock()
 		mock_client.get = AsyncMock(side_effect=Exception("timeout"))
@@ -355,8 +355,8 @@ class TestFetchMarketMeta:
 class TestRunRecovery:
 	def test_registers_tickers_and_seeds_orderbooks(self):
 		"""run_recovery should register tickers and seed their orderbooks."""
-		from edge_catcher.monitors.recovery import run_recovery
-		from edge_catcher.monitors.market_state import MarketState
+		from edge_catcher.engine.recovery import run_recovery
+		from edge_catcher.engine.market_state import MarketState
 
 		market_state = MarketState()
 		active_series = ["SERIES_A"]

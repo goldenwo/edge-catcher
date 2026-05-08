@@ -21,7 +21,7 @@ backtester streams trades from a ``markets``+``trades`` SQLite DB in time
 order and calls ``on_trade`` for every tick.
 
 The paper trader uses a *different* base class (``PaperStrategy`` in
-``edge_catcher.monitors``) with a different callback (``on_tick``) — the two
+``edge_catcher.engine``) with a different callback (``on_tick``) — the two
 are independent, not interchangeable. See ``docs/strategy-guide.md`` for a
 side-by-side comparison.
 
