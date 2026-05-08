@@ -5,7 +5,7 @@ hand-verifiable set of 20 paper_trades rows. Intended as the input fixture
 for the reporting module's tests (Task 8 in the public-release v1 plan).
 
 The schema matches ``paper_trades`` as defined by ``TradeStore`` in
-``edge_catcher/monitors/trade_store.py``. No ``strategy_state`` rows are
+``edge_catcher/engine/trade_store.py``. No ``strategy_state`` rows are
 written — the reporting module only reads trade rows.
 
 Mix:

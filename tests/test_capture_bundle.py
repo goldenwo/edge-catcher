@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 import zstandard as zstd
 
-from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
-from edge_catcher.monitors.trade_store import TradeStore
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.trade_store import TradeStore
 
 
 # ---------------------------------------------------------------------------
@@ -41,9 +41,9 @@ def capture_dir(tmp_path: Path) -> Path:
 def repo_root(tmp_path: Path) -> Path:
 	"""A fake repo checkout with the files bundle.py is expected to copy."""
 	root = tmp_path / "repo"
-	(root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(root / "edge_catcher" / "engine").mkdir(parents=True)
 	(root / "config.local").mkdir(parents=True)
-	(root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+	(root / "edge_catcher" / "engine" / "strategies_local.py").write_text(
 		"# stub strategies_local for bundle test\n", encoding="utf-8"
 	)
 	(root / "config.local" / "paper-trader.yaml").write_text(
@@ -125,7 +125,7 @@ def test_assemble_bundle_creates_all_expected_files(
 	market_state: MarketState,
 ) -> None:
 	"""The bundle directory should contain every artifact listed in spec §4.3."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -147,6 +147,53 @@ def test_assemble_bundle_creates_all_expected_files(
 	assert (bundle_path / "manifest.json").exists()
 
 
+def test_assemble_bundle_strategies_source_is_engine_not_monitors(
+	tmp_path: Path,
+	capture_dir: Path,
+	trade_db: Path,
+	market_state: MarketState,
+) -> None:
+	"""Lock-in for the post-G migration: bundle.py MUST copy
+	strategies_local.py from ``engine/``, never ``monitors/``.
+
+	Why this test exists: discovery loads ``engine/strategies_local.py``
+	(see edge_catcher/engine/discovery.py:_DEFAULT_STRATEGIES_PATH). If
+	bundle.py drifts back to ``monitors/strategies_local.py`` (the
+	rollback-safety copy), every captured bundle silently encodes the
+	WRONG code and post-cutover replay diverges from live the next day.
+
+	Setup gives the repo BOTH paths with distinguishable content; we then
+	assert the bundle picked up the engine/ flavor and ignored monitors/.
+	"""
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
+
+	repo = tmp_path / "repo_dual"
+	(repo / "edge_catcher" / "engine").mkdir(parents=True)
+	(repo / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo / "config.local").mkdir(parents=True)
+	(repo / "edge_catcher" / "engine" / "strategies_local.py").write_text(
+		"# ENGINE_FLAVOR\n", encoding="utf-8"
+	)
+	(repo / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+		"# MONITORS_FLAVOR\n", encoding="utf-8"
+	)
+	(repo / "config.local" / "paper-trader.yaml").write_text(
+		"strategies: {test: {enabled: true}}\n", encoding="utf-8"
+	)
+
+	bundle_path = assemble_daily_bundle(
+		capture_date=date(2026, 4, 14),
+		capture_dir=capture_dir,
+		repo_root=repo,
+		db_path=trade_db,
+		market_state=market_state,
+	)
+
+	bundled = (bundle_path / "strategies_local.py").read_text(encoding="utf-8")
+	assert "ENGINE_FLAVOR" in bundled
+	assert "MONITORS_FLAVOR" not in bundled
+
+
 def test_bundle_jsonl_zstd_round_trips(
 	tmp_path: Path,
 	capture_dir: Path,
@@ -155,7 +202,7 @@ def test_bundle_jsonl_zstd_round_trips(
 	market_state: MarketState,
 ) -> None:
 	"""The compressed JSONL should decompress to the exact original bytes."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -179,7 +226,7 @@ def test_bundle_manifest_schema(
 	market_state: MarketState,
 ) -> None:
 	"""manifest.json should have schema_version=1, exchange, capture_date, and a file list."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -212,7 +259,7 @@ def test_bundle_open_trades_at_start_only_contains_open_rows(
 	Replay seeds its InMemoryTradeStore from this file; carrying in closed
 	rows would break composite-key lookups for settlement events on the
 	next day's replay."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -242,7 +289,7 @@ def test_bundle_day_slice_contains_only_capture_day_rows(
 	"""paper_trades_v2_<date>.sqlite should contain only rows whose entry_time
 	falls within the capture day's UTC window. This is the "ground truth" source
 	the parity test reads — cross-day bleed would confuse the comparison."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -271,7 +318,7 @@ def test_bundle_market_state_snapshot_round_trips(
 ) -> None:
 	"""market_state_at_start.json should serialize the current orderbooks
 	such that the replay's _seed_market_state can reconstruct them."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -299,13 +346,13 @@ def test_bundle_missing_strategies_file_warns_but_succeeds(
 	market_state: MarketState,
 	caplog: pytest.LogCaptureFixture,
 ) -> None:
-	"""If repo_root/edge_catcher/monitors/strategies_local.py is missing,
+	"""If repo_root/edge_catcher/engine/strategies_local.py is missing,
 	bundle should log a warning and still produce every other artifact.
 	The replay can still run if the dev workstation provides the strategies."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	empty_repo = tmp_path / "empty_repo"
-	(empty_repo / "edge_catcher" / "monitors").mkdir(parents=True)
+	(empty_repo / "edge_catcher" / "engine").mkdir(parents=True)
 	(empty_repo / "config.local").mkdir(parents=True)
 	(empty_repo / "config.local" / "paper-trader.yaml").write_text("x: y\n", encoding="utf-8")
 	# No strategies_local.py
@@ -331,7 +378,7 @@ def test_bundle_market_state_none_skips_snapshot(
 ) -> None:
 	"""If market_state is None, market_state_at_start.json should be omitted —
 	allows test setups and catch-up runs to skip snapshot generation."""
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
 		capture_date=date(2026, 4, 14),
@@ -352,7 +399,7 @@ def test_strategy_state_snapshot_happy_path(tmp_path):
 	import json
 	import sqlite3
 	from datetime import datetime, timezone
-	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+	from edge_catcher.engine.capture.bundle import _write_strategy_state_snapshot
 
 	db_path = tmp_path / "fixture.db"
 	conn = sqlite3.connect(str(db_path))
@@ -420,7 +467,7 @@ def test_strategy_state_snapshot_empty_table(tmp_path):
 	"""Empty strategy_state table produces a valid envelope with states={}."""
 	import json
 	import sqlite3
-	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+	from edge_catcher.engine.capture.bundle import _write_strategy_state_snapshot
 
 	db_path = tmp_path / "fixture.db"
 	conn = sqlite3.connect(str(db_path))
@@ -448,7 +495,7 @@ def test_strategy_state_snapshot_missing_table(tmp_path, caplog):
 	import json
 	import logging
 	import sqlite3
-	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+	from edge_catcher.engine.capture.bundle import _write_strategy_state_snapshot
 
 	db_path = tmp_path / "fixture.db"
 	conn = sqlite3.connect(str(db_path))
@@ -471,7 +518,7 @@ def test_strategy_state_snapshot_malformed_value(tmp_path, caplog):
 	import logging
 	import sqlite3
 	from datetime import datetime, timezone
-	from edge_catcher.monitors.capture.bundle import _write_strategy_state_snapshot
+	from edge_catcher.engine.capture.bundle import _write_strategy_state_snapshot
 
 	db_path = tmp_path / "fixture.db"
 	conn = sqlite3.connect(str(db_path))
@@ -514,15 +561,15 @@ def test_assemble_daily_bundle_includes_strategy_state(tmp_path):
 	import json
 	import sqlite3
 	from datetime import date, datetime, timezone
-	from edge_catcher.monitors.capture.bundle import assemble_daily_bundle
-	from edge_catcher.monitors.market_state import MarketState
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
+	from edge_catcher.engine.market_state import MarketState
 
 	capture_dir = tmp_path / "capture"
 	capture_dir.mkdir()
 	repo_root = tmp_path / "repo"
-	(repo_root / "edge_catcher" / "monitors").mkdir(parents=True)
+	(repo_root / "edge_catcher" / "engine").mkdir(parents=True)
 	(repo_root / "config.local").mkdir()
-	(repo_root / "edge_catcher" / "monitors" / "strategies_local.py").write_text(
+	(repo_root / "edge_catcher" / "engine" / "strategies_local.py").write_text(
 		"# fixture\n", encoding="utf-8"
 	)
 	(repo_root / "config.local" / "paper-trader.yaml").write_text(
@@ -595,7 +642,7 @@ def test_market_state_snapshot_emits_schema_v2_with_first_seen(tmp_path: Path) -
 	  3. Produce byte-stable output (sort_keys=True) across repeat writes,
 	     even when tickers were inserted in reverse-alphabetical order.
 	"""
-	from edge_catcher.monitors.capture.bundle import _write_market_state_snapshot
+	from edge_catcher.engine.capture.bundle import _write_market_state_snapshot
 
 	ms = MarketState()
 	# Reverse-alphabetical insertion order locks in that the writer is

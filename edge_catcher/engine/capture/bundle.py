@@ -33,7 +33,7 @@ from typing import Optional
 
 import zstandard as zstd
 
-from edge_catcher.monitors.market_state import MarketState
+from edge_catcher.engine.market_state import MarketState
 
 log = logging.getLogger(__name__)
 
@@ -75,8 +75,13 @@ def assemble_daily_bundle(
 	dst_jsonl = bundle_dir / f"kalshi_engine_{day_str}.jsonl.zst"
 	_compress_zstd(src_jsonl, dst_jsonl)
 
-	# 2. Copy strategies_local.py from the repo checkout.
-	strategies_src = repo_root / "edge_catcher" / "monitors" / "strategies_local.py"
+	# 2. Copy strategies_local.py from the repo checkout. Source MUST track the
+	# engine's discovery target (see engine/discovery.py:_DEFAULT_STRATEGIES_PATH)
+	# so the bundle captures the EXACT code the live engine just ran. Sub-project
+	# G moved discovery to ``engine/strategies_local.py``; if this path is wrong,
+	# every captured bundle silently encodes the wrong code and post-cutover
+	# replay diverges from live.
+	strategies_src = repo_root / "edge_catcher" / "engine" / "strategies_local.py"
 	if strategies_src.exists():
 		shutil.copy2(strategies_src, bundle_dir / "strategies_local.py")
 	else:
@@ -150,23 +155,30 @@ def _compress_zstd(src: Path, dst: Path, level: int = 10) -> None:
 def _git_state(repo_root: Path) -> tuple[str, bool]:
 	"""Return (commit_sha, dirty_flag). Returns ('unknown', False) if git is
 	unavailable or the directory isn't a git repo — bundles can still be
-	assembled off-repo."""
+	assembled off-repo.
+
+	A 10-second timeout guards against hung git invocations (e.g. lock
+	contention from a parallel ``git gc``); rotation must be best-effort
+	and never block the engine thread on git.
+	"""
 	try:
 		commit = subprocess.check_output(
 			["git", "rev-parse", "HEAD"],
 			cwd=str(repo_root),
 			text=True,
 			stderr=subprocess.DEVNULL,
+			timeout=10,
 		).strip()
 		porcelain = subprocess.check_output(
 			["git", "status", "--porcelain"],
 			cwd=str(repo_root),
 			text=True,
 			stderr=subprocess.DEVNULL,
+			timeout=10,
 		).strip()
 		dirty = porcelain != ""
 		return commit, dirty
-	except (subprocess.CalledProcessError, FileNotFoundError):
+	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
 		return "unknown", False
 
 

@@ -35,19 +35,20 @@ from typing import Any, Optional
 
 import yaml
 
-from edge_catcher.monitors.discovery import get_enabled_strategies
-from edge_catcher.monitors.dispatch import dispatch_message
-from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
-from edge_catcher.monitors.replay.loader import read_jsonl_window
-from edge_catcher.monitors.strategy_base import PaperStrategy
-from edge_catcher.monitors.trade_store import InMemoryTradeStore
+from edge_catcher.engine.discovery import get_enabled_strategies
+from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine.executors.paper import PaperExecutor
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.replay.loader import read_jsonl_window
+from edge_catcher.engine.strategy_base import Strategy
+from edge_catcher.engine.trade_store import InMemoryTradeStore
 
 log = logging.getLogger(__name__)
 
 
 class BundleStrategyLoadError(Exception):
 	"""Raised when the bundle's strategies_local.py fails to import or
-	contains no PaperStrategy subclasses. Explicitly distinct from a missing
+	contains no Strategy subclasses. Explicitly distinct from a missing
 	file so the caller can tell "bundle incomplete" from "bundle code broken"."""
 
 
@@ -77,7 +78,7 @@ class ReplayResult:
 def replay_capture(
 	bundle_path: Path | str,
 	*,
-	strategies: Optional[list[PaperStrategy]] = None,
+	strategies: Optional[list[Strategy]] = None,
 	config: Optional[dict] = None,
 	ticker_filter: Optional[set[str]] = None,
 	prior_bundle: Optional[Path | str] = None,
@@ -131,6 +132,11 @@ def replay_capture(
 	market_state = MarketState()
 	_seed_market_state(market_state, bundle, prior_bundle)
 
+	# 5a. Construct the PaperExecutor — replay uses paper semantics
+	# (orderbook walk against the captured book). Live executor never appears
+	# in the replay path — replay is paper-only by design.
+	executor = PaperExecutor(market_state=market_state, config=config)
+
 	# 6. Construct InMemoryTradeStore and seed from PRIOR day's open_trades
 	#    and strategy_state snapshot.
 	store = InMemoryTradeStore()
@@ -138,7 +144,7 @@ def replay_capture(
 	_seed_strategy_state(store, bundle, prior_bundle)
 
 	# 7. Build strategy-by-series index (same shape as engine.py run_engine)
-	strat_by_series: dict[str, list[PaperStrategy]] = {}
+	strat_by_series: dict[str, list[Strategy]] = {}
 	for strat in strategies:
 		series_for_strat = _series_for_strategy(config, strat.name)
 		for s in series_for_strat:
@@ -194,6 +200,7 @@ def replay_capture(
 				strat_by_series=strat_by_series,
 				pending_states=pending_states,
 				dirty=dirty,
+				executor=executor,
 				now=now,
 			)
 		except Exception:
@@ -232,13 +239,23 @@ def replay_capture(
 # ---------------------------------------------------------------------------
 
 
-def _load_bundle_strategies(bundle: Path, manifest: dict) -> list[PaperStrategy]:
+def _load_bundle_strategies(bundle: Path, manifest: dict) -> list[Strategy]:
 	"""Load ``strategies_local.py`` from the bundle via spec_from_file_location.
 
-	This explicitly avoids ``importlib.import_module("edge_catcher.monitors.strategies_local")``
+	This explicitly avoids ``importlib.import_module("edge_catcher.engine.strategies_local")``
 	which would pick up the dev workspace's cached module from ``sys.modules``
 	instead of the bundle's copy. Using a synthetic module name based on the
 	bundle's engine_commit keeps multiple bundles loadable in the same process.
+
+	**Trust model.** ``exec_module`` runs arbitrary Python from the bundle file.
+	The trust boundary is the R2 bucket: anyone with write access to the
+	configured ``R2_BUCKET`` can insert a strategies_local.py that runs at
+	replay time on the operator's dev workstation. Today this is a single-
+	tenant operator-controlled bucket, so the trust path is ok. Before
+	exposing replay to third-party bundles (e.g. a multi-user research
+	share), add either bundle signature verification at upload time or a
+	``trust_bundle_code: false`` config flag that fails closed when the
+	bundle source isn't signed.
 	"""
 	strat_file = bundle / "strategies_local.py"
 	if not strat_file.exists():
@@ -261,10 +278,10 @@ def _load_bundle_strategies(bundle: Path, manifest: dict) -> list[PaperStrategy]
 			f"failed to exec bundle strategies from {strat_file}: {e}"
 		) from e
 
-	strategies: list[PaperStrategy] = []
+	strategies: list[Strategy] = []
 	for name in dir(module):
 		obj = getattr(module, name)
-		if isinstance(obj, type) and issubclass(obj, PaperStrategy) and obj is not PaperStrategy:
+		if isinstance(obj, type) and issubclass(obj, Strategy) and obj is not Strategy:
 			try:
 				strategies.append(obj())
 			except Exception as e:
@@ -272,7 +289,7 @@ def _load_bundle_strategies(bundle: Path, manifest: dict) -> list[PaperStrategy]
 
 	if not strategies:
 		raise BundleStrategyLoadError(
-			f"strategies_local.py in {bundle} contains no PaperStrategy subclasses"
+			f"strategies_local.py in {bundle} contains no Strategy subclasses"
 		)
 	return strategies
 
@@ -295,8 +312,9 @@ def _check_engine_version(bundle: Path, manifest: dict) -> None:
 			text=True,
 			stderr=subprocess.DEVNULL,
 			cwd=str(Path(__file__).resolve().parent.parent.parent.parent),
+			timeout=10,  # never block replay startup on a hung git
 		).strip()
-	except (subprocess.CalledProcessError, FileNotFoundError):
+	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
 		log.warning("replay_capture: could not determine dev engine commit")
 		return
 	bundle_commit = manifest.get("engine_commit", "unknown")
@@ -432,7 +450,7 @@ def _resolve_prior_file(
 		return None
 
 	try:
-		from edge_catcher.monitors.capture.transport import R2Transport
+		from edge_catcher.engine.capture.transport import R2Transport
 		transport = R2Transport()
 	except (KeyError, ImportError):
 		log.info(

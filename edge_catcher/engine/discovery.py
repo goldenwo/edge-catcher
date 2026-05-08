@@ -10,12 +10,12 @@ from pathlib import Path
 
 import yaml
 
-from edge_catcher.monitors.sizing import validate_sizing_config
-from edge_catcher.monitors.strategy_base import PaperStrategy
+from edge_catcher.engine.executors.paper import validate_sizing_config
+from edge_catcher.engine.strategy_base import Strategy
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STRATEGIES_PATH = Path("edge_catcher/monitors/strategies_local.py")
+_DEFAULT_STRATEGIES_PATH = Path("edge_catcher/engine/strategies_local.py")
 
 
 # ---------------------------------------------------------------------------
@@ -44,12 +44,12 @@ def load_config(config_path: Path) -> dict:
 # Strategy discovery
 # ---------------------------------------------------------------------------
 
-def discover_strategies(module_path: Path | None = None) -> list[PaperStrategy]:
-	"""Dynamically load and instantiate all PaperStrategy subclasses from a file.
+def discover_strategies(module_path: Path | None = None) -> list[Strategy]:
+	"""Dynamically load and instantiate all Strategy subclasses from a file.
 
 	Args:
 		module_path: Path to the Python file to load.  Defaults to
-		             ``edge_catcher/monitors/strategies_local.py``.
+		             ``edge_catcher/engine/strategies_local.py``.
 
 	Returns:
 		List of instantiated strategy objects.  Returns an empty list if the
@@ -72,13 +72,13 @@ def discover_strategies(module_path: Path | None = None) -> list[PaperStrategy]:
 		logger.exception("Error loading strategies file: %s", path)
 		return []
 
-	strategies: list[PaperStrategy] = []
+	strategies: list[Strategy] = []
 	for attr_name in dir(module):
 		obj = getattr(module, attr_name)
 		if (
 			inspect.isclass(obj)
-			and issubclass(obj, PaperStrategy)
-			and obj is not PaperStrategy
+			and issubclass(obj, Strategy)
+			and obj is not Strategy
 			and isinstance(getattr(obj, "name", None), str)
 		):
 			try:
@@ -127,8 +127,8 @@ def _load_manifest_series(manifest_path: str | Path | None) -> dict[str, list[st
 
 def get_enabled_strategies(
 	config: dict,
-	all_strategies: list[PaperStrategy],
-) -> tuple[list[PaperStrategy], list[tuple[str, str]]]:
+	all_strategies: list[Strategy],
+) -> tuple[list[Strategy], list[tuple[str, str]]]:
 	"""Filter to enabled strategies and apply config param overrides.
 
 	Enforces ``supported_series`` on each strategy: if the strategy
@@ -159,11 +159,11 @@ def get_enabled_strategies(
 	validate_sizing_config(config)
 
 	strats_cfg: dict = config.get("strategies", {})
-	by_name: dict[str, PaperStrategy] = {s.name: s for s in all_strategies}
+	by_name: dict[str, Strategy] = {s.name: s for s in all_strategies}
 	strict = config.get("strict_series_validation", True)
 	manifest_series = _load_manifest_series(config.get("supported_series_manifest"))
 
-	enabled: list[PaperStrategy] = []
+	enabled: list[Strategy] = []
 	rejected_pairs: list[tuple[str, str]] = []
 
 	for name, scfg in strats_cfg.items():

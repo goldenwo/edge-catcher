@@ -19,8 +19,8 @@ import pytest
 
 pytest.importorskip("websockets", reason="paper-trader engine tests require the [live] extra")
 
-from edge_catcher.monitors.engine import _make_rotation_callback
-from edge_catcher.monitors.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.engine import _make_rotation_callback
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 
 
 def _wait_for(predicate, timeout: float = 2.0, step: float = 0.01) -> bool:
@@ -39,7 +39,7 @@ def test_rotation_callback_deepcopies_market_state_synchronously(
 	"""The callback must deepcopy market_state BEFORE returning from the
 	synchronous call — otherwise a background assemble thread could race
 	with engine-thread mutations."""
-	import edge_catcher.monitors.engine as engine_mod
+	import edge_catcher.engine.engine as engine_mod
 
 	# Capture what assemble_daily_bundle sees as its market_state argument.
 	seen_market_state: list[MarketState] = []
@@ -84,7 +84,7 @@ def test_rotation_callback_uploads_via_transport_when_provided(
 	"""When a transport is wired in, the callback should call upload_bundle
 	with the bundle path returned by assemble_daily_bundle and a
 	'kalshi/<date>' remote key."""
-	import edge_catcher.monitors.engine as engine_mod
+	import edge_catcher.engine.engine as engine_mod
 
 	stub_bundle_path = tmp_path / "bundle-stub"
 	stub_bundle_path.mkdir()
@@ -117,7 +117,7 @@ def test_rotation_callback_none_transport_skips_upload(
 ) -> None:
 	"""When transport is None the callback still assembles the bundle but
 	doesn't try to upload — bundles accumulate on local disk only."""
-	import edge_catcher.monitors.engine as engine_mod
+	import edge_catcher.engine.engine as engine_mod
 
 	assembled = [False]
 
@@ -146,7 +146,7 @@ def test_rotation_callback_exception_in_background_is_logged(
 	"""An exception during background assemble/upload must be logged but
 	not propagate — the engine thread has already returned from the
 	synchronous callback by the time the error happens."""
-	import edge_catcher.monitors.engine as engine_mod
+	import edge_catcher.engine.engine as engine_mod
 
 	def fake_assemble(*args, **kwargs):
 		raise RuntimeError("assemble blew up")

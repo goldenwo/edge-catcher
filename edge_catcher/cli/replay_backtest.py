@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def run(args) -> None:
-	from edge_catcher.monitors.replay.backtester import replay_capture
+	from edge_catcher.engine.replay.backtester import replay_capture
 
 	bundle = Path(args.bundle)
 	if not bundle.exists():

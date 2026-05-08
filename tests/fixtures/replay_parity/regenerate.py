@@ -39,7 +39,7 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from edge_catcher.monitors.replay.backtester import replay_capture  # noqa: E402
+from edge_catcher.engine.replay.backtester import replay_capture  # noqa: E402
 
 # Days included in the strict-parity sweep.
 #

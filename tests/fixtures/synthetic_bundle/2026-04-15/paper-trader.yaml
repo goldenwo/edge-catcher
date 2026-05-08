@@ -1,0 +1,10 @@
+sizing:
+  risk_per_trade_cents: 200
+  max_slippage_cents: 5
+  min_fill: 1
+  require_fresh_book: true
+
+strategies:
+  synthetic_tick:
+    enabled: true
+    series: ["SYN"]

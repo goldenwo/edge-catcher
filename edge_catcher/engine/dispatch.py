@@ -17,23 +17,22 @@ Invariants (see capture/replay spec §4.7):
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
-from edge_catcher.monitors.market_state import (
+from edge_catcher.engine.executor import Executor, OrderRequest
+from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
 	TickContext,
 	_is_tradeable_cents,
 	derive_event_ticker,
 )
-from edge_catcher.monitors.metrics import Metrics
-from edge_catcher.monitors.notifications import notify
-from edge_catcher.monitors.sizing import FillSkip, resolve_fill
-from edge_catcher.monitors.strategy_base import PaperStrategy, Signal
-from edge_catcher.monitors.trade_store import TradeStoreProtocol
+from edge_catcher.engine.metrics import Metrics
+from edge_catcher.engine.notifications import notify
+from edge_catcher.engine.strategy_base import Signal, Strategy
+from edge_catcher.engine.trade_store import TradeStoreProtocol
 
 log = logging.getLogger(__name__)
 
@@ -135,9 +134,10 @@ def _format_close_message(
 
 def process_tick(
 	ctx: TickContext,
-	strategies: list[PaperStrategy],
+	strategies: list[Strategy],
 	store: TradeStoreProtocol,
 	config: dict,
+	executor: Executor,
 	*,
 	now: datetime,
 ) -> None:
@@ -153,6 +153,10 @@ def process_tick(
 	message loop (or equivalent replay source) and threaded down so that every
 	trade row written during this call has an identical entry_time/exit_time.
 	Required for byte-equal parity between live and replay backtester paths.
+
+	`executor` is the engine's pluggable execution endpoint — `PaperExecutor` for
+	paper-trader, `LiveExecutor` (added by sub-project D) for live. Both implement
+	the `Executor` Protocol with sync `place(req) -> OrderResult`.
 	"""
 	for strategy in strategies:
 		try:
@@ -163,7 +167,7 @@ def process_tick(
 
 		for signal in signals:
 			try:
-				_handle_signal(signal, ctx, store, config, strategy.emoji, now=now)
+				_handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now)
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -176,17 +180,31 @@ def _handle_signal(
 	ctx: TickContext,
 	store: TradeStoreProtocol,
 	config: dict,
+	executor: Executor,
 	bullet: str = "🔵",
 	*,
 	now: datetime,
 ) -> None:
 	"""Dispatch a single signal — enter or exit."""
 	if signal.action == "enter":
-		_handle_enter(signal, ctx, store, config, bullet, now=now)
+		_handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
 		_handle_exit(signal, ctx, store, bullet, now=now)
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
+
+
+def _make_client_order_id(sig: Signal, now: datetime) -> str:
+	"""Build an idempotency key for the order. Paper records but does not enforce
+	uniqueness; D will tighten when wiring LiveExecutor (Kalshi requires
+	idempotency on retries).
+
+	# TODO(D): millisecond resolution can collide on a burst replay or two
+	# strategies firing on the same ticker in the same ms. Before LiveExecutor
+	# starts depending on this for Kalshi idempotency, append a short uuid4 or
+	# a per-process monotonic counter so the key is guaranteed unique.
+	"""
+	return f"{sig.strategy}-{sig.ticker}-{int(now.timestamp() * 1000)}"
 
 
 def _handle_enter(
@@ -194,11 +212,12 @@ def _handle_enter(
 	ctx: TickContext,
 	store: TradeStoreProtocol,
 	config: dict,
+	executor: Executor,
 	bullet: str = "🔵",
 	*,
 	now: datetime,
 ) -> None:
-	"""Process an entry signal: resolve sizing, walk orderbook, record trade."""
+	"""Process an entry signal: build OrderRequest, call executor, route by status."""
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
 	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
@@ -214,54 +233,75 @@ def _handle_enter(
 		metrics = Metrics()
 	metrics.inc("entries_attempted")
 
-	fill = resolve_fill(config, entry_price, signal.side, ctx.orderbook)
+	# Build typed request. PaperExecutor's resolve_fill computes the actual
+	# size_contracts from config["sizing"]["risk_per_trade_cents"] / entry_price;
+	# G threads the request shape through but defers sizing to the executor's
+	# internal pipeline (D will refactor sizing into a pre-executor step).
+	#
+	# Signal.side is typed as plain `str` for strategy-author ergonomics
+	# (strategies build sides from data); OrderRequest.side narrows to
+	# Literal["yes", "no"]. Cast at the boundary — pre-G dispatch did no
+	# runtime validation here, so neither do we (byte-exact preservation).
+	req = OrderRequest(
+		ticker=signal.ticker,
+		series=signal.series,
+		side=cast(Literal["yes", "no"], signal.side),
+		size_contracts=0,
+		limit_price_cents=entry_price,
+		strategy=signal.strategy,
+		client_order_id=_make_client_order_id(signal, now),
+	)
 
-	if isinstance(fill, FillSkip):
-		if fill.reason == "stale_book":
+	result = executor.place(req)
+
+	if result.status == "filled":
+		# Field-by-field match to the pre-G record_trade call shape — byte-exact
+		# preservation is the parity-sweep success criterion.
+		trade_id = store.record_trade(
+			ticker=signal.ticker,
+			entry_price=entry_price,
+			strategy=signal.strategy,
+			side=signal.side,
+			series_ticker=signal.series,
+			intended_size=result.intended_size,
+			fill_size=result.filled_size,
+			blended_entry=result.blended_entry_cents,
+			book_depth=result.book_depth,
+			fill_pct=result.fill_pct,
+			slippage_cents=result.slippage_cents,
+			book_snapshot=result.book_snapshot,
+			now=now,
+		)
+		metrics.inc("entries_filled")
+
+		display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
+		log_line, notify_line = _format_enter_message(
+			strategy=signal.strategy,
+			series=signal.series,
+			ticker=signal.ticker,
+			side=signal.side,
+			fill_size=result.filled_size,
+			entry_price=display_price,
+			trade_id=trade_id,
+			bullet=bullet,
+		)
+		log.info(log_line)
+		notify(notify_line)
+	elif result.status == "rejected":
+		if result.rejection_reason == "stale_book":
 			metrics.inc("entries_skipped_stale")
 		else:
 			metrics.inc("entries_skipped_other")
 		log.info(
 			"No fill for %s %s %s (entry=%dc) — skipping (reason=%s)",
-			signal.strategy, signal.side, signal.ticker, entry_price, fill.reason,
+			signal.strategy, signal.side, signal.ticker, entry_price, result.rejection_reason,
 		)
-		return
-
-	side_levels = (
-		ctx.orderbook.yes_levels if signal.side == "yes"
-		else ctx.orderbook.no_levels
-	)
-
-	trade_id = store.record_trade(
-		ticker=signal.ticker,
-		entry_price=entry_price,
-		strategy=signal.strategy,
-		side=signal.side,
-		series_ticker=signal.series,
-		intended_size=fill.intended_size,
-		fill_size=fill.fill_size,
-		blended_entry=fill.blended_price_cents,
-		book_depth=ctx.orderbook.depth,
-		fill_pct=fill.fill_pct,
-		slippage_cents=fill.slippage_cents,
-		book_snapshot=json.dumps(side_levels),
-		now=now,
-	)
-	metrics.inc("entries_filled")
-
-	display_price = fill.blended_price_cents if fill.blended_price_cents else entry_price
-	log_line, notify_line = _format_enter_message(
-		strategy=signal.strategy,
-		series=signal.series,
-		ticker=signal.ticker,
-		side=signal.side,
-		fill_size=fill.fill_size,
-		entry_price=display_price,
-		trade_id=trade_id,
-		bullet=bullet,
-	)
-	log.info(log_line)
-	notify(notify_line)
+	elif result.status == "pending":
+		# PENDING BRANCH GUARD: G's PR keeps this as a bare pass.
+		# Paper never returns pending; live (D) will write a pending row here once
+		# B's spec defines record_pending_order. A premature stub call would
+		# ImportError at engine startup or crash on first live signal.
+		pass
 
 
 def _handle_exit(
@@ -394,10 +434,11 @@ def _handle_ticker_msg(
 	config: dict,
 	market_state: MarketState,
 	store: TradeStoreProtocol,
-	strategies: list[PaperStrategy],
-	strat_by_series: dict[str, list[PaperStrategy]],
+	strategies: list[Strategy],
+	strat_by_series: dict[str, list[Strategy]],
 	pending_states: dict[str, dict],
 	dirty: set[str],
+	executor: Executor,
 	*,
 	now: datetime,
 ) -> None:
@@ -464,7 +505,7 @@ def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			process_tick(ctx, [strat], store, config, now=now)
+			process_tick(ctx, [strat], store, config, executor, now=now)
 			dirty.add(strat.name)
 
 
@@ -473,10 +514,11 @@ def _handle_trade_msg(
 	config: dict,
 	market_state: MarketState,
 	store: TradeStoreProtocol,
-	strategies: list[PaperStrategy],
-	strat_by_series: dict[str, list[PaperStrategy]],
+	strategies: list[Strategy],
+	strat_by_series: dict[str, list[Strategy]],
 	pending_states: dict[str, dict],
 	dirty: set[str],
+	executor: Executor,
 	*,
 	now: datetime,
 ) -> None:
@@ -550,7 +592,7 @@ def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			process_tick(ctx, [strat], store, config, now=now)
+			process_tick(ctx, [strat], store, config, executor, now=now)
 			dirty.add(strat.name)
 
 
@@ -576,7 +618,6 @@ def _handle_synthetic_rest_orderbook(market_state: MarketState, payload: dict) -
 	the post-parse `yes_levels` / `no_levels` so the replay doesn't re-parse
 	the raw Kalshi response.
 	"""
-	from edge_catcher.monitors.market_state import OrderbookSnapshot
 	ticker = payload.get("ticker")
 	if not ticker:
 		return
@@ -653,10 +694,11 @@ def dispatch_message(
 	config: dict,
 	market_state: MarketState,
 	store: TradeStoreProtocol,
-	strategies: list[PaperStrategy],
-	strat_by_series: dict[str, list[PaperStrategy]],
+	strategies: list[Strategy],
+	strat_by_series: dict[str, list[Strategy]],
 	pending_states: dict[str, dict],
 	dirty: set[str],
+	executor: Executor,
 	*,
 	now: datetime,
 ) -> None:
@@ -686,12 +728,12 @@ def dispatch_message(
 		elif msg_type == "ticker":
 			_handle_ticker_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, now=now,
+				strat_by_series, pending_states, dirty, executor, now=now,
 			)
 		elif msg_type == "trade":
 			_handle_trade_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, now=now,
+				strat_by_series, pending_states, dirty, executor, now=now,
 			)
 		else:
 			log.debug("dispatch_message: unknown msg_type %r", msg_type)
