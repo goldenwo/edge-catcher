@@ -20,10 +20,10 @@ and implement ``on_trade(trade, market, portfolio) -> list[Signal]``. The
 backtester streams trades from a ``markets``+``trades`` SQLite DB in time
 order and calls ``on_trade`` for every tick.
 
-The paper trader uses a *different* base class (``PaperStrategy`` in
-``edge_catcher.engine``) with a different callback (``on_tick``) — the two
-are independent, not interchangeable. See ``docs/strategy-guide.md`` for a
-side-by-side comparison.
+The paper trader uses a *different* base class (``Strategy`` in
+``edge_catcher.engine.strategy_base``) with a different callback
+(``on_tick``) — the two are independent, not interchangeable. See
+``docs/strategy-guide.md`` for a side-by-side comparison.
 
 Making it your own
 ------------------
