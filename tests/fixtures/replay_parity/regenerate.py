@@ -149,14 +149,16 @@ def _read_allowlist(day: str) -> frozenset[tuple]:
 
 
 def _run_replay(bundle: Path) -> set[tuple]:
+	import asyncio
 	# Use the prior-day bundle for seeding (replay's normal mode).
 	day = bundle.name
 	year, month, dom = day.split("-")
 	prior = BUNDLES_DIR / f"{year}-{month}-{int(dom)-1:02d}"
-	result = replay_capture(
+	# replay_capture is async — wrap at this sync→async boundary.
+	result = asyncio.run(replay_capture(
 		bundle_path=bundle,
 		prior_bundle=prior if prior.exists() else None,
-	)
+	))
 	return {_project_to_key(t) for t in result.trades}
 
 

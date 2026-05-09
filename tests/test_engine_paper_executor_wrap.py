@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from edge_catcher.engine.executor import OrderRequest
 from edge_catcher.engine.executors.paper import (
 	FillSkip, PaperExecutor, resolve_fill,
@@ -54,7 +56,8 @@ class _StubMarketState:
 		return self._book
 
 
-def test_filled_path_maps_FillResult_to_OrderResult_field_by_field():
+@pytest.mark.asyncio
+async def test_filled_path_maps_FillResult_to_OrderResult_field_by_field():
 	book = _canned_book()
 	cfg = _canned_config()
 	ms = _StubMarketState(book)
@@ -64,7 +67,7 @@ def test_filled_path_maps_FillResult_to_OrderResult_field_by_field():
 	assert not isinstance(fill, FillSkip), "canned book should produce a fill"
 
 	executor = PaperExecutor(market_state=ms, config=cfg)
-	result = executor.place(req)
+	result = await executor.place(req)
 
 	assert result.status == "filled"
 	assert result.intended_size == fill.intended_size
@@ -76,7 +79,8 @@ def test_filled_path_maps_FillResult_to_OrderResult_field_by_field():
 	assert result.book_snapshot == json.dumps(book.yes_levels if req.side == "yes" else book.no_levels)
 
 
-def test_blended_zero_sentinel_preserved():
+@pytest.mark.asyncio
+async def test_blended_zero_sentinel_preserved():
 	"""When resolve_fill returns blended_price_cents == 0, OrderResult.blended_entry_cents
 	MUST be 0 verbatim (not None, not the limit price). Trade store relies on the
 	0-sentinel to fall back to entry_price at close time."""
@@ -87,21 +91,22 @@ def test_blended_zero_sentinel_preserved():
 	req = _canned_request(side="yes", limit=42)
 
 	executor = PaperExecutor(market_state=ms, config=cfg)
-	result = executor.place(req)
+	result = await executor.place(req)
 
 	# Either filled with 0 sentinel, or rejected — both valid for this config.
 	if result.status == "filled":
 		assert result.blended_entry_cents == 0
 
 
-def test_FillSkip_translates_to_rejected_with_reason():
+@pytest.mark.asyncio
+async def test_FillSkip_translates_to_rejected_with_reason():
 	cfg = _canned_config()
 	book = _canned_book(yes_levels=[])
 	ms = _StubMarketState(book)
 	req = _canned_request(side="yes", limit=42)
 
 	executor = PaperExecutor(market_state=ms, config=cfg)
-	result = executor.place(req)
+	result = await executor.place(req)
 
 	assert result.status == "rejected"
 	assert result.rejection_reason in {"stale_book", "empty_book"}

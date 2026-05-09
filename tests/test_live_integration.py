@@ -64,12 +64,13 @@ def _read_best_yes_bid_cents(ticker: str) -> int | None:
 	return int(round(best * 100))
 
 
+@pytest.mark.asyncio
 @pytest.mark.live
 @pytest.mark.skipif(
 	os.environ.get("LIVE_TRADER_LIVE_TEST") != "1",
 	reason="Live integration test only runs when LIVE_TRADER_LIVE_TEST=1",
 )
-def test_place_and_cancel_against_prod(tmp_path):
+async def test_place_and_cancel_against_prod(tmp_path):
 	ticker = os.environ.get(TEST_TICKER_ENV)
 	assert ticker, f"Set {TEST_TICKER_ENV} to a Kalshi ticker before running"
 
@@ -99,9 +100,9 @@ def test_place_and_cancel_against_prod(tmp_path):
 
 	order_id: str | None = None
 	try:
-		with KalshiOrderClient(cfg, audit) as c:
+		async with KalshiOrderClient(cfg, audit) as c:
 			# 1. Balance — proves auth + GET on the trade-scope key
-			bal = c.balance()
+			bal = await c.balance()
 			assert bal.balance_cents >= 0
 
 			# 2. Place a GTC limit at (best_yes_bid - 1¢) — rests on the book
@@ -116,13 +117,13 @@ def test_place_and_cancel_against_prod(tmp_path):
 				time_in_force="gtc",
 				client_order_id=coid,
 			)
-			order = c.place(req)
+			order = await c.place(req)
 			assert order.order_id, "place returned no order_id"
 			order_id = order.order_id
 
 			# 3. Cancel the resting order. Should succeed — order is alive.
 			try:
-				result = c.cancel(order_id)
+				result = await c.cancel(order_id)
 				assert result.status in ("canceled", "executed", "deleted"), (
 					f"unexpected cancel status: {result.status}"
 				)
@@ -136,8 +137,8 @@ def test_place_and_cancel_against_prod(tmp_path):
 		# Last-ditch cleanup: don't leave a resting order on the user's account.
 		if order_id is not None:
 			try:
-				with KalshiOrderClient(cfg, audit) as cleanup:
-					cleanup.cancel(order_id)
+				async with KalshiOrderClient(cfg, audit) as cleanup:
+					await cleanup.cancel(order_id)
 			except Exception:
 				pass  # best-effort; already logged in audit
 
