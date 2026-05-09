@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import asyncio
+import functools
 import re
 import time
 import uuid
@@ -252,7 +253,7 @@ class KalshiOrderClient:
 					response_body = {"_raw_text": resp.text[:500]}
 
 				if 200 <= resp.status_code < 300:
-					self._write_audit(
+					await self._write_audit_async(
 						op=op,
 						method=method,
 						path=full_path,
@@ -277,7 +278,7 @@ class KalshiOrderClient:
 					continue
 
 				# 4xx (non-429): fail loud, surface Kalshi error verbatim.
-				self._write_audit(
+				await self._write_audit_async(
 					op=op,
 					method=method,
 					path=full_path,
@@ -306,7 +307,7 @@ class KalshiOrderClient:
 				await asyncio.sleep(min(60.0, (2 ** retries) + 0.1 * retries))
 				retries += 1
 
-		self._write_audit(
+		await self._write_audit_async(
 			op=op,
 			method=method,
 			path=full_path,
@@ -350,6 +351,14 @@ class KalshiOrderClient:
 			error=error,
 			retries=retries,
 		))
+
+	async def _write_audit_async(self, **kwargs) -> None:
+		# AuditLogger.write does sync open/write/close under a threading.Lock.
+		# Off-load to the default thread pool so the engine event loop (which
+		# also services WS receives and the reconciler poll in sub-project E)
+		# is never blocked by SD-card write stalls during a live order.
+		loop = asyncio.get_running_loop()
+		await loop.run_in_executor(None, functools.partial(self._write_audit, **kwargs))
 
 	# ------------------------------------------------------------------
 	# Parsing helpers

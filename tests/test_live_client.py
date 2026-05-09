@@ -1,7 +1,9 @@
 """Tests for edge_catcher.live.client — KalshiOrderClient + dataclasses."""
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -429,3 +431,75 @@ async def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
 	# Negative position interpreted as no-side
 	assert positions[1].side == "no"
 	assert positions[1].count == 3
+
+
+# ---------------------------------------------------------------------------
+# Audit-write off-loading regression — sub-project E pre-flight
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_place_audit_write_does_not_block_event_loop(cfg, signing_env, tmp_path, monkeypatch):
+	"""Audit-log file I/O must not block the engine event loop.
+
+	Once sub-project E ships, the engine's persistent event loop services
+	WS receives, the 30s reconciler poll, and order placement on the same
+	loop. A blocking ``open + write + close`` inside ``_request`` would stall
+	all of those during a slow disk write — Pi SD-card spikes can hit tens
+	of ms, which is enough to drop a WS tick during a live trade and
+	violate the "no errors with live money" lens.
+
+	We monkeypatch ``AuditLogger.write`` to ``time.sleep(0.100)`` (a 100 ms
+	stall, ~10× a real Pi spike), then schedule a sentinel coroutine that
+	wants to sleep for 30 ms while ``place()`` runs. The sentinel's actual
+	wall-clock sleep duration is the signal: with the write off-loaded to
+	a worker thread, the sentinel wakes on time (~30 ms); with the write
+	blocking the loop, the sentinel can't be resumed until the 100 ms
+	stall completes, so its sleep balloons to ~100 ms.
+	"""
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+	audit_logger = AuditLogger(cfg2.audit_log_path)
+	original_write = audit_logger.write
+
+	def slow_write(event):
+		time.sleep(0.100)
+		original_write(event)
+
+	monkeypatch.setattr(audit_logger, "write", slow_write)
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
+
+	c = make_mock_client(cfg2, audit_logger, httpx.MockTransport(handler))
+	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
+
+	loop = asyncio.get_running_loop()
+	sentinel_t0 = 0.0
+	sentinel_t1 = 0.0
+	target_sleep_s = 0.030
+
+	async def sentinel():
+		nonlocal sentinel_t0, sentinel_t1
+		sentinel_t0 = loop.time()
+		await asyncio.sleep(target_sleep_s)
+		sentinel_t1 = loop.time()
+
+	sentinel_task = asyncio.create_task(sentinel())
+	# Yield once so the sentinel reaches its asyncio.sleep before place() runs.
+	await asyncio.sleep(0)
+	await c.place(req)
+	await sentinel_task
+
+	actual_sleep_ms = (sentinel_t1 - sentinel_t0) * 1000.0
+	overrun_ms = actual_sleep_ms - (target_sleep_s * 1000.0)
+	# 35 ms tolerance covers Windows ProactorEventLoop ~16 ms scheduler-quantum
+	# jitter on top of the 30 ms target. A blocked loop adds ~70 ms of overrun
+	# (full 100 ms slow_write minus the 30 ms target), well outside this band.
+	assert overrun_ms < 35.0, (
+		f"sentinel asyncio.sleep({target_sleep_s*1000:.0f}ms) actually took "
+		f"{actual_sleep_ms:.1f}ms — event loop was blocked for {overrun_ms:.1f}ms "
+		f"during slow audit-write (slow_write=100ms)."
+	)
+	# Audit row was still written through the worker thread.
+	assert cfg2.audit_log_path.exists()
+	assert cfg2.audit_log_path.read_text().strip() != ""
