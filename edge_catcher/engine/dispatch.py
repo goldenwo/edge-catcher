@@ -132,7 +132,7 @@ def _format_close_message(
 # Signal pipeline (relocated from engine.py verbatim)
 # ---------------------------------------------------------------------------
 
-def process_tick(
+async def process_tick(
 	ctx: TickContext,
 	strategies: list[Strategy],
 	store: TradeStoreProtocol,
@@ -147,7 +147,9 @@ def process_tick(
 	  - Call on_tick → get signals
 	  - Process enter/exit signals with exception isolation per-signal
 
-	This is the synchronous, testable core of the engine.
+	This is the async, testable core of the engine. Strategy.on_tick remains
+	sync (signal generation is pure logic) — only signal handling is async
+	because `_handle_enter` awaits the executor's network call.
 
 	`now` is the wall-clock timestamp for this tick, captured once in the WS
 	message loop (or equivalent replay source) and threaded down so that every
@@ -156,7 +158,7 @@ def process_tick(
 
 	`executor` is the engine's pluggable execution endpoint — `PaperExecutor` for
 	paper-trader, `LiveExecutor` (added by sub-project D) for live. Both implement
-	the `Executor` Protocol with sync `place(req) -> OrderResult`.
+	the `Executor` Protocol with async `place(req) -> OrderResult`.
 	"""
 	for strategy in strategies:
 		try:
@@ -167,7 +169,7 @@ def process_tick(
 
 		for signal in signals:
 			try:
-				_handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now)
+				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now)
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -175,7 +177,7 @@ def process_tick(
 				)
 
 
-def _handle_signal(
+async def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
 	store: TradeStoreProtocol,
@@ -185,9 +187,14 @@ def _handle_signal(
 	*,
 	now: datetime,
 ) -> None:
-	"""Dispatch a single signal — enter or exit."""
+	"""Dispatch a single signal — enter or exit.
+
+	`_handle_enter` is async (awaits the executor's network call); `_handle_exit`
+	stays sync (no I/O — pure store mutation + log). Calling a sync function
+	from this async dispatcher is intentional and idiomatic.
+	"""
 	if signal.action == "enter":
-		_handle_enter(signal, ctx, store, config, executor, bullet, now=now)
+		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
 		_handle_exit(signal, ctx, store, bullet, now=now)
 	else:
@@ -207,7 +214,7 @@ def _make_client_order_id(sig: Signal, now: datetime) -> str:
 	return f"{sig.strategy}-{sig.ticker}-{int(now.timestamp() * 1000)}"
 
 
-def _handle_enter(
+async def _handle_enter(
 	signal: Signal,
 	ctx: TickContext,
 	store: TradeStoreProtocol,
@@ -252,7 +259,7 @@ def _handle_enter(
 		client_order_id=_make_client_order_id(signal, now),
 	)
 
-	result = executor.place(req)
+	result = await executor.place(req)
 
 	if result.status == "filled":
 		# Field-by-field match to the pre-G record_trade call shape — byte-exact
@@ -429,7 +436,7 @@ def _handle_orderbook_snapshot(market_state: MarketState, msg: dict) -> None:
 	market_state.seed_orderbook(ticker, snapshot)
 
 
-def _handle_ticker_msg(
+async def _handle_ticker_msg(
 	msg: dict,
 	config: dict,
 	market_state: MarketState,
@@ -505,11 +512,11 @@ def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			process_tick(ctx, [strat], store, config, executor, now=now)
+			await process_tick(ctx, [strat], store, config, executor, now=now)
 			dirty.add(strat.name)
 
 
-def _handle_trade_msg(
+async def _handle_trade_msg(
 	msg: dict,
 	config: dict,
 	market_state: MarketState,
@@ -592,7 +599,7 @@ def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			process_tick(ctx, [strat], store, config, executor, now=now)
+			await process_tick(ctx, [strat], store, config, executor, now=now)
 			dirty.add(strat.name)
 
 
@@ -689,7 +696,7 @@ def _handle_synthetic_settlement(store: TradeStoreProtocol, payload: dict, now: 
 # dispatch_message router
 # ---------------------------------------------------------------------------
 
-def dispatch_message(
+async def dispatch_message(
 	event: dict,
 	config: dict,
 	market_state: MarketState,
@@ -709,6 +716,10 @@ def dispatch_message(
 	accepts both so the live engine can construct events from raw WS messages
 	without going through a capture writer first, and the replay backtester
 	can feed the on-disk shape directly.
+
+	Async because ticker/trade handlers fan out to `process_tick` →
+	`_handle_enter` → `await executor.place(...)`. Synthetic and orderbook
+	handlers stay sync (no I/O) — calling them from this async router is fine.
 	"""
 	# Accept both the wrapped (capture) shape and the raw WS shape.
 	source = event.get("source")
@@ -726,12 +737,12 @@ def dispatch_message(
 		elif msg_type == "orderbook_delta":
 			_handle_orderbook_delta(market_state, msg)
 		elif msg_type == "ticker":
-			_handle_ticker_msg(
+			await _handle_ticker_msg(
 				msg, config, market_state, store, strategies,
 				strat_by_series, pending_states, dirty, executor, now=now,
 			)
 		elif msg_type == "trade":
-			_handle_trade_msg(
+			await _handle_trade_msg(
 				msg, config, market_state, store, strategies,
 				strat_by_series, pending_states, dirty, executor, now=now,
 			)

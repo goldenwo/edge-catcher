@@ -15,6 +15,7 @@ class TestDiscordNotify:
 
 	def test_sends_to_webhook(self):
 		"""Should POST to the configured webhook URL."""
+		from edge_catcher.engine import notifications
 		from edge_catcher.engine.notifications import discord_notify
 
 		mock_client = AsyncMock()
@@ -23,6 +24,12 @@ class TestDiscordNotify:
 		mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 		mock_client.__aexit__ = AsyncMock(return_value=False)
 		mock_client.post = AsyncMock(return_value=mock_resp)
+
+		# Reset the module-level cached client so the patched AsyncClient
+		# factory gets used. Other async tests in the suite (engine
+		# process_tick paths that call notify()) may have populated the
+		# cache during their @pytest.mark.asyncio runs.
+		notifications._client = None
 
 		with patch.dict(os.environ, {"DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL": "https://example.com/webhook"}):
 			with patch("edge_catcher.engine.notifications.httpx.AsyncClient", return_value=mock_client):

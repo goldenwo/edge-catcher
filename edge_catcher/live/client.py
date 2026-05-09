@@ -1,6 +1,7 @@
 """Kalshi REST order placement client — Python API."""
 
 from __future__ import annotations
+import asyncio
 import re
 import time
 import uuid
@@ -118,35 +119,41 @@ class Position:
 
 
 class KalshiOrderClient:
-	"""Synchronous order client. Use one instance per process lifetime.
+	"""Asynchronous order client. Use one instance per process lifetime.
 
-	Thread-safety: `httpx.Client` is thread-safe; the audit logger is locked.
-	The engine in sub-project E creates a single client shared across the loop.
+	Async by design — the engine signal-flow path awaits ``executor.place(...)``
+	for both paper and live executors (sub-project D's LiveExecutor wraps this
+	client). HTTP I/O uses ``httpx.AsyncClient``; retry backoff uses
+	``asyncio.sleep`` so the surrounding event loop is never blocked.
+
+	Thread-safety: ``httpx.AsyncClient`` is task-safe within a single event
+	loop; the audit logger is locked. The engine in sub-project E creates a
+	single client shared across the loop.
 	"""
 
 	def __init__(self, config: LiveConfig, audit: AuditLogger) -> None:
 		self._config = config
 		self._audit = audit
-		self._http = httpx.Client(
+		self._http = httpx.AsyncClient(
 			base_url=config.kalshi_rest_base,
 			timeout=config.http_timeout_seconds,
 			headers={"Accept": "application/json"},
 		)
 
-	def close(self) -> None:
-		self._http.close()
+	async def close(self) -> None:
+		await self._http.aclose()
 
-	def __enter__(self) -> "KalshiOrderClient":
+	async def __aenter__(self) -> "KalshiOrderClient":
 		return self
 
-	def __exit__(self, *args: object) -> None:
-		self.close()
+	async def __aexit__(self, *args: object) -> None:
+		await self.close()
 
 	# ------------------------------------------------------------------
 	# Public API
 	# ------------------------------------------------------------------
 
-	def place(self, req: OrderRequest) -> Order:
+	async def place(self, req: OrderRequest) -> Order:
 		"""Place a Kalshi limit order. Enforces ABSOLUTE_MAX_ORDER_DOLLARS hard cap.
 
 		The CLI applies a separate, lower cap before this is reached; see cli.py.
@@ -160,37 +167,37 @@ class KalshiOrderClient:
 
 		body = self._build_place_body(req)
 		path = "/portfolio/orders"
-		response = self._post(path, body, op="place", client_order_id=req.client_order_id)
+		response = await self._post(path, body, op="place", client_order_id=req.client_order_id)
 		# OrderRejected on 4xx is mapped inside _request via op-specific dispatch.
 		# Kalshi returns {"order": {...}} on success.
 		order_json = response.get("order", response)
 		return self._parse_order(order_json, fallback_request=req)
 
-	def cancel(self, order_id: str) -> CancelResult:
+	async def cancel(self, order_id: str) -> CancelResult:
 		path = f"/portfolio/orders/{order_id}"
-		response = self._delete(path, op="cancel")
+		response = await self._delete(path, op="cancel")
 		return CancelResult(
 			order_id=order_id,
 			status=(response.get("order", {}) or {}).get("status", "canceled"),
 			raw=response,
 		)
 
-	def status(self, order_id: str) -> Order:
+	async def status(self, order_id: str) -> Order:
 		path = f"/portfolio/orders/{order_id}"
-		response = self._get(path, op="status")
+		response = await self._get(path, op="status")
 		return self._parse_order(response.get("order", response))
 
-	def balance(self) -> Balance:
+	async def balance(self) -> Balance:
 		path = "/portfolio/balance"
-		response = self._get(path, op="balance")
+		response = await self._get(path, op="balance")
 		return Balance(
 			balance_cents=int(response.get("balance", 0)),
 			raw=response,
 		)
 
-	def positions(self) -> list[Position]:
+	async def positions(self) -> list[Position]:
 		path = "/portfolio/positions"
-		response = self._get(path, op="positions")
+		response = await self._get(path, op="positions")
 		raw = response.get("market_positions", [])
 		return [self._parse_position(p) for p in raw]
 
@@ -198,16 +205,16 @@ class KalshiOrderClient:
 	# Internal request layer
 	# ------------------------------------------------------------------
 
-	def _post(self, path: str, body: dict, op: str, client_order_id: str | None) -> dict:
-		return self._request("POST", path, op=op, json=body, client_order_id=client_order_id)
+	async def _post(self, path: str, body: dict, op: str, client_order_id: str | None) -> dict:
+		return await self._request("POST", path, op=op, json=body, client_order_id=client_order_id)
 
-	def _get(self, path: str, op: str) -> dict:
-		return self._request("GET", path, op=op)
+	async def _get(self, path: str, op: str) -> dict:
+		return await self._request("GET", path, op=op)
 
-	def _delete(self, path: str, op: str) -> dict:
-		return self._request("DELETE", path, op=op)
+	async def _delete(self, path: str, op: str) -> dict:
+		return await self._request("DELETE", path, op=op)
 
-	def _request(
+	async def _request(
 		self,
 		method: str,
 		path: str,
@@ -237,7 +244,7 @@ class KalshiOrderClient:
 					key_id_env="KALSHI_LIVE_KEY_ID",
 					private_key_env="KALSHI_LIVE_PRIVATE_KEY",
 				)
-				resp = self._http.request(method, full_path, json=json, headers=headers)
+				resp = await self._http.request(method, full_path, json=json, headers=headers)
 				response_status = resp.status_code
 				try:
 					response_body = resp.json() if resp.content else {}
@@ -265,7 +272,7 @@ class KalshiOrderClient:
 						last_error = f"HTTP {resp.status_code} after {retries} retries"
 						break
 					backoff = min(60.0, (2 ** retries) + 0.1 * retries)
-					time.sleep(backoff)
+					await asyncio.sleep(backoff)
 					retries += 1
 					continue
 
@@ -296,7 +303,7 @@ class KalshiOrderClient:
 				if retries >= self._config.max_retries:
 					last_error = f"{type(e).__name__}: {e}"
 					break
-				time.sleep(min(60.0, (2 ** retries) + 0.1 * retries))
+				await asyncio.sleep(min(60.0, (2 ** retries) + 0.1 * retries))
 				retries += 1
 
 		self._write_audit(
