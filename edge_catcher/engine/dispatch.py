@@ -6,7 +6,10 @@ the same event shape through the same handlers, which is what makes byte-equal
 parity possible between the two paths.
 
 No globals. No I/O beyond what the handlers already did while inside engine.py.
-No async. Pure routing + state mutation + store writes.
+Async on the call graph that reaches `executor.place` (`process_tick`,
+`dispatch_message`, ticker/trade handlers, signal pipeline are coroutines);
+other handlers (orderbook, synthetic) remain sync. Pure routing + state
+mutation + store writes.
 
 Invariants (see capture/replay spec §4.7):
   * `now: datetime` is threaded from the caller (WS loop, settlement poller,
