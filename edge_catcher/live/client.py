@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 
@@ -352,7 +352,7 @@ class KalshiOrderClient:
 			retries=retries,
 		))
 
-	async def _write_audit_async(self, **kwargs) -> None:
+	async def _write_audit_async(self, **kwargs: Any) -> None:
 		# AuditLogger.write does sync open/write/close under a threading.Lock.
 		# Off-load to the default thread pool so the engine event loop (which
 		# also services WS receives and the reconciler poll in sub-project E)
