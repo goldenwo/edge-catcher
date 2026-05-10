@@ -96,13 +96,15 @@ def test_order_request_none_client_order_id_passes():
 	assert req.client_order_id is None
 
 
-def test_client_init_and_close(cfg, audit):
+@pytest.mark.asyncio
+async def test_client_init_and_close(cfg, audit):
 	client = KalshiOrderClient(cfg, audit)
-	client.close()
+	await client.close()
 
 
-def test_client_context_manager(cfg, audit):
-	with KalshiOrderClient(cfg, audit) as c:
+@pytest.mark.asyncio
+async def test_client_context_manager(cfg, audit):
+	async with KalshiOrderClient(cfg, audit) as c:
 		assert c is not None
 
 
@@ -112,9 +114,13 @@ def test_client_context_manager(cfg, audit):
 
 
 def make_mock_client(cfg, audit, transport):
-	"""Helper: build a KalshiOrderClient with a custom MockTransport."""
+	"""Helper: build a KalshiOrderClient with a custom MockTransport.
+
+	httpx.MockTransport works identically for AsyncClient — same protocol,
+	same handler signature.
+	"""
 	c = KalshiOrderClient(cfg, audit)
-	c._http = httpx.Client(
+	c._http = httpx.AsyncClient(
 		base_url=cfg.kalshi_rest_base,
 		timeout=cfg.http_timeout_seconds,
 		headers={"Accept": "application/json"},
@@ -143,7 +149,8 @@ def signing_env(monkeypatch):
 	monkeypatch.setenv("KALSHI_LIVE_PRIVATE_KEY", pem.decode())
 
 
-def test_place_exceeds_absolute_max_raises_before_http(cfg, audit, signing_env):
+@pytest.mark.asyncio
+async def test_place_exceeds_absolute_max_raises_before_http(cfg, audit, signing_env):
 	called = []
 	def handler(request: httpx.Request) -> httpx.Response:
 		called.append(request)
@@ -153,11 +160,12 @@ def test_place_exceeds_absolute_max_raises_before_http(cfg, audit, signing_env):
 	# 1000 contracts × 50¢ = $500 > ABSOLUTE_MAX $50
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1000, limit_price_cents=50)
 	with pytest.raises(CapExceededError, match="ABSOLUTE_MAX"):
-		c.place(req)
+		await c.place(req)
 	assert called == []  # no HTTP issued
 
 
-def test_place_happy_path(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 	"""201 response yields an Order; audit row records success."""
 	cfg_with_audit = cfg.model_copy(update={"audit_log_path": tmp_path / "audit.jsonl"})
 	audit_logger = AuditLogger(cfg_with_audit.audit_log_path)
@@ -177,7 +185,7 @@ def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 		}})
 	c = make_mock_client(cfg_with_audit, audit_logger, httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
-	order = c.place(req)
+	order = await c.place(req)
 	assert order.order_id == "ord-123"
 	assert order.count == 10
 	# Path used must include the prefix
@@ -192,7 +200,8 @@ def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 	assert row["outcome"] == "success"
 
 
-def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
 	"""Regression: httpx must NOT redirect /portfolio/orders to skip the prefix."""
 	cfg_with_audit = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	audit_logger = AuditLogger(cfg_with_audit.audit_log_path)
@@ -202,12 +211,13 @@ def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
 		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
 	c = make_mock_client(cfg_with_audit, audit_logger, httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
-	c.place(req)
+	await c.place(req)
 	# Full URL must include /trade-api/v2/portfolio/orders
 	assert "/trade-api/v2/portfolio/orders" in captured_url[0]
 
 
-def test_place_does_not_send_buy_max_cost(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_place_does_not_send_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	"""buy_max_cost is NOT sent — Kalshi's enforcement of it is opaque enough
 	that even principal+estimated_fee gets rejected. Cap safety is provided by
 	ABSOLUTE_MAX_ORDER_DOLLARS (library) + cli_max_order_dollars (CLI).
@@ -220,12 +230,13 @@ def test_place_does_not_send_buy_max_cost(cfg, audit, signing_env, tmp_path):
 		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
-	c.place(req)
+	await c.place(req)
 	assert "buy_max_cost" not in captured_body[0]
 	assert captured_body[0]["yes_price"] == 5
 
 
-def test_place_translates_tif_short_to_kalshi_verbose(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_place_translates_tif_short_to_kalshi_verbose(cfg, audit, signing_env, tmp_path):
 	"""Wire format of time_in_force must be Kalshi's verbose underscored values
 	(`good_till_canceled` / `immediate_or_cancel` / `fill_or_kill`), NOT our
 	short Pythonic CLI form (`gtc`/`ioc`/`fok`). Regression guard: integration
@@ -248,14 +259,15 @@ def test_place_translates_tif_short_to_kalshi_verbose(cfg, audit, signing_env, t
 			ticker="X", action="buy", side="yes", count=1,
 			limit_price_cents=1, time_in_force=short,
 		)
-		c.place(req)
+		await c.place(req)
 		assert captured_bodies[0]["time_in_force"] == verbose, (
 			f"short {short!r} should translate to verbose {verbose!r} on the wire, "
 			f"got {captured_bodies[0]['time_in_force']!r}"
 		)
 
 
-def test_place_sell_also_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_place_sell_also_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
 	"""Sanity check: sells continue to omit buy_max_cost (we don't send it for
 	any action — see test_place_does_not_send_buy_max_cost)."""
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
@@ -265,25 +277,30 @@ def test_place_sell_also_omits_buy_max_cost(cfg, audit, signing_env, tmp_path):
 		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="sell", side="yes", count=10, limit_price_cents=5)
-	c.place(req)
+	await c.place(req)
 	assert "buy_max_cost" not in captured_body[0]
 
 
-def test_place_4xx_raises_order_rejected(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_place_4xx_raises_order_rejected(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(400, json={"error": {"code": "bad", "message": "no"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
 	with pytest.raises(OrderRejected) as exc:
-		c.place(req)
+		await c.place(req)
 	assert exc.value.status == 400
 
 
-def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, tmp_path, monkeypatch):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl", "max_retries": 3})
-	# Skip the real backoff sleep
-	monkeypatch.setattr("edge_catcher.live.client.time.sleep", lambda s: None)
+	# Skip the real backoff sleep — patch asyncio.sleep so retry timing is
+	# instant. The async path uses `await asyncio.sleep(...)`, not time.sleep.
+	async def _no_sleep(s):  # noqa: ARG001
+		return None
+	monkeypatch.setattr("edge_catcher.live.client.asyncio.sleep", _no_sleep)
 	calls = [0]
 	def handler(request: httpx.Request) -> httpx.Response:
 		calls[0] += 1
@@ -292,7 +309,7 @@ def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, tmp_pat
 		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
-	order = c.place(req)
+	order = await c.place(req)
 	assert order.order_id == "x"
 	# Audit row records retries=1
 	row = json.loads((cfg2.audit_log_path).read_text().strip().split("\n")[-1])
@@ -305,14 +322,15 @@ def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, tmp_pat
 # ---------------------------------------------------------------------------
 
 
-def test_cancel_happy_path(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_cancel_happy_path(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	captured = []
 	def handler(request: httpx.Request) -> httpx.Response:
 		captured.append(request)
 		return httpx.Response(200, json={"order": {"order_id": "ord-1", "status": "canceled"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
-	result = c.cancel("ord-1")
+	result = await c.cancel("ord-1")
 	assert result.order_id == "ord-1"
 	assert result.status == "canceled"
 	# DELETE method used
@@ -320,32 +338,35 @@ def test_cancel_happy_path(cfg, audit, signing_env, tmp_path):
 	assert captured[0].url.path == "/trade-api/v2/portfolio/orders/ord-1"
 
 
-def test_cancel_404_raises_order_already_final(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_cancel_404_raises_order_already_final(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(404, json={"error": {"message": "order_not_found"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	with pytest.raises(OrderAlreadyFinal) as exc:
-		c.cancel("missing-id")
+		await c.cancel("missing-id")
 	assert exc.value.status == 404
 
 
-def test_cancel_409_raises_order_already_final(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_cancel_409_raises_order_already_final(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(409, json={"error": {"message": "already filled"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	with pytest.raises(OrderAlreadyFinal):
-		c.cancel("filled-id")
+		await c.cancel("filled-id")
 
 
-def test_cancel_other_4xx_raises_kalshi_api_error(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_cancel_other_4xx_raises_kalshi_api_error(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(401, json={"error": {"message": "unauthorized"}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	with pytest.raises(KalshiAPIError) as exc:
-		c.cancel("any-id")
+		await c.cancel("any-id")
 	# Specifically NOT OrderAlreadyFinal
 	assert not isinstance(exc.value, OrderAlreadyFinal)
 
@@ -355,7 +376,8 @@ def test_cancel_other_4xx_raises_kalshi_api_error(cfg, audit, signing_env, tmp_p
 # ---------------------------------------------------------------------------
 
 
-def test_status_happy_path(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_status_happy_path(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		assert request.method == "GET"
@@ -366,29 +388,32 @@ def test_status_happy_path(cfg, audit, signing_env, tmp_path):
 			"status": "resting", "filled_count": 3,
 		}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
-	o = c.status("ord-1")
+	o = await c.status("ord-1")
 	assert o.order_id == "ord-1"
 	assert o.filled_count == 3
 
 
-def test_balance_happy_path(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_balance_happy_path(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"balance": 19500})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
-	bal = c.balance()
+	bal = await c.balance()
 	assert bal.balance_cents == 19500
 
 
-def test_positions_empty(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_positions_empty(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"market_positions": []})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
-	assert c.positions() == []
+	assert await c.positions() == []
 
 
-def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
+@pytest.mark.asyncio
+async def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"market_positions": [
@@ -396,7 +421,7 @@ def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
 			{"ticker": "Y", "position": -3, "average_position_cost": 95},
 		]})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
-	positions = c.positions()
+	positions = await c.positions()
 	assert len(positions) == 2
 	assert positions[0].ticker == "X"
 	assert positions[0].count == 10

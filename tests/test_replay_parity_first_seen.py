@@ -63,9 +63,10 @@ def _check_sentinel_consistency() -> None:
 			)
 
 
+@pytest.mark.asyncio
 @pytest.mark.requires_bundles
 @pytest.mark.parametrize("day", PARITY_DAYS)
-def test_parity(day: str) -> None:
+async def test_parity(day: str) -> None:
 	_check_sentinel_consistency()  # safety net for 1.d.ii oversight
 
 	bundle = _resolve_bundle(day)
@@ -125,7 +126,7 @@ def test_parity(day: str) -> None:
 
 	# Replay
 	from edge_catcher.engine.replay.backtester import replay_capture
-	result = replay_capture(bundle)
+	result = await replay_capture(bundle)
 	replay_keys = frozenset(_project(t) for t in result.trades)
 
 	# Gate 4: comparator

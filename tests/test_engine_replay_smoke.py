@@ -17,13 +17,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from edge_catcher.engine.replay.backtester import replay_capture
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "synthetic_bundle" / "2026-04-15"
 EXPECTED_FIELDS = ("strategy", "ticker", "side", "fill_size", "blended_entry", "status")
 
 
-def test_replay_capture_synthetic_bundle_produces_expected_trades():
+@pytest.mark.asyncio
+async def test_replay_capture_synthetic_bundle_produces_expected_trades():
 	"""End-to-end: bundle -> replay_capture -> InMemoryTradeStore.all_trades().
 
 	Asserts the replay path through the new engine produces exactly the
@@ -33,7 +36,7 @@ def test_replay_capture_synthetic_bundle_produces_expected_trades():
 	"""
 	expected = json.loads((FIXTURE_DIR / "expected_trades.json").read_text(encoding="utf-8"))
 
-	result = replay_capture(FIXTURE_DIR)
+	result = await replay_capture(FIXTURE_DIR)
 
 	assert result.events_processed == 2, (
 		f"expected 2 events processed (orderbook_snapshot + ticker), "

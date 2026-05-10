@@ -8,6 +8,7 @@ backstop; this CLI cap (from live-trader.yaml) is the user-facing dev-mode floor
 
 from __future__ import annotations
 import argparse
+import asyncio
 import sys
 
 from edge_catcher.live.audit import AuditLogger
@@ -24,6 +25,11 @@ from edge_catcher.live.errors import (
 
 
 def main(argv: list[str] | None = None) -> int:
+	"""Sync CLI entry point — wraps the async client at this boundary."""
+	return asyncio.run(_main_async(argv))
+
+
+async def _main_async(argv: list[str] | None) -> int:
 	parser = _build_parser()
 	args = parser.parse_args(argv)
 	if not args.verb:
@@ -31,9 +37,9 @@ def main(argv: list[str] | None = None) -> int:
 		return 2
 	cfg = load_config()
 	audit = AuditLogger(cfg.audit_log_path)
-	with KalshiOrderClient(cfg, audit) as client:
+	async with KalshiOrderClient(cfg, audit) as client:
 		try:
-			return _dispatch(args, client, cfg)
+			return await _dispatch(args, client, cfg)
 		except CapExceededError as e:
 			print(f"REJECTED: {e}", file=sys.stderr)
 			return 3
@@ -80,21 +86,21 @@ def _build_parser() -> argparse.ArgumentParser:
 	return parser
 
 
-def _dispatch(args: argparse.Namespace, client: KalshiOrderClient, cfg) -> int:
+async def _dispatch(args: argparse.Namespace, client: KalshiOrderClient, cfg) -> int:
 	if args.verb == "place":
-		return _do_place(args, client, cfg)
+		return await _do_place(args, client, cfg)
 	if args.verb == "cancel":
-		return _do_cancel(args, client)
+		return await _do_cancel(args, client)
 	if args.verb == "status":
-		return _do_status(args, client)
+		return await _do_status(args, client)
 	if args.verb == "balance":
-		return _do_balance(client)
+		return await _do_balance(client)
 	if args.verb == "positions":
-		return _do_positions(client)
+		return await _do_positions(client)
 	return 2
 
 
-def _do_place(args: argparse.Namespace, client: KalshiOrderClient, cfg) -> int:
+async def _do_place(args: argparse.Namespace, client: KalshiOrderClient, cfg) -> int:
 	req = OrderRequest(
 		ticker=args.ticker,
 		action=args.action,
@@ -114,7 +120,7 @@ def _do_place(args: argparse.Namespace, client: KalshiOrderClient, cfg) -> int:
 			print("Cancelled.")
 			return 1
 
-	order = client.place(req)
+	order = await client.place(req)
 	print(
 		f"Placed order_id={order.order_id} status={order.status}"
 		f" count={order.count} price={order.limit_price_cents}c"
@@ -134,19 +140,19 @@ def _print_place_confirmation(req: OrderRequest, cfg) -> None:
 		  f"ABS_MAX: ${ABSOLUTE_MAX_ORDER_DOLLARS:.2f})")
 
 
-def _do_cancel(args: argparse.Namespace, client: KalshiOrderClient) -> int:
+async def _do_cancel(args: argparse.Namespace, client: KalshiOrderClient) -> int:
 	if not args.yes:
 		ans = input(f"Cancel order {args.order_id}? [y/N]: ").strip().lower()
 		if ans not in ("y", "yes"):
 			print("Aborted.")
 			return 1
-	result = client.cancel(args.order_id)
+	result = await client.cancel(args.order_id)
 	print(f"Cancelled order_id={result.order_id} status={result.status}")
 	return 0
 
 
-def _do_status(args: argparse.Namespace, client: KalshiOrderClient) -> int:
-	order = client.status(args.order_id)
+async def _do_status(args: argparse.Namespace, client: KalshiOrderClient) -> int:
+	order = await client.status(args.order_id)
 	print(f"order_id={order.order_id}")
 	print(f"  ticker:    {order.ticker}")
 	print(f"  side:      {order.side} ({order.action})")
@@ -157,14 +163,14 @@ def _do_status(args: argparse.Namespace, client: KalshiOrderClient) -> int:
 	return 0
 
 
-def _do_balance(client: KalshiOrderClient) -> int:
-	bal = client.balance()
+async def _do_balance(client: KalshiOrderClient) -> int:
+	bal = await client.balance()
 	print(f"balance: ${bal.balance_cents / 100:.2f}")
 	return 0
 
 
-def _do_positions(client: KalshiOrderClient) -> int:
-	positions = client.positions()
+async def _do_positions(client: KalshiOrderClient) -> int:
+	positions = await client.positions()
 	if not positions:
 		print("(no open positions)")
 		return 0

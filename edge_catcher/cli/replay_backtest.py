@@ -1,5 +1,6 @@
 """Replay backtest CLI command — replay a captured bundle through the live dispatch path."""
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -16,11 +17,13 @@ def run(args) -> None:
 	prior = Path(args.prior) if args.prior else None
 	ticker_filter = set(args.series.split(",")) if args.series else None
 
-	result = replay_capture(
+	# replay_capture is async (dispatch_message → executor.place is async);
+	# wrap at the CLI sync→async boundary.
+	result = asyncio.run(replay_capture(
 		bundle_path=bundle,
 		prior_bundle=prior,
 		ticker_filter=ticker_filter,
-	)
+	))
 
 	output = {
 		"status": "ok",

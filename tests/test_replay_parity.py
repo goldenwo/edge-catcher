@@ -139,11 +139,12 @@ def _load_live_day_slice(bundle: Path) -> list[dict]:
 	return rows
 
 
+@pytest.mark.asyncio
 @pytest.mark.skipif(
 	not os.environ.get(PARITY_BUNDLE_ENV),
 	reason=f"set {PARITY_BUNDLE_ENV}=<bundle-path> to run",
 )
-def test_replay_parity_against_live_bundle():
+async def test_replay_parity_against_live_bundle():
 	"""Run replay against a captured bundle and compare every live row
 	on the PARITY_COLUMNS whitelist.
 
@@ -158,7 +159,7 @@ def test_replay_parity_against_live_bundle():
 	skipped = _is_bundle_skipped(bundle_path)
 
 	# 1. Run replay
-	result = replay_capture(bundle_path)
+	result = await replay_capture(bundle_path)
 
 	# 2. Load live slice
 	live_all = _load_live_day_slice(bundle_path)
@@ -260,11 +261,12 @@ def test_replay_parity_against_live_bundle():
 		assert not replay_only, f"STRICT parity violated: {len(replay_only)} replay-only rows\n{report}"
 
 
+@pytest.mark.asyncio
 @pytest.mark.skipif(
 	not os.environ.get(PARITY_BUNDLE_ENV),
 	reason=f"set {PARITY_BUNDLE_ENV}=<bundle-path> to run",
 )
-def test_replay_runs_without_errors():
+async def test_replay_runs_without_errors():
 	"""Smoke test: replay must complete without raising, regardless of parity.
 
 	If the bundle is malformed (missing manifest, broken strategies_local.py,
@@ -273,6 +275,6 @@ def test_replay_runs_without_errors():
 	from edge_catcher.engine.replay.backtester import replay_capture
 
 	bundle_path = Path(os.environ[PARITY_BUNDLE_ENV])
-	result = replay_capture(bundle_path)
+	result = await replay_capture(bundle_path)
 	assert result.events_processed > 0, "replay processed zero events — bundle likely malformed"
 	assert result.strategies_loaded, "no strategies loaded from bundle"

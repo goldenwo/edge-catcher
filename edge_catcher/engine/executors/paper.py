@@ -333,7 +333,12 @@ class PaperExecutor:
 		self._ms = market_state
 		self._config = config
 
-	def place(self, req: OrderRequest) -> OrderResult:
+	async def place(self, req: OrderRequest) -> OrderResult:
+		# Async signature with sync-only body is the locked pattern (plan §1.1):
+		# the orderbook walk is pure CPU with no I/O, but we adopt `async def`
+		# so dispatch can `await executor.place(...)` uniformly across paper
+		# and live executors. No `await` is needed in this body.
+		#
 		# MarketState.get_orderbook returns Optional; the dispatch path defaults
 		# to an empty OrderbookSnapshot for unseeded tickers (see
 		# engine/dispatch.py:465), and resolve_fill treats empty books as a

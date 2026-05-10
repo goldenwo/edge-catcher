@@ -730,7 +730,7 @@ async def _ws_loop(
 				capture_writer.write_ws(msg, recv_ts=now)
 
 			try:
-				dispatch_message(
+				await dispatch_message(
 					{"source": "ws", "payload": msg},
 					config, market_state, store,
 					strategies, strat_by_series, pending_states, dirty,

@@ -111,7 +111,8 @@ def test_pending_states_projected_from_store_after_seeding():
 	assert "strat-c" not in pending_states
 
 
-def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
+@pytest.mark.asyncio
+async def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 	"""End-to-end wire-up test — the guard for Task 10's replay_capture edits.
 
 	Builds a minimal bundle (manifest + empty JSONL) with a prior-day
@@ -158,7 +159,7 @@ def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 
 	config = {"strategies": {"counter-strat": {"series": ["KXTEST"]}}}
 
-	result = replay_capture(
+	result = await replay_capture(
 		bundle_path=bundle,
 		strategies=[NoopStrategy()],
 		config=config,
@@ -181,7 +182,8 @@ def test_replay_capture_seeds_and_flushes_strategy_state(tmp_path):
 	)
 
 
-def test_seeded_state_round_trips_through_replay_path(tmp_path):
+@pytest.mark.asyncio
+async def test_seeded_state_round_trips_through_replay_path(tmp_path):
 	"""THE behavioral test. Proves the entire chain:
 	_seed_strategy_state → store → projection into pending_states →
 	process_tick mutates the projection → end-of-replay flush → store
@@ -247,7 +249,7 @@ def test_seeded_state_round_trips_through_replay_path(tmp_path):
 		is_first_observation=True,
 	)
 	now = datetime.now(timezone.utc)
-	process_tick(ctx, [strat], store, config={}, executor=_make_executor_for_ctx(ctx, {}), now=now)
+	await process_tick(ctx, [strat], store, config={}, executor=_make_executor_for_ctx(ctx, {}), now=now)
 
 	# The mutation lands in pending_states because persisted_state
 	# and pending_states["counter-strat"] are the same dict object.
@@ -356,8 +358,9 @@ _ENVELOPES = {
 }
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("schema_label,envelope", list(_ENVELOPES.items()))
-def test_seed_market_state_derives_first_seen(
+async def test_seed_market_state_derives_first_seen(
 	schema_label: str, envelope: dict, tmp_path: Path
 ) -> None:
 	"""For each envelope shape, `_seed_market_state` must produce a state
@@ -410,7 +413,7 @@ def test_seed_market_state_derives_first_seen(
 			now=datetime(2026, 4, 15, 12, 0, 0, tzinfo=timezone.utc),
 		)
 
-		dispatch_message(_trade_event_for("KXSEED-T1"), **call_args)
+		await dispatch_message(_trade_event_for("KXSEED-T1"), **call_args)
 		assert len(strat.captured_contexts) == 1, (
 			f"[{schema_label}] dispatch did not reach the strategy for KXSEED-T1"
 		)
@@ -420,7 +423,7 @@ def test_seed_market_state_derives_first_seen(
 			"must NOT report this as a first observation"
 		)
 
-		dispatch_message(_trade_event_for("KXNOTSEEN-T1"), **call_args)
+		await dispatch_message(_trade_event_for("KXNOTSEEN-T1"), **call_args)
 		assert len(strat.captured_contexts) == 2, (
 			f"[{schema_label}] dispatch did not reach the strategy for KXNOTSEEN-T1"
 		)

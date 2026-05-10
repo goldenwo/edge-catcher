@@ -70,8 +70,11 @@ class OrderResult:
 class Executor(Protocol):
 	"""Engine-facing execution contract.
 
-	Sync by design — the engine signal-flow path is fully sync today and stays
-	sync (parity gate, byte-exact replay). Async I/O is contained inside the
-	async lifecycle owners (engine.py WS loop, pollers).
+	Async by design — `LiveExecutor` (sub-project D) issues HTTPX requests
+	to Kalshi inside `place()`; PaperExecutor's body is pure CPU but adopts
+	the same async signature so dispatch can `await executor.place(...)`
+	without branching on executor flavor. Replay parity is preserved because
+	the captured WS message stream still drives a deterministic async
+	dispatch — only the call mechanism changes, not the logic.
 	"""
-	def place(self, req: OrderRequest) -> OrderResult: ...
+	async def place(self, req: OrderRequest) -> OrderResult: ...
