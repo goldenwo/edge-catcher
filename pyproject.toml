@@ -32,6 +32,7 @@ live = [
 ]
 dev = [
     "pytest>=7.0",
+    "pytest-asyncio>=0.23",
     "pytest-cov>=4.0",
     "ruff>=0.5",
     "mypy>=1.10",
@@ -72,6 +73,7 @@ no_implicit_optional = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "strict"
 markers = [
 	"requires_bundles: tests that require local R2-downloaded bundles in data/bundles/<day>/",
 	"live: integration tests that hit prod Kalshi (gated by LIVE_TRADER_LIVE_TEST=1)",

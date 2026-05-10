@@ -75,7 +75,7 @@ class ReplayResult:
 # ---------------------------------------------------------------------------
 
 
-def replay_capture(
+async def replay_capture(
 	bundle_path: Path | str,
 	*,
 	strategies: Optional[list[Strategy]] = None,
@@ -84,6 +84,11 @@ def replay_capture(
 	prior_bundle: Optional[Path | str] = None,
 ) -> ReplayResult:
 	"""Run the replay backtester against a captured bundle.
+
+	Async because the underlying ``dispatch_message`` is async (the executor
+	contract is async — sub-project D's LiveExecutor awaits HTTPX). Replay
+	uses ``PaperExecutor`` whose ``place`` body is sync-only, but the call
+	signature is awaited uniformly. CLI/test callers wrap with ``asyncio.run``.
 
 	Args:
 		bundle_path:   Path to a bundle directory (contains manifest.json + jsonl.zst + etc).
@@ -191,7 +196,7 @@ def replay_capture(
 		last_ts = recv_ts
 
 		try:
-			dispatch_message(
+			await dispatch_message(
 				event=event,
 				config=config,
 				market_state=market_state,

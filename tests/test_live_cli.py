@@ -68,14 +68,15 @@ def test_place_yes_skip_calls_client(monkeypatch, tmp_path, signing_env_cli):
 			"side": "yes", "action": "buy", "time_in_force": "gtc",
 		}})
 
-	# Patch httpx.Client to inject a MockTransport without touching other kwargs.
-	original = httpx.Client
+	# Patch httpx.AsyncClient to inject a MockTransport without touching other kwargs.
+	# httpx.MockTransport is sync/async-agnostic — the same handler signature works.
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main([
 		"place", "--ticker", "X", "--side", "yes",
 		"--price", "1", "--count", "1", "--yes",
@@ -133,13 +134,13 @@ def test_cancel_yes_skip_calls_client(monkeypatch, tmp_path, capsys, signing_env
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"order": {"order_id": "ord-x", "status": "canceled"}})
 
-	original = httpx.Client
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main(["cancel", "ord-x", "--yes"])
 	assert rc == 0
 	out = capsys.readouterr().out
@@ -182,13 +183,13 @@ def test_status_prints_order_details(monkeypatch, tmp_path, capsys, signing_env_
 			"status": "resting", "filled_count": 3,
 		}})
 
-	original = httpx.Client
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main(["status", "ord-x"])
 	assert rc == 0
 	out = capsys.readouterr().out
@@ -216,13 +217,13 @@ def test_balance_prints_dollar_amount(monkeypatch, tmp_path, capsys, signing_env
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"balance": 19500})
 
-	original = httpx.Client
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main(["balance"])
 	assert rc == 0
 	out = capsys.readouterr().out
@@ -244,13 +245,13 @@ def test_positions_empty_prints_no_open(monkeypatch, tmp_path, capsys, signing_e
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"market_positions": []})
 
-	original = httpx.Client
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main(["positions"])
 	assert rc == 0
 	assert "(no open positions)" in capsys.readouterr().out
@@ -274,13 +275,13 @@ def test_positions_non_empty_prints_each(monkeypatch, tmp_path, capsys, signing_
 			{"ticker": "KXBTC", "position": 5, "average_position_cost": 20},
 		]})
 
-	original = httpx.Client
+	original = httpx.AsyncClient
 
 	def mock_client(*args, **kwargs):
 		kwargs_clean = {k: v for k, v in kwargs.items() if k != "transport"}
 		return original(*args, transport=httpx.MockTransport(handler), **kwargs_clean)
 
-	monkeypatch.setattr("httpx.Client", mock_client)
+	monkeypatch.setattr("httpx.AsyncClient", mock_client)
 	rc = main(["positions"])
 	assert rc == 0
 	out = capsys.readouterr().out

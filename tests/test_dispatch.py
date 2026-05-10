@@ -53,7 +53,8 @@ def call_args(market_state: MarketState, store: TradeStore) -> dict:
 	)
 
 
-def test_dispatch_routes_orderbook_snapshot(market_state: MarketState, call_args: dict) -> None:
+@pytest.mark.asyncio
+async def test_dispatch_routes_orderbook_snapshot(market_state: MarketState, call_args: dict) -> None:
 	"""A WS orderbook_snapshot event populates market_state for the ticker."""
 	event = {
 		"source": "ws",
@@ -66,14 +67,15 @@ def test_dispatch_routes_orderbook_snapshot(market_state: MarketState, call_args
 			},
 		},
 	}
-	dispatch_message(event, **call_args)
+	await dispatch_message(event, **call_args)
 	ob = market_state.get_orderbook("KXTEST-26APR14")
 	assert ob is not None
 	assert ob.yes_levels == [(0.50, 100)]
 	assert ob.no_levels == [(0.48, 50)]
 
 
-def test_dispatch_routes_orderbook_delta(market_state: MarketState, call_args: dict) -> None:
+@pytest.mark.asyncio
+async def test_dispatch_routes_orderbook_delta(market_state: MarketState, call_args: dict) -> None:
 	"""A WS orderbook_delta event applies a delta to an existing book."""
 	# Seed the book first
 	market_state.seed_orderbook("KXTEST-26APR14", OrderbookSnapshot(
@@ -91,12 +93,13 @@ def test_dispatch_routes_orderbook_delta(market_state: MarketState, call_args: d
 			},
 		},
 	}
-	dispatch_message(event, **call_args)
+	await dispatch_message(event, **call_args)
 	ob = market_state.get_orderbook("KXTEST-26APR14")
 	assert ob.yes_levels == [(0.50, 80)]
 
 
-def test_dispatch_accepts_raw_ws_shape(market_state: MarketState, call_args: dict) -> None:
+@pytest.mark.asyncio
+async def test_dispatch_accepts_raw_ws_shape(market_state: MarketState, call_args: dict) -> None:
 	"""Raw WS messages (no source/payload wrapper) are also accepted."""
 	raw = {
 		"type": "orderbook_snapshot",
@@ -106,20 +109,21 @@ def test_dispatch_accepts_raw_ws_shape(market_state: MarketState, call_args: dic
 			"no": [["0.60", 15]],
 		},
 	}
-	dispatch_message(raw, **call_args)
+	await dispatch_message(raw, **call_args)
 	ob = market_state.get_orderbook("KXTEST-26APR14")
 	assert ob is not None
 	assert ob.yes_levels == [(0.42, 10)]
 
 
-def test_dispatch_unknown_msg_type_is_noop(market_state: MarketState, call_args: dict) -> None:
+@pytest.mark.asyncio
+async def test_dispatch_unknown_msg_type_is_noop(market_state: MarketState, call_args: dict) -> None:
 	"""An unknown WS msg_type is logged and ignored, not raised."""
 	event = {
 		"source": "ws",
 		"payload": {"type": "heartbeat", "msg": {}},
 	}
 	# Should not raise
-	dispatch_message(event, **call_args)
+	await dispatch_message(event, **call_args)
 	# No orderbook side-effect
 	assert market_state.get_orderbook("ANY") is None
 
@@ -128,7 +132,8 @@ def test_dispatch_unknown_msg_type_is_noop(market_state: MarketState, call_args:
 # Synthetic event handlers (Task 8 — replay side of the capture tee points)
 # ---------------------------------------------------------------------------
 
-def test_dispatch_synthetic_rest_orderbook_seeds_market_state(
+@pytest.mark.asyncio
+async def test_dispatch_synthetic_rest_orderbook_seeds_market_state(
 	market_state: MarketState, call_args: dict
 ) -> None:
 	"""synthetic.rest_orderbook mirrors the live run_recovery's seed_orderbook
@@ -142,14 +147,15 @@ def test_dispatch_synthetic_rest_orderbook_seeds_market_state(
 			"no_levels": [[0.58, 75]],
 		},
 	}
-	dispatch_message(event, **call_args)
+	await dispatch_message(event, **call_args)
 	ob = market_state.get_orderbook("KXTEST-26APR14")
 	assert ob is not None
 	assert (0.42, 100) in ob.yes_levels
 	assert (0.58, 75) in ob.no_levels
 
 
-def test_dispatch_synthetic_ticker_discovered_seeds_market_state(
+@pytest.mark.asyncio
+async def test_dispatch_synthetic_ticker_discovered_seeds_market_state(
 	market_state: MarketState, call_args: dict
 ) -> None:
 	"""synthetic.ticker_discovered is emitted by _ticker_refresh and handled
@@ -163,13 +169,14 @@ def test_dispatch_synthetic_ticker_discovered_seeds_market_state(
 			"no_levels": [[0.70, 15]],
 		},
 	}
-	dispatch_message(event, **call_args)
+	await dispatch_message(event, **call_args)
 	ob = market_state.get_orderbook("KXNEW-26APR14")
 	assert ob is not None
 	assert (0.30, 20) in ob.yes_levels
 
 
-def test_dispatch_synthetic_settlement_resolves_open_trade(
+@pytest.mark.asyncio
+async def test_dispatch_synthetic_settlement_resolves_open_trade(
 	store: 'TradeStore', call_args: dict
 ) -> None:
 	"""synthetic.settlement should look up an open trade by composite key
@@ -199,7 +206,7 @@ def test_dispatch_synthetic_settlement_resolves_open_trade(
 	}
 	call_args_with_settle_now = dict(call_args)
 	call_args_with_settle_now["now"] = settle_now
-	dispatch_message(event, **call_args_with_settle_now)
+	await dispatch_message(event, **call_args_with_settle_now)
 
 	# Verify the trade was settled with the captured now
 	settled = store.get_trade_by_id(trade_id)
@@ -209,7 +216,8 @@ def test_dispatch_synthetic_settlement_resolves_open_trade(
 	assert settled["exit_price"] == 100  # yes-side wins at 100
 
 
-def test_dispatch_synthetic_settlement_no_match_is_logged_not_raised(
+@pytest.mark.asyncio
+async def test_dispatch_synthetic_settlement_no_match_is_logged_not_raised(
 	store: 'TradeStore', call_args: dict
 ) -> None:
 	"""When the composite key doesn't match any open trade, the handler logs
@@ -224,16 +232,17 @@ def test_dispatch_synthetic_settlement_no_match_is_logged_not_raised(
 			"result": "yes",
 		},
 	}
-	dispatch_message(event, **call_args)  # must not raise
+	await dispatch_message(event, **call_args)  # must not raise
 
 
-def test_dispatch_synthetic_unknown_source_warns_and_returns(call_args: dict) -> None:
+@pytest.mark.asyncio
+async def test_dispatch_synthetic_unknown_source_warns_and_returns(call_args: dict) -> None:
 	"""An unknown synthetic source logs a warning and returns."""
 	event = {
 		"source": "synthetic.something_new",
 		"payload": {},
 	}
-	dispatch_message(event, **call_args)  # must not raise
+	await dispatch_message(event, **call_args)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +306,8 @@ def _trade_event(ticker: str, yes_price: float = 0.50) -> dict:
 	}
 
 
-def test_market_state_clear_propagates_to_dispatch(
+@pytest.mark.asyncio
+async def test_market_state_clear_propagates_to_dispatch(
 	market_state: MarketState, store: TradeStore
 ) -> None:
 	"""After MarketState.clear() (and re-seeding to satisfy dispatch's
@@ -322,14 +332,14 @@ def test_market_state_clear_propagates_to_dispatch(
 
 	# --- Stage 1: prime the ticker with one trade so it becomes "seen". ---
 	_seed_ticker_for_trade_dispatch(market_state, ticker)
-	dispatch_message(_trade_event(ticker), **call_args)
+	await dispatch_message(_trade_event(ticker), **call_args)
 	assert len(strat.captured_contexts) == 1, "first dispatch should reach the strategy"
 	assert strat.captured_contexts[-1].is_first_observation is True, (
 		"first observation should be flagged"
 	)
 
 	# Sanity: a second dispatch is NOT first-seen.
-	dispatch_message(_trade_event(ticker), **call_args)
+	await dispatch_message(_trade_event(ticker), **call_args)
 	assert strat.captured_contexts[-1].is_first_observation is False, (
 		"second observation must not be flagged as first"
 	)
@@ -338,7 +348,7 @@ def test_market_state_clear_propagates_to_dispatch(
 	# does on WS reconnect), then dispatch a new trade. ---
 	market_state.clear()
 	_seed_ticker_for_trade_dispatch(market_state, ticker)
-	dispatch_message(_trade_event(ticker), **call_args)
+	await dispatch_message(_trade_event(ticker), **call_args)
 	assert strat.captured_contexts[-1].is_first_observation is True, (
 		"after MarketState.clear(), the next dispatched trade tick MUST flag "
 		"is_first_observation=True — Change 3 (clear discipline) is broken if not"

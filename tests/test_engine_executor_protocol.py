@@ -81,17 +81,18 @@ def test_order_result_pending_allows_partial_fill():
 	assert r.filled_size == 4
 
 
-def test_executor_protocol_structural_typing():
-	"""Anything with `def place(req) -> OrderResult` satisfies Executor."""
+@pytest.mark.asyncio
+async def test_executor_protocol_structural_typing():
+	"""Anything with `async def place(req) -> OrderResult` satisfies Executor."""
 	class FakeExecutor:
-		def place(self, req: OrderRequest) -> OrderResult:
+		async def place(self, req: OrderRequest) -> OrderResult:
 			return OrderResult(
 				status="filled", intended_size=req.size_contracts,
 				filled_size=req.size_contracts, blended_entry_cents=req.limit_price_cents,
 				fill_pct=1.0, slippage_cents=0,
 			)
 	exec_obj: Executor = FakeExecutor()
-	result = exec_obj.place(OrderRequest(
+	result = await exec_obj.place(OrderRequest(
 		ticker="x", series="x", side="yes", size_contracts=1,
 		limit_price_cents=1, strategy="x", client_order_id="x",
 	))
