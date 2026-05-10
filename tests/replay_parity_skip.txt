@@ -1,0 +1,37 @@
+# Replay parity skip list — bundles whose strict-mode parity divergences are
+# accepted as expected, not regressions.
+#
+# Format: one ISO date per line. Comments start with '#'. Blank lines ignored.
+# An optional rationale may follow the date on the same line after whitespace.
+#
+# When the test runs against a bundle on this list:
+#   * Strict-mode assertions are downgraded to soft warnings (test still passes).
+#   * The full divergence report is still printed, prefixed [SKIPPED].
+#   * Non-strict mode is unchanged — the report prints regardless.
+#
+# Adding to this list is a deliberate operator decision. Each entry should
+# name the underlying root cause so future readers can tell whether the
+# rationale still applies (e.g. once the engine fixes the issue, the entry
+# should be removed).
+
+# --- pre-schema-v2 first_seen gap (commit af416e2, 2026-04-30) ---
+# These bundles' market_state_at_start.json predates the schema_version=2
+# change that added the first_seen array. The replay seeder falls back to
+# deriving first_seen from orderbooks ∪ metadata keys, which omits any ticker
+# the live engine had observed on a prior day but isn't currently in active
+# orderbook state at midnight rotation. Affected trade families:
+#   * Apr 17–19: KXXRP and KXSPOTIFYARTISTD markets (multi-day lifecycle)
+#   * Apr 20:    KXETH15M / KXSOL15M markets from Apr 19's last 15-min bars
+#                that settle on Apr 20 — live had seen them yesterday, replay
+#                hasn't.
+# Cannot be regenerated: raw JSONL was deleted post-rotation per
+# bundle.py:delete_raw_jsonl, and the live engine's accumulated _first_seen
+# state isn't reconstructible from any retained artifact.
+#
+# Sibling test tests/test_replay_parity_first_seen.py excludes the same dates
+# from its hardcoded PARITY_DAYS list (see comment block there). If you add or
+# remove an entry here for a first_seen reason, mirror it there too.
+2026-04-17  schema-v1 bundle, no prior-day seed available (oldest in set)
+2026-04-18  schema-v1 bundle, prior Apr 17 snapshot lacks first_seen
+2026-04-19  schema-v1 bundle, prior Apr 18 snapshot lacks first_seen
+2026-04-20  schema-v1 bundle, prior Apr 19 snapshot lacks first_seen
