@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 from edge_catcher.engine.market_state import TickContext
 
@@ -20,6 +20,10 @@ class Signal:
 	reason: str
 	trade_id: Optional[int] = None  # required for "exit" signals
 	intended_size: Optional[int] = None  # deprecated: engine resolves sizing via pipeline
+	entry_price_cents: int | None = None
+	target_price_cents: int | None = None
+	exit_kind: Literal["take_profit", "stop_loss", "time_exit"] | None = None
+	stop_loss_distance_cents: int | None = None
 
 
 class Strategy(ABC):

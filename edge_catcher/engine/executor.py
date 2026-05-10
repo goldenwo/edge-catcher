@@ -30,6 +30,7 @@ class OrderRequest:
 	limit_price_cents: int        # 1..99
 	strategy: str                 # for audit/correlation
 	client_order_id: str          # idempotency (live); recorded but not enforced (paper)
+	action: Literal["buy", "sell"] = "buy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,20 @@ class OrderResult:
 	book_depth: int | None = None
 	book_snapshot: str | None = None
 	rejection_reason: str | None = None
+	order_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenPosition:
+	"""A resolved open position held by the engine.
+
+	side semantics are venue-defined ("yes"/"no" for Kalshi binary);
+	engine treats as opaque label per CR-6 (multi-adapter extensibility).
+	"""
+	ticker: str
+	side: Literal["yes", "no"]
+	fill_size: int
+	blended_entry_cents: int
 
 
 class Executor(Protocol):
