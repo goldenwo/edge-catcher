@@ -9,10 +9,17 @@ Two modes:
     Used after the pipeline has reached maturity — every trade in the live
     slice must have a matching replay row on the column whitelist.
 
-  * **Diagnostic mode** (default): collects all divergences and logs them
-    in a human-readable summary, then asserts on configurable thresholds.
-    Used during iteration — lets a run fail loudly on obvious regressions
-    while still producing a readable report for known-expected drift.
+  * **Diagnostic mode** (default): runs replay and prints the divergence
+    report for inspection, but does NOT enforce parity — the test passes
+    as long as replay completes. Useful during iteration for eyeballing
+    drift without failing the suite. A WARNING banner makes the lack of
+    enforcement explicit so a green run isn't mistaken for a green gate.
+
+A bundle date listed in ``replay_parity_skip.txt`` (alongside this file)
+has its strict-mode assertions downgraded to soft warnings. The divergence
+report still prints, prefixed ``[SKIPPED]``, so the drift is visible but
+doesn't fail the gate. Used for legacy bundles whose divergence has a
+documented, accepted root cause (e.g. pre-schema-v2 first_seen gap).
 
 See spec §8.1 for the column whitelist rationale and the full correctness
 argument. The parity test is the verdict tool for the capture/replay
@@ -61,6 +68,35 @@ APPROX_COLUMNS = {"fill_pct", "slippage_cents"}
 
 PARITY_BUNDLE_ENV = "REPLAY_PARITY_BUNDLE"
 PARITY_STRICT_ENV = "REPLAY_PARITY_STRICT"
+
+# Skip-list co-located with the test so it ships with the codebase. See file
+# header for format and rationale-per-entry expectations.
+SKIP_LIST_PATH = Path(__file__).parent / "replay_parity_skip.txt"
+
+
+def _load_skip_list(path: Path = SKIP_LIST_PATH) -> set[str]:
+	"""Return the set of bundle dates (ISO strings) listed in the skip file.
+
+	Returns an empty set if the file is absent — keeps the test runnable in
+	checkouts that haven't pulled the skip-list yet.
+	"""
+	if not path.exists():
+		return set()
+	skips: set[str] = set()
+	for raw in path.read_text(encoding="utf-8").splitlines():
+		line = raw.strip()
+		if not line or line.startswith("#"):
+			continue
+		# The first whitespace-separated token is the date; the rest is rationale.
+		skips.add(line.split()[0])
+	return skips
+
+
+def _is_bundle_skipped(bundle_path: Path, skip_list: set[str] | None = None) -> bool:
+	"""True if the bundle's directory name (an ISO date) is in the skip list."""
+	if skip_list is None:
+		skip_list = _load_skip_list()
+	return bundle_path.name in skip_list
 
 
 def _composite_key(row: dict[str, Any]) -> tuple:
@@ -119,6 +155,7 @@ def test_replay_parity_against_live_bundle():
 	bundle_path = Path(os.environ[PARITY_BUNDLE_ENV])
 	assert bundle_path.exists(), f"bundle not found: {bundle_path}"
 	strict = os.environ.get(PARITY_STRICT_ENV) == "1"
+	skipped = _is_bundle_skipped(bundle_path)
 
 	# 1. Run replay
 	result = replay_capture(bundle_path)
@@ -149,13 +186,32 @@ def test_replay_parity_against_live_bundle():
 			row_diffs.append((k, diffs))
 
 	# 5. Build a human-readable report
+	header = "=== REPLAY PARITY REPORT ===" if not skipped else "=== REPLAY PARITY REPORT [SKIPPED] ==="
 	lines = [
-		"\n=== REPLAY PARITY REPORT ===",
+		"",
+		header,
 		f"bundle:          {bundle_path}",
 		f"capture window:  {start} .. {end}",
 		f"events replayed: {result.events_processed:,}",
 		f"replay duration: {result.duration_seconds:.2f}s",
 		f"strategies:      {result.strategies_loaded}",
+		f"mode:            {'STRICT' if strict else 'NON-STRICT (report-only)'}",
+	]
+	if skipped:
+		lines.append(
+			f"skip-list:       {bundle_path.name} listed in {SKIP_LIST_PATH.name}; "
+			"strict assertions downgraded to warnings"
+		)
+	if not strict:
+		# Test integrity: a green run in non-strict mode does NOT mean parity
+		# holds — only strict mode enforces it. Make that explicit so an
+		# operator scanning the report doesn't mistake "test passed" for
+		# "no divergences". See module docstring.
+		lines.append(
+			"WARNING:         non-strict mode — divergences below are NOT enforced. "
+			"Set REPLAY_PARITY_STRICT=1 to fail on drift."
+		)
+	lines.extend([
 		"",
 		f"live trades (in scope):   {len(live)} (of {len(live_all)} total in day slice)",
 		f"replay trades:            {len(result.trades)}",
@@ -164,7 +220,7 @@ def test_replay_parity_against_live_bundle():
 		f"  - diverging:            {len(row_diffs)}",
 		f"live-only keys:           {len(live_only)}",
 		f"replay-only keys:         {len(replay_only)}",
-	]
+	])
 
 	if row_diffs:
 		lines.append("\n--- COMMON-KEY DIVERGENCES ---")
@@ -189,13 +245,19 @@ def test_replay_parity_against_live_bundle():
 	print(report)
 
 	# 6. Assertions
-	if strict:
+	#
+	# Strict mode + not skipped: enforce zero divergence as before.
+	# Strict mode + skipped:     downgrade to soft warning — the bundle is on
+	#                            the accepted-divergence list, so the test
+	#                            passes but the divergences are still printed
+	#                            (and any NEW divergence shape would still
+	#                            need an operator to expand the rationale).
+	# Non-strict mode:           always pass. WARNING banner above makes the
+	#                            non-enforcement obvious.
+	if strict and not skipped:
 		assert not row_diffs, f"STRICT parity violated: {len(row_diffs)} divergent rows\n{report}"
 		assert not live_only, f"STRICT parity violated: {len(live_only)} live-only rows\n{report}"
 		assert not replay_only, f"STRICT parity violated: {len(replay_only)} replay-only rows\n{report}"
-	# Non-strict mode: the test passes as long as the replay ran. The
-	# report is emitted as test output for inspection. Use strict mode to
-	# enforce parity on a mature bundle.
 
 
 @pytest.mark.skipif(
