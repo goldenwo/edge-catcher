@@ -17,7 +17,7 @@ from edge_catcher.live.client import (
 	KalshiOrderClient,
 	OrderRequest,
 )
-from edge_catcher.live.config import load_config, ABSOLUTE_MAX_ORDER_DOLLARS
+from edge_catcher.live.config import load_config, ABSOLUTE_MAX_ORDER_DOLLARS, LiveConfig
 from edge_catcher.live.errors import (
 	CapExceededError,
 	KalshiAPIError,
@@ -197,7 +197,7 @@ async def _do_positions(client: KalshiOrderClient) -> int:
 	return 0
 
 
-def _do_kill_clear(args: argparse.Namespace, cfg) -> int:
+def _do_kill_clear(args: argparse.Namespace, cfg: LiveConfig) -> int:
 	"""Clear an auto-tripped kill switch row (Sub-project C operator command).
 
 	Calls KillSwitch.clear(kill_id, cleared_by, now) so the gate stops

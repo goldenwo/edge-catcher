@@ -36,7 +36,7 @@ _MIGRATION_RE = re.compile(r"^(\d+)_.*\.sql$")
 _INIT_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
-    applied_at_utc TEXT NOT NULL
+    applied_at TEXT NOT NULL
 );
 """
 
@@ -75,6 +75,19 @@ def apply_migrations(
 	Raises:
 		FileNotFoundError: If *migrations_dir* does not exist.
 		sqlite3.DatabaseError: On any SQL error during migration execution.
+
+	**Atomicity warning for future DML migrations:** ``executescript`` issues
+	its own implicit COMMIT for the migration body, then the
+	``schema_migrations`` INSERT is committed by a second ``conn.commit()``.
+	If the process dies between those two commits, the migration body is
+	persisted but the tracking row is missing — the migration re-runs on
+	next startup. **This is safe today** because every Phase 1 migration is
+	idempotent ``CREATE TABLE IF NOT EXISTS`` DDL. **It is NOT safe for any
+	future DML migration** (``INSERT`` / ``UPDATE`` / ``DELETE``), which
+	would silently double-apply and corrupt data. Any such migration must
+	wrap its body in an explicit ``BEGIN; ... COMMIT;`` paired with the
+	tracking-row INSERT inside the same transaction. Until that's needed,
+	the YAGNI two-commit pattern stays.
 	"""
 	if migrations_dir is None:
 		migrations_dir = _DEFAULT_MIGRATIONS_DIR
@@ -121,7 +134,7 @@ def apply_migrations(
 
 		# Record the applied version.
 		conn.execute(
-			"INSERT INTO schema_migrations (version, applied_at_utc) VALUES (?, ?)",
+			"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
 			(version, datetime.now(timezone.utc).isoformat()),
 		)
 		conn.commit()

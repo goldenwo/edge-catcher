@@ -225,27 +225,25 @@ async def _handle_signal(
 	  to call from the WS-close handler path where it has a RiskContext.
 	"""
 	if signal.action == "enter":
-		# Gate consultation — live path only (risk is None for paper/replay).
+		# Gate consultation surface — live path only. PR 3 (C) ships the
+		# Gate building blocks (engine/risk.py); E's PR wires the actual
+		# invocation here. E owns:
+		#   1. constructing the RiskContext from engine state (sqlite conn,
+		#      bankroll cache, open-positions reader from engine/live_db.py),
+		#   2. adding the `risk.gate_entry(signal, ctx)` call here,
+		#   3. handling Reject (log + return) and propagating exceptions
+		#      from `_emit_trip` so the engine STOPS on kill-switch DB
+		#      failure (C-spec §Risks #4 ghost-reject defense — do NOT
+		#      catch broadly here; infrastructure exceptions are fatal).
+		# Until E lands, dispatch passes through ungated. If a Gate is
+		# constructed before E (e.g. in tests), warn so the gap is visible
+		# rather than silently allowing trades.
 		if risk is not None:
-			# E builds the RiskContext and passes it; for now the gate call
-			# shape matches C-spec §Gate ordering. E will supply ctx_risk.
-			# Placeholder: pass None as ctx until E wires RiskContext creation.
-			# This branch compiles but is not exercised until E's PR.
-			try:
-				from edge_catcher.engine.risk import Reject as RiskReject  # noqa: PLC0415
-				decision = risk.gate_entry(signal, None)  # type: ignore[arg-type]
-				if isinstance(decision, RiskReject):
-					log.info(
-						"Gate REJECT %s — %s: %s",
-						signal.strategy, decision.reason, decision.detail,
-					)
-					return
-			except Exception:
-				log.exception(
-					"Gate error for %s %s — aborting signal (fail-safe)",
-					signal.strategy, signal.ticker,
-				)
-				return
+			log.warning(
+				"Risk gate constructed but dispatch wiring deferred to E; "
+				"signal %s for %s passes through ungated.",
+				signal.strategy, signal.ticker,
+			)
 		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
 		_handle_exit(signal, ctx, store, bullet, now=now)

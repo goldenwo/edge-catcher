@@ -498,29 +498,20 @@ async def run_engine(
 	if executor is None:
 		executor = PaperExecutor(market_state=market_state, config=config)
 
-	# Risk gate (Sub-project C) — constructed only for the live path.
-	# Paper-trader and replay set executor_kind=None (absent) so bankroll_cache
-	# is never constructed on those paths.  E's live-engine bootstrap will
-	# call BankrollCache.refresh() at T0 and start the periodic-refresh task.
-	executor_kind: str | None = config.get("executor_kind")
-	bankroll_cache = None
-	if executor_kind == "live":
-		# BankrollCache lives in engine/risk.py (Agent A's scope).
-		# Import deferred so paper-trader startup doesn't fail when risk.py
-		# doesn't exist yet.
-		try:
-			from edge_catcher.engine.risk import BankrollCache  # noqa: PLC0415
-			risk_cfg = config.get("risk", {})
-			# BankrollCache construction is E's full responsibility (E wires the
-			# KalshiBalanceSource and passes it here).  For this PR the cache
-			# variable is surfaced on the engine so E can retrieve it; the
-			# actual construction is deferred until E's wiring is in place.
-			log.info("engine[C]: live executor_kind detected — BankrollCache will be wired by E")
-		except ImportError:
-			log.warning(
-				"engine[C]: executor_kind=live but engine/risk.py not yet available "
-				"(expected until Agent A's PR lands) — bankroll_cache remains None"
-			)
+	# Risk gate (Sub-project C) — Gate / BankrollCache / KillSwitch / etc.
+	# all live in engine/risk.py and SHIP in this PR (PR 3). However the
+	# actual construction + wiring requires KalshiBalanceSource (live HTTP
+	# client), the live_trades.db connection, and a periodic-refresh task —
+	# none of which dispatch.py has access to. E's PR owns the full
+	# bootstrap: instantiating KalshiBalanceSource, calling
+	# BankrollCache.refresh() at T0, threading RiskContext to dispatch,
+	# and starting the periodic-refresh background task.
+	#
+	# PR 3 ships only the building blocks. No risk-related wiring happens
+	# at engine startup yet. If config has executor_kind=live before E
+	# ships, the engine starts paper-style (gate not consulted) — see the
+	# warning in dispatch._handle_signal when a Gate is constructed
+	# without dispatch wiring.
 
 	# Cutover-verification beacon. Pi cutover step 5 greps journalctl for this
 	# exact substring to prove the engine/ package is loaded (NOT monitors/).
