@@ -47,9 +47,13 @@ TimeInForce = Literal["gtc", "ioc", "fok"]
 # client_order_id is forwarded to Kalshi as the idempotency key. Restrict to
 # URL-safe alphanumerics + ``-_`` so the value survives JSON encoding, log
 # rendering, and any downstream system that consumes the audit trail without
-# ambiguity. 64 chars covers UUID4 (36) plus prefix headroom for keys like
-# ``{strategy}-{ticker}-{ms_ts}`` produced by engine.dispatch.
-_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# ambiguity. 80 chars covers the D-spec L214 worst-case format
+# ``{strategy}-{ticker}-{ms_ts}-{uuid8}``. NOTE: today engine.dispatch's
+# ``_make_client_order_id`` produces only ``{strategy}-{ticker}-{ms_ts}``
+# (well under 80 chars); the uuid8 suffix is added by sub-project D — see
+# the TODO at engine/dispatch.py:_make_client_order_id. The 80-char gate is
+# pre-positioned here so D's PR doesn't also need to re-bump the regex.
+_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 
 @dataclass

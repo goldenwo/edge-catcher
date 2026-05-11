@@ -71,7 +71,7 @@ def test_order_request_accepts_underscores_and_hyphens():
 
 @pytest.mark.parametrize("bad", [
 	"",                                        # empty
-	"a" * 65,                                  # too long (max 64)
+	"a" * 81,                                  # too long (max 80)
 	"has spaces",                              # whitespace
 	"with/slash",                              # forward slash
 	"with\\backslash",                         # backslash
@@ -410,6 +410,33 @@ async def test_positions_empty(cfg, audit, signing_env, tmp_path):
 		return httpx.Response(200, json={"market_positions": []})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	assert await c.positions() == []
+
+
+def test_order_request_accepts_80_char_client_order_id():
+	"""80-char client_order_id is accepted — D-spec worst-case format boundary."""
+	req = OrderRequest(
+		ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+		client_order_id="a" * 80,
+	)
+	assert len(req.client_order_id) == 80
+
+
+def test_order_request_rejects_81_char_client_order_id():
+	"""81-char client_order_id must be rejected — one over the 80-char limit."""
+	with pytest.raises(ValueError, match="client_order_id must match"):
+		OrderRequest(
+			ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+			client_order_id="a" * 81,
+		)
+
+
+def test_order_request_accepts_64_char_client_order_id():
+	"""64-char client_order_id still accepted — regression guard from PR #28."""
+	req = OrderRequest(
+		ticker="X", action="buy", side="yes", count=1, limit_price_cents=1,
+		client_order_id="a" * 64,
+	)
+	assert len(req.client_order_id) == 64
 
 
 @pytest.mark.asyncio
