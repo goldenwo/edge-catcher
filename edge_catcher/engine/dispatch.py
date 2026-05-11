@@ -43,7 +43,22 @@ if TYPE_CHECKING:
 	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
 	from edge_catcher.engine.risk import Gate
 
+# KillSwitchTripFailed is imported at runtime (not under TYPE_CHECKING) because
+# process_tick's except clause needs the actual class. Use a try/except so
+# dispatch.py still imports cleanly when risk.py is absent (paper/replay).
+try:
+	from edge_catcher.engine.risk import KillSwitchTripFailed  # noqa: PLC0415
+except ImportError:
+	# Sentinel: a class no exception will ever be (so the except clause is a no-op).
+	class KillSwitchTripFailed(Exception):  # type: ignore[no-redef]
+		pass
+
 log = logging.getLogger(__name__)
+
+# Module-level flag to ensure the "Gate constructed but dispatch wiring deferred"
+# warning fires only once per process, not per signal (would be noisy in tests
+# that exercise many signals against a constructed Gate).
+_gate_unwired_warning_logged = False
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +200,14 @@ async def process_tick(
 		for signal in signals:
 			try:
 				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk)
+			except KillSwitchTripFailed:
+				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
+				# means the kill is NOT persisted (funds-at-risk). The engine
+				# loop catches this above and STOPS rather than letting the
+				# next tick re-enter ungated. This re-raise is the structural
+				# enforcement of E's gate-wiring contract — must NOT be
+				# swallowed by the broad except below.
+				raise
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -239,11 +262,13 @@ async def _handle_signal(
 		# constructed before E (e.g. in tests), warn so the gap is visible
 		# rather than silently allowing trades.
 		if risk is not None:
-			log.warning(
-				"Risk gate constructed but dispatch wiring deferred to E; "
-				"signal %s for %s passes through ungated.",
-				signal.strategy, signal.ticker,
-			)
+			global _gate_unwired_warning_logged
+			if not _gate_unwired_warning_logged:
+				log.warning(
+					"Risk gate constructed but dispatch wiring deferred to E; "
+					"all signals pass through ungated until E's PR lands."
+				)
+				_gate_unwired_warning_logged = True
 		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
 		_handle_exit(signal, ctx, store, bullet, now=now)

@@ -35,6 +35,8 @@ from edge_catcher.engine.risk import (
 	KalshiBalanceSource,
 	KillRow,
 	KillSwitch,
+	KillSwitchClearError,
+	KillSwitchTripFailed,
 	PeakTracker,
 	Reject,
 	RiskConfig,
@@ -272,8 +274,12 @@ class TestKillSwitch:
 		now = datetime.now(timezone.utc)
 		ks.trip("KILL_AUTO_PANIC", detail="first", now=now)
 
-		with pytest.raises(sqlite3.IntegrityError):
+		# Second trip on same (reason, tripped_at) hits UNIQUE constraint
+		# inside KillSwitch.trip; trip wraps the underlying sqlite3 error
+		# in KillSwitchTripFailed (engine MUST stop per C-spec L214).
+		with pytest.raises(KillSwitchTripFailed) as exc_info:
 			ks.trip("KILL_AUTO_PANIC", detail="second", now=now)
+		assert isinstance(exc_info.value.__cause__, sqlite3.IntegrityError)
 
 	def test_emit_trip_raises_propagates_to_gate(self) -> None:
 		"""Gate._emit_trip must not swallow INSERT failures (C-spec L214)."""
@@ -284,9 +290,10 @@ class TestKillSwitch:
 		# Trip once to create the unique row
 		gate._emit_trip("KILL_AUTO_PANIC", detail="first trip", now=now)
 
-		# Second trip with same timestamp should raise (unique constraint)
-		with pytest.raises(sqlite3.IntegrityError):
+		# Second trip with same timestamp must propagate as KillSwitchTripFailed
+		with pytest.raises(KillSwitchTripFailed) as exc_info:
 			gate._emit_trip("KILL_AUTO_PANIC", detail="second trip", now=now)
+		assert isinstance(exc_info.value.__cause__, sqlite3.IntegrityError)
 
 
 # ===========================================================================

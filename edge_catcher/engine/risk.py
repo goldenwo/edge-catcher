@@ -68,6 +68,25 @@ GateRejectReason = Literal[
 ]
 
 
+class KillSwitchTripFailed(Exception):
+	"""Raised when KillSwitch.trip's INSERT fails — engine MUST stop.
+
+	Per C-spec L214: silent INSERT failure = ghost reject = funds-at-risk.
+	dispatch.process_tick catches Exception broadly but MUST re-raise this
+	class so the engine loop terminates rather than silently swallowing a
+	failed kill-switch persistence.
+	"""
+
+
+class KillSwitchClearError(Exception):
+	"""Raised when KillSwitch.clear targets a non-existent kill_id.
+
+	The CLI's kill-clear command surfaces this as a clear operator error
+	rather than a silent no-op (which would mislead the operator into
+	thinking the gate was cleared when it wasn't).
+	"""
+
+
 @dataclass(frozen=True, slots=True)
 class SizingBreakdown:
 	"""Which arm of the min() bounded the final size."""
@@ -374,23 +393,31 @@ class KillSwitch:
 	) -> None:
 		"""Insert a new kill row synchronously.
 
-		Raises ``sqlite3.IntegrityError`` if the same (reason, tripped_at)
-		pair already exists (UNIQUE constraint).  The Gate propagates this
-		as a fatal error — double-trips must never happen silently.
-
-		Any other ``sqlite3.Error`` also propagates — a failed INSERT means
-		the kill is not persisted, which is funds-at-risk (C-spec L214).
+		Raises ``KillSwitchTripFailed`` (chained from the underlying
+		``sqlite3.Error``) on any DB failure — the engine MUST stop
+		(C-spec L214 ghost-reject defense). dispatch.process_tick re-raises
+		this class specifically so the broad signal-level except cannot
+		swallow it.
 		"""
 		tripped_at = now.isoformat()
 		log.error(
 			"Kill switch TRIPPED: reason=%s detail=%s tripped_at=%s",
 			reason, detail, tripped_at,
 		)
-		self._conn.execute(
-			"INSERT INTO kill_switch (reason, detail, tripped_at) VALUES (?, ?, ?)",
-			(reason, detail, tripped_at),
-		)
-		self._conn.commit()
+		try:
+			self._conn.execute(
+				"INSERT INTO kill_switch (reason, detail, tripped_at) VALUES (?, ?, ?)",
+				(reason, detail, tripped_at),
+			)
+			self._conn.commit()
+		except sqlite3.Error as exc:
+			log.error(
+				"Kill switch INSERT FAILED: %s — engine MUST stop (ghost-reject defense)",
+				exc,
+			)
+			raise KillSwitchTripFailed(
+				f"kill_switch INSERT failed for reason={reason!r}: {exc}"
+			) from exc
 
 	def clear(self, kill_id: int, cleared_by: str, now: datetime) -> None:
 		"""Manual clear — operator runs CLI kill-clear.
@@ -399,12 +426,22 @@ class KillSwitch:
 			kill_id: The ``id`` of the kill row to clear.
 			cleared_by: Audit string, e.g. ``'human:investigated, resuming'``.
 			now: Current UTC datetime.
+
+		Raises:
+			KillSwitchClearError: If no kill_switch row matches ``kill_id``.
+				CLI surfaces this as an operator error rather than silently
+				succeeding (which would mislead the operator into thinking
+				the gate was cleared when it wasn't).
 		"""
-		self._conn.execute(
+		cursor = self._conn.execute(
 			"UPDATE kill_switch SET cleared_at=?, cleared_by=? WHERE id=?",
 			(now.isoformat(), cleared_by, kill_id),
 		)
 		self._conn.commit()
+		if cursor.rowcount == 0:
+			raise KillSwitchClearError(
+				f"No kill_switch row with id={kill_id} — nothing cleared"
+			)
 		log.info("Kill switch CLEARED: id=%d cleared_by=%r", kill_id, cleared_by)
 
 	def _auto_clear(self, kill_id: int, now: datetime) -> None:

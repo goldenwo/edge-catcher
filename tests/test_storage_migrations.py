@@ -1,7 +1,7 @@
 """Tests for edge_catcher.storage.migrations.apply_migrations.
 
 Covers:
-- Fresh DB gets both migrations applied; schema_migrations table has 2 rows.
+- Fresh DB gets both migrations applied; live_schema_migrations table has 2 rows.
 - Idempotent re-run produces no new rows and returns an empty applied list.
 - Missing migrations_dir raises FileNotFoundError with a clear message.
 - Numeric ordering: 0001 is applied before 0002 even when filesystem iteration
@@ -32,9 +32,9 @@ def _open_mem() -> sqlite3.Connection:
 
 
 def _applied_versions(conn: sqlite3.Connection) -> list[int]:
-	"""Return sorted list of versions recorded in schema_migrations."""
+	"""Return sorted list of versions recorded in live_schema_migrations."""
 	rows = conn.execute(
-		"SELECT version FROM schema_migrations ORDER BY version ASC"
+		"SELECT version FROM live_schema_migrations ORDER BY version ASC"
 	).fetchall()
 	return [row[0] for row in rows]
 
@@ -63,7 +63,7 @@ def test_apply_migrations_creates_expected_tables() -> None:
 
 
 def test_apply_migrations_records_versions() -> None:
-	"""schema_migrations has exactly 2 rows after applying shipped migrations."""
+	"""live_schema_migrations has exactly 2 rows after applying shipped migrations."""
 	conn = _open_mem()
 	apply_migrations(conn, _MIGRATIONS_DIR)
 

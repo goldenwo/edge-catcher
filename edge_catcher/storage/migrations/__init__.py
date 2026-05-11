@@ -34,7 +34,7 @@ _MIGRATION_RE = re.compile(r"^(\d+)_.*\.sql$")
 
 # DDL for the migrations-tracking table.  Created once on first call.
 _INIT_SQL = """
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS live_schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
 );
@@ -70,7 +70,7 @@ def apply_migrations(
 
 	Returns:
 		A list of version integers that were applied during this call (empty
-		when all migrations were already present in ``schema_migrations``).
+		when all migrations were already present in ``live_schema_migrations``).
 
 	Raises:
 		FileNotFoundError: If *migrations_dir* does not exist.
@@ -78,7 +78,7 @@ def apply_migrations(
 
 	**Atomicity warning for future DML migrations:** ``executescript`` issues
 	its own implicit COMMIT for the migration body, then the
-	``schema_migrations`` INSERT is committed by a second ``conn.commit()``.
+	``live_schema_migrations`` INSERT is committed by a second ``conn.commit()``.
 	If the process dies between those two commits, the migration body is
 	persisted but the tracking row is missing — the migration re-runs on
 	next startup. **This is safe today** because every Phase 1 migration is
@@ -103,7 +103,7 @@ def apply_migrations(
 	# Read already-applied versions.
 	applied_versions: set[int] = {
 		row[0]
-		for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+		for row in conn.execute("SELECT version FROM live_schema_migrations").fetchall()
 	}
 
 	# Collect and sort migration files by numeric prefix.
@@ -134,7 +134,7 @@ def apply_migrations(
 
 		# Record the applied version.
 		conn.execute(
-			"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+			"INSERT INTO live_schema_migrations (version, applied_at) VALUES (?, ?)",
 			(version, datetime.now(timezone.utc).isoformat()),
 		)
 		conn.commit()
