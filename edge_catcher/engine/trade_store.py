@@ -43,6 +43,41 @@ class TradeStoreProtocol(Protocol):
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None: ...
 
+	def record_pending(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		kalshi_order_id: Optional[str],
+		placed_at_utc: str,
+		rejection_reason: Optional[str],
+	) -> None:
+		"""Write a placeholder row for a live-execution pending order.
+
+		AUTHORITATIVE signature is owned by sub-project B (PR 5). D's PR ships
+		this surface here so the dispatch pending-branch can call it without
+		B's implementation present. B's PR provides the real SQLite-backed
+		impl; replay's InMemoryTradeStore provides a no-op for parity.
+
+		Kwarg semantics (per D spec L673-L685, locked cross-PR contract):
+		* identity (ticker/series/strategy/side/stop_loss_distance_cents) — from Signal
+		* intended_size — from D's OrderResult (post-sizing by C)
+		* entry_price_cents — ORIGINAL Signal intent, NOT D's slippage-adjusted limit
+		* client_order_id — D-generated idempotency key
+		* kalshi_order_id — OrderResult.order_id (None on NetworkError;
+		  preserved on malformed-fills)
+		* placed_at_utc — ISO-8601 UTC string
+		* rejection_reason — D's diagnostic detail (kalshi_unreachable:/
+		  kalshi_malformed_fills/kalshi_5xx_unknown_state:)
+		"""
+		...
+
 	def get_open_trades(self) -> list[dict[str, Any]]: ...
 
 	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None: ...
@@ -266,6 +301,28 @@ class TradeStore:
 			(exit_price, exit_time_iso, pnl, status, trade_id),
 		)
 		self._conn.commit()
+
+	def record_pending(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		kalshi_order_id: Optional[str],
+		placed_at_utc: str,
+		rejection_reason: Optional[str],
+	) -> None:
+		"""No-op placeholder — B's PR (sub-project B / PR 5) provides the real
+		SQLite-backed live_trades-row impl. Paper-mode never produces pending
+		results (paper is synchronous), so this default keeps the surface
+		Protocol-compatible without altering paper behavior. Replay's
+		InMemoryTradeStore has the equivalent no-op."""
+		return
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
 		"""Exit a trade at a specific price (TP/SL).
@@ -521,6 +578,28 @@ class InMemoryTradeStore:
 			r["status"] = status
 			return
 		# not found → silent return to match live behavior (trade_store.py:161-162)
+
+	def record_pending(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		kalshi_order_id: Optional[str],
+		placed_at_utc: str,
+		rejection_reason: Optional[str],
+	) -> None:
+		"""No-op for replay. Replay drives captured bundles through dispatch
+		end-to-end, but pending rows are LIVE-only (D's NetworkError /
+		malformed-fills paths). A captured bundle never contains a pending
+		event because replay's executor (PaperExecutor or stubbed live) is
+		deterministic. Mirror of SQLiteTradeStore.record_pending no-op."""
+		return
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
 		"""Mirror of SQLiteTradeStore.exit_trade — see trade_store.py:183.
