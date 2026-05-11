@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 
@@ -19,7 +20,13 @@ from edge_catcher.live.client import (
 )
 from edge_catcher.live.config import LiveConfig
 from edge_catcher.live.audit import AuditLogger
-from edge_catcher.live.errors import CapExceededError, KalshiAPIError, OrderAlreadyFinal, OrderRejected
+from edge_catcher.live.errors import (
+	CapExceededError,
+	KalshiAPIError,
+	NetworkError,
+	OrderAlreadyFinal,
+	OrderRejected,
+)
 
 
 @pytest.fixture
@@ -539,3 +546,115 @@ async def test_place_audit_write_does_not_block_event_loop(cfg, signing_env, tmp
 	# Audit row was still written through the worker thread.
 	assert cfg2.audit_log_path.exists()
 	assert cfg2.audit_log_path.read_text().strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# Audit-write fault isolation — guards _request against audit I/O failures so
+# disk-full / permission errors during compliance logging don't kill orders
+# the venue already accepted (success path) or mask the real exception
+# (4xx / NetworkError paths). Sequenced ahead of sub-project E to keep the
+# engine daemon's persistent event loop free of audit-induced crashes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_place_returns_order_when_audit_write_fails(
+	cfg, audit, signing_env, tmp_path, caplog,
+):
+	"""201 succeeded; OSError from audit must be swallowed + logged, not raised.
+
+	Engine on persistent loop (sub-project E) cannot tolerate audit I/O killing
+	a placement the venue already accepted — that strands a real Kalshi order
+	with no record on our side and no retry path.
+	"""
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(201, json={"order": {
+			"order_id": "ord-1", "ticker": "X", "side": "yes", "action": "buy",
+			"count": 1, "yes_price": 1, "time_in_force": "gtc", "status": "resting",
+		}})
+
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+
+	async def _explode_audit(**_kwargs: object) -> None:
+		raise OSError("disk full")
+	c._write_audit_async = _explode_audit  # type: ignore[method-assign]
+
+	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
+
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.client"):
+		order = await c.place(req)
+
+	assert order.order_id == "ord-1"
+	assert any("audit_write_failed_after_success" in r.message for r in caplog.records), (
+		"audit failure on success path must be logged at ERROR level"
+	)
+
+
+@pytest.mark.asyncio
+async def test_place_4xx_still_raises_order_rejected_when_audit_write_fails(
+	cfg, audit, signing_env, tmp_path, caplog,
+):
+	"""4xx must still raise OrderRejected even if audit-write also fails.
+
+	Audit failure must not mask the real placement error — caller's reconcile /
+	error-handling path keys off the typed exception.
+	"""
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		return httpx.Response(400, json={"error": {"message": "invalid_price"}})
+
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+
+	async def _explode_audit(**_kwargs: object) -> None:
+		raise OSError("disk full")
+	c._write_audit_async = _explode_audit  # type: ignore[method-assign]
+
+	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
+
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.client"):
+		with pytest.raises(OrderRejected) as exc:
+			await c.place(req)
+
+	assert exc.value.status == 400
+	assert any("audit_write_failed_after_http_error" in r.message for r in caplog.records), (
+		"audit failure on 4xx path must be logged at ERROR level before re-raise"
+	)
+
+
+@pytest.mark.asyncio
+async def test_network_error_still_raises_when_audit_write_fails(
+	cfg, audit, signing_env, tmp_path, caplog, monkeypatch,
+):
+	"""Exhausted network retries must still raise NetworkError when audit fails.
+
+	Same shape as the 4xx case for the third call site in `_request`.
+	"""
+	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl", "max_retries": 0})
+
+	# Skip backoff so the test doesn't burn real wall time. max_retries=0
+	# means we exhaust on the first attempt, but defend in depth anyway.
+	async def _no_sleep(_s: float) -> None:
+		return None
+	monkeypatch.setattr("edge_catcher.live.client.asyncio.sleep", _no_sleep)
+
+	def handler(request: httpx.Request) -> httpx.Response:
+		raise httpx.ConnectError("can't reach kalshi")
+
+	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
+
+	async def _explode_audit(**_kwargs: object) -> None:
+		raise OSError("disk full")
+	c._write_audit_async = _explode_audit  # type: ignore[method-assign]
+
+	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
+
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.client"):
+		with pytest.raises(NetworkError):
+			await c.place(req)
+
+	assert any("audit_write_failed_after_network_error" in r.message for r in caplog.records), (
+		"audit failure on network-error path must be logged at ERROR level before re-raise"
+	)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import asyncio
 import functools
+import logging
 import re
 import time
 import uuid
@@ -24,6 +25,8 @@ from edge_catcher.live.errors import (
 	OrderAlreadyFinal,
 	OrderRejected,
 )
+
+log = logging.getLogger(__name__)
 
 # Kalshi REST API path prefix. Owned by this module so signing uses the
 # exact path sent on the wire (httpx base_url + leading-/ behaviour is
@@ -257,19 +260,32 @@ class KalshiOrderClient:
 					response_body = {"_raw_text": resp.text[:500]}
 
 				if 200 <= resp.status_code < 300:
-					await self._write_audit_async(
-						op=op,
-						method=method,
-						path=full_path,
-						client_order_id=client_order_id,
-						request=json or {},
-						response_status=response_status,
-						response_body=response_body,
-						started=started,
-						outcome="success",
-						error=None,
-						retries=retries,
-					)
+					# Audit-write failures must NOT mask a successful order placement
+					# — the venue already accepted the order. Sub-project E's engine
+					# runs on a persistent event loop where a propagated audit error
+					# would crash the dispatch coroutine and strand the live order
+					# with no record. Log + swallow; compliance/ops sees the ERROR
+					# entry without losing the response at the caller.
+					try:
+						await self._write_audit_async(
+							op=op,
+							method=method,
+							path=full_path,
+							client_order_id=client_order_id,
+							request=json or {},
+							response_status=response_status,
+							response_body=response_body,
+							started=started,
+							outcome="success",
+							error=None,
+							retries=retries,
+						)
+					except Exception:
+						log.exception(
+							"audit_write_failed_after_success op=%s client_order_id=%s",
+							op,
+							client_order_id,
+						)
 					return response_body or {}
 
 				if resp.status_code == 429 or resp.status_code >= 500:
@@ -282,19 +298,30 @@ class KalshiOrderClient:
 					continue
 
 				# 4xx (non-429): fail loud, surface Kalshi error verbatim.
-				await self._write_audit_async(
-					op=op,
-					method=method,
-					path=full_path,
-					client_order_id=client_order_id,
-					request=json or {},
-					response_status=response_status,
-					response_body=response_body,
-					started=started,
-					outcome="http_error",
-					error=resp.text[:500],
-					retries=retries,
-				)
+				# Audit-write failure here must not mask the typed Kalshi
+				# exception below — callers (and B's reconciler) key off the
+				# exception class to decide retry/idempotency behaviour.
+				try:
+					await self._write_audit_async(
+						op=op,
+						method=method,
+						path=full_path,
+						client_order_id=client_order_id,
+						request=json or {},
+						response_status=response_status,
+						response_body=response_body,
+						started=started,
+						outcome="http_error",
+						error=resp.text[:500],
+						retries=retries,
+					)
+				except Exception:
+					log.exception(
+						"audit_write_failed_after_http_error op=%s status=%s client_order_id=%s",
+						op,
+						response_status,
+						client_order_id,
+					)
 				# Op-specific 4xx mapping. B's reconciliation loop relies on
 				# OrderAlreadyFinal being distinguishable from auth/validation
 				# errors so it can treat repeated cancels as idempotent no-ops.
@@ -311,19 +338,28 @@ class KalshiOrderClient:
 				await asyncio.sleep(min(60.0, (2 ** retries) + 0.1 * retries))
 				retries += 1
 
-		await self._write_audit_async(
-			op=op,
-			method=method,
-			path=full_path,
-			client_order_id=client_order_id,
-			request=json or {},
-			response_status=response_status,
-			response_body=response_body,
-			started=started,
-			outcome="network_error" if response_status is None else "http_error",
-			error=last_error,
-			retries=retries,
-		)
+		# Network/timeout retries exhausted — same fault-isolation contract as
+		# the 4xx path: audit failure must not mask the NetworkError.
+		try:
+			await self._write_audit_async(
+				op=op,
+				method=method,
+				path=full_path,
+				client_order_id=client_order_id,
+				request=json or {},
+				response_status=response_status,
+				response_body=response_body,
+				started=started,
+				outcome="network_error" if response_status is None else "http_error",
+				error=last_error,
+				retries=retries,
+			)
+		except Exception:
+			log.exception(
+				"audit_write_failed_after_network_error op=%s client_order_id=%s",
+				op,
+				client_order_id,
+			)
 		raise NetworkError(last_error or "unknown")
 
 	def _write_audit(
