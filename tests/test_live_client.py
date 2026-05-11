@@ -493,14 +493,16 @@ async def test_place_audit_write_does_not_block_event_loop(cfg, signing_env, tmp
 
 	actual_sleep_ms = (sentinel_t1 - sentinel_t0) * 1000.0
 	overrun_ms = actual_sleep_ms - (target_sleep_s * 1000.0)
-	# Platform-aware threshold so the production target (Pi/Linux) catches
-	# 30-40 ms partial regressions instead of leaving them in the wider Windows
-	# band. Windows ProactorEventLoop has ~16 ms scheduler quantum (35 ms band);
-	# Linux SelectorEventLoop has ~4 ms quantum and is the production runtime
-	# (15 ms band — tight enough that a partial loop stall surfaces). Either
-	# way, a fully blocked loop adds ~70 ms of overrun (full 100 ms slow_write
-	# minus the 30 ms target), well outside both bands.
-	threshold_ms = 35.0 if sys.platform.startswith("win") else 15.0
+	# Platform-aware threshold balancing production-target sensitivity (Pi/Linux
+	# catches partial regressions) against CI runner scheduler variance.
+	# Windows ProactorEventLoop: ~16 ms scheduler quantum, ~5-15 ms unblocked
+	# overrun observed → 35 ms band.
+	# Linux SelectorEventLoop on loaded GitHub Actions: up to ~17-20 ms unblocked
+	# overrun observed (vs ~5 ms on quiet Pi) → 30 ms band gives ~10 ms CI
+	# headroom while still catching ~40 ms+ partial loop stalls on Pi.
+	# A fully blocked loop adds ~70 ms of overrun (full 100 ms slow_write minus
+	# the 30 ms target) — well outside both bands.
+	threshold_ms = 35.0 if sys.platform.startswith("win") else 30.0
 	assert overrun_ms < threshold_ms, (
 		f"sentinel asyncio.sleep({target_sleep_s*1000:.0f}ms) actually took "
 		f"{actual_sleep_ms:.1f}ms — event loop was blocked for {overrun_ms:.1f}ms "
