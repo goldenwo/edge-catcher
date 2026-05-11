@@ -9,6 +9,16 @@ from typing import Literal, Optional
 from edge_catcher.engine.market_state import TickContext
 
 
+# Named alias for the three Phase 1 exit-kinds. Hoisted out of the inline
+# annotation on ``Signal.exit_kind`` so D's ``engine/execution.py`` can
+# declare ``cfg.exit_slippage_cents: dict[ExitKind, int]`` and validators
+# can iterate ``typing.get_args(ExitKind)`` to assert config completeness.
+# The inline annotation on ``Signal.exit_kind`` below uses this alias so
+# the two stay in lock-step — adding a new kind (e.g. ``partial_exit``)
+# requires only updating this one line.
+ExitKind = Literal["take_profit", "stop_loss", "time_exit"]
+
+
 @dataclass
 class Signal:
 	"""What a strategy wants to do — enter or exit."""
@@ -22,7 +32,7 @@ class Signal:
 	intended_size: Optional[int] = None  # deprecated: engine resolves sizing via pipeline
 	entry_price_cents: int | None = None
 	target_price_cents: int | None = None
-	exit_kind: Literal["take_profit", "stop_loss", "time_exit"] | None = None
+	exit_kind: ExitKind | None = None
 	stop_loss_distance_cents: int | None = None
 
 
