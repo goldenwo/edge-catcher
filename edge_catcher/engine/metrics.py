@@ -17,8 +17,45 @@ _COUNTER_KEYS = (
 	"entries_skipped_other",
 	"trades_settled_won",
 	"trades_settled_lost",
+	# Risk-gate counters (C) — incremented by Gate.gate_entry on every call.
+	# `risk_gate_decisions_total` is split into two counters: one for Allow,
+	# one for each Reject reason (label emulation via key suffix).
+	"risk_gate_allowed",           # decision=allow
+	"risk_gate_rejected_operator", # reason=KILL_OPERATOR
+	"risk_gate_rejected_panic",    # reason=KILL_AUTO_PANIC
+	"risk_gate_rejected_drawdown", # reason=KILL_AUTO_DRAWDOWN
+	"risk_gate_rejected_daily",    # reason=KILL_AUTO_DAILY
+	"risk_gate_rejected_invalid",  # reason=INVALID_SIGNAL
+	"risk_gate_rejected_max_open", # reason=MAX_OPEN
+	"risk_gate_rejected_min_fill", # reason=BELOW_MIN_FILL
+	# Bankroll cache refresh failure counter.
+	"risk_bankroll_refresh_failures_total",
 )
-_GAUGE_KEYS = ("entries_skipped_unsupported",)
+_GAUGE_KEYS = (
+	"entries_skipped_unsupported",
+	# Risk gauges (C) — polled lazily by E; set after each gate call / refresh.
+	"risk_kill_active_operator",    # 0/1 — operator kill active
+	"risk_kill_active_auto_panic",  # 0/1 — auto-panic kill active
+	"risk_kill_active_auto_drawdown", # 0/1 — auto-drawdown kill active
+	"risk_kill_active_auto_daily",  # 0/1 — auto-daily kill active
+	"risk_equity_cents",            # current computed equity in cents
+	"risk_peak_cents",              # closed-equity peak in cents
+	"risk_daily_pnl_cents",         # daily P&L in cents (may be negative)
+	"risk_bankroll_age_seconds",    # seconds since last bankroll cache refresh
+)
+
+
+# Mapping from GateRejectReason literals to their counter key.
+# Gate uses this to inc() the right counter without a large if/elif chain.
+_GATE_REJECT_COUNTER: dict[str, str] = {
+	"KILL_OPERATOR": "risk_gate_rejected_operator",
+	"KILL_AUTO_PANIC": "risk_gate_rejected_panic",
+	"KILL_AUTO_DRAWDOWN": "risk_gate_rejected_drawdown",
+	"KILL_AUTO_DAILY": "risk_gate_rejected_daily",
+	"INVALID_SIGNAL": "risk_gate_rejected_invalid",
+	"MAX_OPEN": "risk_gate_rejected_max_open",
+	"BELOW_MIN_FILL": "risk_gate_rejected_min_fill",
+}
 
 
 @dataclass
