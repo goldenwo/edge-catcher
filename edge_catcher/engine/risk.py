@@ -39,7 +39,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
 from edge_catcher.engine.executor import OpenPosition

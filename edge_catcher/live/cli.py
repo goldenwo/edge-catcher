@@ -230,7 +230,7 @@ def _do_kill_clear(args: argparse.Namespace, cfg: LiveConfig) -> int:
 		return 1
 
 	now = datetime.now(timezone.utc)
-	cleared_by = f"operator-cli"
+	cleared_by = "operator-cli"
 	if args.note:
 		cleared_by = f"operator-cli: {args.note}"
 
