@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
 from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot
 
 log = logging.getLogger(__name__)
@@ -96,7 +97,14 @@ def walk_book_with_ceiling(
 	ceiling_cents = best_price_cents + max_slippage_cents
 	remaining = size
 	remaining_budget = max_cost_cents  # None = unlimited
-	total_cost_cents = 0
+	# Collect per-level fills as we walk so we can hand the list to
+	# ``fill_math.blended_price_cents`` — the SINGLE source of truth for the
+	# volume-weighted-average computation. Both paper (this function) and
+	# live (LiveExecutor._translate_order) MUST route through that helper so
+	# replay-live parity holds byte-exact. The math is identical to the
+	# pre-D inline ``round(total_cost_cents / total_filled)`` line (proven
+	# byte-exact by tests/test_engine_fill_math.py test #14).
+	fills: list[FillEvent] = []
 	total_filled = 0
 
 	for price_dollars, qty in levels:
@@ -115,7 +123,7 @@ def walk_book_with_ceiling(
 			take = min(take, max_by_budget)
 		if take == 0:
 			break
-		total_cost_cents += take * price_cents
+		fills.append({"price": price_cents, "size": take})
 		total_filled += take
 		remaining -= take
 		if remaining_budget is not None:
@@ -130,7 +138,7 @@ def walk_book_with_ceiling(
 			intended_size=size,
 		)
 
-	blended = round(total_cost_cents / total_filled)
+	blended = blended_price_cents(fills)
 	# Guard: if the book has sub-cent prices that round to 0, the blended
 	# price is unusable as a cost basis. Treat as no fill so the trade is
 	# skipped rather than entered with a corrupt 0¢ price.

@@ -21,9 +21,10 @@ Invariants (see capture/replay spec §4.7):
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from edge_catcher.engine.execution import _make_client_order_id
 from edge_catcher.engine.executor import Executor, OrderRequest
 from edge_catcher.engine.market_state import (
 	MarketState,
@@ -276,19 +277,6 @@ async def _handle_signal(
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
 
-def _make_client_order_id(sig: Signal, now: datetime) -> str:
-	"""Build an idempotency key for the order. Paper records but does not enforce
-	uniqueness; D will tighten when wiring LiveExecutor (Kalshi requires
-	idempotency on retries).
-
-	# TODO(D): millisecond resolution can collide on a burst replay or two
-	# strategies firing on the same ticker in the same ms. Before LiveExecutor
-	# starts depending on this for Kalshi idempotency, append a short uuid4 or
-	# a per-process monotonic counter so the key is guaranteed unique.
-	"""
-	return f"{sig.strategy}-{sig.ticker}-{int(now.timestamp() * 1000)}"
-
-
 async def _handle_enter(
 	signal: Signal,
 	ctx: TickContext,
@@ -379,11 +367,40 @@ async def _handle_enter(
 			signal.strategy, signal.side, signal.ticker, entry_price, result.rejection_reason,
 		)
 	elif result.status == "pending":
-		# PENDING BRANCH GUARD: G's PR keeps this as a bare pass.
-		# Paper never returns pending; live (D) will write a pending row here once
-		# B's spec defines record_pending_order. A premature stub call would
-		# ImportError at engine startup or crash on first live signal.
-		pass
+		# D's NetworkError or malformed-fills path. Paper never returns pending;
+		# only live execution (D) produces this status.
+		#
+		# Funds-at-risk semantic: writing the pending row is REQUIRED for B's
+		# reconciliation. If Kalshi accepted the order but A's HTTP layer lost
+		# the response (NetworkError), B reconciles via client_order_id; if
+		# Kalshi returned filled_count>0 with a malformed fills array, B
+		# reconciles via kalshi_order_id. Skipping this branch — even on
+		# NetworkError where order_id=None — strands the order on Kalshi with
+		# no local record. Per D spec L657-L685; locked cross-PR contract
+		# with B (see B spec L479-L502).
+		#
+		# Notification routing for pending rows is E's responsibility (CR-1).
+		# Dispatch only writes the row; E reads OrderResult.status and routes.
+		# entry_price_cents is the ORIGINAL Signal intent — NOT D's slippage-
+		# adjusted limit_price_cents. Per D spec L679 + B's reconciliation
+		# contract: B computes PnL on settlement against the strategy's
+		# intended entry, not the walked-up limit. Pinned by
+		# tests/test_engine_dispatch_pending_branch.py.
+		store.record_pending(
+			ticker=signal.ticker,
+			series=signal.series,
+			strategy=signal.strategy,
+			side=signal.side,
+			intended_size=result.intended_size,
+			entry_price_cents=signal.entry_price_cents,
+			stop_loss_distance_cents=signal.stop_loss_distance_cents,
+			client_order_id=req.client_order_id,
+			# kalshi_order_id: None on NetworkError; preserved on malformed-fills
+			kalshi_order_id=result.order_id,
+			placed_at_utc=datetime.now(timezone.utc).isoformat(),
+			rejection_reason=result.rejection_reason,
+		)
+		metrics.inc("entries_pending")
 
 
 def _handle_exit(
