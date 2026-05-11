@@ -575,7 +575,7 @@ def test_outer_reconnect_loop_reraises_kill_switch_trip_failed_in_source():
 
 
 @pytest.mark.asyncio
-async def test_bankroll_refresh_propagates_kill_switch_trip_failed(monkeypatch):
+async def test_bankroll_refresh_propagates_kill_switch_trip_failed():
 	"""BankrollCache.refresh's docstring promises that KillSwitchTripFailed
 	from the auto-panic trip propagates out (C-spec L214 ghost-reject defense).
 	Callers (E's periodic refresh task, on_fill, on_settlement) must NOT
@@ -584,7 +584,6 @@ async def test_bankroll_refresh_propagates_kill_switch_trip_failed(monkeypatch):
 	"""
 	from edge_catcher.engine.risk import (
 		BankrollCache,
-		BalanceSource,
 		KillSwitchTripFailed,
 		RiskConfig,
 	)
@@ -598,21 +597,19 @@ async def test_bankroll_refresh_propagates_kill_switch_trip_failed(monkeypatch):
 		raise KillSwitchTripFailed("simulated kill_switch INSERT failure")
 
 	cfg = RiskConfig(
-		bankroll_cents=20_000,
 		sizing_pct=0.0025,
-		stop_loss_cents=20,
-		daily_loss_cap_cents=400,
-		absolute_panic_floor_cents=3000,
+		daily_loss_pct=0.02,
 		drawdown_pct=0.30,
-		min_fill_contracts=1,
 		max_open=20,
+		min_fill_contracts=1,
+		absolute_panic_floor_cents=3000,
+		absolute_max_cents=5000,
+		kelly_shrinkage=0.5,
+		bankroll_ttl_seconds=300.0,
 		bankroll_failures_until_kill=2,
 	)
-	cache = BankrollCache(
-		source=_FlakySource(),  # type: ignore[arg-type]
-		cfg=cfg,
-		emit_trip_fn=_failing_emit_trip,
-	)
+	cache = BankrollCache(_source=_FlakySource(), _cfg=cfg)  # type: ignore[arg-type]
+	cache._emit_trip_fn = _failing_emit_trip
 
 	# First refresh: increments failure counter to 1 (below threshold = 2)
 	await cache.refresh()
