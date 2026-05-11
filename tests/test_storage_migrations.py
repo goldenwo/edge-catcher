@@ -150,6 +150,42 @@ def test_non_sql_files_ignored(tmp_path: Path) -> None:
 	assert not _table_exists(conn, "tbl_bad"), "malformed filename must be skipped"
 
 
+def test_apply_migrations_does_not_collide_with_init_db(tmp_path: Path) -> None:
+	"""Q4 regression: storage/db.py:init_db writes (version=1, applied_at) to
+	its own ``schema_migrations`` table. The migration runner uses a separate
+	``live_schema_migrations`` table so that calling apply_migrations on a
+	DB previously initialized by init_db does NOT skip 0001_create_kill_switch.
+
+	Pre-fix bug: shared ``schema_migrations`` table → init_db's hardcoded
+	version=1 row → apply_migrations sees version 1 in applied_versions →
+	silently skips 0001_create_kill_switch.sql. Result: kill_switch table
+	never created on shared DBs (latent live-money risk).
+	"""
+	from edge_catcher.storage.db import init_db
+
+	db_path = tmp_path / "shared.db"
+	# init_db writes version=1 to its own schema_migrations table.
+	init_db(db_path)
+
+	# apply_migrations on the SAME DB must apply both 0001 and 0002, not
+	# silently skip 0001 because of init_db's version-1 row collision.
+	conn = sqlite3.connect(str(db_path))
+	conn.row_factory = sqlite3.Row
+	try:
+		applied = apply_migrations(conn, _MIGRATIONS_DIR)
+		assert applied == [1, 2], (
+			f"expected both 0001 and 0002 applied, got {applied} — collision likely"
+		)
+		assert _table_exists(conn, "kill_switch"), (
+			"kill_switch table must exist; would not if 0001 was skipped"
+		)
+		# Verify the runner's tracking table is separate from db.py's.
+		assert _table_exists(conn, "live_schema_migrations"), "runner tracking table must exist"
+		assert _table_exists(conn, "schema_migrations"), "db.py's tracking table also exists (decoupled)"
+	finally:
+		conn.close()
+
+
 def test_partial_migration_state(tmp_path: Path) -> None:
 	"""If 0001 is already applied, only 0002 is applied on the next call."""
 	m_dir = tmp_path / "migrations"

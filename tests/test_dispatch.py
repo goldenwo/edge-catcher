@@ -10,14 +10,18 @@ the handlers moved modules but their logic and tests stayed intact.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine import dispatch as dispatch_module
+from edge_catcher.engine.dispatch import dispatch_message, process_tick
 from edge_catcher.engine.executors.paper import PaperExecutor
-from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot, TickContext
+from edge_catcher.engine.risk import KillSwitchTripFailed
+from edge_catcher.engine.strategy_base import Signal, Strategy
 from edge_catcher.engine.trade_store import TradeStore
 
 
@@ -352,4 +356,107 @@ async def test_market_state_clear_propagates_to_dispatch(
 	assert strat.captured_contexts[-1].is_first_observation is True, (
 		"after MarketState.clear(), the next dispatched trade tick MUST flag "
 		"is_first_observation=True — Change 3 (clear discipline) is broken if not"
+	)
+
+
+# ---------------------------------------------------------------------------
+# Risk-gate enforcement — Q1 + Q2 regression tests (PR #36 R2 fixes)
+# ---------------------------------------------------------------------------
+
+class _StubStrategy:
+	"""Minimal strategy that emits one enter signal per on_tick call."""
+	name = "stub"
+	emoji = "🔵"
+
+	def on_tick(self, ctx: TickContext) -> list[Signal]:  # type: ignore[override]
+		return [Signal(action="enter", ticker=ctx.ticker, side="yes",
+			series="X", strategy=self.name, reason="test")]
+
+
+def _make_tick_ctx() -> TickContext:
+	"""Build a minimal TickContext for risk-gate enforcement tests."""
+	return TickContext(
+		ticker="X", event_ticker="EX", yes_bid=50, yes_ask=51, no_bid=49, no_ask=50,
+		orderbook=OrderbookSnapshot(yes_levels=[], no_levels=[]),
+		price_history=[], open_positions=[], persisted_state={}, market_metadata={},
+	)
+
+
+@pytest.mark.asyncio
+async def test_process_tick_reraises_kill_switch_trip_failed(monkeypatch, market_state, store):
+	"""Q1 regression: process_tick MUST re-raise KillSwitchTripFailed so the
+	engine STOPS on kill-switch INSERT failure (C-spec L214 ghost-reject
+	defense). The broad `except Exception` for other signal-handling errors
+	must NOT swallow this specific exception class.
+	"""
+	async def fake_handle_signal(*args, **kwargs):
+		raise KillSwitchTripFailed("simulated kill_switch INSERT failure")
+
+	monkeypatch.setattr(dispatch_module, "_handle_signal", fake_handle_signal)
+
+	ctx = _make_tick_ctx()
+	with pytest.raises(KillSwitchTripFailed):
+		await process_tick(
+			ctx, [_StubStrategy()], store, config={},
+			executor=PaperExecutor(market_state=market_state, config={}),
+			now=_now(),
+			risk=None,
+		)
+
+
+@pytest.mark.asyncio
+async def test_process_tick_swallows_non_kill_switch_exceptions(monkeypatch, market_state, store, caplog):
+	"""Counter-test for Q1: non-KillSwitchTripFailed exceptions must STILL be
+	logged + swallowed (preserves existing per-signal isolation behavior).
+	"""
+	async def fake_handle_signal(*args, **kwargs):
+		raise ValueError("simulated business-logic error")
+
+	monkeypatch.setattr(dispatch_module, "_handle_signal", fake_handle_signal)
+
+	ctx = _make_tick_ctx()
+	with caplog.at_level(logging.ERROR):
+		# Should NOT raise — process_tick logs and continues.
+		await process_tick(
+			ctx, [_StubStrategy()], store, config={},
+			executor=PaperExecutor(market_state=market_state, config={}),
+			now=_now(),
+			risk=None,
+		)
+	assert any("Error handling" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_gate_unwired_warning_fires_only_once(monkeypatch, market_state, store, caplog):
+	"""Q2 regression: when risk is not None but dispatch wiring isn't done
+	yet (E hasn't shipped), the "ungated passes through" warning fires
+	once per process, not per signal — module-level _gate_unwired_warning_logged
+	flag prevents log spam.
+	"""
+	# Reset the module-level flag for an isolated test.
+	monkeypatch.setattr(dispatch_module, "_gate_unwired_warning_logged", False)
+
+	# Stub _handle_enter so we don't actually try to place orders.
+	async def fake_handle_enter(*args, **kwargs):
+		return None
+	monkeypatch.setattr(dispatch_module, "_handle_enter", fake_handle_enter)
+
+	ctx = _make_tick_ctx()
+	# Use a sentinel object as 'risk' — _handle_signal only checks `risk is not None`.
+	fake_risk = object()
+
+	with caplog.at_level(logging.WARNING):
+		# Process 3 ticks — each emits one signal, all 3 reach _handle_signal
+		# with risk=fake_risk. Warning should fire ONCE total.
+		for _ in range(3):
+			await process_tick(
+				ctx, [_StubStrategy()], store, config={},
+				executor=PaperExecutor(market_state=market_state, config={}),
+				now=_now(),
+				risk=fake_risk,  # type: ignore[arg-type]
+			)
+
+	gate_warnings = [r for r in caplog.records if "Risk gate constructed" in r.message]
+	assert len(gate_warnings) == 1, (
+		f"warning should fire once across 3 signals, fired {len(gate_warnings)}"
 	)

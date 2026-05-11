@@ -281,6 +281,22 @@ class TestKillSwitch:
 			ks.trip("KILL_AUTO_PANIC", detail="second", now=now)
 		assert isinstance(exc_info.value.__cause__, sqlite3.IntegrityError)
 
+	def test_clear_raises_on_missing_kill_id(self) -> None:
+		"""KillSwitch.clear on non-existent id raises KillSwitchClearError.
+
+		C-spec operator-safety: silent UPDATE-rowcount-zero would mislead
+		the operator into thinking the gate was cleared. The CLI's existing
+		try/except surfaces this as 'ERROR: No kill_switch row with id=N'
+		and exits 1.
+		"""
+		conn = _make_conn()
+		ks = KillSwitch(conn)
+		now = datetime.now(timezone.utc)
+		# kill_switch table is empty — id=99 does not exist.
+		with pytest.raises(KillSwitchClearError) as exc_info:
+			ks.clear(99, "human:test", now=now)
+		assert "id=99" in str(exc_info.value)
+
 	def test_emit_trip_raises_propagates_to_gate(self) -> None:
 		"""Gate._emit_trip must not swallow INSERT failures (C-spec L214)."""
 		conn = _make_conn()
