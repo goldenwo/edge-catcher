@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -178,7 +178,6 @@ class TestEndToEndGateFlow:
 
 	def test_multi_trade_equity_tracking(self) -> None:
 		"""Multiple positions affect equity computation and sizing."""
-		from edge_catcher.engine.market_state import OrderbookSnapshot
 		conn = _make_conn()
 		cfg = _phase1_cfg(min_fill_contracts=1, max_open=10)
 		gate = _make_gate_full(conn, cash_cents=10_000, peak_cents=10_000, cfg=cfg)

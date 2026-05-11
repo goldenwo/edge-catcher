@@ -16,7 +16,6 @@ Running::
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -32,8 +31,6 @@ from edge_catcher.engine.risk import (
 	BalanceSource,
 	BankrollCache,
 	Gate,
-	KalshiBalanceSource,
-	KillRow,
 	KillSwitch,
 	KillSwitchClearError,
 	KillSwitchTripFailed,
@@ -41,10 +38,6 @@ from edge_catcher.engine.risk import (
 	Reject,
 	RiskConfig,
 	RiskContext,
-	RiskEvent,
-	SizingBreakdown,
-	_SizingResult,
-	build_risk_module,
 )
 from edge_catcher.engine.strategy_base import Signal
 
@@ -978,7 +971,7 @@ class TestSizingProperties:
 		decisions = [gate.gate_entry(sig, ctx) for _ in range(5)]
 		first = decisions[0]
 		for d in decisions[1:]:
-			assert type(d) == type(first)
+			assert type(d) is type(first)
 			if isinstance(d, Allow):
 				assert isinstance(first, Allow)
 				assert d.size_contracts == first.size_contracts

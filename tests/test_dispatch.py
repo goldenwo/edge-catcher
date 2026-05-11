@@ -259,8 +259,6 @@ async def test_dispatch_synthetic_unknown_source_warns_and_returns(call_args: di
 # ---------------------------------------------------------------------------
 
 
-from edge_catcher.engine.market_state import TickContext  # noqa: E402
-from edge_catcher.engine.strategy_base import Strategy  # noqa: E402
 
 
 class _CaptureStrategy(Strategy):
