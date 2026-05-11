@@ -1,0 +1,68 @@
+# Live Trader Configuration — example / skeleton
+# Copy to config.local/live-trader.yaml and fill in your values.
+#
+# Secrets stay in environment variables per A's existing convention:
+#   KALSHI_LIVE_KEY_ID       — Kalshi API key ID for the live account
+#   KALSHI_LIVE_PRIVATE_KEY  — Kalshi RSA private key (PEM, no passphrase)
+# Write these to a bare KEY=VALUE file (NOT ~/.bashrc) and EnvironmentFile=
+# it from the systemd live-trader unit so they never touch the repo.
+
+db_path: data/live_trades.db
+
+ws:
+  channels: [ticker, orderbook_delta]
+  ping_interval: 20
+  reconnect_delay: 30
+  price_history_limit: 100
+
+recovery:
+  rest_sweep_on_startup: true
+  state_flush_interval: 5
+
+strategies:
+  # Enable only Phase-1-approved strategies here.
+  # See config.local/live-trader.yaml for the real strategy list.
+  my-strategy:
+    enabled: false
+    series: [KXETH15M]
+    params: {}
+
+# ---------------------------------------------------------------------------
+# Risk gates (Sub-project C)
+# ---------------------------------------------------------------------------
+# These six top-level numbers define the current phase. Phase promotion is
+# YAML-only — bump the numbers, restart the live trader; no code change.
+#
+# Phase 1 reference values shown below. Adjust for your bankroll and risk
+# tolerance before enabling live execution.
+# ---------------------------------------------------------------------------
+risk:
+  # Phase progression — promotion is config-only (no code change).
+  sizing_pct: 0.005          # 0.5% of equity per trade (fixed_fraction arm)
+  daily_loss_pct: 0.02       # 2% of equity — daily soft-kill threshold
+  drawdown_pct: 0.05         # 5% from closed-equity peak — lifetime guard
+
+  max_open: 5                # max concurrent open positions
+  min_fill_contracts: 3      # reject signals that size below this threshold
+
+  # Static safety floors — do NOT scale with bankroll. Bug protection.
+  absolute_panic_floor_cents: 3000   # $30 — absolute equity floor (hard stop)
+  absolute_max_cents: 5000           # $50 — per-order dollar cap (bug guard)
+
+  # Kelly arm tuning — currently inert in Phase 1.
+  # Phase 2+ activates when strategy config provides win_prob + payout_ratio.
+  kelly_shrinkage: 0.5       # multiplicative on win_prob (conservative Kelly)
+
+  # Bankroll cache — how often to refresh from Kalshi REST.
+  bankroll_ttl_seconds: 300          # 5 minutes; E refreshes at TTL/2
+  bankroll_failures_until_kill: 2    # consecutive refresh failures → auto-panic
+
+# Orderbook capture pipeline — same options as paper-trader.example.yaml.
+# Flip to true on the live-trading host once R2 credentials are configured.
+capture:
+  enabled: false
+  output_dir: data/orderbook_capture_live
+  min_free_gb: 10
+  transport: none
+  delete_raw_after_bundle: true
+  local_retention_days: 7

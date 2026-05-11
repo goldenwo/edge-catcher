@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from edge_catcher.engine.executor import Executor, OrderRequest
 from edge_catcher.engine.market_state import (
@@ -36,6 +36,12 @@ from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.notifications import notify
 from edge_catcher.engine.strategy_base import Signal, Strategy
 from edge_catcher.engine.trade_store import TradeStoreProtocol
+
+if TYPE_CHECKING:
+	# Gate lives in engine/risk.py (Agent A's scope, PR 3/6).
+	# Import only for type-checking so dispatch doesn't fail to import when
+	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
+	from edge_catcher.engine.risk import Gate
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +149,7 @@ async def process_tick(
 	executor: Executor,
 	*,
 	now: datetime,
+	risk: Gate | None = None,
 ) -> None:
 	"""Run every enabled strategy against the current tick context.
 
@@ -162,6 +169,11 @@ async def process_tick(
 	`executor` is the engine's pluggable execution endpoint — `PaperExecutor` for
 	paper-trader, `LiveExecutor` (added by sub-project D) for live. Both implement
 	the `Executor` Protocol with async `place(req) -> OrderResult`.
+
+	`risk` is the Gate instance for live trading (Sub-project C), or None for
+	paper-trader and replay paths. When None, the gate is a no-op: every signal
+	proceeds to executor.place without a gate check. Construction of Gate is
+	gated on `executor_kind == "live"` in engine.py (E's wiring point).
 	"""
 	for strategy in strategies:
 		try:
@@ -172,7 +184,7 @@ async def process_tick(
 
 		for signal in signals:
 			try:
-				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now)
+				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk)
 			except Exception:
 				log.exception(
 					"Error handling %s signal from %s for %s",
@@ -189,14 +201,51 @@ async def _handle_signal(
 	bullet: str = "🔵",
 	*,
 	now: datetime,
+	risk: Gate | None = None,
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
 	`_handle_enter` is async (awaits the executor's network call); `_handle_exit`
 	stays sync (no I/O — pure store mutation + log). Calling a sync function
 	from this async dispatcher is intentional and idiomatic.
+
+	Gate consultation (Sub-project C):
+	  Entry signals are gated BEFORE building/placing the order. `risk` is the
+	  Gate instance constructed by E when `executor_kind == "live"`; for paper-
+	  trader and replay paths, `risk` is None and the gate is a no-op.
+
+	  On Reject: log the reason + return (no order placed). Audit + Discord
+	  notify routing is E's responsibility via the RiskEvent contract (CR-1).
+	  On Allow: proceed with build_order(sig, decision.size_contracts) then
+	  executor.place (sizing is wired by D in PR 4).
+
+	  Exit signals bypass the entry gate — exits are always allowed even when
+	  auto-kills are active (kills cap new exposure; they don't trap existing
+	  exposure). The gate_exit check (operator-kill only) is E's responsibility
+	  to call from the WS-close handler path where it has a RiskContext.
 	"""
 	if signal.action == "enter":
+		# Gate consultation — live path only (risk is None for paper/replay).
+		if risk is not None:
+			# E builds the RiskContext and passes it; for now the gate call
+			# shape matches C-spec §Gate ordering. E will supply ctx_risk.
+			# Placeholder: pass None as ctx until E wires RiskContext creation.
+			# This branch compiles but is not exercised until E's PR.
+			try:
+				from edge_catcher.engine.risk import Reject as RiskReject  # noqa: PLC0415
+				decision = risk.gate_entry(signal, None)  # type: ignore[arg-type]
+				if isinstance(decision, RiskReject):
+					log.info(
+						"Gate REJECT %s — %s: %s",
+						signal.strategy, decision.reason, decision.detail,
+					)
+					return
+			except Exception:
+				log.exception(
+					"Gate error for %s %s — aborting signal (fail-safe)",
+					signal.strategy, signal.ticker,
+				)
+				return
 		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
 		_handle_exit(signal, ctx, store, bullet, now=now)
@@ -451,6 +500,7 @@ async def _handle_ticker_msg(
 	executor: Executor,
 	*,
 	now: datetime,
+	risk: Gate | None = None,
 ) -> None:
 	"""Handle a ticker (price update) WS message."""
 	data = msg.get("msg", {})
@@ -515,7 +565,7 @@ async def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now)
+			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
 			dirty.add(strat.name)
 
 
@@ -531,6 +581,7 @@ async def _handle_trade_msg(
 	executor: Executor,
 	*,
 	now: datetime,
+	risk: Gate | None = None,
 ) -> None:
 	"""Handle a trade WS message — routes to flow-sensitive strategies."""
 	data = msg.get("msg", {})
@@ -602,7 +653,7 @@ async def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now)
+			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
 			dirty.add(strat.name)
 
 
@@ -711,6 +762,7 @@ async def dispatch_message(
 	executor: Executor,
 	*,
 	now: datetime,
+	risk: Gate | None = None,
 ) -> None:
 	"""Route one parsed event to its handler.
 
@@ -723,6 +775,11 @@ async def dispatch_message(
 	Async because ticker/trade handlers fan out to `process_tick` →
 	`_handle_enter` → `await executor.place(...)`. Synthetic and orderbook
 	handlers stay sync (no I/O) — calling them from this async router is fine.
+
+	`risk` is the Gate instance (Sub-project C) for the live path, or None for
+	paper-trader and replay.  When None, all signals proceed to executor.place
+	without any gate check — replay of a historical bundle produces zero gate
+	calls.  Callers construct Gate only when `executor_kind == "live"`.
 	"""
 	# Accept both the wrapped (capture) shape and the raw WS shape.
 	source = event.get("source")
@@ -742,12 +799,12 @@ async def dispatch_message(
 		elif msg_type == "ticker":
 			await _handle_ticker_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now,
+				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
 			)
 		elif msg_type == "trade":
 			await _handle_trade_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now,
+				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
 			)
 		else:
 			log.debug("dispatch_message: unknown msg_type %r", msg_type)
