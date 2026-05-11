@@ -272,7 +272,18 @@ class BankrollCache:
 		return self._cash_cents
 
 	def is_stale(self) -> bool:
-		"""Return True if the cache is older than bankroll_ttl_seconds."""
+		"""Return True if the cache is older than bankroll_ttl_seconds.
+
+		A never-refreshed cache (``_last_refresh_ts == 0.0``) is always
+		considered stale. ``time.monotonic()``'s reference point is platform-
+		dependent and undefined — on a freshly-booted CI runner it returns
+		small values (single-digit seconds), so the naive ``time.monotonic() -
+		0 > ttl`` check would falsely report a never-refreshed cache as fresh
+		until the process has been running for at least ``ttl`` seconds. The
+		zero-check makes the "never refreshed = stale" invariant portable.
+		"""
+		if self._last_refresh_ts == 0.0:
+			return True
 		return (time.monotonic() - self._last_refresh_ts) > self._cfg.bankroll_ttl_seconds
 
 	async def refresh(self) -> None:

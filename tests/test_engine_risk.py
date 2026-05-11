@@ -321,6 +321,29 @@ class TestBankrollCache:
 		# _last_refresh_ts defaults to 0.0 → very stale
 		assert cache.is_stale()
 
+	def test_is_stale_on_fresh_process_with_low_monotonic_clock(self, monkeypatch) -> None:
+		"""Regression for the CI failure on Linux runners: time.monotonic()'s
+		reference point is platform-dependent. On a freshly-booted CI runner
+		it returns single-digit seconds — and `(time.monotonic() - 0) > 300`
+		evaluates False, so a never-refreshed cache was incorrectly reported
+		as fresh. The fix in `is_stale` short-circuits on `_last_refresh_ts ==
+		0.0` so the "never refreshed = stale" invariant holds regardless of
+		process uptime.
+		"""
+		import time as time_module
+
+		# Simulate a fresh CI runner where time.monotonic() returns a small
+		# value, smaller than bankroll_ttl_seconds. Without the zero-check,
+		# (5.0 - 0.0) > 300 is False and the cache is reported as fresh —
+		# wrong; a never-refreshed cache should always be stale.
+		monkeypatch.setattr(time_module, "monotonic", lambda: 5.0)
+
+		cfg = _phase1_cfg(bankroll_ttl_seconds=300.0)
+		cache = BankrollCache(_source=_make_balance_source(), _cfg=cfg)
+		assert cache.is_stale(), (
+			"Never-refreshed cache must be stale even when time.monotonic() < ttl"
+		)
+
 	def test_is_not_stale_after_pre_load(self) -> None:
 		cfg = _phase1_cfg(bankroll_ttl_seconds=300.0)
 		cache = _make_bankroll(cfg, cents=20_000)
