@@ -30,6 +30,11 @@ class OrderRequest:
 	limit_price_cents: int        # 1..99
 	strategy: str                 # for audit/correlation
 	client_order_id: str          # idempotency (live); recorded but not enforced (paper)
+	# default "buy" — all current strategies (paper + Phase 1 live) only
+	# buy entries; sell-side execution lands with PR 4 (D) when LiveExecutor
+	# constructs sell-orders for exit-pending paths. Per the protocol-growth
+	# invariant above, "buy" serves as the zero-value default for this
+	# binary-action field.
 	action: Literal["buy", "sell"] = "buy"
 
 
@@ -73,8 +78,13 @@ class OrderResult:
 class OpenPosition:
 	"""A resolved open position held by the engine.
 
-	side semantics are venue-defined ("yes"/"no" for Kalshi binary);
-	engine treats as opaque label per CR-6 (multi-adapter extensibility).
+	``side`` is typed ``Literal["yes","no"]`` for Phase 1's binary-prediction-
+	market scope (Kalshi today; Polymarket-binary later — same type works).
+	Engine code treats the value as an opaque label: no business logic
+	switches on "yes" vs "no" (sizing/exit logic is direction-agnostic via
+	``Signal.action``). Future continuous-payoff or multi-outcome venues
+	require their own ``OpenPosition`` type per CR-6, not a widening of
+	this one.
 	"""
 	ticker: str
 	side: Literal["yes", "no"]

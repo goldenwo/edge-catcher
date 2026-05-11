@@ -104,7 +104,7 @@ async def test_executor_protocol_structural_typing():
 # ---------------------------------------------------------------------------
 
 
-def test_order_request_action_defaults_to_buy():
+def test_order_request_action_defaults_to_buy() -> None:
 	"""OrderRequest.action defaults to 'buy' — preserves existing call sites."""
 	req = OrderRequest(
 		ticker="x", series="x", side="yes", size_contracts=1,
@@ -113,7 +113,7 @@ def test_order_request_action_defaults_to_buy():
 	assert req.action == "buy"
 
 
-def test_order_request_action_can_be_sell():
+def test_order_request_action_can_be_sell() -> None:
 	req = OrderRequest(
 		ticker="x", series="x", side="yes", size_contracts=1,
 		limit_price_cents=1, strategy="x", client_order_id="x",
@@ -122,7 +122,7 @@ def test_order_request_action_can_be_sell():
 	assert req.action == "sell"
 
 
-def test_order_result_order_id_defaults_to_none():
+def test_order_result_order_id_defaults_to_none() -> None:
 	"""OrderResult.order_id defaults to None — preserves existing paper-path call sites."""
 	r = OrderResult(
 		status="filled",
@@ -135,7 +135,7 @@ def test_order_result_order_id_defaults_to_none():
 	assert r.order_id is None
 
 
-def test_order_result_order_id_can_be_set():
+def test_order_result_order_id_can_be_set() -> None:
 	r = OrderResult(
 		status="filled",
 		intended_size=1,
@@ -148,7 +148,7 @@ def test_order_result_order_id_can_be_set():
 	assert r.order_id == "ord-abc123"
 
 
-def test_open_position_shape():
+def test_open_position_shape() -> None:
 	"""OpenPosition is a frozen+slots dataclass with 4 required fields."""
 	pos = OpenPosition(
 		ticker="KXSOL15M-25-T1",
@@ -162,7 +162,7 @@ def test_open_position_shape():
 	assert pos.blended_entry_cents == 42
 
 
-def test_open_position_is_frozen():
+def test_open_position_is_frozen() -> None:
 	"""OpenPosition must be immutable."""
 	pos = OpenPosition(ticker="X", side="no", fill_size=5, blended_entry_cents=60)
 	from dataclasses import FrozenInstanceError
@@ -170,7 +170,7 @@ def test_open_position_is_frozen():
 		pos.fill_size = 99  # type: ignore[misc]
 
 
-def test_open_position_uses_slots():
+def test_open_position_uses_slots() -> None:
 	pos = OpenPosition(ticker="X", side="yes", fill_size=1, blended_entry_cents=50)
 	with pytest.raises((AttributeError, TypeError)):
 		pos.unknown_field = 1  # type: ignore[attr-defined]
