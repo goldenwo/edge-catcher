@@ -22,6 +22,7 @@ Funds-at-risk lens:
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.live.client import (
@@ -36,25 +37,7 @@ from edge_catcher.live.errors import (
 	OrderRejected,
 )
 
-try:
-	from edge_catcher.engine.fill_math import blended_price_cents
-except ImportError:
-	# Local shim: ``engine/fill_math.py`` lands in the parallel v1.6.0 PR 4
-	# branch owned by Agent 3b.A. Mirrors the spec's volume-weighted formula
-	# byte-for-byte so isolated builds (and this module's unit tests) pass
-	# pre-merge. The merge step removes this fallback once fill_math.py is in
-	# the same tree.
-	from typing import Any, Iterable
-
-	def blended_price_cents(fills: Iterable[Any]) -> int:
-		total_cost = 0
-		total_size = 0
-		for fill in fills:
-			total_cost += fill["price"] * fill["size"]
-			total_size += fill["size"]
-		if total_size == 0:
-			return 0
-		return round(total_cost / total_size)
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
 
 
 log = logging.getLogger(__name__)
@@ -146,8 +129,10 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	# Parse the per-fill array from order.raw — Kalshi returns it as
 	# raw["fills"]: [{"price": int, "size": int}, ...] when fills exist.
 	# A missing/malformed shape falls through to the pending branch below;
-	# B will reconcile by order_id.
-	fills: list[dict[str, int]] = []
+	# B will reconcile by order_id. We cast at the boundary because the
+	# Kalshi wire shape is dynamically typed but we've validated it has the
+	# FillEvent shape (price+size keys) before passing to fill_math.
+	fills: list[FillEvent] = []
 	try:
 		raw_fills = order.raw.get("fills") if isinstance(order.raw, dict) else None
 		if isinstance(raw_fills, list):
@@ -156,7 +141,7 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			if all(
 				isinstance(f, dict) and "price" in f and "size" in f for f in raw_fills
 			):
-				fills = raw_fills
+				fills = cast(list[FillEvent], raw_fills)
 	except (AttributeError, TypeError):
 		fills = []
 
