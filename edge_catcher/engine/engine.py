@@ -51,6 +51,21 @@ from edge_catcher.engine.recovery import (
 from edge_catcher.engine.strategy_base import Strategy
 from edge_catcher.engine.trade_store import TradeStore
 
+# KillSwitchTripFailed must propagate out of run_engine when raised — it's the
+# C-spec L214 ghost-reject defense. process_tick re-raises it past _handle_signal's
+# broad-except; this module's _ws_loop and the outer reconnect block must ALSO
+# re-raise so the engine actually STOPS instead of continuing to the next tick
+# (which would re-evaluate the gate against unchanged DB state and let the
+# previously-blocked trade through with real money).
+#
+# Imported at runtime via try/except so engine.py still imports when risk.py is
+# absent (paper-only deployments / tests with no live risk module).
+try:
+	from edge_catcher.engine.risk import KillSwitchTripFailed  # noqa: PLC0415
+except ImportError:
+	class KillSwitchTripFailed(Exception):  # type: ignore[no-redef]
+		pass
+
 log = logging.getLogger(__name__)
 
 
@@ -659,6 +674,16 @@ async def run_engine(
 					await asyncio.sleep(reconnect_delay)
 					market_state.clear()
 					await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
+				except KillSwitchTripFailed:
+					# C-spec L214 ghost-reject defense — must STOP, not reconnect.
+					# Reconnecting would re-enter the WS loop, accept the next tick,
+					# query the gate, find no kill row (the INSERT that triggered
+					# this exception failed), and allow the previously-rejected
+					# trade through. The fail-loud behavior is intentional: the
+					# operator sees the crash, investigates DB health, and either
+					# restarts the engine after the DB is fixed or manually trips
+					# the kill via the CLI.
+					raise
 				except Exception:
 					log.exception("Unexpected WS error — reconnecting in %ds", reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
@@ -752,6 +777,15 @@ async def _ws_loop(
 					executor,
 					now=now,
 				)
+			except KillSwitchTripFailed:
+				# C-spec L214 ghost-reject defense — full chain. process_tick
+				# already re-raised past _handle_signal's broad except; we must
+				# NOT swallow here either, otherwise the engine continues to the
+				# next message, the gate re-evaluates with no kill row persisted,
+				# and the previously-blocked trade goes through with real money.
+				# Propagate to the outer reconnect block (which also re-raises
+				# it) so run_engine terminates.
+				raise
 			except Exception:
 				log.exception("Error dispatching WS message (type=%s)", msg.get("type"))
 

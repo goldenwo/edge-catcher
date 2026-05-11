@@ -283,8 +283,19 @@ class BankrollCache:
 		KILL_AUTO_PANIC (the gate will then reject all entries until an
 		operator acks the kill-clear).
 
-		Raises: nothing — exceptions are caught and logged.  The kill-trip
-		path handles the fatal case.
+		Raises:
+			KillSwitchTripFailed: when the auto-panic trip's DB INSERT fails
+				(via ``_emit_trip_fn`` → ``KillSwitch.trip``). This is the
+				C-spec L214 ghost-reject defense — a silent kill-INSERT failure
+				would let the next tick re-enter the gate against unchanged
+				DB state. Callers (E's periodic refresh task, on_fill,
+				on_settlement) must NOT swallow this exception; the engine's
+				WS loop and outer reconnect block both re-raise it so the
+				process stops rather than continuing past a failed trip.
+
+		All other exceptions (network errors, venue API errors, programming
+		errors during balance fetch) are caught and logged; ``refresh`` does
+		not raise on those paths.
 		"""
 		try:
 			self._cash_cents = await self._source.balance_cents()

@@ -458,3 +458,164 @@ async def test_gate_unwired_warning_fires_only_once(monkeypatch, market_state, s
 	assert len(gate_warnings) == 1, (
 		f"warning should fire once across 3 signals, fired {len(gate_warnings)}"
 	)
+
+
+# ---------------------------------------------------------------------------
+# KillSwitchTripFailed propagation chain — C-spec L214 ghost-reject defense
+# ---------------------------------------------------------------------------
+#
+# When `Gate._emit_trip` cannot persist the kill row (DB INSERT failure), it
+# raises ``KillSwitchTripFailed``. That exception must propagate all the way
+# out of ``run_engine`` so the engine actually STOPS — otherwise the next tick
+# re-enters the gate, finds no kill row, and lets the previously-blocked trade
+# through with real money. The chain is:
+#
+#   Gate._emit_trip → _handle_signal → process_tick → _handle_*_msg →
+#   dispatch_message → engine._ws_loop → run_engine's reconnect loop
+#
+# The R2 backfill already covers process_tick's re-raise (test above). These
+# tests cover the remaining links in the chain.
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_propagates_kill_switch_trip_failed(
+	monkeypatch, market_state, store, call_args
+):
+	"""dispatch_message must NOT catch KillSwitchTripFailed propagating up from
+	_handle_ticker_msg / _handle_trade_msg / process_tick.  The router has no
+	try/except around the handler calls — this test verifies that invariant
+	is preserved if the router structure changes in future."""
+	async def fake_handle_ticker(*args, **kwargs):
+		raise KillSwitchTripFailed("simulated kill INSERT failure")
+
+	monkeypatch.setattr(dispatch_module, "_handle_ticker_msg", fake_handle_ticker)
+
+	event = {
+		"source": "ws",
+		"payload": {
+			"type": "ticker",
+			"msg": {"market_ticker": "KXTEST-26APR14", "yes_bid": 50, "yes_ask": 51},
+		},
+	}
+	with pytest.raises(KillSwitchTripFailed):
+		await dispatch_message(event, **call_args)
+
+
+def test_ws_loop_reraises_kill_switch_trip_failed_in_source():
+	"""engine._ws_loop's per-message try/except must explicitly re-raise
+	KillSwitchTripFailed BEFORE the broad `except Exception:` swallow clause.
+	Without this, the loop would log + continue to the next message, the next
+	tick would re-enter the gate against unchanged DB state (kill INSERT
+	failed), and the previously-blocked trade would go through.
+
+	This is a structural test (inspect.getsource) because _ws_loop is tightly
+	coupled to the WS connection lifecycle and a behavioral test would require
+	mocking websockets.connect, the auth headers, and the recovery path. The
+	structural invariant ("KillSwitchTripFailed handler exists and re-raises
+	before the broad Exception catch") is what's actually being defended; the
+	test fails if a future refactor removes or weakens it.
+	"""
+	import inspect
+
+	from edge_catcher.engine import engine as engine_module
+
+	source = inspect.getsource(engine_module._ws_loop)
+
+	assert "except KillSwitchTripFailed:" in source, (
+		"engine._ws_loop must explicitly handle KillSwitchTripFailed before "
+		"the broad `except Exception:` — see C-spec L214 ghost-reject defense"
+	)
+
+	# The KillSwitchTripFailed handler must appear BEFORE the broad `except
+	# Exception:` so it's matched first (Python except clauses are checked in
+	# source order).
+	ks_idx = source.index("except KillSwitchTripFailed:")
+	exc_idx = source.index("except Exception:")
+	assert ks_idx < exc_idx, (
+		"`except KillSwitchTripFailed:` must precede `except Exception:` so "
+		"the typed handler is matched first; otherwise the broad except will "
+		"swallow the kill-trip-failure"
+	)
+
+	# The handler body must re-raise. Inspect the slice between the
+	# KillSwitchTripFailed handler and the next `except` — there must be a
+	# bare `raise` statement.
+	handler_body = source[ks_idx : exc_idx]
+	assert "\n\t\t\t\traise\n" in handler_body or "\n\t\t\traise\n" in handler_body, (
+		f"engine._ws_loop's KillSwitchTripFailed handler must re-raise to "
+		f"propagate to the outer reconnect block. Handler body:\n{handler_body}"
+	)
+
+
+def test_outer_reconnect_loop_reraises_kill_switch_trip_failed_in_source():
+	"""engine.run_engine's outer reconnect-while-loop must explicitly re-raise
+	KillSwitchTripFailed BEFORE its broad `except Exception:` (which reconnects
+	with backoff). Without this, even if _ws_loop correctly propagates, the
+	outer reconnect block would catch it and resume processing — defeating
+	the defense.
+
+	Structural test because the reconnect block is inlined in run_engine and
+	would require massive mocking to test behaviorally.
+	"""
+	import inspect
+
+	from edge_catcher.engine import engine as engine_module
+
+	source = inspect.getsource(engine_module.run_engine)
+
+	# The outer reconnect block contains the same `except Exception:` /
+	# reconnect pattern. Verify a KillSwitchTripFailed clause exists in the
+	# outer block too.
+	assert source.count("except KillSwitchTripFailed:") >= 1, (
+		"engine.run_engine's outer reconnect loop must explicitly handle "
+		"KillSwitchTripFailed — see C-spec L214 ghost-reject defense.  "
+		"Without this, the engine reconnects on kill-INSERT failure and "
+		"the next tick re-enters the gate with no kill row persisted."
+	)
+
+
+@pytest.mark.asyncio
+async def test_bankroll_refresh_propagates_kill_switch_trip_failed(monkeypatch):
+	"""BankrollCache.refresh's docstring promises that KillSwitchTripFailed
+	from the auto-panic trip propagates out (C-spec L214 ghost-reject defense).
+	Callers (E's periodic refresh task, on_fill, on_settlement) must NOT
+	wrap this in try/except — otherwise a silent kill-INSERT failure leaves
+	the trader running against unchanged DB state.
+	"""
+	from edge_catcher.engine.risk import (
+		BankrollCache,
+		BalanceSource,
+		KillSwitchTripFailed,
+		RiskConfig,
+	)
+
+	class _FlakySource:
+		"""Always raises — simulates an unreachable venue."""
+		async def balance_cents(self) -> int:
+			raise ConnectionError("simulated venue unreachable")
+
+	def _failing_emit_trip(reason: str, *, detail: str | None = None, now=None) -> None:
+		raise KillSwitchTripFailed("simulated kill_switch INSERT failure")
+
+	cfg = RiskConfig(
+		bankroll_cents=20_000,
+		sizing_pct=0.0025,
+		stop_loss_cents=20,
+		daily_loss_cap_cents=400,
+		absolute_panic_floor_cents=3000,
+		drawdown_pct=0.30,
+		min_fill_contracts=1,
+		max_open=20,
+		bankroll_failures_until_kill=2,
+	)
+	cache = BankrollCache(
+		source=_FlakySource(),  # type: ignore[arg-type]
+		cfg=cfg,
+		emit_trip_fn=_failing_emit_trip,
+	)
+
+	# First refresh: increments failure counter to 1 (below threshold = 2)
+	await cache.refresh()
+	# Second refresh: counter hits threshold → emit_trip_fn called → raises
+	with pytest.raises(KillSwitchTripFailed):
+		await cache.refresh()
