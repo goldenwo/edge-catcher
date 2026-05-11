@@ -21,6 +21,7 @@ Funds-at-risk lens:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import cast
 
@@ -60,9 +61,20 @@ class LiveExecutor:
 
 		Every exception path returns a defined :class:`OrderResult` — never
 		re-raises — so dispatch's status-discriminator can route uniformly.
+		The one exception is ``asyncio.CancelledError``: cooperative cancellation
+		must propagate so the engine can shut down cleanly; we treat it as
+		an out-of-band control signal, not an order failure.
 		"""
 		try:
 			order = await self._client.place(_to_kalshi_request(req))
+		except asyncio.CancelledError:
+			# Cooperative cancellation — engine is shutting down. Re-raise
+			# WITHOUT writing a pending row: there's no reliable way to know
+			# whether Kalshi received the request, but B's startup-reconcile
+			# (B-spec L286-L361) will pick up any orphan by client_order_id
+			# on next boot via the periodic poll. Swallowing CancelledError
+			# here would deadlock the dispatch coroutine on shutdown.
+			raise
 		except OrderRejected as e:
 			# Kalshi authoritatively rejected (4xx). Don't retry; no exposure.
 			return _make_rejected(req, reason=f"kalshi_4xx:{e.status}")
@@ -80,6 +92,22 @@ class LiveExecutor:
 			# we don't know whether Kalshi accepted the order. B reconciles.
 			return _make_pending_unknown(
 				req, reason=f"kalshi_5xx_unknown_state:{e.status}"
+			)
+		except Exception as e:
+			# Defensive catch-all per the "never re-raises" contract above.
+			# Possible causes: future Kalshi client raises an exception type
+			# not in edge_catcher.live.errors, AttributeError on a malformed
+			# Order object, an OSError that NetworkError didn't wrap, etc.
+			# Funds-at-risk semantics: we don't know whether the order
+			# reached Kalshi, so route to pending+None (UNKNOWN state) and
+			# let B reconcile via client_order_id. Logging includes the
+			# exception class so on-call can triage.
+			log.exception(
+				"LiveExecutor.place: unexpected %s — routing to pending+None "
+				"(client_order_id=%s)", type(e).__name__, req.client_order_id,
+			)
+			return _make_pending_unknown(
+				req, reason=f"unexpected_exception:{type(e).__name__}"
 			)
 		return _translate_order(order, req)
 
@@ -203,9 +231,23 @@ def _make_rejected(req: OrderRequest, *, reason: str) -> OrderResult:
 def _make_pending_unknown(req: OrderRequest, *, reason: str) -> OrderResult:
 	"""Build a pending :class:`OrderResult` for the unknown-state Kalshi paths.
 
-	``order_id`` is ``None`` because we never received a successful 2xx — B
-	must dedupe via the natural Signal key, not ``client_order_id`` (D
-	guarantees per-attempt uniqueness; B owns dedup).
+	``order_id`` is ``None`` because we never received a successful 2xx.
+
+	Two B-side operations consume this row and they use different keys:
+
+	* **Reconciliation** (per pending row): B polls Kalshi for the row's
+	  ``client_order_id`` via ``KalshiOrderClient.status(...)`` — that's the
+	  only key Kalshi knows about pre-2xx, so it's the only one that can
+	  resolve pending → filled/rejected. See module docstring + dispatch
+	  comment in ``engine/dispatch.py:_handle_enter``.
+
+	* **Dedup across retries of the same signal**: ``_make_client_order_id``
+	  appends a uuid4 suffix per call (D-spec L214 collision-safety), so two
+	  retries of the same Signal in the same millisecond produce TWO
+	  different ``client_order_id`` values. B must therefore dedup retries
+	  via the natural Signal key (e.g. ``(strategy, ticker, ms_bucket)``),
+	  not ``client_order_id``. D guarantees per-attempt uniqueness; B owns
+	  dedup across attempts.
 	"""
 	return OrderResult(
 		status="pending",

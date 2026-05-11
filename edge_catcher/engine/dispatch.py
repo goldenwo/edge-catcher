@@ -21,7 +21,7 @@ Invariants (see capture/replay spec §4.7):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from edge_catcher.engine.execution import _make_client_order_id
@@ -397,7 +397,12 @@ async def _handle_enter(
 			client_order_id=req.client_order_id,
 			# kalshi_order_id: None on NetworkError; preserved on malformed-fills
 			kalshi_order_id=result.order_id,
-			placed_at_utc=datetime.now(timezone.utc).isoformat(),
+			# Use the threaded `now` (not datetime.now()) — see module
+			# invariant at L14-L18: handlers must NOT read the wall clock
+			# internally. During replay, `now` is sourced from the captured
+			# bundle's recv_ts so replay produces a byte-identical
+			# placed_at_utc to the original live execution.
+			placed_at_utc=now.isoformat(),
 			rejection_reason=result.rejection_reason,
 		)
 		metrics.inc("entries_pending")

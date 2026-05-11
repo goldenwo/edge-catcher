@@ -24,6 +24,7 @@ the dispatch layer needs to route correctly.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 
 import pytest
@@ -747,3 +748,103 @@ async def test_place_raw_not_dict_pending():
 	assert result.status == "pending"
 	assert result.rejection_reason == "kalshi_malformed_fills"
 	assert result.order_id == "ord-bad-raw"
+
+
+# ---------------------------------------------------------------------------
+# Exception propagation contract — never re-raises, EXCEPT CancelledError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_place_propagates_cancelled_error() -> None:
+	"""Failure mode prevented: a future refactor adds a broad ``except
+	Exception`` BEFORE the ``except asyncio.CancelledError: raise`` guard, or
+	removes the explicit CancelledError handler entirely.
+
+	``asyncio.CancelledError`` is the cooperative-cancellation signal sent
+	when a task is cancelled (engine shutdown, supervisor kill, etc.).
+	Swallowing it inside ``place()`` would deadlock the dispatch coroutine
+	at shutdown because the cancel scope never collapses.
+
+	The fix: explicitly re-raise CancelledError BEFORE the defensive
+	``except Exception`` catch-all. This test pins that ordering — if
+	someone reorders the except clauses (Python checks them in source
+	order; CancelledError is a subclass of BaseException, not Exception,
+	so the order matters less in Python 3.8+ but the explicit guard
+	doubles as documentation).
+	"""
+	client = FakeKalshiClient()
+	client.raise_value = asyncio.CancelledError()
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=5)
+
+	with pytest.raises(asyncio.CancelledError):
+		await executor.place(req)
+
+
+@pytest.mark.asyncio
+async def test_place_unexpected_exception_routes_to_pending_unknown() -> None:
+	"""Failure mode prevented: an unmapped exception type (e.g., a future
+	Kalshi client version raising a new exception class, an OSError that
+	NetworkError didn't wrap, an AttributeError from a malformed Order
+	object) propagates out of ``place()``, crashing the dispatch coroutine
+	AFTER the order may have been sent to Kalshi.
+
+	The module contract (place() docstring: "Every exception path returns a
+	defined OrderResult — never re-raises") requires every unexpected
+	exception to be routed to pending+None so B can reconcile via
+	client_order_id. Without the catch-all, dispatch crashes and no pending
+	row is written — the order is stranded on Kalshi with no local record
+	(funds-at-risk).
+
+	The catch-all sits AFTER the typed handlers (OrderRejected, NetworkError,
+	etc.) so typed errors get their specific rejection_reason; unmapped
+	types get ``unexpected_exception:<ClassName>``.
+	"""
+	# Use RuntimeError as a stand-in for "unmapped exception subtype".
+	# Any non-mapped Exception subclass would exercise the same path.
+	client = FakeKalshiClient()
+	client.raise_value = RuntimeError("simulated unmapped client exception")
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=5)
+
+	result = await executor.place(req)
+
+	assert result.status == "pending", (
+		"Unexpected exceptions must route to pending — B reconciles via "
+		"client_order_id when Kalshi-side state is unknown"
+	)
+	assert result.order_id is None, (
+		"order_id MUST be None on the unexpected-exception path: we don't "
+		"know whether Kalshi got the request, so we can't make up an order_id"
+	)
+	assert result.rejection_reason is not None
+	assert result.rejection_reason.startswith("unexpected_exception:"), (
+		f"rejection_reason should encode the exception class name to aid "
+		f"on-call triage; got {result.rejection_reason!r}"
+	)
+	assert "RuntimeError" in result.rejection_reason
+
+
+@pytest.mark.asyncio
+async def test_place_attribute_error_from_malformed_order_routes_to_pending() -> None:
+	"""Failure mode prevented: a Kalshi client version returns an Order object
+	missing an expected attribute (e.g., ``filled_count``), causing
+	``_translate_order`` to raise ``AttributeError``. Without the catch-all,
+	this propagates and crashes dispatch. With it, we route to pending+None
+	with a descriptive rejection_reason.
+	"""
+
+	class _BadClient:
+		async def place(self, req):  # type: ignore[no-untyped-def]
+			raise AttributeError("simulated: Order missing .filled_count")
+
+	executor = LiveExecutor(_BadClient())  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=5)
+
+	result = await executor.place(req)
+
+	assert result.status == "pending"
+	assert result.order_id is None
+	assert result.rejection_reason is not None
+	assert "AttributeError" in result.rejection_reason

@@ -356,3 +356,46 @@ async def test_rejected_path_does_not_call_record_pending() -> None:
 
 	assert store.pending_calls == []
 	assert store.trade_calls == []
+
+
+# ---------------------------------------------------------------------------
+# (d) placed_at_utc uses the THREADED `now`, not a wall-clock read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_placed_at_utc_uses_threaded_now_not_wall_clock() -> None:
+	"""Failure mode prevented: dispatch's pending branch reads ``datetime.now()``
+	internally instead of using the ``now`` parameter threaded down from the
+	WS loop / replay dispatcher. The module invariant at L14-L18 explicitly
+	forbids handlers from reading the wall clock — during replay, ``now`` is
+	sourced from the captured bundle's ``recv_ts`` so replay produces a
+	byte-identical ``placed_at_utc`` to the original live execution.
+
+	Without this fix, replaying a pending row from a captured bundle would
+	stamp it with replay-time wall clock (today) instead of the original
+	live-execution timestamp, breaking replay-live parity for B's
+	reconciliation audit trail and any downstream consumer that reads
+	``placed_at_utc`` as "when the order was placed at Kalshi".
+
+	The assertion ``placed_at_utc == _NOW.isoformat()`` fails if dispatch
+	regresses to ``datetime.now()``: today's wall clock won't equal _NOW
+	(which is fixed at 2026-05-11 12:00:00 UTC).
+	"""
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=_make_pending_result(
+		order_id=None,
+		rejection_reason="kalshi_unreachable:connection refused",
+	))
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	assert len(store.pending_calls) == 1
+	kwargs = store.pending_calls[0]
+	assert kwargs["placed_at_utc"] == _NOW.isoformat(), (
+		f"placed_at_utc must equal threaded now.isoformat() ({_NOW.isoformat()}) "
+		f"— got {kwargs['placed_at_utc']!r}. A regression to datetime.now() would "
+		"break replay-live parity per the dispatch module invariant at L14-L18."
+	)
