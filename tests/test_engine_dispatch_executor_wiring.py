@@ -108,9 +108,12 @@ async def test_rejected_other_routes_metric_inc_skipped_other(now):
 
 
 @pytest.mark.asyncio
-async def test_pending_branch_is_noop(now):
-	"""G's PR MUST keep status='pending' as a bare pass — paper never returns
-	pending, and a premature call to record_pending_order would crash."""
+async def test_pending_branch_does_not_call_record_trade(now):
+	"""D's PR adds a real ``record_pending`` call on the pending branch (see
+	tests/test_engine_dispatch_pending_branch.py for the kwarg-contract
+	pinning). This test holds the narrower assertion that the pending branch
+	must NOT fall into the filled path's ``record_trade`` call — preventing
+	a phantom open trade row from a Kalshi-unconfirmed placement."""
 	store = MagicMock()
 	executor = MagicMock()
 	executor.place = AsyncMock(return_value=OrderResult(
