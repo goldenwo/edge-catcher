@@ -69,7 +69,8 @@ class OpenPosition:
 def _series_of(ticker: str) -> str:
 	"""Extract the series prefix from a Kalshi ticker.
 
-	Kalshi tickers are ``<SERIES>-<EVENT>``, e.g. ``KXSOL15M-26MAY09H06``.
+	Kalshi tickers are ``<SERIES>-<EVENT>``, e.g. ``KXBTC15M-26APR10-T1234``
+	(matching the existing docstring convention in ``engine/market_state.py``).
 	Derived inline rather than depending on B's reconciliation module so D
 	can build exit orders from a position alone without a B-side helper.
 

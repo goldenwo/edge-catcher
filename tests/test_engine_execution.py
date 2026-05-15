@@ -577,11 +577,17 @@ def test_make_client_order_id_format_matches_kalshi_regex() -> None:
 def test_make_client_order_id_within_80_char_worst_case() -> None:
 	"""Failure mode: a long strategy name + long ticker pushes the ID past
 	Kalshi's 80-char ceiling and the POST is rejected. Worst case spec'd
-	at ~70 chars; this assertion gives 10 chars of headroom."""
-	# Worst-case strategy name + worst-case ticker.
+	at ~70 chars; this assertion gives 10 chars of headroom.
+
+	Uses synthetic worst-case strings (NOT real strategy/ticker names) so
+	this tracked test file doesn't leak internal strategy iteration history.
+	The 24-char strategy + 24-char ticker exercises the same length budget
+	as any real worst-case pairing.
+	"""
+	# Worst-case strategy name + worst-case ticker — synthetic, not real names.
 	sig = _entry_signal(
-		ticker="KXSPOTIFYARTISTD-T12M-NL",
-		strategy="debut_fade_v4_extended",
+		ticker="KXTESTSERIESLONG-T12M-NL",  # 24 chars (matches longest real-series shape)
+		strategy="test_strategy_long_name",  # 23 chars
 	)
 	oid = _make_client_order_id(sig, _NOW)
 	assert len(oid) <= 80, (
