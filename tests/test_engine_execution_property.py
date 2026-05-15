@@ -280,16 +280,16 @@ def test_property_blended_price_monotonic_on_added_fill(
 
 	lo = min(new_price, existing_blended)
 	hi = max(new_price, existing_blended)
-	# The 1-cent banker's-rounding step can produce a result that is EXACTLY
-	# at the bound, never past it. The pre-rounding raw blended b' is
-	# strictly in the open interval (lo, hi) when p != b, and equals lo == hi
-	# when p == b. The rounding can shift by ≤ 1c, so we widen the inclusive
-	# interval by 1 on each side to absorb the rounding boundary. Without
-	# this, the round-half-to-even tiebreak case ``lo=4 + new=5 → blended=4.5
-	# → rounded=4`` could fail when the property expected ``new == 5`` at
-	# the upper bound.
-	assert lo - 1 <= new_blended <= hi + 1, (
+	# Tight bounds (no slop): the pre-rounding raw combined blended is a
+	# weighted average of two integer-rounded inputs, both of which lie in
+	# [lo, hi]; round-half-to-even cannot escape that closed interval since
+	# it rounds AWAY from the midpoint when within the open interval and
+	# lands ON a bound when the raw is already at one. A wider ±1 slop here
+	# would absorb off-by-one bugs in the weighting calc (e.g.
+	# ``int(total_cost / total_size) + 1``) — a real correctness regression
+	# we want hypothesis to catch.
+	assert lo <= new_blended <= hi, (
 		f"blended_price_cents not monotonic: existing={existing_fills}, "
 		f"existing_blended={existing_blended}, new={(new_price, new_size)}, "
-		f"new_blended={new_blended}, expected in [{lo}, {hi}] (±1 for rounding)"
+		f"new_blended={new_blended}, expected in [{lo}, {hi}] (closed)"
 	)

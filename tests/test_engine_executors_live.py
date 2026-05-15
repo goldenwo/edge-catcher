@@ -848,3 +848,123 @@ async def test_place_attribute_error_from_malformed_order_routes_to_pending() ->
 	assert result.order_id is None
 	assert result.rejection_reason is not None
 	assert "AttributeError" in result.rejection_reason
+
+
+# ---------------------------------------------------------------------------
+# #R2-cleanup — _translate_order zero-size guard (A-F1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_translate_order_rejects_zero_size_contracts() -> None:
+	"""Failure mode prevented: a sizing bug upstream produces an OrderRequest
+	with size_contracts=0; the catch-all in place() would mask a
+	ZeroDivisionError from ``fill_pct = filled / size`` as
+	``unexpected_exception:ZeroDivisionError``, hiding the real upstream
+	defect. The zero-guard returns ``rejected`` with a precise reason so
+	on-call sees the actual sizing failure.
+
+	Setup: req.size_contracts = 0 but Kalshi reports filled_count > 0
+	(defensive impossible-from-real-Kalshi shape).
+	"""
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		filled_count=5,
+		count=10,
+		limit_price=5,
+		fills=[{"price": 5, "size": 5}],
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=0, limit=5)  # size_contracts=0 — the defect
+
+	result = await executor.place(req)
+
+	assert result.status == "rejected"
+	assert result.rejection_reason is not None
+	assert result.rejection_reason.startswith("invalid_intended_size:")
+
+
+# ---------------------------------------------------------------------------
+# #R2-cleanup — _translate_order fill_pct overfill clamp (A-F2, known #3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_translate_order_clamps_overfill_fill_pct_to_one() -> None:
+	"""Failure mode prevented: Kalshi reports filled_count > size_contracts
+	(IOC wire-shape drift). Raw ``filled / size`` produces fill_pct > 1.0,
+	silently corrupting F's slippage chart and analytics that read this as
+	a probability. The clamp preserves the raw ``filled_size`` (truth) but
+	bounds the ratio. A WARN log fires so the data-quality drift is visible.
+	"""
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		filled_count=12,  # overfill: more than requested
+		limit_price=5,
+		fills=[{"price": 5, "size": 12}],
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=5)
+
+	result = await executor.place(req)
+
+	assert result.status == "filled"
+	assert result.filled_size == 12  # truth preserved
+	assert result.fill_pct == 1.0   # ratio clamped
+
+
+# ---------------------------------------------------------------------------
+# #R2-cleanup — _translate_order sell-side slippage sign convention (known #2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_translate_order_sell_slippage_positive_when_received_less() -> None:
+	"""Lock the unified sign convention: positive slippage = worse than
+	limit regardless of buy/sell. Previously ``slippage = blended - limit``
+	gave positive=bad for buys but negative=bad for sells; F's chart had
+	to know the action to interpret the sign. Now both sides agree.
+
+	Setup: SELL action, limit=50¢, blended=48¢ → received 2¢ less than
+	limit → slippage = +2 (bad, regardless of side).
+	"""
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		filled_count=10,
+		limit_price=50,
+		fills=[{"price": 48, "size": 10}],
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=50, action="sell")
+
+	result = await executor.place(req)
+
+	assert result.status == "filled"
+	assert result.blended_entry_cents == 48
+	assert result.slippage_cents == 2, (
+		"sell-side slippage should be limit - blended (positive when we "
+		"received less than asked)"
+	)
+
+
+@pytest.mark.asyncio
+async def test_translate_order_buy_slippage_positive_when_paid_more() -> None:
+	"""Mirror of the sell test: BUY with blended > limit produces positive
+	slippage. Locks the convention symmetrically — the buy path's sign
+	already had this behaviour pre-fix; this test pins it so a future
+	refactor doesn't break the buy semantics while fixing the sell side.
+	"""
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		filled_count=10,
+		limit_price=50,
+		fills=[{"price": 52, "size": 10}],
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=50, action="buy")
+
+	result = await executor.place(req)
+
+	assert result.status == "filled"
+	assert result.blended_entry_cents == 52
+	assert result.slippage_cents == 2

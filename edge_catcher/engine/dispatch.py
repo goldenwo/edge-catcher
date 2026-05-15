@@ -20,12 +20,13 @@ Invariants (see capture/replay spec §4.7):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from edge_catcher.engine.execution import _make_client_order_id
-from edge_catcher.engine.executor import Executor, OrderRequest
+from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -43,6 +44,13 @@ if TYPE_CHECKING:
 	# Import only for type-checking so dispatch doesn't fail to import when
 	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
 	from edge_catcher.engine.risk import Gate
+
+
+# Hard ceiling on a single ``await executor.place(req)`` call. Set to
+# 2 × live/config.py:http_timeout_seconds (default 30s) so KalshiOrderClient
+# has room for one full HTTP-timeout retry cycle while the engine still bails
+# out before an infinite-retry pathology can block the WS message loop.
+_PLACEMENT_TIMEOUT_SECONDS = 60
 
 # KillSwitchTripFailed is imported at runtime (not under TYPE_CHECKING) because
 # process_tick's except clause needs the actual class. Use a try/except so
@@ -319,10 +327,39 @@ async def _handle_enter(
 		size_contracts=0,
 		limit_price_cents=entry_price,
 		strategy=signal.strategy,
-		client_order_id=_make_client_order_id(signal, now),
+		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
 	)
 
-	result = await executor.place(req)
+	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to
+	# never raise (every error path returns a defined OrderResult), but a
+	# bug in ``KalshiOrderClient``'s retry loop (infinite retry on a
+	# particular error code, or a sub-timeout exceeding the engine tick
+	# budget) would block this coroutine forever — and the entire WS message
+	# loop blocks behind it because dispatch_message is awaited from _ws_loop's
+	# ``async for raw in ws``. The 60s ceiling = 2 × http_timeout_seconds
+	# (live/config.py default), leaving room for one retry cycle while
+	# capping infinite-retry pathology. On timeout: synthesize a pending+None
+	# OrderResult (Kalshi may still have received the POST; we don't know
+	# the truth, so we don't lie) and let B's reconciler resolve it.
+	try:
+		result = await asyncio.wait_for(executor.place(req), timeout=_PLACEMENT_TIMEOUT_SECONDS)
+	except asyncio.TimeoutError:
+		log.warning(
+			"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
+			"synthesizing pending+None for B's reconciler to resolve",
+			_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
+			req.client_order_id,
+		)
+		result = OrderResult(
+			status="pending",
+			intended_size=req.size_contracts,
+			filled_size=0,
+			blended_entry_cents=0,
+			fill_pct=0.0,
+			slippage_cents=0,
+			rejection_reason=f"engine_timeout:{_PLACEMENT_TIMEOUT_SECONDS}s",
+			order_id=None,
+		)
 
 	if result.status == "filled":
 		# Field-by-field match to the pre-G record_trade call shape — byte-exact
@@ -366,6 +403,25 @@ async def _handle_enter(
 			"No fill for %s %s %s (entry=%dc) — skipping (reason=%s)",
 			signal.strategy, signal.side, signal.ticker, entry_price, result.rejection_reason,
 		)
+		# Persist a rejected row for operator triage + F's UI surface. Paper +
+		# replay no-op; B's PR 5 implements the real SQLite write. ``stale_book``
+		# is the only paper-side rejection_reason (its existing log+metric is
+		# the source of truth for paper); LIVE rejections (kalshi_4xx,
+		# absolute_max_exceeded, ioc_zero_fill, invalid_intended_size) need
+		# durable audit beyond the rotating process log.
+		if result.rejection_reason != "stale_book":
+			store.record_rejected(
+				ticker=signal.ticker,
+				series=signal.series,
+				strategy=signal.strategy,
+				side=signal.side,
+				intended_size=result.intended_size,
+				entry_price_cents=signal.entry_price_cents,
+				stop_loss_distance_cents=signal.stop_loss_distance_cents,
+				client_order_id=req.client_order_id,
+				placed_at_utc=now.isoformat(),
+				rejection_reason=result.rejection_reason or "unknown",
+			)
 	elif result.status == "pending":
 		# D's NetworkError or malformed-fills path. Paper never returns pending;
 		# only live execution (D) produces this status.
@@ -406,6 +462,21 @@ async def _handle_enter(
 			rejection_reason=result.rejection_reason,
 		)
 		metrics.inc("entries_pending")
+	else:
+		# Defensive exhaustiveness arm — the OrderResult.status Literal at
+		# executor.py:65 enumerates {"filled","pending","rejected"} so static
+		# type checking would catch a missing branch, but a new variant added
+		# to the Literal without a matching dispatch branch (PR 5 / PR 6 risk)
+		# would otherwise silently fall through with no audit row + no notify.
+		# Loud log + metric surfaces the dispatch-side miss before live money
+		# is affected.
+		log.error(
+			"dispatch._handle_enter: unhandled OrderResult.status=%r for %s %s — "
+			"either a new status literal was added without a matching branch, "
+			"or an executor returned an out-of-spec status. Funds-at-risk.",
+			result.status, signal.strategy, signal.ticker,
+		)
+		metrics.inc("entries_unhandled_status")
 
 
 def _handle_exit(

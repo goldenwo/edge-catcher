@@ -78,6 +78,40 @@ class TradeStoreProtocol(Protocol):
 		"""
 		...
 
+	def record_rejected(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		placed_at_utc: str,
+		rejection_reason: str,
+	) -> None:
+		"""Write a row for a live-execution order Kalshi authoritatively rejected.
+
+		Distinct from ``record_pending`` (which covers UNKNOWN-state outcomes
+		like NetworkError / 5xx / malformed-fills): rejected rows have NO
+		corresponding Kalshi-side order, so ``kalshi_order_id`` is omitted.
+		B (PR 5) provides the real SQLite impl; paper + replay use the no-op
+		default since they never produce ``status="rejected"`` via Kalshi.
+
+		Why a row instead of log-only: without persistence, F's UI cannot
+		surface 4xx rejections to the operator (process logs rotate). B's
+		reconciler also benefits — a row at attempt time, even for rejected
+		orders, gives audit-grade visibility into the strategy's full
+		live-trading attempt history.
+
+		``rejection_reason`` is REQUIRED (not Optional) here — every rejected
+		row must carry a diagnostic value (kalshi_4xx:/absolute_max_exceeded/
+		ioc_zero_fill/invalid_intended_size:).
+		"""
+		...
+
 	def get_open_trades(self) -> list[dict[str, Any]]: ...
 
 	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None: ...
@@ -322,6 +356,28 @@ class TradeStore:
 		results (paper is synchronous), so this default keeps the surface
 		Protocol-compatible without altering paper behavior. Replay's
 		InMemoryTradeStore has the equivalent no-op."""
+		return
+
+	def record_rejected(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		placed_at_utc: str,
+		rejection_reason: str,
+	) -> None:
+		"""No-op placeholder — B's PR (sub-project B / PR 5) provides the real
+		SQLite-backed live_trades-row impl for rejected live orders. Paper-mode
+		never produces ``status="rejected"`` via Kalshi (it has its own
+		stale_book reject path that's handled directly in dispatch), so this
+		default keeps the surface Protocol-compatible without altering paper
+		behaviour."""
 		return
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
@@ -599,6 +655,26 @@ class InMemoryTradeStore:
 		malformed-fills paths). A captured bundle never contains a pending
 		event because replay's executor (PaperExecutor or stubbed live) is
 		deterministic. Mirror of SQLiteTradeStore.record_pending no-op."""
+		return
+
+	def record_rejected(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		placed_at_utc: str,
+		rejection_reason: str,
+	) -> None:
+		"""No-op for replay. Replay's deterministic executor (PaperExecutor or
+		stubbed live) never produces a Kalshi-side rejection; captured bundles
+		do not contain rejected events for the same reason. Mirror of
+		SQLiteTradeStore.record_rejected no-op."""
 		return
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:

@@ -658,6 +658,13 @@ async def run_engine(
 						executor,
 						capture_writer=capture_writer,
 					)
+				except asyncio.CancelledError:
+					# Cooperative cancellation (SIGTERM, parent task cancel). Re-raise
+					# BEFORE the OSError tuple below — some websocket implementations
+					# wrap shutdown-time errors as OSError, which would route us into
+					# the reconnect_delay sleep + run_recovery() call before honouring
+					# the cancel. Propagate immediately so shutdown is prompt.
+					raise
 				except (
 					websockets.ConnectionClosed,
 					# websockets ≥12 renamed InvalidStatusCode → InvalidStatus.
@@ -777,6 +784,15 @@ async def _ws_loop(
 					executor,
 					now=now,
 				)
+			except asyncio.CancelledError:
+				# Cooperative cancellation must propagate so the outer reconnect
+				# block (and ultimately run_engine's finally:) honour shutdown
+				# promptly. Explicit handler mirrors the LiveExecutor.place
+				# pattern; while ``except Exception`` below would NOT catch
+				# CancelledError (BaseException subclass in Py3.8+), this clause
+				# pins the behaviour against a future refactor that broadens the
+				# catch to ``except BaseException``.
+				raise
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense — full chain. process_tick
 				# already re-raised past _handle_signal's broad except; we must
