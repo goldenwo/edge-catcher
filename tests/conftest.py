@@ -7,6 +7,13 @@ import pytest
 from edge_catcher.storage.db import get_connection, init_db
 from edge_catcher.storage.models import Market, Trade
 
+# Register fixture modules so pytest discovers their @pytest.fixture decorators
+# without per-test re-import. The MockKalshiServer module provides fixtures
+# (mock_kalshi_server / live_cfg / live_audit / signing_env / zero_backoff)
+# consumed by tests/test_engine_live_executor_integration.py and (later) E's
+# CR-5 parity test.
+pytest_plugins = ["tests.fixtures.mock_kalshi_server"]
+
 
 # ---------------------------------------------------------------------------
 # DB fixtures
