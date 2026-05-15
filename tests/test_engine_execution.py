@@ -566,13 +566,24 @@ def test_validate_exec_cfg_exit_slippage_dict_is_immutable() -> None:
 	"""Lock the MappingProxyType wrap: the ``frozen=True`` invariant on
 	ExecCfg is shallow — without the proxy, a caller could mutate
 	``cfg.exit_slippage_cents["stop_loss"] = 999`` and silently flip live
-	order limits mid-stream. Asserts the wrap is applied at validation time
-	by attempting to mutate and catching the expected ``TypeError``.
+	order limits mid-stream. Asserts BOTH (a) the wrap is the canonical
+	``types.MappingProxyType`` (Reviewer A-F7 / B-F6: a swap to a different
+	read-only container that breaks lookup semantics or returns a tuple
+	would also raise TypeError on __setitem__ but break callers), AND
+	(b) read-shape via ``[]`` works correctly.
 	"""
+	from types import MappingProxyType
 	cfg = validate_exec_cfg({
 		"entry_slippage_cents": 2,
 		"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
 	})
+	assert isinstance(cfg.exit_slippage_cents, MappingProxyType), (
+		"the immutable wrap must be MappingProxyType specifically — a swap to "
+		"a different read-only container would also raise TypeError on the "
+		"mutation attempt below but could break dict-style lookups elsewhere"
+	)
+	# Read-shape still works.
+	assert cfg.exit_slippage_cents["stop_loss"] == 10
 	with pytest.raises(TypeError):
 		cfg.exit_slippage_cents["stop_loss"] = 999  # type: ignore[index]
 

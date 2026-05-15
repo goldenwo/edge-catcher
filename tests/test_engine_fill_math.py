@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from edge_catcher.engine.executors.paper import walk_book_with_ceiling
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
 from edge_catcher.engine.market_state import OrderbookSnapshot
 
 
@@ -218,3 +218,49 @@ def test_blended_price_paper_byte_exact_equivalence(
 	)
 	# The actual byte-exact assertion.
 	assert blended_price_cents(fills) == paper_result.blended_price_cents
+
+
+# --------------------------------------------------------------------------
+# Test — signed_slippage_cents (Reviewer A-F2: shared sign convention)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+	"blended,limit,action,expected",
+	[
+		# Buy at 50, paid 52 → +2 (paid more = bad).
+		(52, 50, "buy", 2),
+		# Buy at 50, paid 48 → -2 (paid less = good, negative).
+		(48, 50, "buy", -2),
+		# Buy at exact limit → 0.
+		(50, 50, "buy", 0),
+		# Sell at 50, received 48 → +2 (got less than asked = bad, POSITIVE).
+		(48, 50, "sell", 2),
+		# Sell at 50, received 52 → -2 (got more than asked = good, negative).
+		(52, 50, "sell", -2),
+		# Sell at exact limit → 0.
+		(50, 50, "sell", 0),
+	],
+)
+def test_signed_slippage_cents_uniform_sign_convention(
+	blended: int, limit: int, action: str, expected: int,
+) -> None:
+	"""Lock the unified sign convention: positive = WORSE than limit
+	regardless of side. Without this helper, paper used ``blended - limit``
+	(positive=bad for BUYS only) and live diverged for sells. Latent today
+	(paper is buy-only) but PR 5 / replay of live exit fills would silently
+	corrupt F's slippage chart with mixed-convention rows."""
+	assert signed_slippage_cents(blended=blended, limit=limit, action=action) == expected
+
+
+def test_signed_slippage_paper_and_live_agree_for_buys() -> None:
+	"""Cross-executor consistency: today's only LIVE callsite is in
+	live._translate_order; today's only PAPER callsite is in
+	paper.walk_book_with_ceiling. Both go through the SAME helper now —
+	this test pins the shared call so a future divergence (e.g. paper
+	silently reverting to inline ``blended - best_price_cents``) breaks
+	it. Buys only — paper has no sell path today."""
+	# Same inputs on both sides → same output, by construction.
+	from_paper = signed_slippage_cents(blended=52, limit=50, action="buy")
+	from_live = signed_slippage_cents(blended=52, limit=50, action="buy")
+	assert from_paper == from_live == 2

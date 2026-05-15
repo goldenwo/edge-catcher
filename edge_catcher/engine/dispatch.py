@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 # 2 × live/config.py:http_timeout_seconds (default 30s) so KalshiOrderClient
 # has room for one full HTTP-timeout retry cycle while the engine still bails
 # out before an infinite-retry pathology can block the WS message loop.
-_PLACEMENT_TIMEOUT_SECONDS = 60
+_ENTRY_PLACEMENT_TIMEOUT_SECONDS = 60
 
 # KillSwitchTripFailed is imported at runtime (not under TYPE_CHECKING) because
 # process_tick's except clause needs the actual class. Use a try/except so
@@ -342,12 +342,12 @@ async def _handle_enter(
 	# OrderResult (Kalshi may still have received the POST; we don't know
 	# the truth, so we don't lie) and let B's reconciler resolve it.
 	try:
-		result = await asyncio.wait_for(executor.place(req), timeout=_PLACEMENT_TIMEOUT_SECONDS)
+		result = await asyncio.wait_for(executor.place(req), timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS)
 	except asyncio.TimeoutError:
 		log.warning(
 			"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
 			"synthesizing pending+None for B's reconciler to resolve",
-			_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
+			_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
 			req.client_order_id,
 		)
 		result = OrderResult(
@@ -357,7 +357,7 @@ async def _handle_enter(
 			blended_entry_cents=0,
 			fill_pct=0.0,
 			slippage_cents=0,
-			rejection_reason=f"engine_timeout:{_PLACEMENT_TIMEOUT_SECONDS}s",
+			rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
 			order_id=None,
 		)
 

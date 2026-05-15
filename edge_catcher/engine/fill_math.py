@@ -59,3 +59,29 @@ def blended_price_cents(fills: Iterable[FillEvent]) -> int:
 	if total_size == 0:
 		return 0
 	return round(total_cost / total_size)
+
+
+def signed_slippage_cents(*, blended: int, limit: int, action: str) -> int:
+	"""Slippage with a uniform sign convention: positive = WORSE than limit
+	regardless of buy/sell side. Negative = better than limit.
+
+	Single source of truth shared by ``PaperExecutor.walk_book_with_ceiling``
+	and ``LiveExecutor._translate_order`` so F's UI / B's reconciler / any
+	downstream slippage analytics can read this field with one interpretation.
+
+	Args:
+		blended: Weighted-average actual fill price in cents.
+		limit:   The OrderRequest's limit_price_cents (the price we offered).
+		action:  ``"buy"`` or ``"sell"`` (from ``OrderRequest.action``).
+
+	Returns:
+		``blended - limit`` for buys (positive when we paid more than we asked).
+		``limit - blended`` for sells (positive when we received less than we asked).
+
+	Without the sign flip, F's slippage-distribution chart had to know the
+	action to interpret the sign; the unified convention lets the UI render
+	one histogram for entries + exits without action-aware branching.
+	"""
+	if action == "buy":
+		return blended - limit
+	return limit - blended

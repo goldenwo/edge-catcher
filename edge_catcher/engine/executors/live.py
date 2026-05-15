@@ -39,7 +39,7 @@ from edge_catcher.live.errors import (
 	OrderRejected,
 )
 
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
 
 
 log = logging.getLogger(__name__)
@@ -218,7 +218,9 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 
 	blended = blended_price_cents(fills)
 	fill_pct = _clamp_fill_pct(order.filled_count, req.size_contracts, order.order_id)
-	slippage = _signed_slippage(blended=blended, limit=req.limit_price_cents, action=req.action)
+	slippage = signed_slippage_cents(
+		blended=blended, limit=req.limit_price_cents, action=req.action
+	)
 	return OrderResult(
 		status="filled",
 		intended_size=req.size_contracts,
@@ -255,20 +257,12 @@ def _clamp_fill_pct(filled_count: int, size_contracts: int, order_id: str | None
 	return raw
 
 
-def _signed_slippage(*, blended: int, limit: int, action: str) -> int:
-	"""Return slippage with a uniform sign convention: positive = worse than
-	limit (paid more on buys, received less on sells), negative = better.
-
-	Failure mode the unified sign fixes: F's slippage-distribution chart
-	previously had to know the action to interpret the sign. A single
-	convention ("positive = bad regardless of side") lets the UI render
-	one histogram for entries + exits without action-aware branching.
-	"""
-	if action == "buy":
-		# Buy: paid more than limit → blended > limit → positive (bad).
-		return blended - limit
-	# Sell: received less than limit → blended < limit → flip to positive.
-	return limit - blended
+# Slippage sign convention now lives in fill_math.signed_slippage_cents so
+# PaperExecutor and LiveExecutor share one source of truth (Reviewer A-F2):
+# without the shared helper, paper.py:153 used `blended - best_price_cents`
+# (positive=bad for buys only) while live.py used the sign-flipped version
+# for sells. Latent today (paper is buy-only) but breaks the moment any
+# sell-side execution routes through paper (e.g., replay of live exit fills).
 
 
 def _make_rejected(req: OrderRequest, *, reason: str) -> OrderResult:
