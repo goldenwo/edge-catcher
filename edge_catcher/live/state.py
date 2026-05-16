@@ -28,7 +28,6 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.storage.migrations import apply_migrations
 
 log = logging.getLogger(__name__)
@@ -80,18 +79,6 @@ def connect_live_trades_db(db_path: Path) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-# Status sets used as compare-and-swap preconditions (spec Risk #9). Every
-# status-mutating UPDATE filters on one of these and asserts rowcount == 1.
-_CLOSEABLE_FROM = ("open", "exit_pending")
-
-
-def _fee_cents(price_cents: int, size: int) -> int:
-	"""Kalshi fee for ``size`` contracts at ``price_cents``, rounded to whole
-	cents. ``STANDARD_FEE.calculate`` returns a float cents value; live rows
-	store INTEGER cents (matches the paper path's record_trade)."""
-	return round(STANDARD_FEE.calculate(price_cents, size))
-
 
 def _cas_update(
 	conn: sqlite3.Connection,
