@@ -75,13 +75,17 @@ def _entry_signal(
 
 def _exit_signal(
 	*,
+	ticker: str = "KXSOL15M-26MAY09H06",
 	strategy: str = "strat_34",
 	target_price_cents: int | None = 50,
 	exit_kind: ExitKind | None = "take_profit",
 ) -> Signal:
 	return Signal(
 		action="exit",
-		ticker="KXSOL15M-26MAY09H06",  # not used by exit builder; pos.ticker wins
+		# Default matches ``_open_long`` / ``_open_short`` so existing tests
+		# satisfy ``build_exit_order``'s sig.ticker == pos.ticker invariant.
+		# Override per-test when probing the mismatch failure mode.
+		ticker=ticker,
 		side="yes",
 		series="KXSOL15M",
 		strategy=strategy,
@@ -520,6 +524,23 @@ def test_validate_exec_cfg_bool_entry_slippage_rejected() -> None:
 		})
 
 
+@pytest.mark.parametrize("kind", ["take_profit", "stop_loss", "time_exit"])
+def test_validate_exec_cfg_bool_exit_slippage_rejected(kind: str) -> None:
+	"""Failure mode mirror of the entry test: ``True``/``False`` per-exit-kind
+	would silently coerce to 1/0 slippage on a YAML ``yes:`` / ``no:`` value.
+	The production code at ``execution.py`` already defends against this in
+	the exit branch, but the regression test was missing — a refactor that
+	drops the ``isinstance(value, bool)`` check from the loop body would
+	not have been caught."""
+	exits = {"take_profit": 2, "stop_loss": 10, "time_exit": 5}
+	exits[kind] = True  # type: ignore[assignment]
+	with pytest.raises(TypeError, match=rf"exit_slippage_cents\[{kind!r}\] must be int"):
+		validate_exec_cfg({
+			"entry_slippage_cents": 2,
+			"exit_slippage_cents": exits,
+		})
+
+
 def test_validate_exec_cfg_list_exit_slippage_raises_type_error() -> None:
 	"""Failure mode: YAML drift produces a list instead of a dict. The
 	validator must surface it as a TypeError on the section, not crash on
@@ -541,6 +562,32 @@ def test_validate_exec_cfg_negative_exit_slippage_raises() -> None:
 		})
 
 
+def test_validate_exec_cfg_exit_slippage_dict_is_immutable() -> None:
+	"""Lock the MappingProxyType wrap: the ``frozen=True`` invariant on
+	ExecCfg is shallow — without the proxy, a caller could mutate
+	``cfg.exit_slippage_cents["stop_loss"] = 999`` and silently flip live
+	order limits mid-stream. Asserts BOTH (a) the wrap is the canonical
+	``types.MappingProxyType`` (Reviewer A-F7 / B-F6: a swap to a different
+	read-only container that breaks lookup semantics or returns a tuple
+	would also raise TypeError on __setitem__ but break callers), AND
+	(b) read-shape via ``[]`` works correctly.
+	"""
+	from types import MappingProxyType
+	cfg = validate_exec_cfg({
+		"entry_slippage_cents": 2,
+		"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
+	})
+	assert isinstance(cfg.exit_slippage_cents, MappingProxyType), (
+		"the immutable wrap must be MappingProxyType specifically — a swap to "
+		"a different read-only container would also raise TypeError on the "
+		"mutation attempt below but could break dict-style lookups elsewhere"
+	)
+	# Read-shape still works.
+	assert cfg.exit_slippage_cents["stop_loss"] == 10
+	with pytest.raises(TypeError):
+		cfg.exit_slippage_cents["stop_loss"] = 999  # type: ignore[index]
+
+
 # --------------------------------------------------------------------------
 # Test #20 — _make_client_order_id collision-safety + length budget
 # --------------------------------------------------------------------------
@@ -553,8 +600,8 @@ def test_make_client_order_id_distinct_in_same_millisecond() -> None:
 	silently double-counting one fill. The uuid4 suffix is the regression
 	guard — without it, this test fails."""
 	sig = _entry_signal()
-	a = _make_client_order_id(sig, _NOW)
-	b = _make_client_order_id(sig, _NOW)
+	a = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
+	b = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
 	assert a != b, (
 		"client_order_id must be unique per call even when (Signal, now) "
 		"are identical — uuid4 suffix MUST be present"
@@ -567,7 +614,7 @@ def test_make_client_order_id_format_matches_kalshi_regex() -> None:
 	Asserts the value matches the {1,80}-char URL-safe regex pinned in
 	live/client.py:_CLIENT_ORDER_ID_PATTERN."""
 	sig = _entry_signal()
-	oid = _make_client_order_id(sig, _NOW)
+	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
 	# Mirrors live.client._CLIENT_ORDER_ID_PATTERN.
 	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
 		f"client_order_id {oid!r} fails Kalshi-side regex"
@@ -589,7 +636,7 @@ def test_make_client_order_id_within_80_char_worst_case() -> None:
 		ticker="KXTESTSERIESLONG-T12M-NL",  # 24 chars (matches longest real-series shape)
 		strategy="test_strategy_long_name",  # 23 chars
 	)
-	oid = _make_client_order_id(sig, _NOW)
+	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
 	assert len(oid) <= 80, (
 		f"client_order_id length {len(oid)} exceeds Kalshi's 80-char ceiling: {oid!r}"
 	)
@@ -600,7 +647,7 @@ def test_make_client_order_id_embeds_strategy_and_ticker() -> None:
 	strategy), reducing operator-grep ability in audit logs. The format
 	contract is binding — strategy and ticker MUST be present."""
 	sig = _entry_signal(strategy="strat_34", ticker="KXSOL15M-26MAY09H06")
-	oid = _make_client_order_id(sig, _NOW)
+	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
 	assert oid.startswith("strat_34-KXSOL15M-26MAY09H06-")
 
 
@@ -626,3 +673,122 @@ def test_series_of_parses_kalshi_ticker(ticker: str, expected_series: str) -> No
 	instead of ``KXSOL15M``. The forward-split contract is binding for
 	exit-order routing."""
 	assert _series_of(ticker) == expected_series
+
+
+# --------------------------------------------------------------------------
+# Test #22 — OpenPosition identity across modules
+# --------------------------------------------------------------------------
+
+
+def test_open_position_is_re_exported_from_executor() -> None:
+	"""Lock the cross-PR contract: ``OpenPosition`` has ONE canonical type
+	(``engine.executor.OpenPosition``) and ``engine.execution`` re-exports
+	the same class object — not a structural twin.
+
+	Failure mode: a refactor re-introduces ``class OpenPosition`` in
+	``execution.py``. C's ``RiskContext.open_positions`` holds the
+	executor.OpenPosition, but D's ``build_exit_order`` accepts
+	execution.OpenPosition. mypy --strict raises a type mismatch; runtime
+	``isinstance(pos, execution.OpenPosition)`` returns False even though
+	the shapes look identical. This test would catch the regression before
+	PR 5's reconciler hits the type mismatch in production.
+	"""
+	from edge_catcher.engine import execution as _execution_mod
+	from edge_catcher.engine import executor as _executor_mod
+	assert _execution_mod.OpenPosition is _executor_mod.OpenPosition
+
+
+# --------------------------------------------------------------------------
+# Test #23 — _make_client_order_id charset + length validation
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+	"bad_strategy",
+	[
+		"strat.34.v3",   # dot
+		"alpha 1",          # space
+		"fade/long",        # slash
+		"fade:long",        # colon
+		"",                 # empty
+	],
+)
+def test_make_client_order_id_rejects_strategy_with_invalid_charset(bad_strategy: str) -> None:
+	"""Failure mode: a strategy author uses ``.`` / space / ``/`` / ``:`` in
+	their strategy name. ``KalshiOrderClient.OrderRequest.__post_init__``
+	would raise ``ValueError`` deep inside ``LiveExecutor.place``, which the
+	catch-all routes to ``pending`` with ``unexpected_exception:ValueError``
+	— opaque on-call experience. Loud failure at the builder gives the
+	offending value in the message instead."""
+	with pytest.raises(ValueError, match=r"strategy must match"):
+		_make_client_order_id(bad_strategy, "KXTEST15M-26MAY09H06", _NOW)
+
+
+@pytest.mark.parametrize(
+	"bad_ticker",
+	[
+		"KX.SOL15M",       # dot
+		"KX SOL15M",       # space
+		"KX/SOL15M",       # slash
+		"",                # empty
+	],
+)
+def test_make_client_order_id_rejects_ticker_with_invalid_charset(bad_ticker: str) -> None:
+	"""Mirror of the strategy charset test for the ticker side. A future
+	venue's ticker scheme using punctuation (e.g. Polymarket's ``0x…``
+	addresses if ever exposed) would silently 4xx; loud builder-side
+	failure beats opaque post-place reject."""
+	with pytest.raises(ValueError, match=r"ticker must match"):
+		_make_client_order_id("strat_34", bad_ticker, _NOW)
+
+
+def test_make_client_order_id_rejects_oversized_assembled_id() -> None:
+	"""Failure mode: a future strategy + ticker combination pushes the
+	assembled ID past 80 chars. The builder raises rather than handing
+	Kalshi an over-budget ID (which would 4xx silently into pending+None)."""
+	long_strategy = "A" * 60
+	long_ticker = "B" * 60
+	with pytest.raises(ValueError, match=r"assembled id length"):
+		_make_client_order_id(long_strategy, long_ticker, _NOW)
+
+
+# --------------------------------------------------------------------------
+# Test #24 — build_exit_order ticker invariant (sig.ticker == pos.ticker)
+# --------------------------------------------------------------------------
+
+
+def test_build_exit_order_rejects_ticker_mismatch() -> None:
+	"""Failure mode: a strategy emits an exit signal tagged for a ticker
+	that doesn't match the open position. The order body uses ``pos.ticker``
+	but the (old) ``_make_client_order_id`` used ``sig.ticker`` — so the
+	idempotency key and the request body would disagree on the target,
+	corrupting B's reconciliation key. Loud rejection surfaces the
+	strategy-side bug instead of letting it ship a wire-divergent order."""
+	from edge_catcher.engine.executor import OpenPosition
+	pos = OpenPosition(
+		ticker="KXTEST15M-26MAY09H06",
+		side="yes",
+		fill_size=10,
+		blended_entry_cents=42,
+	)
+	sig = _exit_signal(ticker="KXOTHER15M-26MAY09H06")  # ticker mismatch
+	with pytest.raises(ValueError, match=r"sig\.ticker.*must equal.*pos\.ticker"):
+		build_exit_order(pos=pos, sig=sig, cfg=_exec_cfg(), now=_NOW)
+
+
+def test_build_exit_order_client_order_id_uses_pos_ticker() -> None:
+	"""Lock the contract: when sig.ticker == pos.ticker (the normal case),
+	the assembled client_order_id contains ``pos.ticker`` — not whatever
+	other ticker the signal might carry. Regression guard against a future
+	refactor that goes back to ``sig.ticker`` in the builder body."""
+	from edge_catcher.engine.executor import OpenPosition
+	pos = OpenPosition(
+		ticker="KXTEST15M-26MAY09H06",
+		side="yes",
+		fill_size=10,
+		blended_entry_cents=42,
+	)
+	sig = _exit_signal(ticker="KXTEST15M-26MAY09H06")
+	req = build_exit_order(pos=pos, sig=sig, cfg=_exec_cfg(), now=_NOW)
+	# client_order_id format: {strategy}-{ticker}-{ms_ts}-{uuid8}
+	assert "-KXTEST15M-26MAY09H06-" in req.client_order_id

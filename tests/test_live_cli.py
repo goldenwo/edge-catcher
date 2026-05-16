@@ -306,3 +306,41 @@ def signing_env_cli(monkeypatch):
 	)
 	monkeypatch.setenv("KALSHI_LIVE_KEY_ID", "test-live")
 	monkeypatch.setenv("KALSHI_LIVE_PRIVATE_KEY", pem.decode())
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_audit_note — known leftover #4
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+	"raw,expected",
+	[
+		("investigated, resuming", "investigated, resuming"),  # clean note passes through
+		("note with\nnewline", "note withnewline"),            # newline stripped
+		("note with\ttab", "note withtab"),                    # tab stripped
+		("emoji \U0001f600 note", "emoji  note"),              # non-ASCII stripped
+		("ANSI \x1b[31mred\x1b[0m", "ANSI [31mred[0m"),        # ESC stripped (literal bracket kept)
+		("\x00null\x00note", "nullnote"),                      # NUL stripped
+		("  leading and trailing  ", "leading and trailing"),  # whitespace trimmed
+	],
+)
+def test_sanitize_audit_note_strips_problem_characters(raw: str, expected: str) -> None:
+	"""Failure mode prevented: an operator's --note value containing newlines,
+	ANSI escapes, NUL bytes, or non-ASCII would land in the cleared_by audit
+	column and corrupt downstream log rendering / UI / Discord webhook
+	display. Strip-and-truncate preserves the intent without forcing the
+	operator to re-run on a stray character."""
+	from edge_catcher.live.cli import _sanitize_audit_note
+	assert _sanitize_audit_note(raw) == expected
+
+
+def test_sanitize_audit_note_truncates_to_200_chars() -> None:
+	"""Failure mode prevented: a very long --note value blows out audit
+	table column widths and renders unreadable in any UI. 200 chars covers
+	the practical maximum useful operator context without bloat."""
+	from edge_catcher.live.cli import _sanitize_audit_note
+	long_note = "a" * 500
+	result = _sanitize_audit_note(long_note)
+	assert len(result) == 200
+	assert result == "a" * 200

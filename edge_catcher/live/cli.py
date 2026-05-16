@@ -9,6 +9,7 @@ backstop; this CLI cap (from live-trader.yaml) is the user-facing dev-mode floor
 from __future__ import annotations
 import argparse
 import asyncio
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -197,6 +198,29 @@ async def _do_positions(client: KalshiOrderClient) -> int:
 	return 0
 
 
+# Charset + length limit for operator notes that land in the ``cleared_by``
+# audit column. Stripping non-printable / non-ASCII characters keeps log
+# rendering and UI display predictable; the 200-char ceiling matches the
+# practical width of audit table columns without over-truncating real notes.
+_AUDIT_NOTE_DISALLOWED = re.compile(r"[^\x20-\x7E]")
+_AUDIT_NOTE_MAX_LEN = 200
+
+
+def _sanitize_audit_note(note: str) -> str:
+	"""Strip non-printable / non-ASCII chars from an operator note and
+	truncate to 200 chars before it lands in the ``cleared_by`` column.
+
+	Failure mode prevented: a stray newline, ANSI escape, NUL byte, or
+	emoji in ``--note`` would corrupt downstream log rendering and any
+	UI / Discord webhook that renders the audit row. Sanitization runs
+	silently (vs. loud rejection) because operator-CLI ergonomics favour
+	"strip the tab, keep the note" over "re-run because you had a stray
+	character".
+	"""
+	cleaned = _AUDIT_NOTE_DISALLOWED.sub("", note).strip()
+	return cleaned[:_AUDIT_NOTE_MAX_LEN]
+
+
 def _do_kill_clear(args: argparse.Namespace, cfg: LiveConfig) -> int:
 	"""Clear an auto-tripped kill switch row (Sub-project C operator command).
 
@@ -232,7 +256,7 @@ def _do_kill_clear(args: argparse.Namespace, cfg: LiveConfig) -> int:
 	now = datetime.now(timezone.utc)
 	cleared_by = "operator-cli"
 	if args.note:
-		cleared_by = f"operator-cli: {args.note}"
+		cleared_by = f"operator-cli: {_sanitize_audit_note(args.note)}"
 
 	conn = sqlite3.connect(str(db_path))
 	conn.row_factory = sqlite3.Row

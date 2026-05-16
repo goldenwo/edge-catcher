@@ -5,10 +5,10 @@ helpers that sit between the strategy layer (engine/strategy_base.py) and the
 executor layer (engine/executor.py + engine/executors/live.py):
 
   - ``ExecCfg`` — typed view of ``live-trader.yaml``'s execution: section.
-  - ``OpenPosition`` — read-only view of an open trade; consumed by C's sizing
-    gate and D's exit-order builder. Mirrors the shape in
-    ``engine/executor.py:OpenPosition`` but is owned here so D can build exit
-    orders from a position alone without a B-side helper.
+  - ``OpenPosition`` — re-exported from ``engine/executor.py``. The canonical
+    definition lives there so C's ``RiskContext`` (which holds the position
+    list) and D's exit-order builder share one type; mypy ``--strict`` and
+    runtime ``isinstance`` checks both succeed across the cross-module call.
   - ``build_entry_order`` / ``build_exit_order`` — pure builders that translate
     Signal + size + cfg into the engine's typed ``OrderRequest``.
   - ``_make_client_order_id`` — idempotency-key generator.
@@ -23,13 +23,21 @@ tests that need it mock ``uuid.uuid4`` (standard pattern).
 """
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, cast, get_args
+from types import MappingProxyType
+from typing import Literal, Mapping, cast, get_args
 
-from edge_catcher.engine.executor import OrderRequest
+from edge_catcher.engine.executor import OpenPosition, OrderRequest
 from edge_catcher.engine.strategy_base import ExitKind, Signal
+
+# Re-export so callers can ``from edge_catcher.engine.execution import OpenPosition``
+# alongside the builders that consume it. The canonical definition lives in
+# engine/executor.py — see module docstring above.
+__all__ = ["ENTRY_TIF", "EXIT_TIF", "ExecCfg", "OpenPosition", "build_entry_order",
+           "build_exit_order", "validate_exec_cfg"]
 
 # Kalshi time-in-force value used for both entries and exits in Phase 1.
 # IOC = "fill at the limit immediately and cancel any unfilled remainder";
@@ -44,26 +52,16 @@ EXIT_TIF: Literal["ioc"] = "ioc"
 class ExecCfg:
 	"""Typed subset of ``live-trader.yaml``'s ``execution:`` section, produced
 	by ``validate_exec_cfg``. Both slippage values are non-negative integers
-	in cents."""
+	in cents.
+
+	``exit_slippage_cents`` is typed ``Mapping`` (not ``dict``) because
+	``validate_exec_cfg`` wraps the assembled dict in ``MappingProxyType``
+	to make the immutability promise of ``frozen=True`` total: shallow
+	frozen-ness alone would let a caller mutate ``cfg.exit_slippage_cents
+	["stop_loss"] = 999`` and silently flip live order limits mid-stream."""
 
 	entry_slippage_cents: int
-	exit_slippage_cents: dict[ExitKind, int]
-
-
-@dataclass(frozen=True, slots=True)
-class OpenPosition:
-	"""Read-only view of an open live trade.
-
-	AUTHORITATIVE definition lives in this module — C imports from here, and
-	B's reconciliation populates the field set when reading from the live
-	trades store. The four fields below are the entire C+D read surface; B's
-	persistent schema may have additional columns (e.g. ``kalshi_order_id``,
-	timestamps) that this view doesn't expose."""
-
-	ticker: str
-	side: Literal["yes", "no"]
-	fill_size: int
-	blended_entry_cents: int
+	exit_slippage_cents: Mapping[ExitKind, int]
 
 
 def _series_of(ticker: str) -> str:
@@ -80,8 +78,27 @@ def _series_of(ticker: str) -> str:
 	return ticker.split("-", 1)[0]
 
 
-def _make_client_order_id(sig: Signal, now: datetime) -> str:
+# Charset + length contract for Kalshi's client_order_id field. Mirrors the
+# regex enforced by ``KalshiOrderClient.OrderRequest.__post_init__`` so a
+# strategy/ticker that would 4xx-reject on the wire fails loudly here at
+# signal-generation time instead — and we get a useful error string rather
+# than ``unexpected_exception:ValueError`` from the catch-all in
+# ``LiveExecutor.place``.
+_CLIENT_ORDER_ID_CHARSET = re.compile(r"[A-Za-z0-9_-]+")
+_CLIENT_ORDER_ID_MAX_LEN = 80
+
+
+def _make_client_order_id(strategy: str, ticker: str, now: datetime) -> str:
 	"""Build the Kalshi idempotency key for an order.
+
+	Args:
+		strategy: Strategy name. MUST match ``[A-Za-z0-9_-]+``.
+		ticker:   The Kalshi ticker the order targets. For exits, callers
+			MUST pass ``pos.ticker`` (NOT ``sig.ticker``) — the two can drift
+			if a strategy emits an exit signal tagged for a different ticker
+			than the open position; the order is for ``pos.ticker``, so the
+			idempotency key must be too.
+		now: Wall-clock for the millisecond timestamp component.
 
 	Format: ``{strategy}-{ticker}-{ms_ts}-{uuid4_hex8}``.
 
@@ -92,15 +109,35 @@ def _make_client_order_id(sig: Signal, now: datetime) -> str:
 	B's eventual schema and corrupting C's bankroll accounting until the
 	panic floor catches it. Funds-at-risk bug per the v1.6.0 round-4 review.
 
-	**Determinism contract:** same ``(Signal, now)`` produces a NEW string each
-	call (uuid4 ensures uniqueness). Tests that need deterministic IDs must
-	mock ``uuid.uuid4`` — production code MUST NOT rely on determinism.
+	**Determinism contract:** same ``(strategy, ticker, now)`` produces a NEW
+	string each call (uuid4 ensures uniqueness). Tests that need deterministic
+	IDs must mock ``uuid.uuid4`` — production code MUST NOT rely on determinism.
 
-	**Length budget:** worst-case strategy + ticker (~70 chars total) +
-	1+13+1+8 = 23 → well within the 80-char ceiling enforced by the
-	``_CLIENT_ORDER_ID_PATTERN`` regex in ``edge_catcher.live.client``.
+	Raises:
+		ValueError: when ``strategy`` or ``ticker`` contains a character
+			outside ``[A-Za-z0-9_-]``, or when the assembled ID exceeds 80
+			characters. Defense in depth: ``KalshiOrderClient`` will also
+			reject these, but failing here surfaces the offending strategy
+			name in the log instead of an opaque ``ValueError`` propagating
+			through ``LiveExecutor.place``'s catch-all.
 	"""
-	return f"{sig.strategy}-{sig.ticker}-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+	if not _CLIENT_ORDER_ID_CHARSET.fullmatch(strategy):
+		raise ValueError(
+			f"_make_client_order_id: strategy must match [A-Za-z0-9_-]+, "
+			f"got {strategy!r}"
+		)
+	if not _CLIENT_ORDER_ID_CHARSET.fullmatch(ticker):
+		raise ValueError(
+			f"_make_client_order_id: ticker must match [A-Za-z0-9_-]+, "
+			f"got {ticker!r}"
+		)
+	oid = f"{strategy}-{ticker}-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+	if len(oid) > _CLIENT_ORDER_ID_MAX_LEN:
+		raise ValueError(
+			f"_make_client_order_id: assembled id length {len(oid)} > "
+			f"{_CLIENT_ORDER_ID_MAX_LEN} (strategy={strategy!r}, ticker={ticker!r})"
+		)
+	return oid
 
 
 def build_entry_order(
@@ -170,7 +207,7 @@ def build_entry_order(
 		size_contracts=allowed_size,
 		limit_price_cents=limit,
 		strategy=sig.strategy,
-		client_order_id=_make_client_order_id(sig, now),
+		client_order_id=_make_client_order_id(sig.strategy, sig.ticker, now),
 		action="buy",
 	)
 
@@ -223,6 +260,16 @@ def build_exit_order(
 			f"build_exit_order: pos.fill_size must be > 0, got {pos.fill_size} "
 			f"(ticker={pos.ticker}, strategy={sig.strategy})"
 		)
+	if sig.ticker != pos.ticker:
+		# The exit order is for ``pos.ticker``; if the strategy emitted an
+		# exit signal tagged for a different ticker, that's a strategy bug.
+		# Surface loudly rather than silently building an order whose
+		# client_order_id and request body disagree on the target ticker.
+		raise ValueError(
+			f"build_exit_order: sig.ticker ({sig.ticker!r}) must equal "
+			f"pos.ticker ({pos.ticker!r}) — strategy is closing the wrong "
+			f"position (strategy={sig.strategy})"
+		)
 	if sig.target_price_cents is None or sig.exit_kind is None:
 		raise ValueError(
 			f"build_exit_order: missing required fields "
@@ -254,7 +301,9 @@ def build_exit_order(
 		size_contracts=pos.fill_size,
 		limit_price_cents=limit,
 		strategy=sig.strategy,
-		client_order_id=_make_client_order_id(sig, now),
+		# Use pos.ticker explicitly — for exits the order is for the open
+		# position, so the idempotency key must agree with the request body.
+		client_order_id=_make_client_order_id(sig.strategy, pos.ticker, now),
 		action="sell",
 	)
 
@@ -321,4 +370,10 @@ def validate_exec_cfg(cfg: dict[str, object]) -> ExecCfg:
 			)
 		typed_exits[cast(ExitKind, kind)] = value
 
-	return ExecCfg(entry_slippage_cents=entry, exit_slippage_cents=typed_exits)
+	# Wrap in MappingProxyType so the frozen=True invariant is total — without
+	# the wrap, ``cfg.exit_slippage_cents["stop_loss"] = 999`` would silently
+	# succeed and corrupt live order limits mid-stream.
+	return ExecCfg(
+		entry_slippage_cents=entry,
+		exit_slippage_cents=MappingProxyType(typed_exits),
+	)

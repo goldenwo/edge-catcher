@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from edge_catcher.engine.executors.paper import walk_book_with_ceiling
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
 from edge_catcher.engine.market_state import OrderbookSnapshot
 
 
@@ -218,3 +218,86 @@ def test_blended_price_paper_byte_exact_equivalence(
 	)
 	# The actual byte-exact assertion.
 	assert blended_price_cents(fills) == paper_result.blended_price_cents
+
+
+# --------------------------------------------------------------------------
+# Test — signed_slippage_cents (Reviewer A-F2: shared sign convention)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+	"blended,limit,action,expected",
+	[
+		# Buy at 50, paid 52 → +2 (paid more = bad).
+		(52, 50, "buy", 2),
+		# Buy at 50, paid 48 → -2 (paid less = good, negative).
+		(48, 50, "buy", -2),
+		# Buy at exact limit → 0.
+		(50, 50, "buy", 0),
+		# Sell at 50, received 48 → +2 (got less than asked = bad, POSITIVE).
+		(48, 50, "sell", 2),
+		# Sell at 50, received 52 → -2 (got more than asked = good, negative).
+		(52, 50, "sell", -2),
+		# Sell at exact limit → 0.
+		(50, 50, "sell", 0),
+	],
+)
+def test_signed_slippage_cents_uniform_sign_convention(
+	blended: int, limit: int, action: str, expected: int,
+) -> None:
+	"""Lock the unified sign convention: positive = WORSE than limit
+	regardless of side. Without this helper, paper used ``blended - limit``
+	(positive=bad for BUYS only) and live diverged for sells. Latent today
+	(paper is buy-only) but PR 5 / replay of live exit fills would silently
+	corrupt F's slippage chart with mixed-convention rows."""
+	assert signed_slippage_cents(blended=blended, limit=limit, action=action) == expected
+
+
+def test_paper_slippage_routes_through_signed_slippage_helper() -> None:
+	"""Pass-3 review G4: the previous version of this test called
+	``signed_slippage_cents`` twice with identical args and asserted they
+	were equal — a tautology that proved only the helper is idempotent,
+	NOT that paper actually routes through it. A revert of
+	``paper.walk_book_with_ceiling`` to an inline slippage computation
+	that diverged from the helper would pass unchanged.
+
+	This version runs the REAL paper walker end-to-end and asserts its
+	``slippage_cents`` equals what the shared helper produces for the
+	same (blended, best, buy) inputs. Failure mode caught: any future
+	change to paper's slippage computation that diverges from
+	``fill_math.signed_slippage_cents`` (off-by-one, different rounding,
+	or — if a sell path is ever added to paper — a sign flip).
+	"""
+	# Two levels: best=42c, walker crosses into 43c. blended = (42*5 + 43*5)/10
+	# = 425/10 = 42.5 → banker's round → 42. slippage = 42 - 42 = 0 here, so
+	# use an asymmetric book that produces a non-zero slippage to make the
+	# assertion meaningful.
+	yes_levels = [(0.42, 3), (0.45, 100)]   # best=42; 3@42 + 7@45 = 441/10 → 44
+	book = _book(yes=yes_levels)
+	# Positional signature: (book, side, size, max_slippage_cents, max_cost_cents)
+	paper_result = walk_book_with_ceiling(book, "yes", 10, 5, None)
+	assert paper_result.fill_size > 0, "test setup: walker must produce a fill"
+
+	best_cents = round(yes_levels[0][0] * 100)   # 42
+	expected = signed_slippage_cents(
+		blended=paper_result.blended_price_cents, limit=best_cents, action="buy"
+	)
+	assert paper_result.slippage_cents == expected, (
+		f"paper.walk_book_with_ceiling slippage_cents "
+		f"({paper_result.slippage_cents}) diverged from the shared "
+		f"signed_slippage_cents helper ({expected}) — paper may have "
+		f"reverted to an inline computation"
+	)
+
+
+@pytest.mark.parametrize("bad_action", ["BUY", "Sell", "", "cancel", "amend", "hold"])
+def test_signed_slippage_cents_rejects_unknown_action(bad_action: str) -> None:
+	"""Pass-3 review G3: a shared live-money helper must NOT silently apply
+	the sell-side formula to an unexpected action string — that would
+	produce a wrong slippage number that corrupts F's chart + B's
+	reconciliation with no error. The function raises ValueError on any
+	action that is not exactly 'buy' or 'sell'. Failure mode prevented:
+	a future caller (e.g. a Phase-1.5 'cancel' action, or a casing bug
+	passing 'BUY') silently mis-signs slippage."""
+	with pytest.raises(ValueError, match=r"action must be 'buy' or 'sell'"):
+		signed_slippage_cents(blended=52, limit=50, action=bad_action)

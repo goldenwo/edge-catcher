@@ -25,6 +25,7 @@ import asyncio
 import logging
 from typing import cast
 
+from edge_catcher.engine.execution import ENTRY_TIF, EXIT_TIF
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.live.client import (
 	KalshiOrderClient,
@@ -38,7 +39,7 @@ from edge_catcher.live.errors import (
 	OrderRejected,
 )
 
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
 
 
 log = logging.getLogger(__name__)
@@ -120,14 +121,31 @@ def _to_kalshi_request(req: OrderRequest) -> KalshiOrderRequest:
 	asserts this via AST inspection. Reason: a sign bug in dispatch (Buy vs
 	Sell flipped at signal generation) must NOT be papered over here. The
 	round-1 caught bug silently inverted sells to buys (funds-at-risk).
+
+	``time_in_force`` is sourced from ``execution.ENTRY_TIF`` / ``EXIT_TIF``
+	rather than a hardcoded literal so a future Phase-2 flip to GTC entries
+	lands as a one-line constant change in ``execution.py`` without scattering
+	updates across the executor layer.
+
+	**Phase-1 invariant (load-bearing):** the ``buy → ENTRY_TIF`` /
+	``sell → EXIT_TIF`` mapping assumes entries are always buys and exits
+	always sells (true in Phase 1). It is action-name-keyed, NOT
+	intent-keyed. If Phase 2 ever introduces a sell-entry or buy-exit, OR
+	makes ``ENTRY_TIF != EXIT_TIF`` (the GTC-entries case), this mapping
+	must be revisited — the OrderRequest would need to carry explicit
+	entry/exit intent rather than inferring it from ``action``. Today both
+	constants are ``"ioc"`` so a mis-assignment is harmless, but the
+	structural assumption is the thing that drifts silently. Flagged by
+	the PR #38 pass-3 review (G1).
 	"""
+	tif = ENTRY_TIF if req.action == "buy" else EXIT_TIF
 	return KalshiOrderRequest(
 		ticker=req.ticker,
 		action=req.action,
 		side=req.side,
 		count=req.size_contracts,
 		limit_price_cents=req.limit_price_cents,
-		time_in_force="ioc",
+		time_in_force=tif,
 		client_order_id=req.client_order_id,
 	)
 
@@ -136,11 +154,24 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	"""Map a Kalshi-returned :class:`Order` to engine :class:`OrderResult`.
 
 	Branches:
+	* ``req.size_contracts <= 0`` → rejected (``invalid_intended_size``).
+	  Defense in depth — D's builders refuse to produce size<=0 OrderRequests,
+	  but the catch-all in ``place()`` would mask a downstream
+	  ``ZeroDivisionError`` here as ``unexpected_exception:ZeroDivisionError``,
+	  hiding the real sizing bug. Loud reject surfaces the upstream defect.
 	* ``filled_count == 0`` → rejected (``ioc_zero_fill``).
 	* ``filled_count > 0`` but ``raw["fills"]`` missing/malformed → pending
 	  with ``order_id`` preserved (B reconciles true blended price).
 	* Happy path: blended price from per-fill array; status=filled.
 	"""
+	# Defense in depth — size_contracts <= 0 must never reach here from the
+	# builders, but the divisions below would mask the bug as a div-by-zero
+	# rerouted through the catch-all in place(). Surface loudly instead.
+	if req.size_contracts <= 0:
+		return _make_rejected(
+			req, reason=f"invalid_intended_size:{req.size_contracts}"
+		)
+
 	# Zero fill — IOC didn't get any liquidity at our limit. Reject.
 	if order.filled_count == 0:
 		return OrderResult(
@@ -190,19 +221,17 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			intended_size=req.size_contracts,
 			filled_size=order.filled_count,
 			blended_entry_cents=0,
-			fill_pct=order.filled_count / req.size_contracts,
+			fill_pct=_clamp_fill_pct(order.filled_count, req.size_contracts, order.order_id),
 			slippage_cents=0,
 			rejection_reason="kalshi_malformed_fills",
 			order_id=order.order_id or None,
 		)
 
 	blended = blended_price_cents(fills)
-	fill_pct = order.filled_count / req.size_contracts
-	# Signed slippage: for a buy, blended > limit means we paid more than
-	# the limit (Kalshi's actual matched price). For a sell, blended < limit
-	# means we accepted less. F's slippage-distribution chart reads this
-	# directly; sign carries direction.
-	slippage = blended - req.limit_price_cents
+	fill_pct = _clamp_fill_pct(order.filled_count, req.size_contracts, order.order_id)
+	slippage = signed_slippage_cents(
+		blended=blended, limit=req.limit_price_cents, action=req.action
+	)
 	return OrderResult(
 		status="filled",
 		intended_size=req.size_contracts,
@@ -212,6 +241,39 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 		slippage_cents=slippage,
 		order_id=order.order_id or None,
 	)
+
+
+def _clamp_fill_pct(filled_count: int, size_contracts: int, order_id: str | None) -> float:
+	"""Return fill_pct clamped to [0.0, 1.0]; log a warning on overfill.
+
+	Failure mode: Kalshi IOC semantics SHOULD cap matched quantity at
+	``count``, but a wire-shape drift returning ``filled_count > size_contracts``
+	would silently produce ``fill_pct > 1.0`` and corrupt F's slippage
+	chart + analytics that read this field as a probability. The raw
+	``filled_size`` is still recorded (truth of record); only the derived
+	ratio is clamped.
+	"""
+	if size_contracts <= 0:
+		# Defense in depth — the caller is responsible for refusing size<=0
+		# before reaching here, but never return a NaN from a div-by-zero.
+		return 0.0
+	raw = filled_count / size_contracts
+	if raw > 1.0:
+		log.warning(
+			"Kalshi order %s overfilled: filled_count=%d > size_contracts=%d "
+			"(fill_pct clamped to 1.0; filled_size preserved)",
+			order_id, filled_count, size_contracts,
+		)
+		return 1.0
+	return raw
+
+
+# Slippage sign convention now lives in fill_math.signed_slippage_cents so
+# PaperExecutor and LiveExecutor share one source of truth (Reviewer A-F2):
+# without the shared helper, paper.py:153 used `blended - best_price_cents`
+# (positive=bad for buys only) while live.py used the sign-flipped version
+# for sells. Latent today (paper is buy-only) but breaks the moment any
+# sell-side execution routes through paper (e.g., replay of live exit fills).
 
 
 def _make_rejected(req: OrderRequest, *, reason: str) -> OrderResult:
