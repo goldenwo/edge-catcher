@@ -161,6 +161,31 @@ def test_record_pending_happy_path(conn: sqlite3.Connection) -> None:
 	assert row["rejection_reason"] == "kalshi_unreachable:test"
 
 
+def test_record_pending_accepts_none_entry_price_cents(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Locked cross-PR contract: record_pending.entry_price_cents is
+	int | None (Signal.entry_price_cents may be None). A None intent must
+	INSERT cleanly — persisted as the inert sentinel 0 (NOT-NULL DDL column;
+	pending rows never feed P&L)."""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=5,
+		entry_price_cents=None,
+		stop_loss_distance_cents=None,
+		client_order_id="none-entry",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+	)
+	row = _row(conn, rid)
+	assert row["status"] == "pending"
+	assert row["entry_price_cents"] == 0
+
+
 def test_record_pending_unique_client_order_id(conn: sqlite3.Connection) -> None:
 	kw = dict(
 		ticker="T",

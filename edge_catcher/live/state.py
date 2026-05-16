@@ -140,7 +140,7 @@ def record_pending(
 	strategy: str,
 	side: Literal["yes", "no"],
 	intended_size: int,
-	entry_price_cents: int,
+	entry_price_cents: int | None,
 	stop_loss_distance_cents: int | None,
 	client_order_id: str,
 	kalshi_order_id: str | None,
@@ -160,7 +160,13 @@ def record_pending(
 
 	``entry_price_cents`` is the ORIGINAL Signal intent, NOT D's
 	slippage-adjusted limit (caller's contract; pinned by
-	tests/test_engine_dispatch_pending_branch.py).
+	tests/test_engine_dispatch_pending_branch.py). It is typed
+	``int | None`` to match the locked cross-PR kwarg contract
+	(``test_record_pending_kwarg_set_is_exactly_locked_eleven`` +
+	``Signal.entry_price_cents: int | None``); a ``None`` intent is persisted
+	as the inert sentinel ``0`` so the NOT-NULL DDL column stays satisfied
+	(a pending row's entry_price_cents is overwritten by the real blended
+	fill on transition_pending_to_open, and pending rows never feed P&L).
 	"""
 	try:
 		cur = conn.execute(
@@ -177,7 +183,10 @@ def record_pending(
 				side,
 				intended_size,
 				intended_size,
-				entry_price_cents,
+				# entry_price_cents is NOT NULL in the DDL; the locked Protocol
+				# allows a None intent. Persist the inert sentinel 0 (pending
+				# rows never feed P&L; the real price lands on fill).
+				entry_price_cents if entry_price_cents is not None else 0,
 				stop_loss_distance_cents,
 				client_order_id,
 				kalshi_order_id,
