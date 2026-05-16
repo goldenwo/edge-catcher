@@ -885,6 +885,51 @@ class TestRiskConfig:
 		with pytest.raises(KeyError):
 			RiskConfig.from_dict(d)
 
+	# -----------------------------------------------------------------------
+	# Range-guard regressions for the 7 fields that previously had no guard
+	# -----------------------------------------------------------------------
+
+	def test_from_dict_rejects_zero_max_open(self) -> None:
+		"""0 max_open would block every entry — surface as config error
+		rather than booting an engine that silently no-ops."""
+		with pytest.raises(ValueError, match="max_open"):
+			_phase1_cfg(max_open=0)
+
+	def test_from_dict_rejects_negative_min_fill_contracts(self) -> None:
+		"""0 is a valid "no minimum" setting (used by sizing-arm unit tests
+		to bypass the BELOW_MIN_FILL gate); negative is nonsensical."""
+		with pytest.raises(ValueError, match="min_fill_contracts"):
+			_phase1_cfg(min_fill_contracts=-1)
+
+	def test_from_dict_rejects_negative_panic_floor(self) -> None:
+		"""Negative equity floor would trip immediately on first refresh."""
+		with pytest.raises(ValueError, match="absolute_panic_floor_cents"):
+			_phase1_cfg(absolute_panic_floor_cents=-1)
+
+	def test_from_dict_rejects_zero_absolute_max(self) -> None:
+		"""0 per-order dollar cap blocks every entry; negative is nonsensical."""
+		with pytest.raises(ValueError, match="absolute_max_cents"):
+			_phase1_cfg(absolute_max_cents=0)
+
+	def test_from_dict_rejects_kelly_shrinkage_out_of_bounds(self) -> None:
+		"""Shrinkage > 1 over-bets Kelly (math undefined); negative is nonsensical."""
+		with pytest.raises(ValueError, match="kelly_shrinkage"):
+			_phase1_cfg(kelly_shrinkage=1.5)
+		with pytest.raises(ValueError, match="kelly_shrinkage"):
+			_phase1_cfg(kelly_shrinkage=-0.1)
+
+	def test_from_dict_rejects_non_positive_ttl(self) -> None:
+		"""Zero TTL = is_stale() always True = perpetual refresh; negative is nonsensical."""
+		with pytest.raises(ValueError, match="bankroll_ttl_seconds"):
+			_phase1_cfg(bankroll_ttl_seconds=0.0)
+		with pytest.raises(ValueError, match="bankroll_ttl_seconds"):
+			_phase1_cfg(bankroll_ttl_seconds=-1.0)
+
+	def test_from_dict_rejects_zero_failures_until_kill(self) -> None:
+		"""0 would trip on the very first failure (no resilience)."""
+		with pytest.raises(ValueError, match="bankroll_failures_until_kill"):
+			_phase1_cfg(bankroll_failures_until_kill=0)
+
 
 # ===========================================================================
 # 11. Replay / paper path guard
@@ -1013,3 +1058,150 @@ class TestSizingProperties:
 				ctx = _make_ctx(open_positions=positions)
 				equity = gate._compute_equity(ctx)
 				assert equity >= 0, f"equity={equity} < 0 (cash={cash}, fill={fill})"
+
+
+# ===========================================================================
+# 12. build_risk_module pre-refreshes the bankroll cache (known leftover #6)
+# ===========================================================================
+
+
+class TestBuildRiskModulePreRefresh:
+	"""Regression tests for the known leftover: ``build_risk_module`` previously
+	returned a Gate whose BankrollCache had ``_last_refresh_ts=0`` and
+	``_cash_cents=0``. The first ``gate_entry`` call would see equity=0,
+	below ``absolute_panic_floor_cents``, and trip ``KILL_AUTO_PANIC`` on
+	every clean startup. The async factory now awaits ``bankroll.refresh()``
+	before returning."""
+
+	def test_build_risk_module_is_a_coroutine_function(self) -> None:
+		"""Pass-3 review G5: cross-PR seam guard. ``build_risk_module`` was
+		sync before PR #38 and is now ``async``. The most likely PR 5/6
+		integration mistake is a copy-paste from the old sync signature —
+		``gate = build_risk_module(...)`` without ``await`` returns a
+		coroutine object silently (Python does not error until awaited), so
+		the engine would wire a coroutine where a Gate is expected and fail
+		far from the cause. This two-line shape assertion fails loudly at
+		the seam if the signature ever regresses to sync, OR alerts a PR 5
+		author who greps tests for the calling convention."""
+		import inspect  # noqa: PLC0415
+		from edge_catcher.engine.risk import build_risk_module  # noqa: PLC0415
+		assert inspect.iscoroutinefunction(build_risk_module), (
+			"build_risk_module MUST be async (it pre-refreshes the bankroll "
+			"cache before Gate construction) — callers MUST `await` it"
+		)
+
+	@pytest.mark.asyncio
+	async def test_build_risk_module_prerefreshes_bankroll(self, tmp_path: Path) -> None:
+		"""The factory awaits bankroll.refresh() before returning, so the cache
+		holds the real Kalshi balance from the moment the Gate is constructed.
+		Without this, equity = 0 + mtm = 0 ≤ panic_floor on the first signal."""
+		from edge_catcher.engine.risk import build_risk_module
+
+		# Bootstrap a real SQLite schema (live_trades.db) so KillSwitch /
+		# PeakTracker can read/write.
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				reason TEXT NOT NULL,
+				detail TEXT NOT NULL,
+				tripped_at TEXT NOT NULL,
+				cleared_at TEXT,
+				cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+		""")
+
+		# Fake KalshiOrderClient whose balance() returns 17000c.
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=17000))
+
+		config = {
+			"risk": {
+				"sizing_pct": 0.005,
+				"daily_loss_pct": 0.02,
+				"drawdown_pct": 0.05,
+				"max_open": 5,
+				"min_fill_contracts": 3,
+				"absolute_panic_floor_cents": 3000,
+				"absolute_max_cents": 5000,
+				"kelly_shrinkage": 0.5,
+				"bankroll_ttl_seconds": 300.0,
+				"bankroll_failures_until_kill": 2,
+			}
+		}
+
+		gate = await build_risk_module(config, conn, fake_client)
+
+		assert gate._bankroll._cash_cents == 17000, (
+			"build_risk_module MUST pre-refresh the bankroll cache so the "
+			"first gate_entry sees real cash, not the 0-default"
+		)
+		assert gate._bankroll.is_stale() is False, (
+			"after pre-refresh, _last_refresh_ts is set so is_stale() reports "
+			"fresh — without the await refresh(), it would report stale"
+		)
+		# Sanity check — the gate's existing equity-floor logic now works as
+		# intended on first call (cash > floor, no panic trip).
+		fake_client.balance.assert_awaited_once()
+
+	@pytest.mark.asyncio
+	async def test_build_risk_module_swallows_refresh_failure_cleanly(self, tmp_path: Path) -> None:
+		"""When pre-refresh fails (Kalshi unreachable at boot), the factory
+		does NOT raise — the cache stays at 0 and the engine's existing
+		failure-handling (next gate eval trips KILL_AUTO_PANIC for cash=0
+		≤ absolute_panic_floor_cents) is the correct behaviour. Loud
+		factory-level failure would be a separate, breaking change.
+
+		Note: _emit_trip_fn is still None at pre-refresh time (Gate hasn't
+		been constructed yet), so a refresh failure CANNOT fire a phantom
+		kill trip during construction."""
+		from edge_catcher.engine.risk import build_risk_module
+		from edge_catcher.live.errors import NetworkError
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				reason TEXT NOT NULL,
+				detail TEXT NOT NULL,
+				tripped_at TEXT NOT NULL,
+				cleared_at TEXT,
+				cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY,
+				value TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+		""")
+
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(side_effect=NetworkError("simulated: connection refused"))
+
+		config = {
+			"risk": {
+				"sizing_pct": 0.005,
+				"daily_loss_pct": 0.02,
+				"drawdown_pct": 0.05,
+				"max_open": 5,
+				"min_fill_contracts": 3,
+				"absolute_panic_floor_cents": 3000,
+				"absolute_max_cents": 5000,
+				"kelly_shrinkage": 0.5,
+				"bankroll_ttl_seconds": 300.0,
+				"bankroll_failures_until_kill": 2,
+			}
+		}
+
+		gate = await build_risk_module(config, conn, fake_client)
+		assert gate._bankroll._cash_cents == 0, (
+			"refresh failure leaves cache at 0 — the existing trip-on-first-"
+			"signal behaviour handles the unreachable-Kalshi case"
+		)

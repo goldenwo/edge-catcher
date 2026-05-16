@@ -83,7 +83,14 @@ async def test_filled_path_maps_FillResult_to_OrderResult_field_by_field():
 async def test_blended_zero_sentinel_preserved():
 	"""When resolve_fill returns blended_price_cents == 0, OrderResult.blended_entry_cents
 	MUST be 0 verbatim (not None, not the limit price). Trade store relies on the
-	0-sentinel to fall back to entry_price at close time."""
+	0-sentinel to fall back to entry_price at close time.
+
+	Previously this test asserted the sentinel only inside ``if result.status
+	== "filled"`` — a refactor that made the executor always reject on empty
+	yes_levels would let the test pass vacuously (no assertion runs). Now
+	BOTH branches assert: filled MUST be 0; rejected MUST carry an expected
+	reason. Any other status (e.g. pending — a LIVE-only outcome) fails.
+	"""
 	cfg = _canned_config()
 	cfg["sizing"]["require_fresh_book"] = False
 	book = _canned_book(yes_levels=[])
@@ -93,9 +100,22 @@ async def test_blended_zero_sentinel_preserved():
 	executor = PaperExecutor(market_state=ms, config=cfg)
 	result = await executor.place(req)
 
-	# Either filled with 0 sentinel, or rejected — both valid for this config.
 	if result.status == "filled":
-		assert result.blended_entry_cents == 0
+		assert result.blended_entry_cents == 0, (
+			"filled-with-zero is the sentinel for paper's empty-book fallback "
+			"path — blended_entry_cents MUST round-trip as 0 so the trade "
+			"store's close-time fallback to entry_price fires correctly"
+		)
+	elif result.status == "rejected":
+		assert result.rejection_reason in {"stale_book", "empty_book"}, (
+			f"empty yes_levels rejection must surface a defined reason — "
+			f"got {result.rejection_reason!r}"
+		)
+	else:
+		raise AssertionError(
+			f"PaperExecutor MUST return filled or rejected for this input — "
+			f"got {result.status!r}. pending is a LIVE-only status."
+		)
 
 
 @pytest.mark.asyncio

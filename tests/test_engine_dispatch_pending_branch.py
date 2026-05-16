@@ -70,16 +70,19 @@ class _RecordPendingCalls(list):
 
 
 class _StubStore:
-	"""Stand-in for B's eventual TradeStore that captures record_pending kwargs.
+	"""Stand-in for B's eventual TradeStore that captures record_pending +
+	record_rejected kwargs.
 
 	Also provides record_trade (no-op) so the dispatch handler's existing
 	filled-branch code path doesn't blow up during these tests — but we only
-	assert against record_pending. Any test that triggers record_trade is
-	out-of-scope for this file (covered by test_engine_dispatch_executor_wiring).
+	assert against record_pending / record_rejected. Any test that triggers
+	record_trade is out-of-scope for this file (covered by
+	test_engine_dispatch_executor_wiring).
 	"""
 
 	def __init__(self) -> None:
 		self.pending_calls: _RecordPendingCalls = _RecordPendingCalls()
+		self.rejected_calls: list[dict[str, Any]] = []
 		self.trade_calls: list[dict[str, Any]] = []
 
 	def record_trade(self, **kwargs: Any) -> int:
@@ -90,6 +93,10 @@ class _StubStore:
 		"""Capture kwargs verbatim. B's eventual implementation writes a row;
 		our stub just records what dispatch passed."""
 		self.pending_calls.append(dict(kwargs))
+
+	def record_rejected(self, **kwargs: Any) -> None:
+		"""Mirror of record_pending capture for the rejected-branch audit row."""
+		self.rejected_calls.append(dict(kwargs))
 
 
 def _make_pending_result(
@@ -399,3 +406,370 @@ async def test_placed_at_utc_uses_threaded_now_not_wall_clock() -> None:
 		f"— got {kwargs['placed_at_utc']!r}. A regression to datetime.now() would "
 		"break replay-live parity per the dispatch module invariant at L14-L18."
 	)
+
+
+# ---------------------------------------------------------------------------
+# (d) Kwarg SET drift guard — record_pending kwargs are EXACTLY the locked 11
+# ---------------------------------------------------------------------------
+
+
+_LOCKED_RECORD_PENDING_KWARGS: frozenset[str] = frozenset({
+	"ticker",
+	"series",
+	"strategy",
+	"side",
+	"intended_size",
+	"entry_price_cents",
+	"stop_loss_distance_cents",
+	"client_order_id",
+	"kalshi_order_id",
+	"placed_at_utc",
+	"rejection_reason",
+})
+
+
+@pytest.mark.asyncio
+async def test_record_pending_kwarg_set_is_exactly_locked_eleven() -> None:
+	"""Failure mode prevented: a future dispatch refactor adds an experimental
+	``notes=`` or ``intended_size_dollars=`` kwarg to ``store.record_pending(...)``
+	that B's PR 5 schema doesn't accept. The per-key assertions above pass
+	(they only check presence + value), but PR 5 fails at runtime with
+	``unexpected keyword argument``. This test locks the SET so a kwarg
+	added or removed surfaces here, BEFORE the cross-PR drift hits B.
+	"""
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=_make_pending_result(
+		order_id="ord-set-test",
+		rejection_reason="kalshi_unreachable:test",
+	))
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	assert len(store.pending_calls) == 1
+	kwargs = store.pending_calls[0]
+	actual = set(kwargs.keys())
+	missing = _LOCKED_RECORD_PENDING_KWARGS - actual
+	extra = actual - _LOCKED_RECORD_PENDING_KWARGS
+	assert not missing and not extra, (
+		f"record_pending kwarg drift detected. "
+		f"Missing: {sorted(missing)!r}. Extra: {sorted(extra)!r}. "
+		f"This test is the cross-PR contract between D (this PR's dispatch) "
+		f"and B (PR 5's state machine impl) — if the set has legitimately "
+		f"changed, update _LOCKED_RECORD_PENDING_KWARGS and bump the spec."
+	)
+	# Per-kwarg TYPE locking (Reviewer B-F1): the SET test alone misses a
+	# refactor that passes the right kwarg name with the wrong type — e.g.
+	# ``placed_at_utc=now`` (datetime) instead of ``placed_at_utc=now.isoformat()``
+	# (str) — which would silently pass the SET test and break PR 5's SQLite
+	# INSERT at runtime. Lock the types here so any value-shape drift surfaces.
+	expected_types: dict[str, tuple[type, ...]] = {
+		"ticker": (str,),
+		"series": (str,),
+		"strategy": (str,),
+		"side": (str,),
+		"intended_size": (int,),
+		"entry_price_cents": (int, type(None)),
+		"stop_loss_distance_cents": (int, type(None)),
+		"client_order_id": (str,),
+		"kalshi_order_id": (str, type(None)),
+		"placed_at_utc": (str,),
+		"rejection_reason": (str, type(None)),
+	}
+	for key, allowed in expected_types.items():
+		assert isinstance(kwargs[key], allowed), (
+			f"record_pending kwarg {key!r} has wrong type: "
+			f"got {type(kwargs[key]).__name__} ({kwargs[key]!r}), "
+			f"expected one of {[t.__name__ for t in allowed]!r}. "
+			f"PR 5's SQLite INSERT will reject this at runtime."
+		)
+
+
+# ---------------------------------------------------------------------------
+# (e) Rejected branch writes audit row via store.record_rejected
+# ---------------------------------------------------------------------------
+
+
+def _make_rejected_result(*, rejection_reason: str = "kalshi_4xx:400") -> OrderResult:
+	"""Rejected OrderResult — Kalshi authoritatively rejected, no order_id."""
+	return OrderResult(
+		status="rejected",
+		intended_size=10,
+		filled_size=0,
+		blended_entry_cents=0,
+		fill_pct=0.0,
+		slippage_cents=0,
+		rejection_reason=rejection_reason,
+		order_id=None,
+	)
+
+
+@pytest.mark.asyncio
+async def test_rejected_branch_writes_audit_row() -> None:
+	"""Failure mode prevented: a Kalshi 4xx rejection (or absolute_max_exceeded,
+	ioc_zero_fill, invalid_intended_size) lands as ``status="rejected"`` but
+	dispatch only logged + bumped a metric — no durable audit row. Operators
+	triaging "why did my strategy stop trading?" had to grep rotating
+	process logs. The dispatch now persists a record_rejected row so F's
+	UI surfaces the rejection history and B's reconciler has full audit.
+
+	stale_book is excluded (paper-side path; its existing log+metric is the
+	source of truth for paper).
+	"""
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=_make_rejected_result(
+		rejection_reason="kalshi_4xx:400"
+	))
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	assert len(store.rejected_calls) == 1, (
+		"record_rejected MUST be called for non-stale_book rejections so F's "
+		"UI and operator triage have a durable audit row"
+	)
+	kwargs = store.rejected_calls[0]
+	assert kwargs["ticker"] == "KXSOL15M-26MAY09H06"
+	assert kwargs["rejection_reason"] == "kalshi_4xx:400"
+	assert kwargs["client_order_id"]  # was generated even though Kalshi rejected
+	assert kwargs["placed_at_utc"] == _NOW.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_rejected_stale_book_skips_audit_row() -> None:
+	"""Mirror of the above — stale_book rejections (paper-only path) do
+	NOT call record_rejected. The existing metric/log is the truth source
+	for paper-mode rejections; no live_trades.db row needed."""
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=_make_rejected_result(
+		rejection_reason="stale_book"
+	))
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	assert len(store.rejected_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# (e2) record_rejected drift guard — kwarg SET locked to the 10 names
+# ---------------------------------------------------------------------------
+
+
+_LOCKED_RECORD_REJECTED_KWARGS: frozenset[str] = frozenset({
+	"ticker",
+	"series",
+	"strategy",
+	"side",
+	"intended_size",
+	"entry_price_cents",
+	"stop_loss_distance_cents",
+	"client_order_id",
+	"placed_at_utc",
+	"rejection_reason",
+})
+
+
+@pytest.mark.asyncio
+async def test_record_rejected_kwarg_set_is_exactly_locked_ten() -> None:
+	"""Mirror of the record_pending drift guard for the new record_rejected
+	Protocol surface. PR 5's SQLite impl must accept exactly these 10 kwargs
+	(no kalshi_order_id — rejected = no Kalshi-side order). A future dispatch
+	refactor that adds an experimental kwarg would silently pass the per-key
+	tests above but break PR 5's INSERT.
+
+	Also locks types so passing wrong-type values (e.g. ``placed_at_utc=now``
+	datetime instead of isoformat string) surfaces here rather than at PR 5
+	runtime.
+	"""
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=_make_rejected_result(
+		rejection_reason="kalshi_4xx:400"
+	))
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	assert len(store.rejected_calls) == 1
+	kwargs = store.rejected_calls[0]
+	actual = set(kwargs.keys())
+	missing = _LOCKED_RECORD_REJECTED_KWARGS - actual
+	extra = actual - _LOCKED_RECORD_REJECTED_KWARGS
+	assert not missing and not extra, (
+		f"record_rejected kwarg drift detected. "
+		f"Missing: {sorted(missing)!r}. Extra: {sorted(extra)!r}."
+	)
+	expected_types: dict[str, tuple[type, ...]] = {
+		"ticker": (str,),
+		"series": (str,),
+		"strategy": (str,),
+		"side": (str,),
+		"intended_size": (int,),
+		"entry_price_cents": (int, type(None)),
+		"stop_loss_distance_cents": (int, type(None)),
+		"client_order_id": (str,),
+		"placed_at_utc": (str,),
+		"rejection_reason": (str,),  # rejected rows ALWAYS carry a reason
+	}
+	for key, allowed in expected_types.items():
+		assert isinstance(kwargs[key], allowed), (
+			f"record_rejected kwarg {key!r} has wrong type: "
+			f"got {type(kwargs[key]).__name__} ({kwargs[key]!r}), "
+			f"expected one of {[t.__name__ for t in allowed]!r}."
+		)
+
+
+# ---------------------------------------------------------------------------
+# (f) Unhandled OrderResult.status falls through to the exhaustiveness else
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unhandled_status_logs_and_increments_metric(
+	caplog: pytest.LogCaptureFixture,
+) -> None:
+	"""Failure mode prevented: PR 5 adds a new status literal (e.g.
+	``"lost_truth"``) to OrderResult but forgets to add a matching dispatch
+	branch. Without the else arm, the new variant silently no-ops with no
+	audit row + no notification + no metric — exactly the funds-at-risk
+	scenario the protocol-growth invariant warns about. The else arm fires
+	a loud log + metric so the dispatch-side miss surfaces immediately.
+	"""
+	# Bypass the OrderResult Literal type to simulate a future variant.
+	bogus = OrderResult.__new__(OrderResult)
+	object.__setattr__(bogus, "status", "lost_truth")
+	object.__setattr__(bogus, "intended_size", 10)
+	object.__setattr__(bogus, "filled_size", 0)
+	object.__setattr__(bogus, "blended_entry_cents", 0)
+	object.__setattr__(bogus, "fill_pct", 0.0)
+	object.__setattr__(bogus, "slippage_cents", 0)
+	object.__setattr__(bogus, "book_depth", None)
+	object.__setattr__(bogus, "book_snapshot", None)
+	object.__setattr__(bogus, "rejection_reason", None)
+	object.__setattr__(bogus, "order_id", None)
+
+	metrics = MagicMock()
+	config = {"_metrics": metrics}
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=bogus)
+	sig = _live_entry_signal()
+
+	import logging
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.engine.dispatch"):
+		await _handle_enter(sig, _ctx(), store, config, executor, now=_NOW)
+
+	# No audit row should be written (the variant has no defined branch)
+	assert len(store.pending_calls) == 0
+	assert len(store.rejected_calls) == 0
+	# Loud log + metric must fire so the dispatch-side miss is visible
+	assert any("unhandled OrderResult.status" in rec.message for rec in caplog.records)
+	metrics.inc.assert_any_call("entries_unhandled_status")
+
+
+# ---------------------------------------------------------------------------
+# (g) wait_for timeout on executor.place synthesizes pending+None (B-F6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_executor_place_timeout_synthesizes_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+	"""Failure mode prevented: a bug in ``KalshiOrderClient`` (infinite retry,
+	missing sub-timeout) makes ``executor.place`` block forever. The entire
+	WS message loop blocks behind dispatch_message → _handle_enter → place.
+	The dispatch-layer wait_for caps the call; on timeout we synthesize a
+	pending+None row so B's reconciler can resolve via client_order_id
+	without the engine grinding to a halt.
+
+	The test monkeypatches the module constant to 0.01s so the test runs
+	fast — the production value (60s) is documented at the constant's
+	definition in dispatch.py.
+	"""
+	from edge_catcher.engine import dispatch as dispatch_mod
+	monkeypatch.setattr(dispatch_mod, "_ENTRY_PLACEMENT_TIMEOUT_SECONDS", 0.01)
+
+	async def _hang(req: Any) -> OrderResult:
+		import asyncio as _aio
+		await _aio.sleep(10)  # never completes within the test
+		raise AssertionError("unreachable")
+
+	store = _StubStore()
+	executor = MagicMock()
+	executor.place = _hang
+	sig = _live_entry_signal()
+
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), executor, now=_NOW)
+
+	# Pending row synthesized at the dispatch layer
+	assert len(store.pending_calls) == 1
+	kwargs = store.pending_calls[0]
+	assert kwargs["rejection_reason"] is not None
+	assert kwargs["rejection_reason"].startswith("engine_timeout:")
+	assert kwargs["kalshi_order_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_executor_place_timeout_with_real_live_executor(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""Reviewer A-F4: the previous test uses a hand-rolled ``_hang`` coroutine
+	that NEVER goes through ``LiveExecutor.place``'s
+	``except asyncio.CancelledError: raise`` carve-out. ``asyncio.wait_for``
+	cancels the wrapped coroutine on timeout — the carve-out re-raises
+	CancelledError, and Python's wait_for must translate that to TimeoutError.
+	If a future refactor breaks that translation (e.g. the carve-out catches
+	a different exception class first), dispatch would see CancelledError
+	instead of TimeoutError and the broad ``except asyncio.TimeoutError`` arm
+	would NOT fire — funds-at-risk. This test exercises the real LiveExecutor
+	→ wait_for cancellation → TimeoutError → pending-synthesis chain.
+	"""
+	import asyncio as _aio
+
+	from edge_catcher.engine import dispatch as dispatch_mod
+	from edge_catcher.engine.executors.live import LiveExecutor
+
+	monkeypatch.setattr(dispatch_mod, "_ENTRY_PLACEMENT_TIMEOUT_SECONDS", 0.05)
+
+	class _HangingKalshiClient:
+		"""Real-shape Kalshi client whose .place() hangs forever — exercises
+		the LiveExecutor.place catch-all + CancelledError carve-out under
+		wait_for cancellation."""
+
+		def __init__(self) -> None:
+			self.calls: list = []
+
+		async def place(self, req):  # type: ignore[no-untyped-def]
+			self.calls.append(req)
+			await _aio.sleep(10)  # never completes
+			raise AssertionError("unreachable")
+
+	hanging_client = _HangingKalshiClient()
+	live_executor = LiveExecutor(hanging_client)  # type: ignore[arg-type]
+
+	store = _StubStore()
+	sig = _live_entry_signal()
+
+	start = _aio.get_event_loop().time()
+	await _handle_enter(sig, _ctx(), store, _config_with_metrics(), live_executor, now=_NOW)
+	elapsed = _aio.get_event_loop().time() - start
+
+	# Prompt return — control got back to dispatch before the 10s sleep
+	# completed. Without wait_for translating CancelledError → TimeoutError,
+	# dispatch's except branch wouldn't fire and we'd hang.
+	assert elapsed < 1.0, (
+		f"_handle_enter took {elapsed:.2f}s — expected prompt return after "
+		"wait_for cancellation. CancelledError may be propagating instead "
+		"of being translated to TimeoutError."
+	)
+	# Pending row synthesized — proves the dispatch-layer ``except
+	# asyncio.TimeoutError`` arm fired (NOT a CancelledError leak).
+	assert len(store.pending_calls) == 1
+	kwargs = store.pending_calls[0]
+	assert kwargs["rejection_reason"] is not None
+	assert kwargs["rejection_reason"].startswith("engine_timeout:")
+	# LiveExecutor was actually called (not short-circuited).
+	assert len(hanging_client.calls) == 1

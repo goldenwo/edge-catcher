@@ -188,13 +188,59 @@ class RiskConfig:
 			bankroll_ttl_seconds=float(d["bankroll_ttl_seconds"]),
 			bankroll_failures_until_kill=int(d["bankroll_failures_until_kill"]),
 		)
-		# Basic range guards
+		# Range guards — every config knob has a defined valid range. Each
+		# guard prevents a specific live-money failure mode noted inline.
 		if not (0 < cfg.sizing_pct < 1):
+			# 0 = no position sizing; 1+ = full-bankroll sizing per trade.
 			raise ValueError(f"sizing_pct must be in (0, 1), got {cfg.sizing_pct}")
 		if not (0 < cfg.daily_loss_pct < 1):
+			# 0 = trips on any loss (engine never trades); 1+ = never trips.
 			raise ValueError(f"daily_loss_pct must be in (0, 1), got {cfg.daily_loss_pct}")
 		if not (0 <= cfg.drawdown_pct < 1):
+			# 0 = no drawdown gate (allowed); 1+ = liquidation cap collapses to 0.
 			raise ValueError(f"drawdown_pct must be in [0, 1), got {cfg.drawdown_pct}")
+		if cfg.max_open < 1:
+			# 0 max_open would block every entry; surface as config error
+			# instead of letting the engine boot and silently no-op.
+			raise ValueError(f"max_open must be >= 1, got {cfg.max_open}")
+		if cfg.min_fill_contracts < 0:
+			# 0 is a valid "no minimum" setting (the sizing arms never produce
+			# negative size, so 0 effectively disables the BELOW_MIN_FILL gate
+			# — handy for testing pure sizing-arm behaviour). Negative is
+			# nonsensical.
+			raise ValueError(
+				f"min_fill_contracts must be >= 0, got {cfg.min_fill_contracts}"
+			)
+		if cfg.absolute_panic_floor_cents < 0:
+			# Negative equity floor would trip immediately on first refresh.
+			raise ValueError(
+				f"absolute_panic_floor_cents must be >= 0, got {cfg.absolute_panic_floor_cents}"
+			)
+		if cfg.absolute_max_cents <= 0:
+			# 0 per-order dollar cap blocks every entry; negative is nonsensical.
+			raise ValueError(
+				f"absolute_max_cents must be > 0, got {cfg.absolute_max_cents}"
+			)
+		if not (0.0 <= cfg.kelly_shrinkage <= 1.0):
+			# Shrinkage > 1 would over-bet Kelly (math undefined); negative is
+			# nonsensical. Phase 1 default is 0.5 (¼-Kelly when combined with
+			# the 0.25 prefactor in _compute_kelly_arm).
+			raise ValueError(
+				f"kelly_shrinkage must be in [0, 1], got {cfg.kelly_shrinkage}"
+			)
+		if cfg.bankroll_ttl_seconds <= 0:
+			# Zero TTL = is_stale() always True = perpetual refresh; negative
+			# is nonsensical.
+			raise ValueError(
+				f"bankroll_ttl_seconds must be > 0, got {cfg.bankroll_ttl_seconds}"
+			)
+		if cfg.bankroll_failures_until_kill < 1:
+			# 0 would trip on the very first failure (no resilience); negative
+			# is nonsensical.
+			raise ValueError(
+				f"bankroll_failures_until_kill must be >= 1, "
+				f"got {cfg.bankroll_failures_until_kill}"
+			)
 		return cfg
 
 
@@ -885,12 +931,21 @@ class Gate:
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_risk_module(
+async def build_risk_module(
 	config: dict[str, Any],
 	db_conn: sqlite3.Connection,
 	kalshi_client: KalshiOrderClient,
 ) -> Gate:
 	"""Wire all risk components from config + injected deps.
+
+	Async because we pre-refresh ``BankrollCache`` before returning so the
+	first ``Gate.gate_entry`` call sees real cash rather than the 0-default.
+	Without the pre-refresh, equity = cash + mtm = 0 + 0 ≤ absolute_panic_
+	floor_cents (3000) on the very first signal, tripping KILL_AUTO_PANIC
+	on every clean startup. With it, a failed pre-refresh still leaves the
+	cache at 0 (the existing failure semantics) and the same trip fires —
+	which is the correct behaviour for the rare "Kalshi unreachable at
+	boot" case.
 
 	Args:
 		config: The full live-trader.yaml parsed dict.  Must contain a
@@ -900,7 +955,8 @@ def build_risk_module(
 		kalshi_client: Async Kalshi REST client (from ``live.client``).
 
 	Returns:
-		A fully wired ``Gate`` ready for ``gate_entry`` / ``gate_exit`` calls.
+		A fully wired ``Gate`` ready for ``gate_entry`` / ``gate_exit`` calls,
+		with the bankroll cache pre-populated when Kalshi is reachable.
 	"""
 	risk_block = config.get("risk", config)
 	cfg = RiskConfig.from_dict(risk_block)
@@ -909,6 +965,12 @@ def build_risk_module(
 	bankroll = BankrollCache(_source=balance_source, _cfg=cfg)
 	kill_switch = KillSwitch(conn=db_conn)
 	peak_tracker = PeakTracker(conn=db_conn)
+
+	# Pre-refresh BEFORE Gate construction — at this point ``_emit_trip_fn``
+	# is still None, so a refresh failure cannot fire a phantom kill trip.
+	# refresh() never raises on its own (network/API errors are caught and
+	# logged); only the post-Gate refresh path can trip via _emit_trip_fn.
+	await bankroll.refresh()
 
 	return Gate(
 		cfg=cfg,

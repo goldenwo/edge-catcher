@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
 from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot
 
 log = logging.getLogger(__name__)
@@ -150,7 +150,10 @@ def walk_book_with_ceiling(
 			fill_pct=0.0,
 			intended_size=size,
 		)
-	slippage = blended - best_price_cents
+	# Paper today only handles entries (action="buy"); routing through the
+	# shared helper makes the sign convention symmetric with live so a future
+	# sell-side path produces the same positive=worse semantics F's UI expects.
+	slippage = signed_slippage_cents(blended=blended, limit=best_price_cents, action="buy")
 	fill_pct = total_filled / size
 
 	return FillResult(
