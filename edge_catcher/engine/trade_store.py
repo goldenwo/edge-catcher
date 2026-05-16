@@ -108,7 +108,13 @@ class TradeStoreProtocol(Protocol):
 
 		``rejection_reason`` is REQUIRED (not Optional) here — every rejected
 		row must carry a diagnostic value (kalshi_4xx:/absolute_max_exceeded/
-		ioc_zero_fill/invalid_intended_size:).
+		ioc_zero_fill/invalid_intended_size:). The dispatch call site coerces
+		a ``None`` reason to the sentinel string ``"unknown"`` (defensive —
+		no current executor produces ``status="rejected"`` with
+		``rejection_reason=None``, since every ``_make_rejected`` sets one;
+		the sentinel is a latent-drift guard, not an expected value). PR 5's
+		SQLite impl can therefore assume a non-empty ``str`` and need not
+		special-case ``None``.
 		"""
 		...
 

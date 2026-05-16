@@ -1073,6 +1073,23 @@ class TestBuildRiskModulePreRefresh:
 	every clean startup. The async factory now awaits ``bankroll.refresh()``
 	before returning."""
 
+	def test_build_risk_module_is_a_coroutine_function(self) -> None:
+		"""Pass-3 review G5: cross-PR seam guard. ``build_risk_module`` was
+		sync before PR #38 and is now ``async``. The most likely PR 5/6
+		integration mistake is a copy-paste from the old sync signature —
+		``gate = build_risk_module(...)`` without ``await`` returns a
+		coroutine object silently (Python does not error until awaited), so
+		the engine would wire a coroutine where a Gate is expected and fail
+		far from the cause. This two-line shape assertion fails loudly at
+		the seam if the signature ever regresses to sync, OR alerts a PR 5
+		author who greps tests for the calling convention."""
+		import inspect  # noqa: PLC0415
+		from edge_catcher.engine.risk import build_risk_module  # noqa: PLC0415
+		assert inspect.iscoroutinefunction(build_risk_module), (
+			"build_risk_module MUST be async (it pre-refreshes the bankroll "
+			"cache before Gate construction) — callers MUST `await` it"
+		)
+
 	@pytest.mark.asyncio
 	async def test_build_risk_module_prerefreshes_bankroll(self, tmp_path: Path) -> None:
 		"""The factory awaits bankroll.refresh() before returning, so the cache

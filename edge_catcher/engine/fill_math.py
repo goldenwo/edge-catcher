@@ -81,7 +81,19 @@ def signed_slippage_cents(*, blended: int, limit: int, action: str) -> int:
 	Without the sign flip, F's slippage-distribution chart had to know the
 	action to interpret the sign; the unified convention lets the UI render
 	one histogram for entries + exits without action-aware branching.
+
+	Raises:
+		ValueError: if ``action`` is not exactly ``"buy"`` or ``"sell"``.
+			This is a shared live-money helper — a silent sell-formula
+			fallthrough for an unexpected action string (``"BUY"``, ``""``,
+			a future ``"cancel"``) would produce a wrong slippage number
+			that silently corrupts F's chart and B's reconciliation. Loud
+			failure beats a silent wrong answer (zero-error lens).
 	"""
 	if action == "buy":
 		return blended - limit
-	return limit - blended
+	if action == "sell":
+		return limit - blended
+	raise ValueError(
+		f"signed_slippage_cents: action must be 'buy' or 'sell', got {action!r}"
+	)

@@ -344,9 +344,19 @@ async def _handle_enter(
 	try:
 		result = await asyncio.wait_for(executor.place(req), timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS)
 	except asyncio.TimeoutError:
+		# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
+		# sizing to the executor pipeline; the real sizing refactor lands in
+		# PR 5/E). So the synthesized pending row carries intended_size=0.
+		# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
+		# reconciler MUST treat an engine_timeout pending row's
+		# intended_size=0 as "unknown — resolve the true size from Kalshi by
+		# client_order_id", same as the NetworkError-pending path. Flagged by
+		# the PR #38 pass-3 review (G2); the clean fix is gated on the
+		# deferred sizing refactor, so we surface it loudly instead.
 		log.warning(
 			"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
-			"synthesizing pending+None for B's reconciler to resolve",
+			"synthesizing pending+None (intended_size=0, sizing-deferred "
+			"placeholder) for B's reconciler to resolve via client_order_id",
 			_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
 			req.client_order_id,
 		)
