@@ -1,7 +1,7 @@
 """Tests for edge_catcher.storage.migrations.apply_migrations.
 
 Covers:
-- Fresh DB gets both migrations applied; live_schema_migrations table has 2 rows.
+- Fresh DB gets all shipped migrations applied; live_schema_migrations has 3 rows.
 - Idempotent re-run produces no new rows and returns an empty applied list.
 - Missing migrations_dir raises FileNotFoundError with a clear message.
 - Numeric ordering: 0001 is applied before 0002 even when filesystem iteration
@@ -52,23 +52,26 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def test_apply_migrations_creates_expected_tables() -> None:
-	"""Applying both shipped migrations creates kill_switch and risk_state."""
+	"""Applying the shipped migrations creates kill_switch, risk_state, and
+	live_trades."""
 	conn = _open_mem()
 	applied = apply_migrations(conn, _MIGRATIONS_DIR)
 
 	assert 1 in applied, "migration 0001 should be applied"
 	assert 2 in applied, "migration 0002 should be applied"
+	assert 3 in applied, "migration 0003 should be applied"
 	assert _table_exists(conn, "kill_switch"), "kill_switch table must exist after 0001"
 	assert _table_exists(conn, "risk_state"), "risk_state table must exist after 0002"
+	assert _table_exists(conn, "live_trades"), "live_trades table must exist after 0003"
 
 
 def test_apply_migrations_records_versions() -> None:
-	"""live_schema_migrations has exactly 2 rows after applying shipped migrations."""
+	"""live_schema_migrations has exactly 3 rows after applying shipped migrations."""
 	conn = _open_mem()
 	apply_migrations(conn, _MIGRATIONS_DIR)
 
 	versions = _applied_versions(conn)
-	assert versions == [1, 2], f"expected [1, 2], got {versions}"
+	assert versions == [1, 2, 3], f"expected [1, 2, 3], got {versions}"
 
 
 def test_apply_migrations_idempotent() -> None:
@@ -77,9 +80,9 @@ def test_apply_migrations_idempotent() -> None:
 	first = apply_migrations(conn, _MIGRATIONS_DIR)
 	second = apply_migrations(conn, _MIGRATIONS_DIR)
 
-	assert first == [1, 2], "first run should apply both"
+	assert first == [1, 2, 3], "first run should apply all shipped migrations"
 	assert second == [], "second run should apply nothing"
-	assert _applied_versions(conn) == [1, 2], "no duplicate rows"
+	assert _applied_versions(conn) == [1, 2, 3], "no duplicate rows"
 
 
 def test_apply_migrations_missing_dir_raises() -> None:
@@ -167,14 +170,14 @@ def test_apply_migrations_does_not_collide_with_init_db(tmp_path: Path) -> None:
 	# init_db writes version=1 to its own schema_migrations table.
 	init_db(db_path)
 
-	# apply_migrations on the SAME DB must apply both 0001 and 0002, not
+	# apply_migrations on the SAME DB must apply all shipped migrations, not
 	# silently skip 0001 because of init_db's version-1 row collision.
 	conn = sqlite3.connect(str(db_path))
 	conn.row_factory = sqlite3.Row
 	try:
 		applied = apply_migrations(conn, _MIGRATIONS_DIR)
-		assert applied == [1, 2], (
-			f"expected both 0001 and 0002 applied, got {applied} — collision likely"
+		assert applied == [1, 2, 3], (
+			f"expected 0001+0002+0003 applied, got {applied} — collision likely"
 		)
 		assert _table_exists(conn, "kill_switch"), (
 			"kill_switch table must exist; would not if 0001 was skipped"
