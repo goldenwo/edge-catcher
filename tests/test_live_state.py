@@ -500,12 +500,18 @@ def test_record_partial_exit_worst_case_length_split_id(
 
 
 def test_record_partial_exit_idempotent_duplicate_ws_event(
-	conn: sqlite3.Connection,
+	conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
-	"""A duplicate WS fill event re-invokes record_partial_exit for the same
-	logical split. The synthesized split-id collides on UNIQUE → caught +
-	logged 'already split, no-op'; the existing child id is returned and the
-	parent is NOT decremented twice."""
+	"""Critical #1 + Important #4: a TRUE duplicate WS fill event re-invokes
+	record_partial_exit with the SAME kalshi_exit_order_id. The second call
+	must be a pure no-op — parent fill_size unchanged, child count unchanged,
+	the existing child id returned — even though the first call already
+	succeeded (the failure mode the old count-derived split-id missed: the
+	2nd call derives a FRESH, non-colliding -split-2 and would double-book).
+
+	This is the real idempotency test (the prior version only re-INSERTed a
+	split-id via raw SQL and asserted IntegrityError — it never called the
+	function twice, so it exercised a path production never hits)."""
 	parent = _seed_open(conn, coid="idem-coid", intended_size=10, fill_size=10)
 
 	c1 = record_partial_exit(
@@ -518,25 +524,253 @@ def test_record_partial_exit_idempotent_duplicate_ws_event(
 		exit_fee_cents=3,
 		kalshi_exit_order_id="ord-ex-1",
 	)
-	fill_after_first = _row(conn, parent)["fill_size"]
-	assert fill_after_first == 6
-
-	# Simulate the duplicate: force child_seq back to 1 by deleting nothing —
-	# instead re-run with the SAME resulting split-id. The 2nd call computes
-	# child_seq = (#existing -split-%)+1 = 2, so to truly test idempotency we
-	# directly re-INSERT the SAME split-id the first call used.
-	with pytest.raises(sqlite3.IntegrityError):
-		conn.execute(
-			"INSERT INTO live_trades (ticker, series, strategy, side, "
-			"intended_size, original_intended_size, fill_size, "
-			"entry_price_cents, status, client_order_id, placed_at_utc) "
-			"VALUES ('T','S','st','yes',1,1,1,40,'won','idem-coid-split-1',?)",
-			(_NOW_ISO,),
-		)
-	conn.rollback()
-	# The original child still exists and parent unchanged from the 1 split.
-	assert _row(conn, c1)["client_order_id"] == "idem-coid-split-1"
+	assert c1 > 0
 	assert _row(conn, parent)["fill_size"] == 6
+	count_after_first = conn.execute(
+		"SELECT COUNT(*) FROM live_trades"
+	).fetchone()[0]
+
+	# TRUE duplicate: identical args, same kalshi_exit_order_id. Old code
+	# computed child_seq=2 → 'idem-coid-split-2' (no UNIQUE collision) →
+	# parent decremented to 2 + phantom child. Correct behaviour: no-op.
+	with caplog.at_level("INFO"):
+		c2 = record_partial_exit(
+			conn,
+			parent,
+			closed_size=4,
+			exit_price_cents=55,
+			exit_reason="take_profit",
+			now_utc=_NOW_ISO,
+			exit_fee_cents=3,
+			kalshi_exit_order_id="ord-ex-1",
+		)
+
+	assert c2 == c1, "duplicate must return the SAME (existing) child id"
+	assert _row(conn, parent)["fill_size"] == 6, (
+		"parent must NOT be decremented twice for one logical fill"
+	)
+	assert _row(conn, parent)["intended_size"] == 6
+	assert (
+		conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+		== count_after_first
+	), "no phantom child row may be inserted on a duplicate WS event"
+	assert _row(conn, c1)["client_order_id"] == "idem-coid-split-1"
+	assert any(
+		"duplicate WS event" in r.message for r in caplog.records
+	), "the duplicate must be logged as an idempotent no-op"
+
+
+class _FailingInsertConnection(sqlite3.Connection):
+	"""Real SQLite connection that raises OperationalError on the next
+	``INSERT INTO live_trades`` when ``fail_next_insert`` is set. Used to
+	simulate a disk-full / I/O failure on the child INSERT *after* the
+	parent decrement ran — the only way to prove the decrement is rolled
+	back (not merely never applied). Everything else is genuine SQLite.
+	"""
+
+	fail_next_insert: bool = False
+
+	def execute(self, sql: str, *args: object) -> sqlite3.Cursor:  # type: ignore[override]
+		if (
+			self.fail_next_insert
+			and sql.lstrip().upper().startswith("INSERT INTO LIVE_TRADES")
+		):
+			self.fail_next_insert = False
+			raise sqlite3.OperationalError("disk I/O error (simulated)")
+		return super().execute(sql, *args)
+
+
+def test_record_partial_exit_atomic_rollback_on_child_insert_failure(
+	tmp_path: Path,
+) -> None:
+	"""Critical #2: if the child INSERT fails with a non-Integrity DB error
+	(disk full / OperationalError / I/O), the parent decrement must roll
+	back fully — the parent keeps its full contract count and no orphan
+	child exists. The old code committed the parent decrement inside
+	_cas_update BEFORE the child INSERT, so a failed INSERT silently lost
+	contracts (position claims fewer than held on Kalshi, no P&L row).
+
+	Uses a real on-disk migrated DB opened through a Connection subclass
+	that raises OperationalError on the child INSERT only — the parent
+	UPDATE genuinely commits-or-rolls-back via real SQLite transactions."""
+	db = tmp_path / "live_trades.db"
+	# Migrate via the production helper, then reopen with the failing factory
+	# (same file, real schema/WAL — nothing about SQLite itself is mocked).
+	connect_live_trades_db(db).close()
+	c = sqlite3.connect(
+		str(db), check_same_thread=False, factory=_FailingInsertConnection
+	)
+	try:
+		parent = _seed_open(
+			c, coid="atomic-coid", intended_size=10, fill_size=10
+		)
+		before = _row(c, parent)
+		before_count = c.execute(
+			"SELECT COUNT(*) FROM live_trades"
+		).fetchone()[0]
+
+		c.fail_next_insert = True  # type: ignore[attr-defined]
+		with pytest.raises(sqlite3.OperationalError):
+			record_partial_exit(
+				c,
+				parent,
+				closed_size=4,
+				exit_price_cents=55,
+				exit_reason="take_profit",
+				now_utc=_NOW_ISO,
+				exit_fee_cents=3,
+				kalshi_exit_order_id="ord-ex-fail",
+			)
+
+		after = _row(c, parent)
+		assert after["fill_size"] == before["fill_size"] == 10, (
+			"parent decrement MUST roll back on child-INSERT failure (no "
+			"silent real-money contract loss)"
+		)
+		assert after["intended_size"] == before["intended_size"] == 10
+		assert (
+			after["entry_fee_remaining_cents"]
+			== before["entry_fee_remaining_cents"]
+		)
+		assert (
+			c.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			== before_count
+		), "no orphan child row may survive a rolled-back split"
+	finally:
+		c.close()
+
+
+def test_record_partial_exit_zero_original_intended_size_no_zerodiv(
+	conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""Critical #3: an engine-timeout pending row is synthesized with
+	intended_size=0 (dispatch.py defers sizing); transition_pending_to_open
+	does NOT mutate original_intended_size (spec-locked immutable). So a
+	timeout-pending row reconciled to open then partially exited reaches
+	record_partial_exit with original_intended_size=0 → the proportional
+	entry-fee `round(fee * M / 0)` raised ZeroDivisionError straight into
+	the live exit path. It must instead allocate the full remaining fee,
+	log a WARNING, and proceed."""
+	rid = record_pending(
+		conn,
+		ticker="KXSOL15M-26",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		side="yes",
+		intended_size=0,  # engine_timeout sizing-deferred placeholder
+		entry_price_cents=None,
+		stop_loss_distance_cents=None,
+		client_order_id="zerodiv-coid",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		rejection_reason="engine_timeout:60s",
+	)
+	assert _row(conn, rid)["original_intended_size"] == 0
+	# Reconcile resolves the true size into fill/intended but original stays 0.
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-resolved",
+		fill_size=10,
+		blended_entry_cents=40,
+		slippage_cents=-1,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	assert _row(conn, rid)["original_intended_size"] == 0
+	assert _row(conn, rid)["entry_fee_remaining_cents"] == 17
+
+	with caplog.at_level("WARNING"):
+		child = record_partial_exit(
+			conn,
+			rid,
+			closed_size=4,
+			exit_price_cents=55,
+			exit_reason="take_profit",
+			now_utc=_NOW_ISO,
+			exit_fee_cents=3,
+			kalshi_exit_order_id="ord-ex-zd",
+		)
+
+	assert child > 0, "must NOT raise ZeroDivisionError; child row created"
+	# Full remaining entry fee allocated to this child (no proportional math
+	# possible with a 0 denominator); record_close later sees a 0 remainder.
+	assert _row(conn, child)["entry_fee_cents"] == 17
+	assert _row(conn, rid)["entry_fee_remaining_cents"] == 0
+	assert any(
+		"original_intended_size" in r.message and r.levelname == "WARNING"
+		for r in caplog.records
+	), "the unusable-denominator fallback must be logged at WARNING"
+
+
+@pytest.mark.parametrize("bad_size", [0, -3, 11])
+def test_record_partial_exit_rejects_out_of_bounds_closed_size(
+	conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture, bad_size: int
+) -> None:
+	"""Important #5: closed_size must satisfy 0 < M <= parent.fill_size. A
+	bad/duplicate WS event with M<=0 or M>fill_size would drive
+	fill_size/intended_size negative or mint a zero/negative child. The
+	guard rejects with a log + returns 0 and writes NOTHING (parent
+	untouched, no child)."""
+	parent = _seed_open(conn, coid="bounds-coid", intended_size=10, fill_size=10)
+	before = _row(conn, parent)
+	before_count = conn.execute(
+		"SELECT COUNT(*) FROM live_trades"
+	).fetchone()[0]
+
+	with caplog.at_level("ERROR"):
+		result = record_partial_exit(
+			conn,
+			parent,
+			closed_size=bad_size,
+			exit_price_cents=55,
+			exit_reason="take_profit",
+			now_utc=_NOW_ISO,
+			exit_fee_cents=3,
+			kalshi_exit_order_id=f"ord-ex-bad-{bad_size}",
+		)
+
+	assert result == 0
+	assert _row(conn, parent) == before, "parent must be untouched"
+	assert (
+		conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+		== before_count
+	), "no child row may be written for an out-of-bounds closed_size"
+	assert any(
+		"out of bounds" in r.message for r in caplog.records
+	), "the rejection must be logged"
+
+
+def test_record_partial_exit_null_blended_entry_is_hard_error(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Minor (a): a NULL blended_entry_cents on a partial-exitable row is an
+	invariant violation (open rows always have a blended entry). Silently
+	using 0 as the cost basis would mislabel won/lost and corrupt P&L under
+	real money — this must raise, not fall back to 0."""
+	parent = _seed_open(conn, coid="nullbasis-coid", intended_size=10, fill_size=10)
+	# Force the invariant-violating state (cannot occur via the normal API;
+	# simulate a corrupt row to prove the guard fires).
+	conn.execute(
+		"UPDATE live_trades SET blended_entry_cents = NULL WHERE id = ?",
+		(parent,),
+	)
+	conn.commit()
+
+	with pytest.raises(RuntimeError, match="NULL .*blended_entry_cents"):
+		record_partial_exit(
+			conn,
+			parent,
+			closed_size=4,
+			exit_price_cents=55,
+			exit_reason="take_profit",
+			now_utc=_NOW_ISO,
+			exit_fee_cents=3,
+			kalshi_exit_order_id="ord-ex-nb",
+		)
+	# Hard error fired BEFORE any write — parent untouched.
+	assert _row(conn, parent)["fill_size"] == 10
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +905,65 @@ def test_cas_record_close_lost_race_is_logged_noop(
 	assert any(
 		"CAS lost race" in r.message for r in caplog.records
 	), "lost race must be logged at WARNING"
+
+
+def test_cas_lost_race_does_not_emit_false_transition_log(
+	conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""Important #6 (TOCTOU): record_close / record_cancelled read `before`
+	BEFORE the CAS UPDATE and used to log 'open→won' / '..→cancelled'
+	UNCONDITIONALLY — even on a lost race (rowcount==0 no-op), the INFO line
+	falsely claimed a transition that never happened. The transition INFO
+	must be gated on the CAS result; only the CAS-lost-race WARNING fires."""
+	# record_close on an already-settled row (CAS predicate matches 0 rows).
+	rid = _seed_open(conn, coid="toctou-close")
+	record_close(
+		conn,
+		rid,
+		status="won",
+		exit_price_cents=100,
+		exit_time=_NOW_ISO,
+		exit_reason="settlement",
+		pnl_cents=600,
+		exit_fee_cents=0,
+	)
+	with caplog.at_level("INFO"):
+		caplog.clear()
+		record_close(
+			conn,
+			rid,
+			status="lost",
+			exit_price_cents=0,
+			exit_time=_NOW_ISO,
+			exit_reason="stop_loss",
+			pnl_cents=-400,
+			exit_fee_cents=4,
+		)
+	msgs = [r.message for r in caplog.records]
+	assert not any("→lost" in m for m in msgs), (
+		"no false 'won→lost' transition INFO may be logged on a lost race"
+	)
+	assert any("CAS lost race" in m for m in msgs), (
+		"the lost race must still be logged at WARNING"
+	)
+
+	# record_cancelled on an already-terminal row (won → not in
+	# {pending,open,exit_pending} → CAS no-op).
+	with caplog.at_level("INFO"):
+		caplog.clear()
+		record_cancelled(
+			conn,
+			rid,
+			exit_time=_NOW_ISO,
+			exit_price_cents=None,
+			pnl_cents=0,
+			notes="late operator cancel",
+		)
+	msgs = [r.message for r in caplog.records]
+	assert not any("→cancelled" in m for m in msgs), (
+		"no false '..→cancelled' transition INFO may be logged on a lost race"
+	)
+	assert _row(conn, rid)["status"] == "won", "row must remain unchanged"
 
 
 def test_cas_transition_pending_to_open_lost_race(

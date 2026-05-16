@@ -87,6 +87,7 @@ def _cas_update(
 	sql: str,
 	params: tuple[object, ...],
 	transition: str,
+	commit: bool = True,
 ) -> bool:
 	"""Execute a status-mutating UPDATE that already carries its
 	``WHERE id=? AND status IN (...)`` compare-and-swap predicate, then
@@ -100,6 +101,15 @@ def _cas_update(
 
 	``rowcount > 1`` is impossible (``id`` is the PRIMARY KEY) but is treated
 	as a hard invariant violation if it ever occurs.
+
+	``commit`` (default True) controls whether a winning CAS is committed
+	immediately. The single-write callers (every transition_*/record_close/
+	record_cancelled/etc.) keep the default. ``record_partial_exit`` passes
+	``commit=False`` so its parent-decrement UPDATE and child INSERT land in
+	ONE transaction with a single trailing ``conn.commit()`` — making the
+	two-step split atomic (Critical #2: a child-INSERT failure must roll back
+	the parent decrement, never leaving the parent silently short of
+	contracts with no offsetting child row).
 	"""
 	cur = conn.execute(sql, params)
 	if cur.rowcount == 0:
@@ -116,7 +126,8 @@ def _cas_update(
 			f"live_trades CAS hit rowcount={cur.rowcount} for id={row_id} "
 			f"transition={transition!r} — expected exactly 1 (id is PK)"
 		)
-	conn.commit()
+	if commit:
+		conn.commit()
 	return True
 
 
@@ -423,7 +434,7 @@ def record_close(
 	is a logged no-op.
 	"""
 	before = _status_of(conn, row_id)
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -447,15 +458,20 @@ def record_close(
 		),
 		transition=f"{before}->{status}",
 	)
-	log.info(
-		"live_trades id=%d %s→%s exit=%dc pnl=%dc reason=%s",
-		row_id,
-		before,
-		status,
-		exit_price_cents,
-		pnl_cents,
-		exit_reason,
-	)
+	# Important #6: only log the transition when the CAS actually applied.
+	# On a lost race _cas_update already logged the WARNING — emitting an
+	# "open→won" INFO here would falsely claim a transition that did not
+	# happen (TOCTOU: `before` was read before the no-op UPDATE).
+	if changed:
+		log.info(
+			"live_trades id=%d %s→%s exit=%dc pnl=%dc reason=%s",
+			row_id,
+			before,
+			status,
+			exit_price_cents,
+			pnl_cents,
+			exit_reason,
+		)
 
 
 def record_cancelled(
@@ -477,7 +493,7 @@ def record_cancelled(
 	loss is a logged no-op, never a RecordPendingFailed.
 	"""
 	before = _status_of(conn, row_id)
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -489,13 +505,16 @@ def record_cancelled(
 		params=(exit_time, exit_price_cents, pnl_cents, notes, row_id),
 		transition=f"{before}->cancelled",
 	)
-	log.info(
-		"live_trades id=%d %s→cancelled pnl=%dc notes=%s",
-		row_id,
-		before,
-		pnl_cents,
-		notes,
-	)
+	# Important #6: gate the transition log on the CAS result (see
+	# record_close) — a lost race already logged its WARNING in _cas_update.
+	if changed:
+		log.info(
+			"live_trades id=%d %s→cancelled pnl=%dc notes=%s",
+			row_id,
+			before,
+			pnl_cents,
+			notes,
+		)
 
 
 def record_partial_exit(
@@ -524,27 +543,43 @@ def record_partial_exit(
 	the parent's remainder is decremented by the allocated amount. The final
 	close (record_close) consumes whatever remains.
 
-	**Idempotency:** the child ``client_order_id`` is
-	``f"{parent.client_order_id}-split-{seq}"`` where ``seq`` =
-	(count of existing ``-split-%`` children) + 1. A duplicate WS event
-	re-INSERTs the same split-id → ``UNIQUE`` raises ``IntegrityError`` →
-	caught + logged "already split, no-op"; the existing child's id is
-	returned. Split-ids are internal-only (NOT bound by PR #28's 80-char
-	regex — Kalshi never sees them).
+	**Idempotency (Critical #1):** a duplicate WS fill event repeats the
+	SAME ``kalshi_exit_order_id``. Before any write, this function looks up
+	an existing child of THIS parent already bearing that exit order id; if
+	found, it returns that child's id as a pure no-op (parent NOT
+	decremented again, no phantom child). The duplicate-detection key is the
+	repeated Kalshi identity — NOT a count-derived ``-split-N`` (a fresh,
+	non-colliding split-id is exactly what a count derives on the second
+	call, which is why the old UNIQUE-collision scheme could not detect a
+	success-then-duplicate). The ``-split-N`` label is retained purely as
+	the child's monotonic row identifier (Test #8 / spec §293); its
+	``UNIQUE(client_order_id)`` is kept as a defence-in-depth backstop only.
+
+	**Atomicity (Critical #2):** the parent-decrement UPDATE and the child
+	INSERT run in ONE transaction (parent CAS uses ``commit=False``; a
+	single ``conn.commit()`` lands both). ANY failure rolls back BOTH — a
+	child-INSERT error can never leave the parent durably short of
+	contracts with no offsetting child row.
 
 	Returns the child row id (new, or the existing one on idempotent retry).
-	Returns ``0`` if the parent CAS lost its race (parent no longer 'open').
+	Returns ``0`` if the parent is absent, the parent CAS lost its race
+	(parent no longer 'open'), or the call was rejected by a precondition
+	guard (``closed_size`` out of bounds) — every ``0`` path is logged
+	unambiguously so "parent absent" vs "CAS-lost" vs "bad-size" are
+	distinguishable in the operator log.
 	"""
 	parent = conn.execute(
 		"SELECT ticker, series, strategy, side, blended_entry_cents, "
 		"entry_time, entry_fee_cents, entry_fee_remaining_cents, "
-		"original_intended_size, client_order_id, status "
+		"original_intended_size, client_order_id, status, fill_size "
 		"FROM live_trades WHERE id = ?",
 		(parent_id,),
 	).fetchone()
 	if parent is None:
 		log.warning(
-			"record_partial_exit: parent id=%d not found — no-op", parent_id
+			"record_partial_exit: parent id=%d not found — no-op (return 0: "
+			"parent absent)",
+			parent_id,
 		)
 		return 0
 	(
@@ -559,18 +594,91 @@ def record_partial_exit(
 		p_orig_size,
 		p_coid,
 		p_status,
+		p_fill_size,
 	) = parent
 
-	# Allocated entry fee (proportional, clamped to remaining).
+	# --- Precondition guard (Important #5): a bad/duplicate WS event with
+	# closed_size <= 0 or > the parent's current fill_size would drive
+	# fill_size / intended_size negative (silent real-money under-count) or
+	# mint a zero/negative child. Reject with a log + return 0; never write.
+	if not 0 < closed_size <= p_fill_size:
+		log.error(
+			"record_partial_exit: parent id=%d closed_size=%d out of bounds "
+			"(must be 0 < M <= parent.fill_size=%d) — REJECTED, no write "
+			"(return 0: bad-size)",
+			parent_id,
+			closed_size,
+			p_fill_size,
+		)
+		return 0
+
+	# --- Idempotency pre-check (Critical #1): a duplicate WS event repeats
+	# the same kalshi_exit_order_id. If a child of THIS parent already
+	# carries it, the logical fill was already booked — return that child as
+	# a no-op WITHOUT decrementing the parent again or inserting a phantom.
+	dup = conn.execute(
+		"SELECT id, client_order_id FROM live_trades "
+		"WHERE client_order_id LIKE ? AND kalshi_order_id = ?",
+		(f"{p_coid}-split-%", kalshi_exit_order_id),
+	).fetchone()
+	if dup is not None:
+		log.info(
+			"record_partial_exit: duplicate WS event for parent=%d "
+			"kalshi_exit_order_id=%s — child %s (id=%d) already booked, "
+			"no-op (idempotent; parent NOT decremented again)",
+			parent_id,
+			kalshi_exit_order_id,
+			dup[1],
+			int(dup[0]),
+		)
+		return int(dup[0])
+
+	# Cost basis is the parent's blended entry. A NULL blended_entry_cents on
+	# an 'open' row is an invariant violation (transition_pending_to_open /
+	# record_open always set it at fill) — under the real-money lens a 0
+	# cost-basis would silently mislabel won/lost and corrupt P&L, so this is
+	# a hard error, not a silent fallback (Minor (a)).
+	if p_blended_entry is None:
+		raise RuntimeError(
+			f"record_partial_exit: parent id={parent_id} has NULL "
+			f"blended_entry_cents on a partial-exitable row — cannot compute "
+			f"cost basis (invariant violation: open rows always have a "
+			f"blended entry)"
+		)
+	entry_basis = p_blended_entry
+
+	# Allocated entry fee (proportional, clamped to remaining). Guard the
+	# original_intended_size == 0 case (Critical #3): an engine-timeout
+	# pending row is synthesized with intended_size=0 (dispatch.py defers
+	# sizing); transition_pending_to_open does NOT mutate
+	# original_intended_size (spec-locked immutability), so a timeout-pending
+	# row reconciled to open then partially exited would hit ZeroDivision.
+	# When the proportional denominator is unusable, allocate the full
+	# remaining entry fee to this child (record_close then sees a 0
+	# remainder; no fragment lost) and log loudly.
 	entry_fee_total = p_entry_fee or 0
-	remaining = p_entry_fee_remaining if p_entry_fee_remaining is not None else entry_fee_total
-	child_entry_fee = round(entry_fee_total * closed_size / p_orig_size)
-	child_entry_fee = min(child_entry_fee, remaining)
+	remaining = (
+		p_entry_fee_remaining
+		if p_entry_fee_remaining is not None
+		else entry_fee_total
+	)
+	if p_orig_size and p_orig_size > 0:
+		child_entry_fee = round(entry_fee_total * closed_size / p_orig_size)
+		child_entry_fee = min(child_entry_fee, remaining)
+	else:
+		child_entry_fee = remaining
+		log.warning(
+			"record_partial_exit: parent id=%d original_intended_size=%r "
+			"(<=0; engine-timeout sizing-deferred row) — cannot allocate "
+			"entry fee proportionally; assigning full remaining fee %dc to "
+			"this child",
+			parent_id,
+			p_orig_size,
+			child_entry_fee,
+		)
 
 	# Outcome: won if exit beat entry, lost if worse, scratch if equal
-	# (before fees — fees push a scratch to pnl <= 0). Cost basis is the
-	# parent's blended entry.
-	entry_basis = p_blended_entry if p_blended_entry is not None else 0
+	# (before fees — fees push a scratch to pnl <= 0).
 	if exit_price_cents > entry_basis:
 		outcome: str = "won"
 	elif exit_price_cents < entry_basis:
@@ -583,7 +691,9 @@ def record_partial_exit(
 		- exit_fee_cents
 	)
 
-	# child_seq = (# existing -split-% children for this parent) + 1
+	# child_seq = (# existing -split-% children for this parent) + 1.
+	# Monotonic row label only (Test #8 / spec §293) — NOT the dedup key;
+	# duplicate detection already happened above on kalshi_exit_order_id.
 	seq_row = conn.execute(
 		"SELECT COUNT(*) FROM live_trades WHERE client_order_id LIKE ?",
 		(f"{p_coid}-split-%",),
@@ -591,27 +701,47 @@ def record_partial_exit(
 	child_seq = int(seq_row[0]) + 1
 	child_coid = f"{p_coid}-split-{child_seq}"
 
-	# Step 1: decrement the parent (CAS — parent must still be 'open').
-	parent_changed = _cas_update(
-		conn,
-		row_id=parent_id,
-		sql=(
-			"UPDATE live_trades SET "
-			"fill_size = fill_size - ?, intended_size = intended_size - ?, "
-			"entry_fee_remaining_cents = entry_fee_remaining_cents - ?, "
-			"reconciled_at_utc = ? "
-			"WHERE id = ? AND status = 'open'"
-		),
-		params=(closed_size, closed_size, child_entry_fee, now_utc, parent_id),
-		transition=f"{p_status}->open(partial -{closed_size})",
-	)
-	if not parent_changed:
-		# Parent already left 'open' (settlement closed it, or a concurrent
-		# split). Do NOT insert an orphan child row.
-		return 0
-
-	# Step 2: INSERT the closed child (idempotent via UNIQUE(client_order_id)).
+	# Atomic two-step (Critical #2): parent decrement (commit=False) + child
+	# INSERT under ONE transaction; single commit at the end; ANY failure
+	# rolls BOTH back. The IntegrityError "already split" path also rolls
+	# back the parent decrement (the old code's rollback was a no-op there
+	# because _cas_update had already committed the parent).
 	try:
+		# Step 1: decrement the parent (CAS — parent must still be 'open').
+		parent_changed = _cas_update(
+			conn,
+			row_id=parent_id,
+			sql=(
+				"UPDATE live_trades SET "
+				"fill_size = fill_size - ?, intended_size = intended_size - ?, "
+				"entry_fee_remaining_cents = entry_fee_remaining_cents - ?, "
+				"reconciled_at_utc = ? "
+				"WHERE id = ? AND status = 'open'"
+			),
+			params=(
+				closed_size,
+				closed_size,
+				child_entry_fee,
+				now_utc,
+				parent_id,
+			),
+			transition=f"{p_status}->open(partial -{closed_size})",
+			commit=False,
+		)
+		if not parent_changed:
+			# Parent already left 'open' (settlement closed it, or a
+			# concurrent split). Roll back (nothing committed yet) and do
+			# NOT insert an orphan child row. _cas_update already logged the
+			# lost-race WARNING; add the return-0 disambiguation.
+			conn.rollback()
+			log.warning(
+				"record_partial_exit: parent id=%d CAS lost (no longer "
+				"'open') — no child inserted (return 0: CAS-lost)",
+				parent_id,
+			)
+			return 0
+
+		# Step 2: INSERT the closed child.
 		cur = conn.execute(
 			"INSERT INTO live_trades ("
 			"ticker, series, strategy, side, intended_size, "
@@ -646,25 +776,45 @@ def record_partial_exit(
 		)
 		conn.commit()
 	except sqlite3.IntegrityError:
-		# Duplicate WS event — the split-id collides on UNIQUE(client_order_id).
+		# Backstop only: the kalshi_exit_order_id pre-check above already
+		# handles genuine duplicate WS events. Reaching here means the
+		# -split-N label collided (e.g. a concurrent writer — spec-stated
+		# impossible under single-writer B, kept defensively). Roll back
+		# BOTH parent decrement and the failed INSERT.
 		conn.rollback()
 		existing = conn.execute(
 			"SELECT id FROM live_trades WHERE client_order_id = ?",
 			(child_coid,),
 		).fetchone()
 		existing_id = int(existing[0]) if existing else 0
-		log.info(
-			"record_partial_exit: child %s already split (id=%d), no-op "
-			"(idempotent duplicate WS event)",
+		log.warning(
+			"record_partial_exit: split-id %s collided on UNIQUE despite "
+			"kalshi_exit_order_id pre-check (concurrent writer?) — rolled "
+			"back parent decrement, no-op (existing id=%d)",
 			child_coid,
 			existing_id,
 		)
 		return existing_id
+	except sqlite3.Error:
+		# Critical #2: any other DB failure (disk full, OperationalError,
+		# I/O) on the child INSERT or the commit. The parent decrement is
+		# NOT yet committed — roll it back so the parent keeps its full
+		# contract count (no silent real-money under-accounting). Re-raise:
+		# a partial-exit persistence failure must not be swallowed.
+		conn.rollback()
+		log.error(
+			"record_partial_exit: DB failure during atomic split for "
+			"parent=%d (child_coid=%s) — rolled back parent decrement (no "
+			"silent contract loss); re-raising",
+			parent_id,
+			child_coid,
+		)
+		raise
 
 	child_id = int(cur.lastrowid or 0)
 	log.info(
 		"live_trades id=%d partial-exit child of parent=%d %s closed=%d "
-		"exit=%dc pnl=%dc alloc_fee=%dc coid=%s",
+		"exit=%dc pnl=%dc alloc_fee=%dc coid=%s kalshi_exit=%s",
 		child_id,
 		parent_id,
 		outcome,
@@ -673,6 +823,7 @@ def record_partial_exit(
 		pnl_cents,
 		child_entry_fee,
 		child_coid,
+		kalshi_exit_order_id,
 	)
 	return child_id
 
@@ -704,7 +855,7 @@ def transition_pending_to_open(
 	never recomputed here. CAS precondition: status='pending'. A lost race is
 	a logged no-op.
 	"""
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -728,13 +879,16 @@ def transition_pending_to_open(
 		),
 		transition="pending->open",
 	)
-	log.info(
-		"live_trades id=%d pending→open kalshi_id=%s fill=%d blended=%dc",
-		row_id,
-		kalshi_order_id,
-		fill_size,
-		blended_entry_cents,
-	)
+	# Important #6: gate the transition log on the CAS result (a lost race
+	# already logged its WARNING in _cas_update — don't double-claim).
+	if changed:
+		log.info(
+			"live_trades id=%d pending→open kalshi_id=%s fill=%d blended=%dc",
+			row_id,
+			kalshi_order_id,
+			fill_size,
+			blended_entry_cents,
+		)
 
 
 def transition_pending_to_rejected(
@@ -758,7 +912,7 @@ def transition_pending_to_rejected(
 		if rejection_reason == "ttl_no_kalshi_order"
 		else "rejected"
 	)
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -770,12 +924,14 @@ def transition_pending_to_rejected(
 		params=(terminal, kalshi_order_id, rejection_reason, row_id),
 		transition=f"pending->{terminal}",
 	)
-	log.info(
-		"live_trades id=%d pending→%s reason=%s",
-		row_id,
-		terminal,
-		rejection_reason,
-	)
+	# Important #6: gate the transition log on the CAS result.
+	if changed:
+		log.info(
+			"live_trades id=%d pending→%s reason=%s",
+			row_id,
+			terminal,
+			rejection_reason,
+		)
 
 
 def transition_exit_pending_to_open(
@@ -791,7 +947,7 @@ def transition_exit_pending_to_open(
 	CAS precondition: status='exit_pending'. A lost race (settlement already
 	closed the row, or the fill landed) is a logged no-op.
 	"""
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -802,7 +958,13 @@ def transition_exit_pending_to_open(
 		params=(notes, row_id),
 		transition="exit_pending->open",
 	)
-	log.info("live_trades id=%d exit_pending→open (revert) notes=%s", row_id, notes)
+	# Important #6: gate the transition log on the CAS result.
+	if changed:
+		log.info(
+			"live_trades id=%d exit_pending→open (revert) notes=%s",
+			row_id,
+			notes,
+		)
 
 
 def mark_lost_truth(
@@ -818,7 +980,7 @@ def mark_lost_truth(
 	CAS precondition: status IN ('open', 'pending', 'exit_pending') — only an
 	active row can become lost_truth. A lost race is a logged no-op.
 	"""
-	_cas_update(
+	changed = _cas_update(
 		conn,
 		row_id=row_id,
 		sql=(
@@ -829,9 +991,13 @@ def mark_lost_truth(
 		params=(notes, row_id),
 		transition="active->lost_truth",
 	)
-	log.warning(
-		"live_trades id=%d →lost_truth (Kalshi has no record) notes=%s — "
-		"manual investigation required",
-		row_id,
-		notes,
-	)
+	# Important #6: only raise the manual-investigation alarm when the row
+	# actually moved to lost_truth (a lost race already logged its WARNING;
+	# falsely demanding investigation on a no-op would page the operator).
+	if changed:
+		log.warning(
+			"live_trades id=%d →lost_truth (Kalshi has no record) notes=%s — "
+			"manual investigation required",
+			row_id,
+			notes,
+		)
