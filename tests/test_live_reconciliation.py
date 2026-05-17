@@ -161,6 +161,7 @@ def _order(
 	count: int = 10,
 	filled_count: int = 0,
 	ticker: str = "KXSOL15M-26MAY16H12",
+	limit_price_cents: int = 40,
 ) -> Order:
 	return Order(
 		order_id=order_id,
@@ -168,7 +169,7 @@ def _order(
 		side="yes",
 		action="buy",
 		count=count,
-		limit_price_cents=40,
+		limit_price_cents=limit_price_cents,
 		time_in_force="ioc",
 		status=status,
 		filled_count=filled_count,
@@ -1053,6 +1054,57 @@ async def test_reconcile_zero_fill_executed_with_positive_count_rejected_not_pha
 		for r in caplog.records
 		if r.levelno >= logging.WARNING
 	), "expected a WARNING naming the zero-fill order id + coid"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_executed_with_zero_price_left_pending_not_phantom_basis(
+	conn: sqlite3.Connection, caplog
+) -> None:
+	"""A1: a matched Kalshi Order(status='executed', filled_count=10) whose
+	limit_price_cents is 0 (Kalshi's order JSON omitted yes_price/no_price →
+	_parse_order coerces it to 0) must NOT be booked pending→open at a 0¢
+	blended cost basis — that silently corrupts won/lost + P&L on
+	reconcile-recovered rows (record_partial_exit's NULL guard does not catch
+	a non-NULL 0). A live order limit is never 0¢; treat it as 'no
+	trustworthy price' and leave the row PENDING (NOT rejected: the order
+	filled, Kalshi holds the contracts — rejecting would orphan a real
+	position). A young row retries next reconcile / its WS fill; a stale one
+	TTLs and is recovered via positions()."""
+	coid = "debut-fade-KXSOL15M-zeroprice"
+	row_id = _seed_pending(
+		conn, coid=coid, placed_at=_recent(), intended_size=10
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-zprice",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=10,
+				limit_price_cents=0,
+			)
+		]
+	)
+
+	with caplog.at_level(logging.WARNING):
+		await recon._reconcile_pending_batch(
+			client, conn, ttl_seconds=90.0
+		)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "pending", (
+		"a matched 'executed' order with no trustworthy price (0¢ limit) "
+		"must leave the row PENDING for WS / next-reconcile / positions() "
+		"recovery — NEVER phantom-open at a fabricated 0¢ cost basis, and "
+		"NEVER reject (the contracts are really held)"
+	)
+	assert any(
+		"trustworthy" in r.message.lower()
+		or ("limit_price_cents=0" in r.message and "kid-zprice" in r.message)
+		for r in caplog.records
+		if r.levelno >= logging.WARNING
+	), "expected a WARNING that the matched order exposed no trustworthy price"
 
 
 # ---------------------------------------------------------------------------
