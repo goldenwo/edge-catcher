@@ -554,6 +554,84 @@ def test_get_open_trades_returns_open_rows(
 	assert r["status"] == "open"
 
 
+def test_get_open_trades_maps_null_blended_entry_to_none(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""Locks the NULL-``blended_entry_cents`` read contract for E's PR-6 wiring.
+
+	The ``0003`` schema declares ``blended_entry_cents INTEGER`` (nullable —
+	"VWAP of fills; NULL until fill"). A reconcile-recovered ``open`` row can
+	legitimately exist before its fill VWAP is confirmed, so a NULL here is a
+	first-class schema-valid state (distinct from the NOT-NULL
+	``entry_price_cents``). ``_open_row_to_dict`` must pass it through as
+	``None`` — NOT coerce to 0, NOT crash — so E's PR-6 ``TickContext`` /
+	strategy code sees a faithful "no blended entry yet" rather than a fake
+	0c cost basis.
+
+	Seeding: ``live.state.record_open`` requires a NON-NULL
+	``blended_entry_cents`` (its signature is ``blended_entry_cents: int`` and
+	it INSERTs the value directly), and ``transition_pending_to_open`` likewise
+	always writes a non-NULL value — neither writer can *express* this
+	legitimate schema state. So we seed a fully schema-valid open row via the
+	real ``record_open`` path (the exact filled-entry writer E's PR-6 wiring
+	uses, so every other column is realistic) and then apply a single
+	controlled ``UPDATE ... SET blended_entry_cents = NULL`` on the test DB to
+	produce the pre-fill-confirmation state the schema deliberately permits but
+	no ``live.state`` writer can construct. Still 100% real SQLite — no DB or
+	``live.state`` mocks (mirrors ``_seed_open_row`` for everything but the one
+	deliberate NULL mutation).
+	"""
+	tid = _seed_open_row(
+		store,
+		client_order_id="debut_fade-KXSOL15M-26MAY16H12-nullblend",
+		kalshi_order_id="ord-kx-real-null0",
+	)
+	# Drive the row to the legitimate pre-fill-confirmation state the schema
+	# permits but record_open / transition_pending_to_open cannot express
+	# (both require a non-NULL blended_entry_cents). Controlled UPDATE over the
+	# store's own real connection; commit so the independent read connection
+	# below proves it landed on disk.
+	store._conn.execute(
+		"UPDATE live_trades SET blended_entry_cents = NULL WHERE id = ?",
+		(tid,),
+	)
+	store._conn.commit()
+	# Sanity: the seeded row is genuinely status='open' with a NULL
+	# blended_entry_cents on disk (independent read connection — not the
+	# store's buffered conn).
+	disk = _query_one(
+		db_path,
+		"SELECT status, blended_entry_cents FROM live_trades WHERE id = ?",
+		(tid,),
+	)
+	assert disk["status"] == "open"
+	assert disk["blended_entry_cents"] is None
+
+	# get_open_trades(): the NULL maps to None cleanly (no coercion, no crash),
+	# every other key still correct.
+	rows = store.get_open_trades()
+	assert len(rows) == 1
+	r = rows[0]
+	assert r["id"] == tid
+	assert r["blended_entry"] is None, (
+		"NULL blended_entry_cents must map to None, NOT 0 — a fabricated 0c "
+		"cost basis would silently corrupt E's PR-6 P&L/exit logic"
+	)
+	assert r["status"] == "open"
+	assert r["ticker"] == "KXSOL15M-26MAY16H12"
+	assert r["entry_price"] == 42  # the NOT-NULL entry_price_cents is unaffected
+	assert r["strategy"] == "debut_fade"
+	assert r["side"] == "yes"
+	assert r["series_ticker"] == "KXSOL15M"
+	assert r["fill_size"] == 5
+
+	# get_open_trades_for(...) honours the same contract on the filtered path.
+	matched = store.get_open_trades_for("debut_fade", "KXSOL15M-26MAY16H12")
+	assert len(matched) == 1
+	assert matched[0]["id"] == tid
+	assert matched[0]["blended_entry"] is None
+
+
 def test_get_open_trades_for_filters_by_strategy_and_ticker(
 	store: SQLiteTradeStore,
 ) -> None:

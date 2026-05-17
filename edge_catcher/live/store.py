@@ -368,13 +368,21 @@ class SQLiteTradeStore:
 		``TickContext.open_positions``. Ordered by ``id`` ASC for determinism
 		(matches ``engine.live_db.read_open_positions``' ordering contract).
 		"""
+		# Save + restore the prior row_factory (NOT a hardcoded None): E's PR-6
+		# wiring may share this connection and set a connection-level
+		# row_factory; clobbering to None would silently reset it. This module
+		# deliberately defends against cross-PR coupling — this closes the last
+		# such gap. Behaviour-identical under every current caller (the factory
+		# is None by default and no other code on this connection sets it);
+		# purely forward-defensive.
+		_prev_factory = self._conn.row_factory
 		self._conn.row_factory = sqlite3.Row
 		try:
 			rows = self._conn.execute(
 				f"{_OPEN_ROW_SQL} ORDER BY id ASC"
 			).fetchall()
 		finally:
-			self._conn.row_factory = None
+			self._conn.row_factory = _prev_factory
 		return [_open_row_to_dict(r) for r in rows]
 
 	def get_open_trades_for(
@@ -386,6 +394,11 @@ class SQLiteTradeStore:
 		Protocol + paper ``TradeStore.get_open_trades_for`` so dispatch's
 		``store.get_open_trades_for(strat.name, ticker)`` call binds.
 		"""
+		# Save + restore the prior row_factory (NOT a hardcoded None): same
+		# cross-PR-coupling defense as get_open_trades — E's PR-6 wiring may
+		# share this connection with its own connection-level row_factory.
+		# Behaviour-identical under every current caller; forward-defensive.
+		_prev_factory = self._conn.row_factory
 		self._conn.row_factory = sqlite3.Row
 		try:
 			rows = self._conn.execute(
@@ -394,7 +407,7 @@ class SQLiteTradeStore:
 				(strategy, ticker),
 			).fetchall()
 		finally:
-			self._conn.row_factory = None
+			self._conn.row_factory = _prev_factory
 		return [_open_row_to_dict(r) for r in rows]
 
 	# -------------------------------------------------------------------------
