@@ -4,14 +4,19 @@ Spec §Test strategy #26-#28. These drive the **real merged state machine**
 end to end against a REAL migrated SQLite ``live_trades.db`` (0003 + WAL) —
 the DB is NEVER mocked and ``live.state`` is NEVER stubbed:
 
-* **#26** dispatch ``_handle_enter`` (the real engine handler) → real
+* **#26** dispatch ``_handle_enter`` (the real engine handler) → the REAL
+  ``edge_catcher.live.store.SQLiteTradeStore`` adapter → real
   ``live.state.record_pending`` → ``MockKalshiWS`` fill → real
   ``on_fill_event`` → ``transition_pending_to_open`` → a strategy-emitted
   exit fill → real ``record_close``. The dispatch→B seam is exercised
-  through the LOCKED 11-kwarg ``record_pending`` contract (the same one
-  ``tests/test_engine_dispatch_pending_branch.py`` pins) via a thin
-  connection-backed ``TradeStoreProtocol`` shim — see the SCOPE NOTE on
-  ``_LiveBackedStore`` below.
+  through the production ``TradeStoreProtocol`` adapter over its own held
+  ``live_trades.db`` connection (the LOCKED 11-kwarg ``record_pending``
+  contract is independently pinned by
+  ``tests/test_engine_dispatch_pending_branch.py``). The filled-entry
+  variant drives the genuine E-shaped live lifecycle
+  (``live.state.record_open`` with real ids → ``on_settlement_event`` →
+  ``record_close``) NOT the paper-shaped ``store.record_trade`` (which the
+  real adapter deliberately fails loud on — see the SCOPE NOTE below).
 
 * **#27** the live schema is queryable in SQLite read-only mode
   (``file:...?mode=ro``) — the load-bearing Risk #5 / spec-§186 property
@@ -33,7 +38,6 @@ import sys
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -45,9 +49,8 @@ from edge_catcher.live.state import (
 	connect_live_trades_db,
 	record_close,
 	record_open,
-	record_pending,
-	record_rejected,
 )
+from edge_catcher.live.store import SQLiteTradeStore
 from edge_catcher.live.ws_handlers import (
 	StoreCallbacks,
 	on_fill_event,
@@ -91,90 +94,39 @@ def _row(conn: sqlite3.Connection, row_id: int) -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
-# SCOPE NOTE — _LiveBackedStore
+# SCOPE NOTE — real SQLiteTradeStore, no test shim
 #
-# Spec §773 and the PR-5 handoff reference ``SQLiteTradeStore.record_pending``
-# as a 4.A deliverable, but 4.A shipped ``live.state`` FREE FUNCTIONS
-# (``record_pending(conn, *, ...)`` etc.) — there is NO ``SQLiteTradeStore``
-# class in the merged tree (verified at HEAD 92dc7b0; only future-tense
-# docstring refs in engine/trade_store.py). The dispatch layer is
-# ``TradeStoreProtocol``-based; the protocol's ``record_pending`` /
-# ``record_rejected`` keyword-only signatures EXACTLY match ``live.state``'s,
-# so the missing piece is a thin connection-holding adapter. Creating that
-# production adapter is outside 4.C's owned-files scope (and is the
-# orchestrator's call re: which agent owns it) — so this test defines a
-# MINIMAL test-local shim that delegates the three dispatch-touched write
-# methods to the REAL ``live.state`` free functions over a REAL connection.
+# These tests drive the PRODUCTION ``edge_catcher.live.store.SQLiteTradeStore``
+# adapter — the two-stage-reviewed ``TradeStoreProtocol`` impl backed by a real
+# ``live_trades.db`` (it opens/migrates the DB via 4.A's
+# ``connect_live_trades_db`` and holds one ``sqlite3.Connection`` for its
+# lifetime). No test-local shim, no synthesized ids, no DB / ``live.state``
+# stubbing. The store's held connection (``store._conn``) is the single
+# connection the dispatch write (``record_pending``), the WS handlers
+# (``on_fill_event`` / ``on_settlement_event``), and the row reads all share —
+# exactly the established idiom ``tests/test_live_store.py::_seed_open_row``
+# uses (``record_open(store._conn, ...)``).
 #
-# This keeps #26 a genuine end-to-end exercise of the merged state machine
-# (real dispatch handler → real record_pending → real WS handler → real
-# transition/close, real SQLite) WITHOUT fabricating an out-of-scope
-# production module and WITHOUT duplicating the dispatch→record_pending
-# kwarg-contract assertions (those are independently pinned by
-# tests/test_engine_dispatch_pending_branch.py). The reporting gap + the
-# missing SQLiteTradeStore are reported as orchestrator findings.
+# **Why the filled-entry #26 variant does NOT go through dispatch's filled
+# branch.** ``SQLiteTradeStore.record_trade`` is *deliberately fail-loud*
+# (``NotImplementedError``): the paper-shaped ``TradeStoreProtocol.record_trade``
+# signature structurally cannot carry D's real ``OrderResult.order_id``
+# (→ ``kalshi_order_id``) / ``client_order_id``, so persisting a *synthesized*
+# id into a funds-at-risk ``open`` row would mint a row 4.B's reconciler /
+# ``on_fill_event`` can never reconcile (real-money correctness hole — see
+# ``live/store.py``'s ``PR-5 → PR-6 (E) CONTRACT``). PR 5's merged
+# ``engine/dispatch.py`` has NO live-vs-paper branching; wiring the filled
+# branch to call ``live.state.record_open`` directly with D's real
+# ``OrderResult`` ids is **E's job (PR 6)**. So the filled→settlement variant
+# drives that genuine E-shaped lifecycle directly — ``live.state.record_open``
+# (real ids) → real ``on_settlement_event`` → real ``record_close`` — rather
+# than reintroducing a synthesizing shim or catching the ``NotImplementedError``
+# (either would make this real-money test only *appear* to exercise the live
+# flow). The pending-entry variant DOES go through dispatch end to end:
+# ``OrderResult(status="pending")`` routes dispatch to the real
+# ``store.record_pending`` (live-correct on this adapter), then the genuine WS
+# fill → ``transition_pending_to_open`` → exit fill → ``record_close`` path.
 # ---------------------------------------------------------------------------
-
-
-class _LiveBackedStore:
-	"""Test-local ``TradeStoreProtocol`` shim → real ``live.state`` over a
-	real ``live_trades.db`` connection. Only the methods dispatch's
-	``_handle_enter`` touches are implemented; each is a verbatim pass-through
-	to the merged 4.A free function (no mocking of the state machine)."""
-
-	def __init__(self, conn: sqlite3.Connection) -> None:
-		self._conn = conn
-		self.last_pending_id: int | None = None
-
-	def record_pending(self, **kwargs: Any) -> None:
-		# Verbatim delegation — kwargs are the locked 11 (dispatch sources
-		# them; pinned by test_engine_dispatch_pending_branch.py).
-		self.last_pending_id = record_pending(self._conn, **kwargs)
-
-	def record_rejected(self, **kwargs: Any) -> None:
-		record_rejected(self._conn, **kwargs)
-
-	def record_trade(
-		self,
-		ticker: str,
-		entry_price: int,
-		strategy: str,
-		side: str,
-		series_ticker: str,
-		intended_size: int = 0,
-		fill_size: int = 0,
-		blended_entry: int | None = None,
-		book_depth: int | None = None,
-		fill_pct: float | None = None,
-		slippage_cents: float | None = None,
-		book_snapshot: str | None = None,
-		*,
-		now: datetime,
-	) -> int:
-		# The filled branch — map dispatch's paper-shaped record_trade onto
-		# the real live record_open (B's open-row writer).
-		return record_open(
-			self._conn,
-			ticker=ticker,
-			series=series_ticker,
-			strategy=strategy,
-			side=side,
-			intended_size=intended_size,
-			fill_size=fill_size,
-			entry_price_cents=entry_price,
-			blended_entry_cents=blended_entry if blended_entry is not None else entry_price,
-			slippage_cents=int(slippage_cents or 0),
-			fill_pct=fill_pct if fill_pct is not None else 1.0,
-			stop_loss_distance_cents=0,
-			client_order_id=f"{strategy}-{ticker}-{int(now.timestamp()*1000)}-itg",
-			kalshi_order_id=f"kx-{strategy}-{int(now.timestamp())}",
-			placed_at_utc=now.isoformat(),
-			entry_time=now.isoformat(),
-			entry_fee_cents=0,
-		)
-
-	def get_open_trades(self) -> list[dict[str, Any]]:
-		return []
 
 
 def _entry_signal() -> Signal:
@@ -201,111 +153,157 @@ def _ctx() -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
-	conn: sqlite3.Connection, mock_kalshi_ws: MockKalshiWS
+	live_db_path: Path, mock_kalshi_ws: MockKalshiWS
 ) -> None:
-	"""End-to-end through the REAL merged machine:
+	"""End-to-end through the REAL merged machine + the REAL
+	``SQLiteTradeStore`` adapter (spec §922 flow verbatim):
 
 	1. D returns ``pending`` (NetworkError) → dispatch ``_handle_enter``
-	   calls the real ``record_pending`` → a real ``pending`` row.
+	   calls the real ``SQLiteTradeStore.record_pending`` (→ pure delegation
+	   to ``live.state.record_pending``) → a real ``pending`` row.
 	2. Kalshi WS ``fill`` for that client_order_id → real ``on_fill_event``
-	   → real ``transition_pending_to_open`` → row is ``open``.
+	   → real ``transition_pending_to_open`` (carrying the real
+	   ``kalshi_order_id`` FROM the WS event, NOT synthesized) → row ``open``.
 	3. The strategy later exits; Kalshi WS ``fill`` for the exit order →
 	   real ``on_fill_event`` exit path → real ``record_close`` → row is
 	   ``won``/``lost`` with P&L.
+
+	No fail-loud adapter method is reached: the pending OrderResult routes
+	dispatch to ``store.record_pending`` (live-correct on this adapter); the
+	open/close transitions go through ``live.state`` via the WS handlers,
+	never ``store.record_trade`` / ``store.exit_trade``.
 	"""
-	store = _LiveBackedStore(conn)
-	cbs = StoreCallbacks()
-	mock_kalshi_ws.register(
-		db=conn,
-		store_callbacks=cbs,
-		on_fill=on_fill_event,
-		on_order_status=on_order_status_event,
-		on_settlement=on_settlement_event,
-	)
-
-	# --- 1. Dispatch the entry; D's executor returns pending (NetworkError:
-	# order_id=None) so dispatch takes the real record_pending path.
-	executor = MagicMock()
-	executor.place = AsyncMock(
-		return_value=OrderResult(
-			status="pending",
-			intended_size=10,
-			filled_size=0,
-			blended_entry_cents=0,
-			fill_pct=0.0,
-			slippage_cents=0,
-			rejection_reason="kalshi_unreachable:integration",
-			order_id=None,
+	store = SQLiteTradeStore(live_db_path)
+	try:
+		conn = store._conn  # the store's own held connection (E-shaped: the
+		# dispatch write + WS handlers + reads all share ONE connection)
+		cbs = StoreCallbacks()
+		mock_kalshi_ws.register(
+			db=conn,
+			store_callbacks=cbs,
+			on_fill=on_fill_event,
+			on_order_status=on_order_status_event,
+			on_settlement=on_settlement_event,
 		)
-	)
-	await _handle_enter(
-		_entry_signal(), _ctx(), store, {"_metrics": MagicMock()}, executor,
-		now=_NOW,
-	)
 
-	assert store.last_pending_id is not None
-	pending_id = store.last_pending_id
-	pending_row = _row(conn, pending_id)
-	assert pending_row["status"] == "pending"
-	assert pending_row["kalshi_order_id"] is None
-	coid = str(pending_row["client_order_id"])
-	assert coid, "dispatch must have generated a client_order_id"
+		# --- 1. Dispatch the entry; D's executor returns pending
+		# (NetworkError: order_id=None) so dispatch takes the real
+		# ``SQLiteTradeStore.record_pending`` path (→ live.state.record_pending).
+		executor = MagicMock()
+		executor.place = AsyncMock(
+			return_value=OrderResult(
+				status="pending",
+				intended_size=10,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				rejection_reason="kalshi_unreachable:integration",
+				order_id=None,
+			)
+		)
+		await _handle_enter(
+			_entry_signal(), _ctx(), store, {"_metrics": MagicMock()},
+			executor, now=_NOW,
+		)
 
-	# --- 2. Kalshi confirms the entry via a WS fill.
-	await mock_kalshi_ws.emit_fill(
-		client_order_id=coid,
-		kalshi_order_id="kx-entry-26",
-		filled_count=10,
-		fills=[{"price": 42, "size": 7}, {"price": 43, "size": 3}],
-		ticker="KXSOL15M-26MAY16H12",
-		side="yes",
-	)
-	opened = _row(conn, pending_id)
-	assert opened["status"] == "open"
-	assert opened["kalshi_order_id"] == "kx-entry-26"
-	assert opened["fill_size"] == 10
-	assert opened["blended_entry_cents"] == 42  # round((42*7+43*3)/10)=42
+		# ``SQLiteTradeStore.record_pending`` returns None (pure delegation);
+		# resolve the persisted row from the DB. ``_handle_enter`` inserts
+		# exactly one row, so the single pending row IS dispatch's write.
+		pending_id = conn.execute(
+			"SELECT id FROM live_trades WHERE status='pending'"
+		).fetchone()[0]
+		pending_row = _row(conn, pending_id)
+		assert pending_row["status"] == "pending"
+		assert pending_row["kalshi_order_id"] is None
+		coid = str(pending_row["client_order_id"])
+		assert coid, "dispatch must have generated a client_order_id"
 
-	# --- 3. The strategy exits; Kalshi WS fill for the exit order (fresh
-	# coid, matches no row → exit path → full close).
-	await mock_kalshi_ws.emit_fill(
-		client_order_id="debut_fade-KXSOL15M-1700000099999-exit26",
-		kalshi_order_id="kx-exit-26",
-		filled_count=10,
-		fills=[{"price": 60, "size": 10}],  # 60 > 42 entry → won
-		ticker="KXSOL15M-26MAY16H12",
-		side="yes",
-	)
-	closed = _row(conn, pending_id)
-	assert closed["status"] == "won"
-	assert closed["exit_price_cents"] == 60
-	assert closed["exit_time"] is not None
-	# pnl = 10*(60-42) - exit_fee  (>0 for this favorable close)
-	assert closed["pnl_cents"] is not None and closed["pnl_cents"] > 0
-	# Exactly one row — a full close UPDATEs in place, no split child.
-	assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+		# --- 2. Kalshi confirms the entry via a WS fill → real on_fill_event
+		# → real transition_pending_to_open (kalshi_order_id is the WS event's
+		# real id, NOT a synthesized one).
+		await mock_kalshi_ws.emit_fill(
+			client_order_id=coid,
+			kalshi_order_id="kx-entry-26",
+			filled_count=10,
+			fills=[{"price": 42, "size": 7}, {"price": 43, "size": 3}],
+			ticker="KXSOL15M-26MAY16H12",
+			side="yes",
+		)
+		opened = _row(conn, pending_id)
+		assert opened["status"] == "open"
+		assert opened["kalshi_order_id"] == "kx-entry-26"
+		assert opened["fill_size"] == 10
+		assert opened["blended_entry_cents"] == 42  # round((42*7+43*3)/10)=42
+
+		# --- 3. The strategy exits; Kalshi WS fill for the exit order (fresh
+		# coid, matches no row → exit path → full close via record_close).
+		await mock_kalshi_ws.emit_fill(
+			client_order_id="debut_fade-KXSOL15M-1700000099999-exit26",
+			kalshi_order_id="kx-exit-26",
+			filled_count=10,
+			fills=[{"price": 60, "size": 10}],  # 60 > 42 entry → won
+			ticker="KXSOL15M-26MAY16H12",
+			side="yes",
+		)
+		closed = _row(conn, pending_id)
+		assert closed["status"] == "won"
+		assert closed["exit_price_cents"] == 60
+		assert closed["exit_time"] is not None
+		# pnl = 10*(60-42) - exit_fee  (>0 for this favorable close)
+		assert closed["pnl_cents"] is not None and closed["pnl_cents"] > 0
+		# Exactly one row — a full close UPDATEs in place, no split child.
+		assert (
+			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			== 1
+		)
+	finally:
+		store.close()
 
 
 @pytest.mark.asyncio
-async def test_26_dispatch_filled_then_settlement_close(
-	conn: sqlite3.Connection, mock_kalshi_ws: MockKalshiWS
+async def test_26_filled_entry_then_settlement_close(
+	live_db_path: Path, mock_kalshi_ws: MockKalshiWS
 ) -> None:
-	"""Variant: D returns ``filled`` → dispatch's real record_trade path →
-	real ``record_open`` (an ``open`` row); the market then settles via a
-	real ``on_settlement_event`` → real ``record_close`` at the binary
-	price. Proves the filled→settlement lifecycle through the real machine."""
-	store = _LiveBackedStore(conn)
-	cbs = StoreCallbacks()
-	mock_kalshi_ws.register(
-		db=conn,
-		store_callbacks=cbs,
-		on_fill=on_fill_event,
-		on_order_status=on_order_status_event,
-		on_settlement=on_settlement_event,
-	)
-	executor = MagicMock()
-	executor.place = AsyncMock(
-		return_value=OrderResult(
+	"""Variant: the live **filled-entry** lifecycle, driven exactly as E's
+	PR-6 wiring will drive it (spec §"To E" / ``store.py``'s
+	``PR-5 → PR-6 (E) CONTRACT``), through the REAL ``SQLiteTradeStore``.
+
+	D returns ``filled`` for a Kalshi IOC entry. The merged
+	``engine/dispatch.py`` filled branch calls the paper-shaped
+	``store.record_trade(...)``, which the real ``SQLiteTradeStore``
+	**deliberately fails loud on** (``NotImplementedError``) — the
+	paper-shaped Protocol method structurally cannot carry D's real
+	``OrderResult.order_id`` (→ ``kalshi_order_id``) / ``client_order_id``,
+	and persisting a *synthesized* id would mint a funds-at-risk ``open``
+	row 4.B's reconciler can never reconcile. Wiring dispatch's filled
+	branch to ``live.state.record_open`` with D's real values is **E's job
+	(PR 6)**; PR 5's dispatch has no live-vs-paper branching.
+
+	So this test:
+
+	* asserts the fail-loud guard is real — dispatching a ``filled``
+	  ``OrderResult`` against the live adapter raises ``NotImplementedError``
+	  (proving the test is NOT secretly relying on a paper-shaped write that
+	  the live architecture forbids — the whole point of the truth-test);
+	* then drives the genuine E-shaped filled→settlement lifecycle:
+	  ``live.state.record_open`` with D's real ``OrderResult.order_id`` /
+	  ``client_order_id`` (the exact call E will wire — same idiom as
+	  ``tests/test_live_store.py::_seed_open_row``) → real
+	  ``on_settlement_event`` → real ``record_close`` at the binary price.
+	"""
+	store = SQLiteTradeStore(live_db_path)
+	try:
+		conn = store._conn
+		cbs = StoreCallbacks()
+		mock_kalshi_ws.register(
+			db=conn,
+			store_callbacks=cbs,
+			on_fill=on_fill_event,
+			on_order_status=on_order_status_event,
+			on_settlement=on_settlement_event,
+		)
+		filled = OrderResult(
 			status="filled",
 			intended_size=10,
 			filled_size=10,
@@ -314,24 +312,63 @@ async def test_26_dispatch_filled_then_settlement_close(
 			slippage_cents=0,
 			order_id="kx-entry-26b",
 		)
-	)
-	await _handle_enter(
-		_entry_signal(), _ctx(), store, {"_metrics": MagicMock()}, executor,
-		now=_NOW,
-	)
-	open_id = conn.execute(
-		"SELECT id FROM live_trades WHERE status='open'"
-	).fetchone()[0]
+		executor = MagicMock()
+		executor.place = AsyncMock(return_value=filled)
 
-	# Market settles YES (100¢) — yes-side row wins.
-	await mock_kalshi_ws.emit_settlement(
-		ticker="KXSOL15M-26MAY16H12", settlement_price_cents=100
-	)
-	row = _row(conn, open_id)
-	assert row["status"] == "won"
-	assert row["exit_reason"] == "settlement"
-	assert row["exit_price_cents"] == 100
-	assert row["exit_fee_cents"] == 0
+		# --- Truth-test: PR-5 dispatch's filled branch hits the paper-shaped
+		# store.record_trade, which the live adapter fails loud on. We do NOT
+		# work around this with a synthesizing shim or by catching it as a
+		# pass — reaching it is the SIGNAL that the filled-entry write is
+		# E's-to-wire (live.state.record_open), not a store.record_trade call.
+		with pytest.raises(NotImplementedError, match="record_trade"):
+			await _handle_enter(
+				_entry_signal(), _ctx(), store, {"_metrics": MagicMock()},
+				executor, now=_NOW,
+			)
+		# The fail-loud guard wrote nothing: no half-persisted row.
+		assert (
+			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			== 0
+		)
+
+		# --- Genuine E-shaped filled-entry persistence: live.state.record_open
+		# with D's REAL OrderResult.order_id (→ kalshi_order_id) +
+		# client_order_id (NOT synthesized) — the exact call E's PR-6 wiring
+		# will make for the filled branch.
+		signal = _entry_signal()
+		open_id = record_open(
+			conn,
+			ticker=signal.ticker,
+			series=signal.series,
+			strategy=signal.strategy,
+			side=signal.side,
+			intended_size=filled.intended_size,
+			fill_size=filled.filled_size,
+			entry_price_cents=signal.entry_price_cents or 0,
+			blended_entry_cents=filled.blended_entry_cents,
+			slippage_cents=filled.slippage_cents,
+			fill_pct=filled.fill_pct,
+			stop_loss_distance_cents=signal.stop_loss_distance_cents or 0,
+			client_order_id="debut_fade-KXSOL15M-26MAY16H12-itg26b",
+			kalshi_order_id=filled.order_id or "",  # D's REAL Kalshi order id
+			placed_at_utc=_NOW_ISO,
+			entry_time=_NOW_ISO,
+			entry_fee_cents=0,
+		)
+		assert _row(conn, open_id)["status"] == "open"
+
+		# Market settles YES (100¢) — yes-side row wins, via the real
+		# on_settlement_event → real record_close.
+		await mock_kalshi_ws.emit_settlement(
+			ticker="KXSOL15M-26MAY16H12", settlement_price_cents=100
+		)
+		row = _row(conn, open_id)
+		assert row["status"] == "won"
+		assert row["exit_reason"] == "settlement"
+		assert row["exit_price_cents"] == 100
+		assert row["exit_fee_cents"] == 0
+	finally:
+		store.close()
 
 
 @pytest.mark.asyncio
