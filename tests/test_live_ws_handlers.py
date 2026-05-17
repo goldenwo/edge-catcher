@@ -526,12 +526,14 @@ async def test_24_late_fill_after_settlement_is_lost_race_noop(
 	mock_kalshi_ws: MockKalshiWS,
 	caplog: pytest.LogCaptureFixture,
 ) -> None:
-	"""🚨 Risk #9 / Risk #4 lost-race: settlement closes the row, THEN a late
-	exit fill for that ticker arrives. The fill handler finds no open parent
-	(settlement already closed it) → idempotent no-op; the settled row is
-	untouched. (No active parent ⇒ the handler short-circuits before any 4.A
-	write — the no-op is proven by the row being unchanged AND a single
-	closed row existing, i.e. no phantom child was minted.)"""
+	"""🚨 Risk #4 no-active-row short-circuit (NOT a rowcount-0 CAS lost
+	race): settlement closes the row, THEN a late exit fill for that ticker
+	arrives. The fill handler finds no open parent (settlement already
+	closed it) → it short-circuits and returns BEFORE any 4.A write — so
+	there is deliberately no `_cas_update` rowcount-0 / WARNING here (that
+	path is covered by #22/#24's CAS-race siblings). The idempotent no-op is
+	proven by the settled row being byte-unchanged AND exactly one (closed)
+	row existing, i.e. no phantom exit child was minted."""
 	row_id = _seed_open(
 		conn, coid="cid-late-24", ticker="KXSOL15M-26MAY16H12", side="yes"
 	)

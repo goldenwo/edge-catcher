@@ -625,15 +625,51 @@ _READER_SRC = textwrap.dedent(
 	import sqlite3, sys, time
 
 	db = sys.argv[1]
-	# Exactly the spec §942 read-only open the reporting CLI must use.
-	max_seen = 0
-	for _ in range(60):
+
+	def _count():
+		# Exactly the spec §942 read-only open the reporting CLI must use.
 		ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 		try:
-			n = ro.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
-			max_seen = max(max_seen, n)
+			return ro.execute(
+				"SELECT COUNT(*) FROM live_trades"
+			).fetchone()[0]
 		finally:
 			ro.close()
+
+	# --- Handshake: bounded wait for the writer's FIRST committed row to be
+	# visible to THIS read-only cross-process handle under WAL. This *is* the
+	# Risk #5 property under test — a read-only reader observing the writer's
+	# committed rows without blocking it. The deadline is generous vs the
+	# worst observed writer cold-start (heavy-load `import edge_catcher.
+	# live.state` + first commit ~1.6s) yet still fails LOUD (exit 3) if a
+	# committed row genuinely never becomes readable — that would be a real
+	# WAL read-safety defect, not a timing nit. This replaces the previous
+	# blind 60-iteration loop whose `max_seen >= 1` lower bound was racy:
+	# the reader's stdlib-only start beats the writer's ~0.7s+ package
+	# import, so under CPU contention the reader could finish all polls
+	# before the writer committed row 1 (reader rc 0, stderr empty —
+	# spurious 8-gate failure). The durable `count == 40` end-state
+	# assertion below is the true WAL-safety invariant and is unaffected.
+	deadline = time.time() + 30.0
+	first = 0
+	while time.time() < deadline:
+		first = _count()
+		if first >= 1:
+			break
+		time.sleep(0.01)
+	if first < 1:
+		sys.stderr.write(
+			"HANDSHAKE_FAILED: read-only reader never observed a "
+			"writer-committed row within 30s (real WAL read-safety "
+			"failure, not a timing skew)\\n"
+		)
+		sys.exit(3)
+
+	# --- Observation loop: the writer is now demonstrably live; sample the
+	# count concurrently to exercise sustained read-while-write under WAL.
+	max_seen = first
+	for _ in range(60):
+		max_seen = max(max_seen, _count())
 		time.sleep(0.005)
 	print(max_seen)
 	"""
@@ -645,8 +681,18 @@ def test_28_cross_process_wal_concurrent_reader_is_safe(
 ) -> None:
 	"""Risk #5: a writer PROCESS appends rows to live_trades.db (WAL) while a
 	reader PROCESS concurrently reads it read-only. Neither errors, and the
-	reader observes a monotonically growing count (proving WAL lets the
-	read-only reader see committed rows without blocking the writer)."""
+	read-only reader provably observes the writer's committed rows under WAL
+	(it completes a bounded first-row handshake — exit 3 if a committed row
+	never becomes readable, a real WAL read-safety defect) without blocking
+	the writer, and all 40 rows are durably present at the end.
+
+	The reader's handshake replaces a former racy `max_seen >= 1` lower
+	bound: the reader (stdlib-only start) reliably out-races the writer's
+	~0.7s+ `edge_catcher.live.state` import under full-suite CPU contention,
+	so the old blind poll loop could finish before the writer committed
+	row 1 (reader rc 0 / empty stderr — a spurious 8-gate failure). The
+	handshake makes "reader saw committed rows" deterministic; the durable
+	`count == 40` end-state is the unchanged true WAL-safety invariant."""
 	root = str(Path(__file__).resolve().parents[1])
 	writer = subprocess.Popen(
 		[sys.executable, "-c", _WRITER_SRC, str(live_db_path)],
@@ -666,15 +712,19 @@ def test_28_cross_process_wal_concurrent_reader_is_safe(
 	r_out, r_err = reader.communicate(timeout=90)
 
 	assert writer.returncode == 0, f"writer process failed: {w_err}"
-	assert reader.returncode == 0, f"reader process failed: {r_err}"
+	# reader rc 0 == the bounded first-row handshake succeeded: a read-only
+	# cross-process handle observed the writer's committed rows under WAL
+	# (the Risk #5 property). rc 3 == HANDSHAKE_FAILED (a real read-safety
+	# defect, surfaced loud); any other rc == reader crashed. No racy count
+	# lower bound — observing committed rows at all is now deterministic.
+	assert reader.returncode == 0, (
+		f"read-only reader did not complete the WAL first-row handshake "
+		f"(rc={reader.returncode}; stderr: {r_err})"
+	)
 	max_seen = int(r_out.strip() or "0")
-	# The reader ran read-only concurrently with the writer and never errored;
-	# it saw at least some committed rows (timing-tolerant lower bound — the
-	# point is "no lock error / no corruption under concurrent WAL access",
-	# not an exact count race).
-	assert max_seen >= 1, (
-		f"read-only reader saw {max_seen} rows — expected concurrent WAL "
-		f"reads to observe committed rows (reader stderr: {r_err})"
+	assert max_seen >= 1, (  # guaranteed by the in-reader handshake
+		f"read-only reader handshake succeeded but reported max_seen="
+		f"{max_seen} (reader stderr: {r_err})"
 	)
 
 	# Final state: the writer's 40 rows are all durably present.
