@@ -1,0 +1,514 @@
+"""Unit tests for edge_catcher.live.store.SQLiteTradeStore.
+
+The adapter is the thin connection-holding bridge between the engine's
+``TradeStoreProtocol`` (``engine/trade_store.py``) and sub-project B's
+``live.state`` free functions, backed by a real ``live_trades.db``.
+
+These tests exercise the REAL chain — real ``connect_live_trades_db`` (0003
+migration + WAL), real ``live.state`` writes, real SQLite. **Nothing is
+mocked** (neither the DB nor the ``live.state`` functions); the highest-stakes
+property — ``RecordPendingFailed`` propagating uncaught so the engine's three
+``except RecordPendingFailed: raise`` ghost-reject clauses fire — is only
+provable against the genuine INSERT-failure path.
+
+Spec cross-refs: §773 (locked 11-kwarg ``record_pending``), §557 (locked
+10-kwarg ``record_rejected``), §661 + §930 (``record_rejected`` audit-write
+best-effort carve-out), §928 (``RecordPendingFailed`` ghost-reject), the
+``_LiveBackedStore`` orchestrator shim in
+``tests/test_live_state_integration.py`` (the construction/delegation pattern
+this production adapter formalises).
+"""
+from __future__ import annotations
+
+import inspect
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from edge_catcher.engine.trade_store import TradeStoreProtocol
+from edge_catcher.live.state import RecordPendingFailed, connect_live_trades_db
+from edge_catcher.live.store import SQLiteTradeStore
+
+if TYPE_CHECKING:
+	# Static structural-conformance assertion: a SQLiteTradeStore must be
+	# assignable to a TradeStoreProtocol-typed name. mypy --strict checks this
+	# block; a signature divergence from the Protocol fails the gate (this is
+	# the type-level half of test #1's runtime duck check).
+	def _accepts_protocol(store: TradeStoreProtocol) -> None: ...
+
+	def _static_conformance_check(s: SQLiteTradeStore) -> None:
+		_accepts_protocol(s)
+
+
+_NOW = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)
+_NOW_ISO = _NOW.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+	return tmp_path / "live_trades.db"
+
+
+@pytest.fixture
+def store(db_path: Path) -> SQLiteTradeStore:
+	"""A SQLiteTradeStore over a real on-disk live_trades.db (0003 + WAL)."""
+	s = SQLiteTradeStore(db_path)
+	yield s
+	# Each test closes explicitly where it asserts close() behaviour; guard a
+	# double-close here so the fixture teardown never raises.
+	try:
+		s.close()
+	except sqlite3.ProgrammingError:
+		pass
+
+
+def _locked_pending_kwargs(**overrides: Any) -> dict[str, Any]:
+	"""The exact 11-kwarg set dispatch.py passes to record_pending (pinned by
+	test_engine_dispatch_pending_branch.py::
+	test_record_pending_kwarg_set_is_exactly_locked_eleven)."""
+	base: dict[str, Any] = {
+		"ticker": "KXSOL15M-26MAY16H12",
+		"series": "KXSOL15M",
+		"strategy": "debut_fade",
+		"side": "yes",
+		"intended_size": 10,
+		"entry_price_cents": 42,
+		"stop_loss_distance_cents": 8,
+		"client_order_id": "debut_fade-KXSOL15M-26MAY16H12-cafebabe",
+		"kalshi_order_id": None,
+		"placed_at_utc": _NOW_ISO,
+		"rejection_reason": "kalshi_unreachable:connection refused",
+	}
+	base.update(overrides)
+	return base
+
+
+def _locked_rejected_kwargs(**overrides: Any) -> dict[str, Any]:
+	"""The exact 10-kwarg set dispatch.py passes to record_rejected (pinned by
+	test_engine_dispatch_pending_branch.py::
+	test_record_rejected_kwarg_set_is_exactly_locked_ten) — no kalshi_order_id;
+	rejection_reason REQUIRED."""
+	base: dict[str, Any] = {
+		"ticker": "KXSOL15M-26MAY16H12",
+		"series": "KXSOL15M",
+		"strategy": "debut_fade",
+		"side": "yes",
+		"intended_size": 10,
+		"entry_price_cents": 42,
+		"stop_loss_distance_cents": 8,
+		"client_order_id": "debut_fade-KXSOL15M-26MAY16H12-rej00001",
+		"placed_at_utc": _NOW_ISO,
+		"rejection_reason": "kalshi_4xx:400",
+	}
+	base.update(overrides)
+	return base
+
+
+def _query_one(db_path: Path, sql: str, params: tuple[Any, ...] = ()) -> Any:
+	"""Open an INDEPENDENT read connection (separate from the store's held
+	conn) and fetch one row — proves the write actually committed to disk, not
+	just buffered in the store's connection."""
+	rc = connect_live_trades_db(db_path)
+	try:
+		rc.row_factory = sqlite3.Row
+		return rc.execute(sql, params).fetchone()
+	finally:
+		rc.close()
+
+
+# ---------------------------------------------------------------------------
+# #1 — Protocol conformance (structural; no inheritance)
+# ---------------------------------------------------------------------------
+
+
+def test_satisfies_trade_store_protocol_runtime_duck(store: SQLiteTradeStore) -> None:
+	"""The live-path methods exist with the EXACT keyword-only signatures the
+	Protocol declares. A structural (not isinstance) check — the TYPE_CHECKING
+	block above is the mypy half; this is the runtime half via
+	inspect.signature so a kwarg rename surfaces even without running mypy."""
+	# record_pending — exactly the locked 11 keyword-only params.
+	pend_sig = inspect.signature(store.record_pending)
+	assert set(pend_sig.parameters) == {
+		"ticker", "series", "strategy", "side", "intended_size",
+		"entry_price_cents", "stop_loss_distance_cents", "client_order_id",
+		"kalshi_order_id", "placed_at_utc", "rejection_reason",
+	}
+	assert all(
+		p.kind is inspect.Parameter.KEYWORD_ONLY
+		for p in pend_sig.parameters.values()
+	), "record_pending params must be keyword-only (matches Protocol + dispatch)"
+
+	# record_rejected — exactly the locked 10 (no kalshi_order_id).
+	rej_sig = inspect.signature(store.record_rejected)
+	assert set(rej_sig.parameters) == {
+		"ticker", "series", "strategy", "side", "intended_size",
+		"entry_price_cents", "stop_loss_distance_cents", "client_order_id",
+		"placed_at_utc", "rejection_reason",
+	}
+
+	# The remaining live-path methods dispatch reaches (Step-1 surface).
+	for name in ("record_trade", "get_open_trades", "get_open_trades_for", "close"):
+		assert callable(getattr(store, name)), f"missing live-path method {name!r}"
+
+	# Assignable to a Protocol-typed binding at runtime (duck — Protocol is
+	# not @runtime_checkable for isinstance, so bind through a function arg).
+	def _takes(_p: TradeStoreProtocol) -> None:
+		return None
+
+	_takes(store)  # mypy + runtime: SQLiteTradeStore IS a TradeStoreProtocol
+
+
+# ---------------------------------------------------------------------------
+# #2 — record_pending writes a real pending row, kwargs forwarded faithfully
+# ---------------------------------------------------------------------------
+
+
+def test_record_pending_writes_real_pending_row(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""dispatch's pending branch → a real status='pending' row in
+	live_trades.db with every locked kwarg faithfully forwarded to
+	live.state.record_pending."""
+	kw = _locked_pending_kwargs(
+		client_order_id="debut_fade-KXSOL15M-26MAY16H12-pend0001",
+		kalshi_order_id="ord-kx-malformed-abc",  # malformed-fills path
+		rejection_reason="kalshi_malformed_fills",
+	)
+	store.record_pending(**kw)
+
+	row = _query_one(
+		db_path,
+		"SELECT * FROM live_trades WHERE client_order_id = ?",
+		(kw["client_order_id"],),
+	)
+	assert row is not None, "pending row must be committed to live_trades.db"
+	assert row["status"] == "pending"
+	assert row["ticker"] == "KXSOL15M-26MAY16H12"
+	assert row["series"] == "KXSOL15M"
+	assert row["strategy"] == "debut_fade"
+	assert row["side"] == "yes"
+	assert row["intended_size"] == 10
+	assert row["original_intended_size"] == 10  # set = intended_size on INSERT
+	assert row["fill_size"] == 0
+	assert row["entry_price_cents"] == 42
+	assert row["stop_loss_distance_cents"] == 8
+	assert row["kalshi_order_id"] == "ord-kx-malformed-abc"
+	assert row["placed_at_utc"] == _NOW_ISO
+	assert row["rejection_reason"] == "kalshi_malformed_fills"
+
+
+def test_record_pending_networkerror_path_kalshi_id_none(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""NetworkError path: kalshi_order_id=None must persist as a NULL column
+	(B's reconciler discriminates on this to fall back to client_order_id)."""
+	kw = _locked_pending_kwargs(
+		client_order_id="debut_fade-KXSOL15M-26MAY16H12-pendnone",
+		kalshi_order_id=None,
+	)
+	store.record_pending(**kw)
+	row = _query_one(
+		db_path,
+		"SELECT kalshi_order_id, status FROM live_trades WHERE client_order_id = ?",
+		(kw["client_order_id"],),
+	)
+	assert row["status"] == "pending"
+	assert row["kalshi_order_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# #3 — record_rejected writes a real rejected row; reason persisted
+# ---------------------------------------------------------------------------
+
+
+def test_record_rejected_writes_real_rejected_row(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	kw = _locked_rejected_kwargs(rejection_reason="absolute_max_exceeded")
+	store.record_rejected(**kw)
+
+	row = _query_one(
+		db_path,
+		"SELECT * FROM live_trades WHERE client_order_id = ?",
+		(kw["client_order_id"],),
+	)
+	assert row is not None
+	assert row["status"] == "rejected"
+	assert row["rejection_reason"] == "absolute_max_exceeded"
+	assert row["intended_size"] == 10
+	assert row["original_intended_size"] == 10
+	assert row["fill_size"] == 0
+
+
+# ---------------------------------------------------------------------------
+# #4 — GHOST-REJECT PROPAGATION (the load-bearing test)
+# ---------------------------------------------------------------------------
+
+
+def test_record_pending_propagates_record_pending_failed(db_path: Path) -> None:
+	"""THE reason this adapter exists. Point the store at a connection whose
+	live_trades table has been DROPPED → live.state.record_pending's INSERT
+	hits sqlite3.OperationalError → it raises RecordPendingFailed → the
+	adapter MUST let it propagate UNCAUGHT.
+
+	If the adapter wrapped the delegating call in a try/except that swallowed
+	this, the engine's three `except RecordPendingFailed: raise` ghost-reject
+	clauses (dispatch.process_tick, engine._ws_loop, engine outer reconnect)
+	would be dead code in the live path and a funds-at-risk stranded Kalshi
+	order would go undetected."""
+	store = SQLiteTradeStore(db_path)
+	try:
+		# Sabotage the schema on the store's OWN held connection so the next
+		# INSERT genuinely fails inside live.state.record_pending.
+		store._conn.execute("DROP TABLE live_trades")
+		store._conn.commit()
+
+		with pytest.raises(RecordPendingFailed):
+			store.record_pending(
+				**_locked_pending_kwargs(
+					client_order_id="debut_fade-KXSOL15M-26MAY16H12-ghost001"
+				)
+			)
+	finally:
+		store.close()
+
+
+def test_record_trade_open_propagates_record_pending_failed(db_path: Path) -> None:
+	"""The filled branch (record_trade → live.state.record_open) is the OTHER
+	funds-at-risk INSERT (Kalshi confirmed the entry). record_open also raises
+	RecordPendingFailed on INSERT failure; the adapter must propagate it for
+	the same ghost-reject reason."""
+	store = SQLiteTradeStore(db_path)
+	try:
+		store._conn.execute("DROP TABLE live_trades")
+		store._conn.commit()
+
+		with pytest.raises(RecordPendingFailed):
+			store.record_trade(
+				ticker="KXSOL15M-26MAY16H12",
+				entry_price=42,
+				strategy="debut_fade",
+				side="yes",
+				series_ticker="KXSOL15M",
+				intended_size=10,
+				fill_size=10,
+				blended_entry=40,
+				fill_pct=1.0,
+				slippage_cents=0.0,
+				now=_NOW,
+			)
+	finally:
+		store.close()
+
+
+# ---------------------------------------------------------------------------
+# #5 — record_rejected carve-out preserved (inherited from live.state)
+# ---------------------------------------------------------------------------
+
+
+def test_record_rejected_insert_failure_does_not_raise(db_path: Path) -> None:
+	"""Carve-out (spec §661/§930, PR #34 precedent): a failed record_rejected
+	INSERT strands only an audit row (no Kalshi-side position) — live.state
+	logs it best-effort and returns 0 WITHOUT raising RecordPendingFailed.
+	The adapter must NOT re-raise/over-broaden: the engine continues."""
+	store = SQLiteTradeStore(db_path)
+	try:
+		store._conn.execute("DROP TABLE live_trades")
+		store._conn.commit()
+
+		# Must NOT raise (RecordPendingFailed or anything else) — pure
+		# delegation inherits live.state.record_rejected's swallow.
+		store.record_rejected(
+			**_locked_rejected_kwargs(
+				client_order_id="debut_fade-KXSOL15M-26MAY16H12-rejfail0"
+			)
+		)
+	finally:
+		store.close()
+
+
+def test_record_rejected_carveout_logs_audit_gap(
+	db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""The carve-out is operator-visible: a failed audit INSERT emits the
+	`rejected_audit_write_failed` ERROR line (from live.state, via the
+	adapter's pure delegation — the adapter adds no log of its own)."""
+	import logging
+
+	store = SQLiteTradeStore(db_path)
+	try:
+		store._conn.execute("DROP TABLE live_trades")
+		store._conn.commit()
+		with caplog.at_level(logging.ERROR, logger="edge_catcher.live.state"):
+			store.record_rejected(
+				**_locked_rejected_kwargs(
+					client_order_id="debut_fade-KXSOL15M-26MAY16H12-rejlog00"
+				)
+			)
+	finally:
+		store.close()
+	assert any(
+		"rejected_audit_write_failed" in rec.message for rec in caplog.records
+	), "carve-out must surface the audit gap at ERROR (operator-visible)"
+
+
+# ---------------------------------------------------------------------------
+# #6 — close() closes the held connection
+# ---------------------------------------------------------------------------
+
+
+def test_close_closes_connection(db_path: Path) -> None:
+	store = SQLiteTradeStore(db_path)
+	store.close()
+	with pytest.raises(sqlite3.ProgrammingError):
+		store._conn.execute("SELECT 1 FROM live_trades")
+
+
+def test_close_is_idempotent(db_path: Path) -> None:
+	"""Double-close must not raise — E's shutdown path may call it more than
+	once (SIGTERM + finally block)."""
+	store = SQLiteTradeStore(db_path)
+	store.close()
+	store.close()  # second close is a no-op, not a ProgrammingError
+
+
+# ---------------------------------------------------------------------------
+# #7 — other implemented live-path methods + NotImplementedError stubs
+# ---------------------------------------------------------------------------
+
+
+def test_record_trade_maps_to_record_open(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""The filled branch persists a real status='open' row via
+	live.state.record_open (paper-shaped record_trade kwargs mapped onto the
+	live open-row writer — the mapping the _LiveBackedStore orchestrator shim
+	formalises)."""
+	trade_id = store.record_trade(
+		ticker="KXSOL15M-26MAY16H12",
+		entry_price=42,
+		strategy="debut_fade",
+		side="yes",
+		series_ticker="KXSOL15M",
+		intended_size=10,
+		fill_size=8,
+		blended_entry=40,
+		fill_pct=0.8,
+		slippage_cents=2.0,
+		now=_NOW,
+	)
+	assert isinstance(trade_id, int) and trade_id > 0
+	row = _query_one(db_path, "SELECT * FROM live_trades WHERE id = ?", (trade_id,))
+	assert row["status"] == "open"
+	assert row["ticker"] == "KXSOL15M-26MAY16H12"
+	assert row["series"] == "KXSOL15M"
+	assert row["fill_size"] == 8
+	assert row["intended_size"] == 10
+	assert row["blended_entry_cents"] == 40
+	assert row["slippage_cents"] == 2  # int-coerced from float at boundary
+	assert row["entry_fee_remaining_cents"] == row["entry_fee_cents"]
+
+
+def test_get_open_trades_returns_open_rows(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""get_open_trades returns live open rows mapped to the paper dict shape
+	(id/ticker/entry_price/strategy/side/series_ticker/fill_size/blended_entry/
+	status) so strategy code + dispatch's TickContext are shape-compatible."""
+	tid = store.record_trade(
+		ticker="KXSOL15M-26MAY16H12",
+		entry_price=42,
+		strategy="debut_fade",
+		side="yes",
+		series_ticker="KXSOL15M",
+		intended_size=5,
+		fill_size=5,
+		blended_entry=41,
+		fill_pct=1.0,
+		slippage_cents=0.0,
+		now=_NOW,
+	)
+	# A rejected row must NOT show up among open trades.
+	store.record_rejected(
+		**_locked_rejected_kwargs(client_order_id="x-rej-not-open")
+	)
+	rows = store.get_open_trades()
+	assert len(rows) == 1
+	r = rows[0]
+	assert r["id"] == tid
+	assert r["ticker"] == "KXSOL15M-26MAY16H12"
+	assert r["entry_price"] == 42  # mapped from entry_price_cents
+	assert r["strategy"] == "debut_fade"
+	assert r["side"] == "yes"
+	assert r["series_ticker"] == "KXSOL15M"  # mapped from series
+	assert r["fill_size"] == 5
+	assert r["blended_entry"] == 41  # mapped from blended_entry_cents
+	assert r["status"] == "open"
+
+
+def test_get_open_trades_for_filters_by_strategy_and_ticker(
+	store: SQLiteTradeStore,
+) -> None:
+	store.record_trade(
+		ticker="KXSOL15M-26MAY16H12",
+		entry_price=42,
+		strategy="debut_fade",
+		side="yes",
+		series_ticker="KXSOL15M",
+		intended_size=5,
+		fill_size=5,
+		blended_entry=41,
+		fill_pct=1.0,
+		slippage_cents=0.0,
+		now=_NOW,
+	)
+	store.record_trade(
+		ticker="KXETH15M-26MAY16H12",
+		entry_price=30,
+		strategy="debut_fade",
+		side="no",
+		series_ticker="KXETH15M",
+		intended_size=3,
+		fill_size=3,
+		blended_entry=29,
+		fill_pct=1.0,
+		slippage_cents=0.0,
+		now=_NOW,
+	)
+	matched = store.get_open_trades_for("debut_fade", "KXSOL15M-26MAY16H12")
+	assert len(matched) == 1
+	assert matched[0]["ticker"] == "KXSOL15M-26MAY16H12"
+	# Non-matching ticker → empty.
+	assert store.get_open_trades_for("debut_fade", "KXDOGE-NOPE") == []
+
+
+@pytest.mark.parametrize(
+	"method_call",
+	[
+		lambda s: s.settle_trade(1, "yes", now=_NOW),
+		lambda s: s.exit_trade(1, 50, now=_NOW),
+		lambda s: s.get_trade_by_id(1),
+		lambda s: s.save_state("debut_fade", {"k": 1}),
+		lambda s: s.load_state("debut_fade"),
+		lambda s: s.load_all_states(),
+	],
+)
+def test_paper_path_methods_raise_not_implemented(
+	store: SQLiteTradeStore, method_call: Any
+) -> None:
+	"""Paper-path Protocol methods with no live-money-correct live.state
+	mapping (live close/exit/settle are CAS-guarded WS-handler/reconciliation
+	driven against live_trades.db directly, NOT store.settle_trade-shaped;
+	live state is in live_trades.db, not the store's strategy_state). They
+	raise a clear NotImplementedError rather than silently no-op'ing into a
+	wrong real-money result. E wires the live path so these are unreachable."""
+	with pytest.raises(NotImplementedError, match="live-only"):
+		method_call(store)
