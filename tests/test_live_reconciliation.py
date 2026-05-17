@@ -906,15 +906,17 @@ async def test_reconcile_full_fill_still_writes_fill_pct_1(
 
 
 # ---------------------------------------------------------------------------
-# M1 — defend against a count==0 'executed' phantom.
+# M1 — defend against ANY zero-fill 'executed' phantom.
 #
 # _kalshi_outcome returns 'open' for status=='executed' BEFORE the
-# order.count > 0 guard, so a degenerate count=0, filled_count=0,
-# status='executed' order would recover a fill_size=0 'open' row that never
-# drains (no WS event for a 0-count order; every later reconcile re-matches
-# it 'executed' → never TTL'd) — an unbounded MAX_OPEN slot leak with no
-# operator signal. The matched-pending path must instead route it to
-# rejected (reason 'reconcile_zero_fill') with a WARNING.
+# filled_count >= count check, so any 'executed' order that genuinely filled
+# zero contracts (filled_count==0 — whether count is 0 OR positive) would
+# recover a phantom 'open' that never drains (no WS event for a zero-fill
+# order; every later reconcile re-matches it 'executed' → never TTL'd) — an
+# unbounded MAX_OPEN slot leak with no operator signal. fill_size is the TRUE
+# filled_count (never `or count`); the matched-pending path routes an
+# effective zero fill to rejected (reason 'reconcile_zero_fill') with a
+# WARNING.
 # ---------------------------------------------------------------------------
 
 
@@ -970,9 +972,9 @@ async def test_reconcile_executed_with_filled_count_but_zero_count_recovers(
 	conn: sqlite3.Connection,
 ) -> None:
 	"""Boundary guard for M1: a degenerate count=0 but filled_count=3
-	'executed' order still has a real fill (effective fill_size=3 via
-	`filled_count or count`), so it must recover as 'open' — the M1 guard
-	keys on the EFFECTIVE fill_size<=0, not on count alone."""
+	'executed' order still has a real fill (fill_size = filled_count = 3),
+	so it must recover as 'open' — the M1 guard keys on the EFFECTIVE
+	fill_size<=0 (the true filled_count), not on count alone."""
 	coid = "debut-fade-KXSOL15M-zcount-nz-fill"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
@@ -998,6 +1000,59 @@ async def test_reconcile_executed_with_filled_count_but_zero_count_recovers(
 	)
 	assert row["fill_size"] == 3
 	assert row["fill_pct"] == pytest.approx(3 / 10)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_zero_fill_executed_with_positive_count_rejected_not_phantom_open(
+	conn: sqlite3.Connection, caplog
+) -> None:
+	"""M1 (broadened): Kalshi Order(status='executed', count=10,
+	filled_count=0) — a requested order that genuinely filled ZERO contracts —
+	must be defensively rejected (reason 'reconcile_zero_fill'), NOT recovered
+	as a phantom 'open' of the full requested size. _kalshi_outcome returns
+	'open' off status=='executed' regardless of filled_count, so the
+	matched-pending zero-fill defense must key on the TRUE filled_count, never
+	fall back to the requested count (the old `filled_count or count` booked a
+	phantom count-sized 'open' that never drains: no WS event for it, and
+	every later reconcile re-matches it 'executed' so the TTL branch is
+	unreachable — an unbounded MAX_OPEN slot leak with wrong equity)."""
+	coid = "debut-fade-KXSOL15M-zerofill-poscount"
+	row_id = _seed_pending(
+		conn, coid=coid, placed_at=_recent(), intended_size=10
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-zero-pc",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=0,
+			)
+		]
+	)
+
+	with caplog.at_level(logging.WARNING):
+		await recon._reconcile_pending_batch(
+			client, conn, ttl_seconds=90.0
+		)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "rejected", (
+		"a count=10 but filled_count=0 'executed' order genuinely filled "
+		"nothing — it must be defensively rejected, NOT booked as a phantom "
+		"full-size 'open' (M1 must key on the true fill, not `or count`)"
+	)
+	assert row["rejection_reason"] == "reconcile_zero_fill", (
+		"the zero-fill rejection must carry the distinct 'reconcile_zero_fill' "
+		"reason (NOT a phantom 'open', NOT the TTL reason)"
+	)
+	assert any(
+		"reconcile_zero_fill" in r.message
+		or ("zero" in r.message.lower() and "kid-zero-pc" in r.message)
+		for r in caplog.records
+		if r.levelno >= logging.WARNING
+	), "expected a WARNING naming the zero-fill order id + coid"
 
 
 # ---------------------------------------------------------------------------

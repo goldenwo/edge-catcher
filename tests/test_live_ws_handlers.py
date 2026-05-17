@@ -286,6 +286,68 @@ async def test_22_duplicate_fill_after_open_is_idempotent_noop(
 	assert any(_CAS_LOST_RACE in r.message for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_22_partial_entry_fill_writes_true_fill_pct_not_hardcoded_one(
+	conn: sqlite3.Connection, cbs: StoreCallbacks, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""Kalshi marks a partial IOC entry 'executed' too (fills what it can,
+	cancels the rest). A 3-of-10 entry fill must record the TRUE
+	fill_pct = fill_size / intended_size (0.3), NOT a hardcoded 1.0 — the DDL
+	0003 contract is `fill_size / intended_size`, and the reconcile path
+	already computes the real fraction; the WS path must agree or F's
+	slippage/partial-fill analytics diverge by which path booked the fill."""
+	row_id = _seed_pending(conn, intended_size=10)
+	_wire(mock_kalshi_ws, conn, cbs)
+
+	await mock_kalshi_ws.emit_fill(
+		client_order_id="debut-fade-KXSOL15M-1700000000000-cafebabe",
+		kalshi_order_id="kx-entry-22part",
+		filled_count=3,
+		fills=[{"price": 40, "size": 3}],  # IOC partial: 3 of 10
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+	)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	assert row["fill_size"] == 3
+	assert row["intended_size"] == 10, "intended_size unmutated by the fill"
+	assert row["fill_pct"] == pytest.approx(3 / 10), (
+		f"WS-path partial entry fill must write the true "
+		f"fill_pct=fill_size/intended_size (0.3), not a hardcoded 1.0; got "
+		f"{row['fill_pct']!r}"
+	)
+	assert row["fill_pct"] != 1.0, (
+		"a 3-of-10 partial entry mis-reported as 100% defeats F's "
+		"slippage/partial-fill analytics and diverges from the reconcile path"
+	)
+
+
+@pytest.mark.asyncio
+async def test_22_full_entry_fill_still_writes_fill_pct_one(
+	conn: sqlite3.Connection, cbs: StoreCallbacks, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""Regression guard: the common 100% entry fill must still yield
+	fill_pct == 1.0 — the fix computes the real fraction, it must not break
+	the full-fill path (mirrors reconcile's full-fill regression guard)."""
+	row_id = _seed_pending(conn, intended_size=10)
+	_wire(mock_kalshi_ws, conn, cbs)
+
+	await mock_kalshi_ws.emit_fill(
+		client_order_id="debut-fade-KXSOL15M-1700000000000-cafebabe",
+		kalshi_order_id="kx-entry-22full",
+		filled_count=10,
+		fills=[{"price": 40, "size": 10}],
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+	)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	assert row["fill_size"] == 10
+	assert row["fill_pct"] == pytest.approx(1.0)
+
+
 # ===========================================================================
 # #23 — partial fill on open → split row  (+ duplicate same kalshi-id no-op)
 # ===========================================================================
@@ -409,6 +471,54 @@ async def test_23_fresh_kalshi_id_is_a_new_partial_not_a_dedup(
 	assert len(children) == 2
 	assert {c[2] for c in children} == {"kx-exit-A", "kx-exit-B"}
 	assert children[0][0] == "won" and children[1][0] == "lost"
+
+
+@pytest.mark.asyncio
+async def test_23_partial_exit_fill_with_empty_kalshi_id_is_rejected_not_booked(
+	conn: sqlite3.Connection,
+	cbs: StoreCallbacks,
+	mock_kalshi_ws: MockKalshiWS,
+	caplog: pytest.LogCaptureFixture,
+) -> None:
+	"""An exit fill that arrives with NO Kalshi order_id (empty) has no
+	idempotency identity. record_partial_exit dedups on kalshi_exit_order_id,
+	so booking an empty-keyed partial would let two genuinely-distinct
+	empty-id fills collapse into one (silent real-money under-count — the 2nd
+	tranche's closed contracts are never booked) OR a reconnect re-delivery
+	double-decrement the parent. Zero-error contract: a partial exit with no
+	Kalshi identity is REJECTED loud (ERROR) and NOT written — the parent
+	stays fully 'open' for reconcile / next-tick recovery (mirrors
+	on_fill_event's other 'no trustworthy data → no-op, reconcile owns
+	recovery' guards)."""
+	parent_id = _seed_open(conn, fill_size=10, blended=40)
+	_wire(mock_kalshi_ws, conn, cbs)
+
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.state"):
+		await mock_kalshi_ws.emit_fill(
+			client_order_id="debut-fade-KXSOL15M-1700000000777-exitNOID",
+			kalshi_order_id="",  # malformed/missing Kalshi identity
+			filled_count=4,
+			fills=[{"price": 55, "size": 4}],
+			ticker="KXSOL15M-26MAY16H12",
+			side="yes",
+		)
+
+	parent = _row(conn, parent_id)
+	assert parent["status"] == "open", "parent must remain open"
+	assert parent["fill_size"] == 10, (
+		"an exit fill with no Kalshi order_id has no idempotency key — it "
+		"must NOT decrement the parent (un-dedupable: would silently collapse "
+		"distinct fills or double-book a re-delivery); leave it for reconcile"
+	)
+	children = conn.execute(
+		"SELECT id FROM live_trades WHERE id != ?", (parent_id,)
+	).fetchall()
+	assert children == [], "no child row may be booked for an un-keyed exit"
+	assert any(
+		r.levelno >= logging.ERROR
+		and ("kalshi_exit_order_id" in r.message or "order_id" in r.message)
+		for r in caplog.records
+	), "expected a loud ERROR that the exit fill had no Kalshi order id"
 
 
 @pytest.mark.asyncio

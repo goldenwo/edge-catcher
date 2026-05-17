@@ -259,18 +259,22 @@ def _resolve_matched_pending(
 	outcome = _kalshi_outcome(order)
 	if status == "pending":
 		if outcome == "open":
-			fill_size = order.filled_count or order.count
-			# M1 — defend against a degenerate ``count=0, filled_count=0,
-			# status='executed'`` phantom. ``_kalshi_outcome`` returns
-			# ``"open"`` off ``status=='executed'`` BEFORE its
-			# ``order.count > 0`` guard, so a zero-fill executed order would
-			# otherwise recover a ``fill_size=0`` ``open`` row that never
-			# drains: no WS event is ever emitted for a 0-count order, and
-			# every later reconcile re-matches it ``executed`` so the TTL
-			# branch is never reached — an unbounded MAX_OPEN slot leak with
-			# no operator signal. Treat an effective zero fill as a
-			# defensive rejection instead (clear, distinct reason; operator
-			# WARNING) so the slot is freed and the anomaly is visible.
+			# M1 — zero-fill defense. ``_kalshi_outcome`` returns ``"open"``
+			# off ``status=='executed'`` BEFORE its ``filled_count >= count``
+			# check, so ANY ``executed`` order that genuinely filled zero
+			# contracts (``filled_count == 0`` — whether ``count`` is 0 OR
+			# positive) reaches here with ``outcome == "open"``. ``fill_size``
+			# is therefore the TRUE ``filled_count`` and NEVER ``or
+			# order.count``: that fallback evaluated ``0 or count == count``
+			# for a real zero-fill, booking a phantom count-sized ``open``
+			# that never drains — no WS event is emitted for a zero-fill
+			# order, and every later reconcile re-matches it ``executed`` so
+			# the TTL branch is never reached: an unbounded MAX_OPEN slot
+			# leak with wrong mark-to-market equity and no operator signal.
+			# An effective zero fill is routed to a defensive rejection
+			# instead (clear, distinct reason; operator WARNING) so the slot
+			# is freed and the anomaly is visible.
+			fill_size = order.filled_count
 			if fill_size <= 0:
 				log.warning(
 					"reconcile: matched Kalshi order %s for coid=%s is "

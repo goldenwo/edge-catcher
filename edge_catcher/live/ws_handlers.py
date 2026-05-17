@@ -131,19 +131,61 @@ def _entry_fee_cents(blended_cents: int, fill_size: int) -> int:
 	return int(round(STANDARD_FEE.calculate(blended_cents, fill_size)))
 
 
+def _clamp_fill_pct(fill_size: int, intended_size: int) -> float:
+	"""WS-path mirror of ``reconciliation._clamp_fill_pct`` /
+	``executors/live.py:_clamp_fill_pct``.
+
+	Replicated (NOT imported) deliberately — the same documented decision as
+	``reconciliation._clamp_fill_pct``: keep the handler layer self-contained
+	for a three-line pure function. The RETURNED-VALUE semantics MUST stay
+	byte-for-byte identical to those copies so a WS-booked row's ``fill_pct``
+	is consistent with a reconcile-recovered row's — F's slippage/partial-fill
+	analytics read the column as a probability and must not diverge by which
+	path booked the fill (spec ~L126 / DDL 0003 ``fill_size / intended_size``):
+
+	* ``intended_size <= 0`` → ``0.0`` (defence in depth; never a NaN).
+	* otherwise the **raw** ratio, NOT rounded (the column is ``REAL``;
+	  rounding here would diverge from the reconcile/executor copies).
+	* clamp the upper bound to ``1.0`` + WARNING on overfill (an IOC caps at
+	  ``count``; ``> 1.0`` corrupts the analytics; the raw ``fill_size`` stays
+	  the truth of record — only the derived ratio is clamped).
+	"""
+	if intended_size <= 0:
+		return 0.0
+	raw = fill_size / intended_size
+	if raw > 1.0:
+		log.warning(
+			"on_fill_event: fill overfill fill_size=%d > intended_size=%d "
+			"(fill_pct clamped to 1.0; fill_size preserved as truth of "
+			"record)",
+			fill_size,
+			intended_size,
+		)
+		return 1.0
+	return raw
+
+
 def _find_row_by_coid(
 	db: sqlite3.Connection, client_order_id: str
-) -> tuple[int, str, str, str] | None:
-	"""``(id, status, ticker, side)`` for the row whose ``client_order_id``
-	matches, or ``None``. ``client_order_id`` is ``UNIQUE`` so this is at
-	most one row. Read-only (the only mutations in this module go through
-	4.A's CAS writers)."""
+) -> tuple[int, str, str, str, int] | None:
+	"""``(id, status, ticker, side, intended_size)`` for the row whose
+	``client_order_id`` matches, or ``None``. ``client_order_id`` is
+	``UNIQUE`` so this is at most one row. ``intended_size`` is carried so
+	the entry-fill resolution can write the TRUE ``fill_pct = fill_size /
+	intended_size`` (DDL 0003), consistent with the reconcile path — a
+	partial IOC entry (Kalshi marks it 'executed' too) must not be
+	mis-recorded as a clean 100% fill. Read-only (the only mutations in this
+	module go through 4.A's CAS writers)."""
 	r = db.execute(
-		"SELECT id, status, ticker, side FROM live_trades "
+		"SELECT id, status, ticker, side, intended_size FROM live_trades "
 		"WHERE client_order_id = ?",
 		(client_order_id,),
 	).fetchone()
-	return None if r is None else (int(r[0]), str(r[1]), str(r[2]), str(r[3]))
+	return (
+		None
+		if r is None
+		else (int(r[0]), str(r[1]), str(r[2]), str(r[3]), int(r[4]))
+	)
 
 
 def _find_active_parent_for_exit(
@@ -277,7 +319,7 @@ async def on_fill_event(
 	)
 
 	if matched is not None:
-		row_id, status, ticker, side = matched
+		row_id, status, ticker, side, intended_size = matched
 		if status == "pending" and (not fills or filled_count <= 0):
 			# A first-delivery entry fill with no usable fills array cannot
 			# yield a trustworthy blended cost basis. Do NOT fabricate 0¢
@@ -325,6 +367,11 @@ async def on_fill_event(
 		# event; the dispatch/REST path records signed slippage at placement.
 		# A fabricated value here would diverge from that path (cross-PR
 		# contract #1 — never roll our own).
+		# fill_pct is the TRUE fraction (DDL 0003: fill_size/intended_size),
+		# computed via _clamp_fill_pct so a WS-booked partial IOC entry
+		# (Kalshi marks a partial 'executed' too) is consistent with the
+		# reconcile-recovered row — F's analytics must not diverge by which
+		# path booked the fill; NEVER a hardcoded 1.0.
 		transition_pending_to_open(
 			db,
 			row_id,
@@ -332,7 +379,7 @@ async def on_fill_event(
 			fill_size=filled_count,
 			blended_entry_cents=blended,
 			slippage_cents=0,
-			fill_pct=1.0,
+			fill_pct=_clamp_fill_pct(filled_count, intended_size),
 			entry_time=_now_utc_iso(),
 			entry_fee_cents=entry_fee,
 		)
@@ -520,7 +567,7 @@ async def on_order_status_event(
 		)
 		return
 
-	row_id, row_status, ticker, _side = matched
+	row_id, row_status, ticker, _side, _intended = matched
 	log.info(
 		"on_order_status_event: Kalshi %s for row id=%d ticker=%s coid=%s "
 		"(local status=%s) — driving pending→rejected via 4.A CAS",

@@ -564,9 +564,11 @@ def record_partial_exit(
 	Returns the child row id (new, or the existing one on idempotent retry).
 	Returns ``0`` if the parent is absent, the parent CAS lost its race
 	(parent no longer 'open'), or the call was rejected by a precondition
-	guard (``closed_size`` out of bounds) — every ``0`` path is logged
-	unambiguously so "parent absent" vs "CAS-lost" vs "bad-size" are
-	distinguishable in the operator log.
+	guard (``closed_size`` out of bounds, or an empty
+	``kalshi_exit_order_id`` — an un-keyed exit cannot be made idempotent)
+	— every ``0`` path is logged unambiguously so "parent absent" vs
+	"CAS-lost" vs "bad-size" vs "missing-exit-id" are distinguishable in the
+	operator log.
 	"""
 	parent = conn.execute(
 		"SELECT ticker, series, strategy, side, blended_entry_cents, "
@@ -609,6 +611,24 @@ def record_partial_exit(
 			parent_id,
 			closed_size,
 			p_fill_size,
+		)
+		return 0
+
+	# --- Precondition guard: an exit fill with no Kalshi order_id has no
+	# idempotency identity. The Critical #1 dedup below keys on
+	# kalshi_exit_order_id; an empty key would let two genuinely-distinct
+	# un-keyed fills collapse into one (silent real-money under-count) or a
+	# reconnect re-delivery double-decrement the parent. A fill without a
+	# Kalshi order id is itself anomalous (Kalshi always assigns one) —
+	# reject loud and never write; the position stays 'open' for reconcile /
+	# next-tick recovery (same posture as on_fill_event's other "no
+	# trustworthy data → no-op, reconcile owns recovery" guards).
+	if not kalshi_exit_order_id or not kalshi_exit_order_id.strip():
+		log.error(
+			"record_partial_exit: parent id=%d exit fill has no "
+			"kalshi_exit_order_id (empty) — REJECTED, no write (return 0: "
+			"missing-exit-id); un-dedupable, left 'open' for reconcile",
+			parent_id,
 		)
 		return 0
 
