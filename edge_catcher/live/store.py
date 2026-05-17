@@ -15,10 +15,8 @@ delegates each Protocol method dispatch reaches on the LIVE path to the
 matching ``live.state`` / ``engine.live_db`` function.
 
 **Live-path surface (only what ``engine/dispatch.py`` invokes when the
-executor is ``LiveExecutor`` — statuses filled / rejected / pending):**
+executor is ``LiveExecutor`` — statuses rejected / pending):**
 
-* ``record_trade`` → :func:`live.state.record_open` (filled branch — the
-  Kalshi-confirmed entry; ``dispatch.py`` ``_handle_enter`` filled arm).
 * ``record_rejected`` → :func:`live.state.record_rejected` (rejected branch,
   non-``stale_book`` only; ``stale_book`` is the paper-side reject path that
   ``dispatch.py`` short-circuits before the store).
@@ -29,39 +27,99 @@ executor is ``LiveExecutor`` — statuses filled / rejected / pending):**
   can see their positions and emit exit Signals).
 * ``close`` → close the held connection (idempotent).
 
-**Paper-path methods deliberately NOT implemented** (``settle_trade``,
-``exit_trade``, ``get_trade_by_id``, ``save_state``, ``load_state``,
-``load_all_states``): they raise :class:`NotImplementedError` with an
-explanatory message rather than silently no-op into a wrong real-money
-result. Rationale — on the live path the post-placement lifecycle
-(entry-fill → exit → partial-exit → settlement / close) is driven by 4.C's
-**WS handlers** and 4.B's **reconciliation** calling ``live.state``'s
-CAS-guarded ``transition_* / record_close / record_partial_exit`` functions
-*directly against ``live_trades.db``*, NOT through this store. The paper
-``exit_trade`` / ``settle_trade`` compute P&L in-store with a single
-``status='open' → won/lost`` UPDATE and a ``paper_trades`` schema shape;
-the live equivalent is a CAS ``won/lost/scratch`` close with entry-fee
-remainder consumption keyed off the Kalshi exit fill — there is no faithful
-1:1 mapping, so a silent no-op here would be a real-money correctness hole.
-Strategy state likewise lives in ``live_trades.db`` (and is rehydrated by the
-reconciler), not in a store-owned ``strategy_state`` table. E wires the live
-engine so these are unreachable; the loud ``NotImplementedError`` is a
-fail-loud guard if a future wiring change ever routes one here.
+So this adapter's live responsibility is **pending/rejected persistence +
+open-row reads ONLY**. The filled-entry write and the whole post-placement
+lifecycle are NOT this adapter's job (see ``PR-5 → PR-6 (E) CONTRACT``).
+
+**Paper-path methods deliberately NOT implemented** (``record_trade``,
+``settle_trade``, ``exit_trade``, ``get_trade_by_id``, ``save_state``,
+``load_state``, ``load_all_states``): they raise :class:`NotImplementedError`
+with an explanatory message rather than silently no-op into a wrong
+real-money result. Rationale — on the live path the entry-fill + the
+post-placement lifecycle (entry-fill → exit → partial-exit → settlement /
+close) is driven by ``live.state``'s ``record_open`` (filled entry, with D's
+real ``OrderResult.order_id``/``client_order_id``) and 4.C's **WS handlers**
++ 4.B's **reconciliation** calling ``live.state``'s CAS-guarded
+``transition_* / record_close / record_partial_exit`` functions *directly
+against ``live_trades.db``*, NOT through this store. Specifically:
+
+* ``record_trade`` — the paper-shaped ``TradeStoreProtocol.record_trade``
+  signature structurally cannot carry D's real ``OrderResult.order_id``
+  (→ ``kalshi_order_id``) or ``client_order_id``. Persisting a *synthesized*
+  ``kalshi_order_id`` into a funds-at-risk ``open`` row would create a row
+  4.B's reconciler / ``on_fill_event`` / phantom-pending poller can never
+  reconcile (they key off the real Kalshi/client ids). It MUST go through
+  :func:`live.state.record_open` with D's real values — E's wiring (PR 6).
+* ``exit_trade`` / ``settle_trade`` — paper computes P&L in-store with a
+  single ``status='open' → won/lost`` UPDATE on a ``paper_trades`` schema;
+  the live equivalent is a CAS ``won/lost/scratch`` close with entry-fee
+  remainder consumption keyed off the Kalshi exit fill — no faithful 1:1
+  mapping, so a silent no-op here would be a real-money correctness hole
+  (e.g. a strategy exit Signal silently not closing a live position).
+* strategy state likewise lives in ``live_trades.db`` (rehydrated by the
+  reconciler), not in a store-owned ``strategy_state`` table.
+
+E wires the live engine so these are unreachable; the loud
+``NotImplementedError`` is the fail-loud guard if a wiring change ever
+routes one here before E's rewire lands.
+
+----------------------------------------------------------------------------
+**PR-5 → PR-6 (E) CONTRACT — read before wiring this store into a live run.**
+----------------------------------------------------------------------------
+
+``SQLiteTradeStore`` is the live **pending/rejected persistence + open-row
+read** boundary ONLY. As shipped in PR 5 the merged ``engine/dispatch.py``
+has **no live-vs-paper branching**: ``_handle_signal`` routes every exit
+Signal to ``_handle_exit``, which unconditionally calls
+``store.exit_trade(...)`` then ``store.get_trade_by_id(...)``; the filled
+branch unconditionally calls the paper-shaped ``store.record_trade(...)``.
+Against this adapter those hit the fail-loud ``NotImplementedError`` above.
+
+Therefore, **before any live run, E (PR 6) MUST rewire dispatch** so that,
+when the executor is ``LiveExecutor``:
+
+(a) **filled-entry branch** → call :func:`live.state.record_open` directly
+    with D's real ``OrderResult.order_id`` (renamed to ``kalshi_order_id``
+    at the write boundary, spec §769) and ``client_order_id`` — NOT the
+    paper-shaped ``store.record_trade``. (``LiveExecutor.place`` returns
+    ``status="filled"`` synchronously for Kalshi IOC, so this is the common
+    live entry path, not an edge case.)
+(b) **exit Signal path** → route through D's executor → B's
+    ``exit_pending`` / ``record_close`` / ``record_partial_exit`` against
+    ``live_trades.db`` — NOT paper ``store.exit_trade`` /
+    ``store.get_trade_by_id``.
+(c) **settlement path** → B's settlement handler (CAS ``won/lost/scratch``
+    close with entry-fee-remainder consumption) — NOT paper
+    ``store.settle_trade``.
+
+Until (a)/(b)/(c) land, ``record_trade`` / ``exit_trade`` /
+``get_trade_by_id`` / ``settle_trade`` are **deliberately fail-loud** so
+wiring this adapter into a live engine without the rewire fails immediately
+and loudly rather than silently mis-persisting / not-closing a real-money
+position. ``tests/test_live_store.py``'s ``strict=True`` xfail
+``test_pr6_contract_live_lifecycle_methods_are_failloud_until_e_wires``
+pins this: it asserts the *gap* (these four still raise), so the day E makes
+them reachable/implemented the strict xfail XPASSes and **fails CI**,
+forcing this contract back into review.
 
 🚨 **Real-money invariant — ``RecordPendingFailed`` MUST propagate.**
-``record_pending`` and ``record_trade`` (→ ``record_open``) are the two
-funds-at-risk INSERTs: a failed INSERT means a Kalshi-side order is stranded
-with no local row for B's reconciler to find. ``live.state`` raises
-:class:`RecordPendingFailed` in exactly those two cases; this adapter does
-**pure delegation with no try/except around the call**, so the exception
-propagates uncaught — which is what the three
-``except RecordPendingFailed: raise`` ghost-reject clauses in
-``dispatch.process_tick`` / ``engine._ws_loop`` / ``engine`` outer reconnect
-depend on to halt the engine. The ``record_rejected`` audit-write
-best-effort carve-out (a failed rejected-row INSERT strands only an audit
-row, no money) is *inherited* from ``live.state.record_rejected`` (it catches
-its own ``sqlite3.Error``, logs ``rejected_audit_write_failed``, returns 0);
-this adapter neither re-raises nor adds its own swallow.
+``record_pending`` is the funds-at-risk INSERT this adapter performs on the
+live path: a failed INSERT means a Kalshi-side order is stranded with no
+local row for B's reconciler to find. ``live.state.record_pending`` raises
+:class:`RecordPendingFailed` in that case; this adapter does **pure
+delegation with no try/except around the call**, so the exception propagates
+uncaught — which is what the three ``except RecordPendingFailed: raise``
+ghost-reject clauses in ``dispatch.process_tick`` / ``engine._ws_loop`` /
+``engine`` outer reconnect depend on to halt the engine.
+(:func:`live.state.record_open` raises the SAME exception for the same
+reason on the filled-entry INSERT, but that call is made by E's PR-6 wiring
+directly against ``live.state`` — NOT through this adapter — so the
+ghost-reject contract there is E's to preserve, not this store's.) The
+``record_rejected`` audit-write best-effort carve-out (a failed
+rejected-row INSERT strands only an audit row, no money) is *inherited*
+from ``live.state.record_rejected`` (it catches its own ``sqlite3.Error``,
+logs ``rejected_audit_write_failed``, returns 0); this adapter neither
+re-raises nor adds its own swallow.
 """
 from __future__ import annotations
 
@@ -73,7 +131,6 @@ from typing import Any, Optional
 
 from edge_catcher.live.state import (
 	connect_live_trades_db,
-	record_open,
 	record_pending,
 	record_rejected,
 )
@@ -259,79 +316,46 @@ class SQLiteTradeStore:
 		*,
 		now: datetime,
 	) -> int:
-		"""Persist an ``open`` row for a Kalshi-confirmed entry (dispatch's
-		filled branch — ``_handle_enter`` filled arm calls the paper-shaped
-		``record_trade``).
+		"""Deliberately fail-loud — the live filled-entry path must NOT go
+		through this paper-shaped Protocol method.
 
-		Maps the paper ``record_trade`` kwargs onto :func:`live.state.record_open`
-		(B's live open-row writer) — the same mapping the ``_LiveBackedStore``
-		orchestrator shim in ``tests/test_live_state_integration.py`` uses, so
-		dispatch's filled branch persists a real live ``open`` row.
+		``LiveExecutor.place`` returns ``status="filled"`` synchronously for
+		Kalshi IOC fill-or-cancel, so the filled branch is the COMMON live
+		entry path. The Kalshi-confirmed entry MUST be persisted via
+		:func:`live.state.record_open`, which requires D's real
+		``OrderResult.order_id`` (→ ``kalshi_order_id`` at the write boundary,
+		spec §769) and ``client_order_id`` (D's idempotency key). The
+		paper-shaped ``TradeStoreProtocol.record_trade(ticker, entry_price,
+		strategy, side, series_ticker, ...)`` signature structurally CANNOT
+		carry either — there is no parameter for them.
 
-		Mapping notes:
-		* ``series_ticker`` → ``series`` (the live schema's column name);
-		* ``entry_price`` → ``entry_price_cents`` AND ``blended_entry_cents``
-		  (falling back to ``entry_price`` when ``blended_entry`` is absent —
-		  the live open row needs a non-NULL cost basis; mirrors paper's
-		  ``effective_price``);
-		* ``slippage_cents`` is int-coerced at the boundary (the live schema
-		  column is ``INTEGER``; D's ``OrderResult.slippage_cents`` is already
-		  an int from ``signed_slippage_cents`` — the float is the paper
-		  Protocol's wider type, never a fractional live value);
-		* ``client_order_id`` / ``kalshi_order_id`` / ``placed_at_utc`` /
-		  ``entry_time`` / ``entry_fee_cents`` are NOT in the paper
-		  ``record_trade`` signature. The live engine's filled-branch wiring
-		  (E / PR 6) is responsible for threading D's real OrderResult values
-		  through; until that wiring lands, ``record_trade`` is exercised only
-		  via the same paper-shaped surface the orchestrator shim uses, where
-		  these are synthesized from the call's identity + ``now``. This keeps
-		  the adapter Protocol-faithful (the dispatch filled call site is the
-		  paper shape) without inventing a divergent signature.
+		Earlier this method synthesized a placeholder
+		``client_order_id``/``kalshi_order_id`` to satisfy ``record_open``'s
+		NOT-NULL columns. That is a real-money correctness hole (zero-error
+		lens): a fabricated ``kalshi_order_id`` corresponds to NO real Kalshi
+		order, so 4.B's reconciler / ``on_fill_event`` / phantom-pending
+		poller — all of which key off ``client_order_id``/``kalshi_order_id``
+		— can never reconcile that funds-at-risk ``open`` row. The synthesis
+		is removed entirely; this method now fails loud exactly like the other
+		paper-shaped lifecycle methods (``exit_trade`` / ``settle_trade`` /
+		``save_state`` …).
 
-		🚨 ``record_open`` raises ``RecordPendingFailed`` on INSERT failure
-		(Kalshi already filled the entry → a missing local row strands a live
-		position). Pure delegation, no try/except — it propagates uncaught,
-		same ghost-reject contract as ``record_pending``.
-
-		``now`` must be timezone-aware (parity contract with paper
-		``record_trade`` / dispatch's threaded clock); a naive datetime is a
-		caller bug and is rejected loudly.
+		Per spec §769 / §"To E", wiring dispatch's filled branch to call
+		``live.state.record_open`` directly with D's real ``OrderResult``
+		values is **E's job (PR 6)**; see this module's
+		``PR-5 → PR-6 (E) CONTRACT`` docstring section. Until E lands that
+		rewire, reaching this method is a wiring bug and is rejected loudly
+		rather than persisting an unreconcilable open row.
 		"""
-		if now.tzinfo is None:
-			raise ValueError("now must be timezone-aware")
-		# Live open rows need a non-NULL cost basis. Mirror paper's
-		# effective_price: blended when present (and non-zero — a 0 blended is
-		# a sub-cent book artefact, not a real price), else the entry price.
-		effective_blended = blended_entry if blended_entry else entry_price
-		now_iso = now.isoformat()
-		return record_open(
-			self._conn,
-			ticker=ticker,
-			series=series_ticker,
-			strategy=strategy,
-			side=side,
-			intended_size=intended_size,
-			fill_size=fill_size,
-			entry_price_cents=entry_price,
-			blended_entry_cents=effective_blended,
-			# D's OrderResult.slippage_cents is an int (signed_slippage_cents);
-			# the float here is only the paper Protocol's wider static type.
-			slippage_cents=int(slippage_cents or 0),
-			fill_pct=fill_pct if fill_pct is not None else 1.0,
-			# stop_loss_distance is a Signal field not carried on the paper
-			# record_trade surface; 0 = "not tracked on this row" (reporting
-			# only — never feeds live P&L or the CAS preconditions).
-			stop_loss_distance_cents=0,
-			# Identity/fee fields absent from the paper record_trade signature
-			# (see docstring). Synthesized deterministically from the call so
-			# the open-row INSERT satisfies its NOT-NULL columns; E's filled-
-			# branch wiring threads D's real values when PR 6 lands.
-			client_order_id=f"{strategy}-{ticker}-{int(now.timestamp() * 1000)}-live",
-			kalshi_order_id=f"kx-{strategy}-{int(now.timestamp())}",
-			placed_at_utc=now_iso,
-			entry_time=now_iso,
-			entry_fee_cents=0,
-		)
+		base = self._live_only("record_trade")
+		raise NotImplementedError(
+			f"{base.args[0]} CONTRACT (spec §769 / §To-E): the live "
+			f"filled-entry path must be wired by E (PR 6) to call "
+			f"live.state.record_open directly with D's real "
+			f"OrderResult.order_id (→ kalshi_order_id) and client_order_id; "
+			f"the paper-shaped record_trade Protocol method cannot carry them "
+			f"and is therefore not live-correct."
+		) from None
 
 	# -------------------------------------------------------------------------
 	# Live-path READ surface — open-position reads for TickContext

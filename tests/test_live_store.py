@@ -29,7 +29,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from edge_catcher.engine.trade_store import TradeStoreProtocol
-from edge_catcher.live.state import RecordPendingFailed, connect_live_trades_db
+from edge_catcher.live.state import (
+	RecordPendingFailed,
+	connect_live_trades_db,
+	record_open,
+)
 from edge_catcher.live.store import SQLiteTradeStore
 
 if TYPE_CHECKING:
@@ -122,6 +126,35 @@ def _query_one(db_path: Path, sql: str, params: tuple[Any, ...] = ()) -> Any:
 		return rc.execute(sql, params).fetchone()
 	finally:
 		rc.close()
+
+
+def _seed_open_row(store: SQLiteTradeStore, **overrides: Any) -> int:
+	"""Insert a real status='open' row via live.state.record_open over the
+	store's held connection — i.e. the exact path E's PR-6 wiring will use
+	for the filled-entry branch (with D's real OrderResult ids). Used to
+	exercise the verified-correct READ surface (get_open_trades*) now that
+	the paper-shaped ``store.record_trade`` is deliberately fail-loud and no
+	longer the open-row writer."""
+	base: dict[str, Any] = {
+		"ticker": "KXSOL15M-26MAY16H12",
+		"series": "KXSOL15M",
+		"strategy": "debut_fade",
+		"side": "yes",
+		"intended_size": 5,
+		"fill_size": 5,
+		"entry_price_cents": 42,
+		"blended_entry_cents": 41,
+		"slippage_cents": 0,
+		"fill_pct": 1.0,
+		"stop_loss_distance_cents": 0,
+		"client_order_id": "debut_fade-KXSOL15M-26MAY16H12-realcoid",
+		"kalshi_order_id": "ord-kx-real-0001",
+		"placed_at_utc": _NOW_ISO,
+		"entry_time": _NOW_ISO,
+		"entry_fee_cents": 7,
+	}
+	base.update(overrides)
+	return record_open(store._conn, **base)
 
 
 # ---------------------------------------------------------------------------
@@ -281,32 +314,59 @@ def test_record_pending_propagates_record_pending_failed(db_path: Path) -> None:
 		store.close()
 
 
-def test_record_trade_open_propagates_record_pending_failed(db_path: Path) -> None:
-	"""The filled branch (record_trade → live.state.record_open) is the OTHER
-	funds-at-risk INSERT (Kalshi confirmed the entry). record_open also raises
-	RecordPendingFailed on INSERT failure; the adapter must propagate it for
-	the same ghost-reject reason."""
-	store = SQLiteTradeStore(db_path)
-	try:
-		store._conn.execute("DROP TABLE live_trades")
-		store._conn.commit()
+def test_record_trade_is_failloud_not_synthesizing(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""REAL-MONEY DEFECT FIX (was: ``test_record_trade_maps_to_record_open``
+	+ ``..._open_propagates_record_pending_failed``).
 
-		with pytest.raises(RecordPendingFailed):
-			store.record_trade(
-				ticker="KXSOL15M-26MAY16H12",
-				entry_price=42,
-				strategy="debut_fade",
-				side="yes",
-				series_ticker="KXSOL15M",
-				intended_size=10,
-				fill_size=10,
-				blended_entry=40,
-				fill_pct=1.0,
-				slippage_cents=0.0,
-				now=_NOW,
-			)
-	finally:
-		store.close()
+	The paper-shaped ``TradeStoreProtocol.record_trade`` signature cannot
+	carry D's real ``OrderResult.order_id`` (→ ``kalshi_order_id``) or
+	``client_order_id``. The pre-fix adapter SYNTHESIZED placeholder ids
+	(``kx-{strategy}-{ts}`` / ``-live``) to satisfy ``record_open``'s
+	NOT-NULL columns, persisting a funds-at-risk ``open`` row that 4.B's
+	reconciler / ``on_fill_event`` / phantom-pending poller can NEVER
+	reconcile (they key off the real Kalshi/client ids).
+
+	``record_trade`` must therefore fail loud exactly like the other
+	paper-path lifecycle methods (``self._live_only``-style
+	``NotImplementedError``), and the message MUST name ``record_open`` and
+	the E/PR-6 wiring obligation per spec §769 / §To-E so the contract is
+	discoverable from the failure alone.
+
+	Fails on 5d0a6b5 (where it synthesized + returned an int trade_id);
+	passes after the fix.
+	"""
+	with pytest.raises(NotImplementedError, match="live-only") as exc:
+		store.record_trade(
+			ticker="KXSOL15M-26MAY16H12",
+			entry_price=42,
+			strategy="debut_fade",
+			side="yes",
+			series_ticker="KXSOL15M",
+			intended_size=10,
+			fill_size=10,
+			blended_entry=40,
+			fill_pct=1.0,
+			slippage_cents=0.0,
+			now=_NOW,
+		)
+	msg = str(exc.value)
+	# Names the correct live writer + the E/PR-6 obligation + the spec cite.
+	assert "record_open" in msg, "message must name live.state.record_open"
+	assert "PR 6" in msg, "message must state the E/PR-6 wiring obligation"
+	assert "§769" in msg or "To-E" in msg, "message must cite the spec contract"
+	assert "client_order_id" in msg and "kalshi_order_id" in msg, (
+		"message must explain WHY the paper signature is not live-correct "
+		"(cannot carry the real client_order_id / kalshi_order_id)"
+	)
+	# It genuinely did NOT write anything (no synthesized open row leaked to
+	# disk on the fail-loud path).
+	leaked = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE status = 'open'",
+	)
+	assert leaked["n"] == 0, "fail-loud record_trade must not persist any row"
 
 
 # ---------------------------------------------------------------------------
@@ -385,36 +445,84 @@ def test_close_is_idempotent(db_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_record_trade_maps_to_record_open(
-	store: SQLiteTradeStore, db_path: Path
-) -> None:
-	"""The filled branch persists a real status='open' row via
-	live.state.record_open (paper-shaped record_trade kwargs mapped onto the
-	live open-row writer — the mapping the _LiveBackedStore orchestrator shim
-	formalises)."""
-	trade_id = store.record_trade(
+_LIVE_LIFECYCLE_CALLS = (
+	lambda s: s.record_trade(
 		ticker="KXSOL15M-26MAY16H12",
 		entry_price=42,
 		strategy="debut_fade",
 		side="yes",
 		series_ticker="KXSOL15M",
-		intended_size=10,
-		fill_size=8,
-		blended_entry=40,
-		fill_pct=0.8,
-		slippage_cents=2.0,
 		now=_NOW,
-	)
-	assert isinstance(trade_id, int) and trade_id > 0
-	row = _query_one(db_path, "SELECT * FROM live_trades WHERE id = ?", (trade_id,))
-	assert row["status"] == "open"
-	assert row["ticker"] == "KXSOL15M-26MAY16H12"
-	assert row["series"] == "KXSOL15M"
-	assert row["fill_size"] == 8
-	assert row["intended_size"] == 10
-	assert row["blended_entry_cents"] == 40
-	assert row["slippage_cents"] == 2  # int-coerced from float at boundary
-	assert row["entry_fee_remaining_cents"] == row["entry_fee_cents"]
+	),
+	lambda s: s.exit_trade(1, 50, now=_NOW),
+	lambda s: s.get_trade_by_id(1),
+	lambda s: s.settle_trade(1, "yes", now=_NOW),
+)
+
+
+def test_pr6_contract_live_lifecycle_methods_are_failloud_until_e_wires(
+	store: SQLiteTradeStore,
+) -> None:
+	"""FIX-2 ENFORCEMENT (part 1 of 2 — the always-on regression guard).
+
+	Merged ``engine/dispatch.py`` has NO live-vs-paper branching:
+	``_handle_signal`` sends every exit Signal to ``_handle_exit`` (which
+	calls ``store.exit_trade`` then ``store.get_trade_by_id``) and the
+	filled branch calls the paper-shaped ``store.record_trade`` — all of
+	which MUST be fail-loud on this adapter until E (PR 6) rewires those
+	live arms to B's real ``live.state`` functions (see ``live/store.py``
+	``PR-5 → PR-6 (E) CONTRACT``).
+
+	This is a NORMAL test (green now). It is the unambiguous enforcement:
+	the moment anyone makes ``record_trade`` / ``exit_trade`` /
+	``get_trade_by_id`` / ``settle_trade`` reachable-or-implemented on this
+	adapter WITHOUT also addressing the dispatch live-arm rewire, one of
+	these ``pytest.raises`` stops matching and this test goes RED — a hard,
+	unmissable CI failure that drags the contract back into review.
+	Companion ``..._xfails_when_e_implements_them`` below is the
+	strict-xfail twin that flips specifically when E delivers the
+	end-state, mirroring the 4.C reporting-CLI-gap pattern.
+
+	(Why split: a SINGLE ``strict=True`` xfail asserting "still fail-loud"
+	is logically inverted — its body PASSES today, so strict-xfail would
+	mark it XPASS=fail on the clean baseline. The clean, correct
+	construction is this always-green guard PLUS the separate strict xfail
+	that asserts the desired END state — fails now → XFAIL, passes when E
+	implements → XPASS → strict CI failure.)
+	"""
+	for call in _LIVE_LIFECYCLE_CALLS:
+		with pytest.raises(NotImplementedError, match="live-only"):
+			call(store)
+
+
+@pytest.mark.xfail(
+	strict=True,
+	reason="PR-6/E must rewire dispatch live arms; see live/store.py "
+	"PR-5 → PR-6 (E) CONTRACT. Asserts the desired END state (the four "
+	"live lifecycle methods no longer raise). Fails now (still fail-loud) "
+	"→ XFAIL (green). XPASSes (=> strict CI failure) the day E makes them "
+	"reachable/implemented, forcing this contract back into review.",
+)
+def test_pr6_contract_xfails_when_e_implements_live_lifecycle(
+	store: SQLiteTradeStore,
+) -> None:
+	"""FIX-2 ENFORCEMENT (part 2 of 2 — the strict-xfail forcing function).
+
+	Asserts the post-E END state: none of the four paper-shaped live
+	lifecycle methods raise ``NotImplementedError`` any more. TODAY they
+	all DO raise, so this body fails → ``strict=True`` xfail records XFAIL
+	(expected; suite stays green). When E (PR 6) rewires dispatch and
+	implements/redirects these so they no longer fail-loud, this body
+	passes → XPASS → ``strict=True`` converts XPASS into a CI FAILURE.
+	That red is the forcing function: the E-obligation is met, so this
+	PR-5→PR-6 contract block (and this pair of tests) must be revisited /
+	retired. "Fixed" == "xpass" == "red", per the task's enforcement spec.
+	"""
+	for call in _LIVE_LIFECYCLE_CALLS:
+		# No pytest.raises: if any still raises NotImplementedError it
+		# propagates, the body fails, and strict-xfail keeps this XFAIL
+		# (green) — i.e. the gap is still open, which is correct today.
+		call(store)
 
 
 def test_get_open_trades_returns_open_rows(
@@ -422,20 +530,12 @@ def test_get_open_trades_returns_open_rows(
 ) -> None:
 	"""get_open_trades returns live open rows mapped to the paper dict shape
 	(id/ticker/entry_price/strategy/side/series_ticker/fill_size/blended_entry/
-	status) so strategy code + dispatch's TickContext are shape-compatible."""
-	tid = store.record_trade(
-		ticker="KXSOL15M-26MAY16H12",
-		entry_price=42,
-		strategy="debut_fade",
-		side="yes",
-		series_ticker="KXSOL15M",
-		intended_size=5,
-		fill_size=5,
-		blended_entry=41,
-		fill_pct=1.0,
-		slippage_cents=0.0,
-		now=_NOW,
-	)
+	status) so strategy code + dispatch's TickContext are shape-compatible.
+
+	Open rows are seeded via live.state.record_open directly (the real
+	filled-entry writer E's PR-6 wiring uses) — store.record_trade is
+	deliberately fail-loud and no longer the open-row writer."""
+	tid = _seed_open_row(store, fill_size=5, blended_entry_cents=41)
 	# A rejected row must NOT show up among open trades.
 	store.record_rejected(
 		**_locked_rejected_kwargs(client_order_id="x-rej-not-open")
@@ -457,31 +557,24 @@ def test_get_open_trades_returns_open_rows(
 def test_get_open_trades_for_filters_by_strategy_and_ticker(
 	store: SQLiteTradeStore,
 ) -> None:
-	store.record_trade(
+	_seed_open_row(
+		store,
 		ticker="KXSOL15M-26MAY16H12",
-		entry_price=42,
-		strategy="debut_fade",
-		side="yes",
-		series_ticker="KXSOL15M",
-		intended_size=5,
-		fill_size=5,
-		blended_entry=41,
-		fill_pct=1.0,
-		slippage_cents=0.0,
-		now=_NOW,
+		series="KXSOL15M",
+		client_order_id="debut_fade-KXSOL15M-26MAY16H12-coid1",
+		kalshi_order_id="ord-kx-real-0001",
 	)
-	store.record_trade(
+	_seed_open_row(
+		store,
 		ticker="KXETH15M-26MAY16H12",
-		entry_price=30,
-		strategy="debut_fade",
+		series="KXETH15M",
 		side="no",
-		series_ticker="KXETH15M",
 		intended_size=3,
 		fill_size=3,
-		blended_entry=29,
-		fill_pct=1.0,
-		slippage_cents=0.0,
-		now=_NOW,
+		entry_price_cents=30,
+		blended_entry_cents=29,
+		client_order_id="debut_fade-KXETH15M-26MAY16H12-coid2",
+		kalshi_order_id="ord-kx-real-0002",
 	)
 	matched = store.get_open_trades_for("debut_fade", "KXSOL15M-26MAY16H12")
 	assert len(matched) == 1
