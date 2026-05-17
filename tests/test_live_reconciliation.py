@@ -813,6 +813,321 @@ async def test_pending_matched_kalshi_resting_defensively_rejected(
 
 
 # ---------------------------------------------------------------------------
+# Reconcile-recovered PARTIAL fill must write the TRUE fill_pct (I1).
+#
+# Kalshi IOC orders are marked status='executed' even on a partial fill (IOC
+# fills what it can, cancels the remainder). The matched-pending→open path
+# records the real fill_size but historically hardcoded fill_pct=1.0, so a
+# 3-of-10 reconcile-recovered fill was mis-reported as a clean 100% fill —
+# defeating slippage/partial-fill analysis on exactly the rows reconciliation
+# exists to recover. fill_pct's contract (DDL 0003 / spec ~L126) is
+# fill_size / intended_size; the value must mirror executors/live.py
+# :_clamp_fill_pct (raw ratio, NOT rounded; div-by-zero→0.0; clamp upper→1.0).
+# intended_size itself stays the original pending value (immutable).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_partial_fill_writes_true_fill_pct(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Pending intended_size=10; Kalshi reports an executed IOC that only
+	filled 3. Post-reconcile the row is 'open' with fill_size==3 and
+	fill_pct == 0.3 (the real fraction, NOT 1.0); intended_size stays 10."""
+	coid = "debut-fade-KXSOL15M-partial"
+	row_id = _seed_pending(
+		conn, coid=coid, placed_at=_recent(), intended_size=10
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-partial",
+				client_order_id=coid,
+				status="executed",  # IOC: 'executed' even on a partial fill
+				count=10,
+				filled_count=3,
+			)
+		]
+	)
+
+	await recon._reconcile_pending_batch(client, conn, ttl_seconds=90.0)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	assert row["kalshi_order_id"] == "kid-partial"
+	assert row["fill_size"] == 3, "the real partial fill_size is recorded"
+	# The hard assertion this whole test exists for: the TRUE fraction, not
+	# the old hardcoded 1.0. _clamp_fill_pct returns the raw ratio (3/10)
+	# WITHOUT rounding, so the stored value is exactly 0.3.
+	assert row["fill_pct"] == pytest.approx(3 / 10), (
+		f"reconcile-recovered partial fill must write the true "
+		f"fill_pct=fill_size/intended_size (0.3), not 1.0; got "
+		f"{row['fill_pct']!r}"
+	)
+	assert row["fill_pct"] != 1.0, (
+		"a 3-of-10 partial fill mis-reported as a clean 100% fill defeats "
+		"slippage/partial-fill analysis (I1)"
+	)
+	# intended_size is the original pending value — never mutated by the
+	# resolution (only the derived ratio is computed from it).
+	assert row["intended_size"] == 10
+	assert row["original_intended_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_reconcile_full_fill_still_writes_fill_pct_1(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Regression guard for I1: a genuine full fill (filled_count==count==
+	intended_size) must still produce fill_pct == 1.0 — the fix computes the
+	real fraction, it does not break the common 100% path."""
+	coid = "debut-fade-KXSOL15M-fullfrac"
+	row_id = _seed_pending(
+		conn, coid=coid, placed_at=_recent(), intended_size=10
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-full",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=10,
+			)
+		]
+	)
+
+	await recon._reconcile_pending_batch(client, conn, ttl_seconds=90.0)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	assert row["fill_size"] == 10
+	assert row["fill_pct"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# M1 — defend against a count==0 'executed' phantom.
+#
+# _kalshi_outcome returns 'open' for status=='executed' BEFORE the
+# order.count > 0 guard, so a degenerate count=0, filled_count=0,
+# status='executed' order would recover a fill_size=0 'open' row that never
+# drains (no WS event for a 0-count order; every later reconcile re-matches
+# it 'executed' → never TTL'd) — an unbounded MAX_OPEN slot leak with no
+# operator signal. The matched-pending path must instead route it to
+# rejected (reason 'reconcile_zero_fill') with a WARNING.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_zero_fill_executed_phantom_rejected_not_open(
+	conn: sqlite3.Connection, caplog
+) -> None:
+	"""Pending + Kalshi Order(status='executed', filled_count=0, count=0):
+	the row must go 'rejected' (reason 'reconcile_zero_fill') with a WARNING
+	logged — NOT a phantom 'open' that leaks a MAX_OPEN slot forever."""
+	coid = "debut-fade-KXSOL15M-zerofill"
+	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-zero",
+				client_order_id=coid,
+				status="executed",
+				count=0,
+				filled_count=0,
+			)
+		]
+	)
+
+	with caplog.at_level(logging.WARNING):
+		await recon._reconcile_pending_batch(
+			client, conn, ttl_seconds=90.0
+		)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "rejected", (
+		"a count=0 'executed' phantom must be defensively rejected, not "
+		"recovered as a never-draining phantom 'open' (M1)"
+	)
+	# Distinct, clear reason — and specifically NOT the TTL reason: a matched
+	# order is resolved immediately and never reaches the TTL branch, so this
+	# also proves it was not mis-routed there (and not a phantom 'open').
+	assert row["rejection_reason"] == "reconcile_zero_fill", (
+		"the defensive zero-fill rejection must carry a clear, distinct "
+		"reason (NOT 'ttl_no_kalshi_order' — it never reaches the TTL "
+		"branch) and the row must NOT be a phantom 'open'"
+	)
+	assert any(
+		"reconcile_zero_fill" in r.message
+		or ("zero" in r.message.lower() and "kid-zero" in r.message)
+		for r in caplog.records
+		if r.levelno >= logging.WARNING
+	), "expected a WARNING naming the zero-fill order id + coid"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_executed_with_filled_count_but_zero_count_recovers(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Boundary guard for M1: a degenerate count=0 but filled_count=3
+	'executed' order still has a real fill (effective fill_size=3 via
+	`filled_count or count`), so it must recover as 'open' — the M1 guard
+	keys on the EFFECTIVE fill_size<=0, not on count alone."""
+	coid = "debut-fade-KXSOL15M-zcount-nz-fill"
+	row_id = _seed_pending(
+		conn, coid=coid, placed_at=_recent(), intended_size=10
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-zc",
+				client_order_id=coid,
+				status="executed",
+				count=0,
+				filled_count=3,
+			)
+		]
+	)
+
+	await recon._reconcile_pending_batch(client, conn, ttl_seconds=90.0)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open", (
+		"a real fill (filled_count=3) must still recover even if count=0 — "
+		"M1 guards on effective fill_size<=0, not count"
+	)
+	assert row["fill_size"] == 3
+	assert row["fill_pct"] == pytest.approx(3 / 10)
+
+
+# ---------------------------------------------------------------------------
+# I2.3 — ordering interaction: a pending row resolved to 'open' in the
+# matched path whose ticker positions() does NOT return in the SAME
+# startup_reconcile pass must end 'lost_truth' (matrix row 2), deterministically.
+#
+# This is the subtle same-pass interaction the reviewer flagged: the matched
+# branch (rows 3-5) runs BEFORE the open/lost-truth scan (rows 1-2/6) inside
+# one _apply_startup_matrix call, so a pending row that resolves to 'open'
+# becomes visible to the lost-truth scan in the same pass; with no matching
+# Kalshi position it is correctly marked lost_truth. Pin the ordering so a
+# future refactor that reorders the matrix sub-steps fails loudly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_pending_resolved_open_then_lost_truth_same_pass(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Pending matched to a Kalshi executed order (→ resolves 'open' in the
+	rows-3-5 sub-step) but positions() returns NO position for that ticker:
+	in the SAME startup pass the row must end 'lost_truth' (matrix row 2),
+	deterministically — resolve-then-lost_truth, exactly once."""
+	coid = "debut-fade-KXSOL15M-resolve-then-lost"
+	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-rtl",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=10,
+			)
+		],
+		# Deliberately NO position for KXSOL15M-26MAY16H12: Kalshi's order
+		# log confirms the fill but positions() does not show the position
+		# (e.g. it settled/closed between the order scan and the position
+		# scan, or a genuine truth divergence).
+		positions=[],
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	row = _row(conn, row_id)
+	assert row["status"] == "lost_truth", (
+		"same-pass: pending resolves to 'open' (rows 3-5) then the row-2 "
+		"scan finds no Kalshi position → lost_truth, deterministically"
+	)
+	# It WAS resolved first (the matched-pending sub-step ran and counted it)
+	# and THEN marked lost_truth in the same pass — both counters fire once.
+	assert report.pending_resolved == 1, (
+		"the matched-pending resolution happened (rows 3-5 ran before the "
+		"lost-truth scan in the same pass)"
+	)
+	assert report.lost_truth == 1
+	assert report.alerts == 1
+	# Determinism: a second identical pass is a pure no-op (lost_truth is
+	# terminal; the pending row is gone; no NEW counts).
+	report2 = await startup_reconcile(client, conn, FakeBankrollCache())
+	assert _status(conn, row_id) == "lost_truth"
+	assert report2.pending_resolved == 0
+	assert report2.lost_truth == 0
+
+
+# ---------------------------------------------------------------------------
+# M2 — startup-path TTL→rejected_post_hoc logs at WARNING (operator-actionable
+# at boot); the steady-state poller path stays at INFO.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_ttl_rejection_logs_warning(
+	conn: sqlite3.Connection, caplog
+) -> None:
+	"""A stale-at-boot pending row TTL'd by startup_reconcile is more
+	anomalous than a steady-state poller TTL — it must log at WARNING so the
+	operator sees it (M2)."""
+	row_id = _seed_pending(
+		conn, coid="debut-fade-KXSOL15M-bootttl", placed_at=_stale()
+	)
+	client = FakeClient(orders=[], positions=[])
+
+	with caplog.at_level(logging.INFO):
+		await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "rejected_post_hoc"
+	ttl_recs = [
+		r
+		for r in caplog.records
+		if "TTL" in r.message and "rejected_post_hoc" in r.message
+	]
+	assert ttl_recs, "expected a startup TTL→rejected_post_hoc log line"
+	assert any(r.levelno >= logging.WARNING for r in ttl_recs), (
+		"startup-path TTL rejection must be WARNING (operator-actionable at "
+		"boot), not INFO (M2)"
+	)
+
+
+@pytest.mark.asyncio
+async def test_poller_ttl_rejection_stays_info(
+	conn: sqlite3.Connection, caplog
+) -> None:
+	"""Contrast for M2: the steady-state poller TTL→rejected_post_hoc path
+	stays at INFO (a routine 30s-poller TTL is not boot-anomalous)."""
+	row_id = _seed_pending(
+		conn, coid="debut-fade-KXSOL15M-pollttl", placed_at=_stale()
+	)
+	client = FakeClient(orders=[], positions=[])
+
+	with caplog.at_level(logging.INFO):
+		await recon._reconcile_pending_batch(
+			client, conn, ttl_seconds=90.0
+		)
+
+	assert _status(conn, row_id) == "rejected_post_hoc"
+	ttl_recs = [
+		r
+		for r in caplog.records
+		if "TTL" in r.message and "rejected_post_hoc" in r.message
+	]
+	assert ttl_recs, "expected a poller TTL→rejected_post_hoc log line"
+	assert all(r.levelno == logging.INFO for r in ttl_recs), (
+		"the poller-path TTL rejection must stay INFO (steady-state, not "
+		"boot-anomalous) — only the startup path is WARNING (M2)"
+	)
+
+
+# ---------------------------------------------------------------------------
 # Matrix row 6 — "Both agree on position | UPDATE reconciled_at_utc; continue"
 # (spec §332 row 6). The agreeing row's last-verified observability timestamp
 # MUST be refreshed; running reconcile twice just re-touches it (idempotent —

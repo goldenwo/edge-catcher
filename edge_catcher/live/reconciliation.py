@@ -151,6 +151,43 @@ def _parse_iso(ts: str) -> datetime:
 	return dt
 
 
+def _clamp_fill_pct(fill_size: int, intended_size: int) -> float:
+	"""Reconcile-side mirror of ``executors/live.py:_clamp_fill_pct``.
+
+	Replicated (NOT imported) deliberately: importing the executor helper
+	into the live reconciler would couple this layer to the engine's
+	execution layer for a three-line pure function — the cross-PR contract
+	keeps reconcile self-contained. The SEMANTICS must match that helper
+	byte-for-byte so a reconcile-recovered row's ``fill_pct`` is consistent
+	with the live-executor (WS) path:
+
+	* ``intended_size <= 0`` → ``0.0`` (defence in depth; never a NaN from a
+	  div-by-zero — the matched-pending guard already rejects a zero-fill
+	  before this is called, but a zero ``intended_size`` must still be safe).
+	* otherwise the **raw** ratio, NOT rounded (the executor helper returns
+	  ``filled_count / size_contracts`` unrounded; the column is ``REAL`` and
+	  F's slippage/partial-fill analytics read it as a probability — rounding
+	  here would diverge from every WS-path row).
+	* clamp the upper bound to ``1.0`` and WARNING on overfill (an IOC must
+	  cap at ``count``; ``> 1.0`` would corrupt the analytics, mirroring the
+	  executor's overfill log; the raw ``fill_size`` is still the truth of
+	  record — only the derived ratio is clamped).
+	"""
+	if intended_size <= 0:
+		return 0.0
+	raw = fill_size / intended_size
+	if raw > 1.0:
+		log.warning(
+			"reconcile: fill overfill fill_size=%d > intended_size=%d "
+			"(fill_pct clamped to 1.0; fill_size preserved as truth of "
+			"record)",
+			fill_size,
+			intended_size,
+		)
+		return 1.0
+	return raw
+
+
 def _kalshi_outcome(order: Order) -> Literal["open", "rejected"]:
 	"""Map a Kalshi ``Order`` to the local resolution for a matched pending
 	row, per the spec's matrix row 3.
@@ -195,6 +232,7 @@ def _resolve_matched_pending(
 	row_id: int,
 	status: str,
 	order: Order,
+	intended_size: int,
 ) -> Literal["resolved", "noop"]:
 	"""Apply the matched-order branch (matrix row 3) for one local row.
 
@@ -206,6 +244,14 @@ def _resolve_matched_pending(
 	synthesise the won/lost/scratch close P&L; it leaves a filled exit for
 	the WS path / settlement and only handles the revert side here.
 
+	``intended_size`` is the pending row's original size (carried by
+	:func:`_read_rows`); the recovered ``fill_pct`` is the TRUE
+	``fill_size / intended_size`` fraction (:func:`_clamp_fill_pct`) so a
+	partial IOC fill — still reported ``status='executed'`` by Kalshi — is
+	not mis-recorded as a clean 100% fill. The row's ``intended_size`` itself
+	is never mutated (the original value is correct; only the derived ratio
+	is computed from it).
+
 	Returns ``"resolved"`` when this call performed the resolving action,
 	``"noop"`` when nothing actionable applied (lets the caller skip the
 	stale-pending TTL branch for an already-handled row).
@@ -214,6 +260,36 @@ def _resolve_matched_pending(
 	if status == "pending":
 		if outcome == "open":
 			fill_size = order.filled_count or order.count
+			# M1 — defend against a degenerate ``count=0, filled_count=0,
+			# status='executed'`` phantom. ``_kalshi_outcome`` returns
+			# ``"open"`` off ``status=='executed'`` BEFORE its
+			# ``order.count > 0`` guard, so a zero-fill executed order would
+			# otherwise recover a ``fill_size=0`` ``open`` row that never
+			# drains: no WS event is ever emitted for a 0-count order, and
+			# every later reconcile re-matches it ``executed`` so the TTL
+			# branch is never reached — an unbounded MAX_OPEN slot leak with
+			# no operator signal. Treat an effective zero fill as a
+			# defensive rejection instead (clear, distinct reason; operator
+			# WARNING) so the slot is freed and the anomaly is visible.
+			if fill_size <= 0:
+				log.warning(
+					"reconcile: matched Kalshi order %s for coid=%s is "
+					"'executed' but has an effective zero fill "
+					"(filled_count=%d count=%d) — rejecting defensively "
+					"(reconcile_zero_fill) to avoid a never-draining "
+					"phantom 'open' (MAX_OPEN slot leak)",
+					order.order_id,
+					order.client_order_id,
+					order.filled_count,
+					order.count,
+				)
+				transition_pending_to_rejected(
+					conn,
+					row_id,
+					kalshi_order_id=order.order_id,
+					rejection_reason="reconcile_zero_fill",
+				)
+				return "resolved"
 			# Cost basis: Kalshi's REST ``Order`` carries no average-fill
 			# price field, so the IOC ``limit_price_cents`` is the only
 			# price the reconciler can see. The WS fill event carries the
@@ -228,6 +304,15 @@ def _resolve_matched_pending(
 			# ``calculate`` already returns ceil'd cents; the column is
 			# INTEGER so round to int.
 			entry_fee = int(round(STANDARD_FEE.calculate(blended, fill_size)))
+			# fill_pct is the TRUE fraction (spec ~L126 / DDL 0003:
+			# ``fill_size / intended_size``), mirroring
+			# ``executors/live.py:_clamp_fill_pct`` so a reconcile-recovered
+			# row is consistent with the WS-path row. A hardcoded ``1.0``
+			# here mis-reports a partial IOC fill (Kalshi marks a partial
+			# 'executed' too) as a clean 100% fill and defeats F's
+			# slippage/partial-fill analytics on exactly the rows
+			# reconciliation exists to recover.
+			fill_pct = _clamp_fill_pct(fill_size, intended_size)
 			# slippage is left 0: the REST Order exposes no fill-vs-limit
 			# delta, so a non-zero value would be fabricated. The WS path
 			# records real signed slippage; reconcile cannot measure it.
@@ -238,7 +323,7 @@ def _resolve_matched_pending(
 				fill_size=fill_size,
 				blended_entry_cents=blended,
 				slippage_cents=0,
-				fill_pct=1.0,
+				fill_pct=fill_pct,
 				entry_time=_now_utc().isoformat(),
 				entry_fee_cents=entry_fee,
 			)
@@ -276,14 +361,26 @@ def _series_from_ticker(ticker: str) -> str:
 
 def _read_rows(
 	conn: sqlite3.Connection, statuses: tuple[str, ...]
-) -> list[tuple[int, str, str, str]]:
-	"""``(id, status, client_order_id, placed_at_utc)`` for the given
-	statuses. The reconciler only ever needs these four columns."""
+) -> list[tuple[int, str, str, str, int]]:
+	"""``(id, status, client_order_id, placed_at_utc, intended_size)`` for the
+	given statuses. The reconciler only ever needs these five columns.
+
+	``intended_size`` is carried so the matched-pending→open resolution can
+	write the TRUE ``fill_pct = fill_size / intended_size`` (DDL 0003 / spec
+	~L126) instead of a hardcoded ``1.0`` — a partial IOC fill is still
+	reported ``status='executed'`` by Kalshi, so without the real fraction a
+	3-of-10 reconcile-recovered fill is mis-reported as a clean 100% fill and
+	slippage/partial-fill analysis on exactly the rows reconciliation exists
+	to recover is defeated. A ``pending`` row is pre-fill (``fill_size=0``,
+	never partial-exited), so its ``intended_size`` still equals the
+	INSERT-time ``original_intended_size`` — the spec-locked-immutable value
+	the live-executor path also divides by (``req.size_contracts``)."""
 	placeholders = ",".join("?" for _ in statuses)
 	return [
-		(int(r[0]), str(r[1]), str(r[2]), str(r[3]))
+		(int(r[0]), str(r[1]), str(r[2]), str(r[3]), int(r[4]))
 		for r in conn.execute(
-			f"SELECT id, status, client_order_id, placed_at_utc "
+			f"SELECT id, status, client_order_id, placed_at_utc, "
+			f"intended_size "
 			f"FROM live_trades WHERE status IN ({placeholders})",
 			statuses,
 		).fetchall()
@@ -292,11 +389,12 @@ def _read_rows(
 
 def _reconcile_rows_against_orders(
 	conn: sqlite3.Connection,
-	rows: list[tuple[int, str, str, str]],
+	rows: list[tuple[int, str, str, str, int]],
 	orders_by_coid: dict[str, Order],
 	*,
 	ttl_seconds: float,
 	now: datetime,
+	ttl_log_level: int = logging.INFO,
 ) -> tuple[int, int]:
 	"""Core matrix rows 3-5 for ``pending`` / ``exit_pending`` rows.
 
@@ -307,15 +405,27 @@ def _reconcile_rows_against_orders(
 	A row younger than its TTL with no match is left untouched — it may
 	still get its WS event (real-money: never reject a young in-flight row).
 
+	``ttl_log_level`` (M2): the pending TTL→``rejected_post_hoc`` line is
+	logged at this level. The steady-state 30s poller / reconnect leaves it
+	at the ``INFO`` default (a routine TTL is not anomalous); only
+	:func:`startup_reconcile` raises it to ``WARNING`` — a pending row still
+	stale at *boot* is operator-actionable (it never got its event across a
+	full process lifetime, not just one poll gap). State transition,
+	counters and control flow are identical regardless of the level.
+
 	Returns ``(pending_resolved, pending_ttl_actioned)``.
 	"""
 	resolved = 0
 	ttl_actioned = 0
-	for row_id, status, coid, placed_at in rows:
+	for row_id, status, coid, placed_at, intended_size in rows:
 		order = orders_by_coid.get(coid)
 		if order is not None:
 			outcome = _resolve_matched_pending(
-				conn, row_id=row_id, status=status, order=order
+				conn,
+				row_id=row_id,
+				status=status,
+				order=order,
+				intended_size=intended_size,
 			)
 			# Matrix row 6 ("both agree on position"): a matched Kalshi order
 			# is Kalshi *confirming* this row's order exists — the spec's
@@ -345,7 +455,10 @@ def _reconcile_rows_against_orders(
 				kalshi_order_id=None,
 				rejection_reason=_TTL_NO_ORDER_REASON,
 			)
-			log.info(
+			# M2: WARNING on the startup path (stale at boot is
+			# operator-actionable), INFO on the steady-state poller.
+			log.log(
+				ttl_log_level,
 				"reconcile: pending id=%d past TTL (%.0fs > %.0fs) with no "
 				"Kalshi order — rejected_post_hoc",
 				row_id,
@@ -501,6 +614,10 @@ def _apply_startup_matrix(
 		# never got its event.
 		ttl_seconds=90.0,
 		now=now,
+		# M2: a pending row still stale at *boot* (TTL'd by startup) is
+		# operator-actionable — surface it at WARNING. The steady-state
+		# poller path keeps the INFO default.
+		ttl_log_level=logging.WARNING,
 	)
 
 	# --- Matrix row 6 (both agree on position): "UPDATE reconciled_at_utc;
