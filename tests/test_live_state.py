@@ -27,6 +27,7 @@ from edge_catcher.live.state import (
 	record_partial_exit,
 	record_pending,
 	record_rejected,
+	touch_reconciled,
 	transition_exit_pending_to_open,
 	transition_pending_to_open,
 	transition_pending_to_rejected,
@@ -1080,3 +1081,121 @@ def test_record_pending_failed_is_chained_from_sqlite_error() -> None:
 			placed_at_utc=_NOW_ISO,
 		)
 	assert isinstance(ei.value.__cause__, sqlite3.Error)
+
+
+# ---------------------------------------------------------------------------
+# touch_reconciled — matrix row 6 "both agree" observability bump
+# (spec §332 row 6: "UPDATE reconciled_at_utc; continue"). CAS-guarded by
+# the same WHERE status IN ('open','pending','exit_pending') discipline as
+# mark_lost_truth — only an active row's reconciled_at_utc is meaningful.
+# ---------------------------------------------------------------------------
+
+
+def test_touch_reconciled_sets_timestamp_on_open_row(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Happy path: an 'open' row's reconciled_at_utc starts NULL (record_open
+	never sets it) and is stamped by a winning touch_reconciled CAS."""
+	rid = _seed_open(conn, coid="touch-open")
+	assert _row(conn, rid)["reconciled_at_utc"] is None
+
+	changed = touch_reconciled(conn, rid, now_utc=_NOW_ISO)
+
+	assert changed is True, "a winning CAS must return True"
+	assert _row(conn, rid)["reconciled_at_utc"] == _NOW_ISO
+	# It touches ONLY reconciled_at_utc — status / fill_size untouched.
+	assert _row(conn, rid)["status"] == "open"
+
+
+@pytest.mark.parametrize("active_status", ["pending", "exit_pending"])
+def test_touch_reconciled_works_on_all_active_states(
+	conn: sqlite3.Connection, active_status: str
+) -> None:
+	"""row 6 "both agree" applies to every active state reconcile can confirm
+	against Kalshi: open (above), pending, exit_pending. Terminal rows are
+	covered by the lost-race test below."""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=5,
+		entry_price_cents=50,
+		stop_loss_distance_cents=None,
+		client_order_id=f"touch-{active_status}",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+	)
+	if active_status == "exit_pending":
+		conn.execute(
+			"UPDATE live_trades SET status='exit_pending' WHERE id=?", (rid,)
+		)
+		conn.commit()
+
+	changed = touch_reconciled(conn, rid, now_utc=_NOW_ISO)
+
+	assert changed is True
+	assert _row(conn, rid)["reconciled_at_utc"] == _NOW_ISO
+	assert _row(conn, rid)["status"] == active_status
+
+
+def test_touch_reconciled_is_idempotent_advances_timestamp(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Calling it twice just rewrites the timestamp — no error, the second
+	value wins (idempotent re-touch across two reconcile passes)."""
+	rid = _seed_open(conn, coid="touch-idem")
+	first = "2026-05-16T12:00:00+00:00"
+	second = "2026-05-16T12:00:30+00:00"
+
+	assert touch_reconciled(conn, rid, now_utc=first) is True
+	assert _row(conn, rid)["reconciled_at_utc"] == first
+
+	# Second pass: a pure re-touch (no error, timestamp advances).
+	assert touch_reconciled(conn, rid, now_utc=second) is True
+	assert _row(conn, rid)["reconciled_at_utc"] == second
+	assert _row(conn, rid)["status"] == "open"
+
+
+def test_touch_reconciled_terminal_row_is_logged_noop(
+	conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""CAS lost-race / precondition-miss (mirror of
+	test_cas_mark_lost_truth_only_from_active): a row that has since gone
+	terminal (won) is NOT bumped — touch_reconciled returns the falsy no-op
+	value, logs the shared 'CAS lost race' WARNING, and leaves the row (incl.
+	its NULL reconciled_at_utc) byte-for-byte unchanged. NOT an error."""
+	rid = _seed_open(conn, coid="touch-terminal")
+	record_close(
+		conn,
+		rid,
+		status="won",
+		exit_price_cents=100,
+		exit_time=_NOW_ISO,
+		exit_reason="settlement",
+		pnl_cents=600,
+		exit_fee_cents=0,
+	)
+	snapshot = _row(conn, rid)
+	assert snapshot["reconciled_at_utc"] is None
+
+	with caplog.at_level("WARNING"):
+		changed = touch_reconciled(conn, rid, now_utc=_NOW_ISO)
+
+	assert changed is False, "precondition miss must return the falsy no-op"
+	assert _row(conn, rid) == snapshot, (
+		"a terminal row must be byte-for-byte unchanged (no blind write)"
+	)
+	assert _row(conn, rid)["reconciled_at_utc"] is None
+	assert any(
+		"CAS lost race" in r.message for r in caplog.records
+	), "a precondition-miss must log the shared CAS-lost-race WARNING"
+
+
+def test_touch_reconciled_missing_row_is_noop(
+	conn: sqlite3.Connection,
+) -> None:
+	"""A nonexistent row id is a logged no-op (return False), never an
+	error — mirrors _cas_update's rowcount==0 contract."""
+	assert touch_reconciled(conn, 99999, now_utc=_NOW_ISO) is False

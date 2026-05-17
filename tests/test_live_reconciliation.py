@@ -810,3 +810,149 @@ async def test_pending_matched_kalshi_resting_defensively_rejected(
 	assert any(
 		"resting" in r.message.lower() for r in caplog.records
 	), "expected a defensive-rejection warning for a resting IOC order"
+
+
+# ---------------------------------------------------------------------------
+# Matrix row 6 — "Both agree on position | UPDATE reconciled_at_utc; continue"
+# (spec §332 row 6). The agreeing row's last-verified observability timestamp
+# MUST be refreshed; running reconcile twice just re-touches it (idempotent —
+# no spurious state transition).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_both_agree_open_row_bumps_reconciled_at_utc(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Local 'open' row + a matching Kalshi position = matrix row 6. Before
+	the wiring this was a deliberate no-op (reconciled_at_utc stayed NULL on
+	the steady-state path); the spec mandates it be stamped. The row must NOT
+	change status (no spurious transition) — only reconciled_at_utc moves."""
+	ticker = "KXSOL15M-26MAY16H12"
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-agree", ticker=ticker)
+	assert _row(conn, row_id)["reconciled_at_utc"] is None
+
+	client = FakeClient(
+		orders=[],
+		positions=[
+			Position(
+				ticker=ticker,
+				side="yes",
+				count=10,
+				average_price_cents=40,
+				raw={},
+			)
+		],
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open", (
+		"a both-agree row must NOT change status (row 6 = continue)"
+	)
+	assert row["reconciled_at_utc"] is not None, (
+		"matrix row 6 mandates reconciled_at_utc be stamped on agreeing rows "
+		"(spec §332) — the steady-state path must no longer leave it NULL"
+	)
+	# Both-agree is neither an orphan recovery nor a lost-truth.
+	assert report.orphan_positions_recovered == 0
+	assert report.lost_truth == 0
+
+
+@pytest.mark.asyncio
+async def test_startup_both_agree_reconciled_at_utc_is_idempotent(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Two startup passes on a both-agree row: the 2nd pass just re-touches
+	reconciled_at_utc (advances or holds it) — never a spurious transition,
+	status stays 'open', and the value remains non-NULL across both passes."""
+	ticker = "KXETH15M-26MAY16H12"
+	row_id = _seed_open(
+		conn, coid="debut-fade-KXETH15M-agree2", ticker=ticker
+	)
+	client = FakeClient(
+		orders=[],
+		positions=[
+			Position(
+				ticker=ticker,
+				side="yes",
+				count=10,
+				average_price_cents=40,
+				raw={},
+			)
+		],
+	)
+
+	r1 = await startup_reconcile(client, conn, FakeBankrollCache())
+	after_first = _row(conn, row_id)["reconciled_at_utc"]
+	assert after_first is not None
+
+	r2 = await startup_reconcile(client, conn, FakeBankrollCache())
+	after_second = _row(conn, row_id)["reconciled_at_utc"]
+
+	assert after_second is not None, (
+		"the 2nd pass must re-touch (still non-NULL), not clear the timestamp"
+	)
+	assert _status(conn, row_id) == "open", (
+		"idempotent: no spurious transition on the 2nd both-agree pass"
+	)
+	# No NEW orphan / lost-truth / pending action on either pass.
+	assert (r1.orphan_positions_recovered, r1.lost_truth) == (0, 0)
+	assert (r2.orphan_positions_recovered, r2.lost_truth) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_poller_both_agree_pending_match_bumps_reconciled_at_utc(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Poller path, matrix row 6: a pending row WITH a matching Kalshi order
+	(here Kalshi-confirmed filled → resolves to 'open') is "confirmed
+	still-active against Kalshi" — reconciled_at_utc MUST be stamped on the
+	now-active row. (A row with NO Kalshi match is NOT row 6 and is left
+	with a NULL reconciled_at_utc — covered by the contrast assertion.)"""
+	coid = "debut-fade-KXSOL15M-pollagree"
+	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
+	assert _row(conn, row_id)["reconciled_at_utc"] is None
+
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-pa",
+				client_order_id=coid,
+				status="executed",
+				filled_count=10,
+			)
+		]
+	)
+
+	await recon._reconcile_pending_batch(client, conn, ttl_seconds=90.0)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open", "Kalshi-filled match resolves to open"
+	assert row["reconciled_at_utc"] is not None, (
+		"a Kalshi-confirmed (matched) row is matrix row 6 — its "
+		"reconciled_at_utc must be stamped by the poller path"
+	)
+
+
+@pytest.mark.asyncio
+async def test_poller_no_kalshi_match_leaves_reconciled_at_utc_null(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Contrast / guard: a young pending row with NO Kalshi order is NOT
+	"both agree" (Kalshi does not confirm it) — it must be left untouched,
+	including a NULL reconciled_at_utc. Proves the row-6 bump is gated on an
+	actual Kalshi match, not applied blindly to every scanned row."""
+	row_id = _seed_pending(
+		conn, coid="debut-fade-KXSOL15M-nomatch", placed_at=_recent()
+	)
+	client = FakeClient(orders=[], positions=[])
+
+	await recon._reconcile_pending_batch(client, conn, ttl_seconds=90.0)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "pending", "young unmatched row stays pending"
+	assert row["reconciled_at_utc"] is None, (
+		"no Kalshi match = not row 6 — reconciled_at_utc must stay NULL"
+	)

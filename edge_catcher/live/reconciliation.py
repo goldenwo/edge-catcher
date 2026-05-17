@@ -42,6 +42,7 @@ from edge_catcher.live.client import Order, Position
 from edge_catcher.live.state import (
 	mark_lost_truth,
 	record_open,
+	touch_reconciled,
 	transition_exit_pending_to_open,
 	transition_pending_to_open,
 	transition_pending_to_rejected,
@@ -313,12 +314,22 @@ def _reconcile_rows_against_orders(
 	for row_id, status, coid, placed_at in rows:
 		order = orders_by_coid.get(coid)
 		if order is not None:
-			if (
-				_resolve_matched_pending(
-					conn, row_id=row_id, status=status, order=order
-				)
-				== "resolved"
-			):
+			outcome = _resolve_matched_pending(
+				conn, row_id=row_id, status=status, order=order
+			)
+			# Matrix row 6 ("both agree on position"): a matched Kalshi order
+			# is Kalshi *confirming* this row's order exists — the spec's
+			# "both agree → UPDATE reconciled_at_utc; continue". Stamp the
+			# last-verified timestamp via 4.A's CAS-guarded helper. It is
+			# safe to call unconditionally for every matched row: the
+			# helper's own WHERE status IN ('open','pending','exit_pending')
+			# predicate stamps a still-active row (pending→open resolution,
+			# an exit_pending whose exit is still working) and is a logged
+			# no-op when the resolution drove the row terminal
+			# (pending→rejected) — exactly the row-6 semantics, with zero
+			# change to the resolve/TTL control flow below.
+			touch_reconciled(conn, row_id, now_utc=now.isoformat())
+			if outcome == "resolved":
 				resolved += 1
 				continue
 			# Matched but not actionable (e.g. exit_pending whose exit is
@@ -492,18 +503,15 @@ def _apply_startup_matrix(
 		now=now,
 	)
 
-	# --- Matrix row 6 (both agree on position): the spec table's nominal
-	# action is "UPDATE reconciled_at_utc; continue" — a last-verified
-	# OBSERVABILITY timestamp, NOT a money-state action (rows 1-5 carry all
-	# the correctness-critical transitions and are fully implemented). 4.A's
-	# locked write API exports NO standalone reconciled_at_utc bump (it is
-	# only written as a side-effect inside record_partial_exit, state.py
-	# L718). Writing a raw ``UPDATE live_trades SET reconciled_at_utc`` from
-	# this module would bypass 4.A's compare-and-swap discipline and breach
-	# the "consume 4.A, never reimplement its writes" boundary this agent is
-	# scoped to. Deliberate, documented deviation: agreeing rows are a
-	# no-op here; the reconciled_at_utc bump is deferred to a 4.A helper a
-	# follow-up can add + wire. Money-correctness is unaffected.
+	# --- Matrix row 6 (both agree on position): "UPDATE reconciled_at_utc;
+	# continue" — a last-verified OBSERVABILITY timestamp, NOT a money-state
+	# action (rows 1-5 carry all the correctness-critical transitions). The
+	# bump goes through 4.A's CAS-guarded ``touch_reconciled`` helper so this
+	# module still never reimplements a 4.A write. It is applied in the
+	# lost-truth loop below: an open row whose ticker Kalshi DOES still hold
+	# a position for is precisely the both-agree case (the else of the
+	# lost-truth branch). Stamping it there touches each agreeing open row
+	# exactly once per pass and is idempotent (a 2nd pass just re-touches).
 	#
 	# --- Matrix row 1: Kalshi has a position, we have no row → INSERT open.
 	# --- Matrix row 2: we have an open row, Kalshi has no position → lost.
@@ -594,7 +602,11 @@ def _apply_startup_matrix(
 	lost_truth_count = 0
 	for row_id, ticker in open_rows:
 		if ticker in kalshi_tickers:
-			continue  # matrix row 6 — both agree.
+			# Matrix row 6 — both agree (Kalshi still holds this ticker's
+			# position). Bump the last-verified observability timestamp via
+			# 4.A's CAS-guarded helper, then continue (no money-state move).
+			touch_reconciled(db, row_id, now_utc=now.isoformat())
+			continue
 		mark_lost_truth(
 			db,
 			row_id,

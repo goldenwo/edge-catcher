@@ -967,6 +967,64 @@ def transition_exit_pending_to_open(
 		)
 
 
+def touch_reconciled(
+	conn: sqlite3.Connection,
+	row_id: int,
+	*,
+	now_utc: str,
+) -> bool:
+	"""UPDATE only ``reconciled_at_utc`` — the matrix row 6 "both agree on
+	position" observability bump (spec §332: ``UPDATE reconciled_at_utc;
+	continue``). Called from the reconciler whenever Kalshi confirms a local
+	row is still legitimately active (a matched in-flight order, or an open
+	row whose ticker Kalshi still holds a position for) and NO money-state
+	transition is warranted — this is purely a last-verified timestamp, not a
+	lifecycle move.
+
+	``now_utc`` is the caller-supplied ISO-8601 UTC string (mirrors
+	``record_partial_exit``'s ``now_utc`` convention — ``state.py`` never
+	sources its own clock; the reconciler passes ``_now_utc().isoformat()``,
+	exactly as it already does for ``transition_pending_to_open``'s
+	``entry_time``).
+
+	CAS precondition: status IN ('open', 'pending', 'exit_pending') — the same
+	active-state set as :func:`mark_lost_truth`. ``reconciled_at_utc`` is only
+	meaningful while a row can still be reconciled against a live Kalshi
+	order/position; terminal rows (won/lost/scratch/rejected/
+	rejected_post_hoc/cancelled/lost_truth) are NOT bumped. A precondition
+	miss (the row went terminal between the reconciler's read and this write,
+	or the row id does not exist) is a logged no-op — ``_cas_update`` emits
+	the shared ``CAS lost race`` WARNING and returns ``False``; the reconciler
+	treats that as the correct idempotent outcome (a row a concurrent
+	settlement/fill already closed needs no reconcile stamp), never an error.
+
+	Idempotent: calling it twice just rewrites the timestamp. Returns the
+	``_cas_update`` boolean verbatim — ``True`` when the active-row stamp
+	applied, ``False`` on the precondition-miss no-op.
+	"""
+	changed = _cas_update(
+		conn,
+		row_id=row_id,
+		sql=(
+			"UPDATE live_trades SET reconciled_at_utc = ? "
+			"WHERE id = ? AND status IN ('open', 'pending', 'exit_pending')"
+		),
+		params=(now_utc, row_id),
+		transition="reconciled_at_utc bump (row6 both-agree)",
+	)
+	# Important #6 parity: only log the bump when the CAS actually applied
+	# (a precondition miss already logged its WARNING in _cas_update — an
+	# unconditional INFO here would falsely claim a stamp that did not land).
+	if changed:
+		log.info(
+			"live_trades id=%d reconciled_at_utc bumped (row6 both-agree) "
+			"at=%s",
+			row_id,
+			now_utc,
+		)
+	return changed
+
+
 def mark_lost_truth(
 	conn: sqlite3.Connection,
 	row_id: int,
