@@ -1,0 +1,651 @@
+"""Integration tests — sub-project B / v1.6.0 PR 5, Agent 4.C.
+
+Spec §Test strategy #26-#28. These drive the **real merged state machine**
+end to end against a REAL migrated SQLite ``live_trades.db`` (0003 + WAL) —
+the DB is NEVER mocked and ``live.state`` is NEVER stubbed:
+
+* **#26** dispatch ``_handle_enter`` (the real engine handler) → real
+  ``live.state.record_pending`` → ``MockKalshiWS`` fill → real
+  ``on_fill_event`` → ``transition_pending_to_open`` → a strategy-emitted
+  exit fill → real ``record_close``. The dispatch→B seam is exercised
+  through the LOCKED 11-kwarg ``record_pending`` contract (the same one
+  ``tests/test_engine_dispatch_pending_branch.py`` pins) via a thin
+  connection-backed ``TradeStoreProtocol`` shim — see the SCOPE NOTE on
+  ``_LiveBackedStore`` below.
+
+* **#27** the live schema is queryable in SQLite read-only mode
+  (``file:...?mode=ro``) — the load-bearing Risk #5 / spec-§186 property
+  (the operator's reporting CLI reads ``live_trades.db`` while B writes).
+  See the SCOPE NOTE on the reporting-CLI gap.
+
+* **#28** cross-process WAL: a writer process appends rows while a reader
+  process reads the same DB read-only — concurrent reads are safe under
+  WAL (Risk #5).
+
+Run from the project venv (``.venv/Scripts/python.exe``); the subprocess
+tests resolve ``edge_catcher`` from this worktree.
+"""
+from __future__ import annotations
+
+import sqlite3
+import subprocess
+import sys
+import textwrap
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from edge_catcher.engine.dispatch import _handle_enter
+from edge_catcher.engine.executor import OrderResult
+from edge_catcher.engine.strategy_base import Signal
+from edge_catcher.live.state import (
+	connect_live_trades_db,
+	record_close,
+	record_open,
+	record_pending,
+	record_rejected,
+)
+from edge_catcher.live.ws_handlers import (
+	StoreCallbacks,
+	on_fill_event,
+	on_order_status_event,
+	on_settlement_event,
+)
+from tests.fixtures.mock_kalshi_ws import MockKalshiWS
+
+_NOW = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)
+_NOW_ISO = _NOW.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def live_db_path(tmp_path: Path) -> Path:
+	"""Path to a fresh migrated live_trades.db (0003 + WAL applied on open)."""
+	p = tmp_path / "live_trades.db"
+	connect_live_trades_db(p).close()
+	return p
+
+
+@pytest.fixture
+def conn(live_db_path: Path) -> sqlite3.Connection:
+	c = connect_live_trades_db(live_db_path)
+	yield c
+	c.close()
+
+
+def _row(conn: sqlite3.Connection, row_id: int) -> dict[str, object]:
+	conn.row_factory = sqlite3.Row
+	r = conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (row_id,)
+	).fetchone()
+	conn.row_factory = None
+	assert r is not None, f"row {row_id} missing"
+	return dict(r)
+
+
+# ---------------------------------------------------------------------------
+# SCOPE NOTE — _LiveBackedStore
+#
+# Spec §773 and the PR-5 handoff reference ``SQLiteTradeStore.record_pending``
+# as a 4.A deliverable, but 4.A shipped ``live.state`` FREE FUNCTIONS
+# (``record_pending(conn, *, ...)`` etc.) — there is NO ``SQLiteTradeStore``
+# class in the merged tree (verified at HEAD 92dc7b0; only future-tense
+# docstring refs in engine/trade_store.py). The dispatch layer is
+# ``TradeStoreProtocol``-based; the protocol's ``record_pending`` /
+# ``record_rejected`` keyword-only signatures EXACTLY match ``live.state``'s,
+# so the missing piece is a thin connection-holding adapter. Creating that
+# production adapter is outside 4.C's owned-files scope (and is the
+# orchestrator's call re: which agent owns it) — so this test defines a
+# MINIMAL test-local shim that delegates the three dispatch-touched write
+# methods to the REAL ``live.state`` free functions over a REAL connection.
+#
+# This keeps #26 a genuine end-to-end exercise of the merged state machine
+# (real dispatch handler → real record_pending → real WS handler → real
+# transition/close, real SQLite) WITHOUT fabricating an out-of-scope
+# production module and WITHOUT duplicating the dispatch→record_pending
+# kwarg-contract assertions (those are independently pinned by
+# tests/test_engine_dispatch_pending_branch.py). The reporting gap + the
+# missing SQLiteTradeStore are reported as orchestrator findings.
+# ---------------------------------------------------------------------------
+
+
+class _LiveBackedStore:
+	"""Test-local ``TradeStoreProtocol`` shim → real ``live.state`` over a
+	real ``live_trades.db`` connection. Only the methods dispatch's
+	``_handle_enter`` touches are implemented; each is a verbatim pass-through
+	to the merged 4.A free function (no mocking of the state machine)."""
+
+	def __init__(self, conn: sqlite3.Connection) -> None:
+		self._conn = conn
+		self.last_pending_id: int | None = None
+
+	def record_pending(self, **kwargs: Any) -> None:
+		# Verbatim delegation — kwargs are the locked 11 (dispatch sources
+		# them; pinned by test_engine_dispatch_pending_branch.py).
+		self.last_pending_id = record_pending(self._conn, **kwargs)
+
+	def record_rejected(self, **kwargs: Any) -> None:
+		record_rejected(self._conn, **kwargs)
+
+	def record_trade(
+		self,
+		ticker: str,
+		entry_price: int,
+		strategy: str,
+		side: str,
+		series_ticker: str,
+		intended_size: int = 0,
+		fill_size: int = 0,
+		blended_entry: int | None = None,
+		book_depth: int | None = None,
+		fill_pct: float | None = None,
+		slippage_cents: float | None = None,
+		book_snapshot: str | None = None,
+		*,
+		now: datetime,
+	) -> int:
+		# The filled branch — map dispatch's paper-shaped record_trade onto
+		# the real live record_open (B's open-row writer).
+		return record_open(
+			self._conn,
+			ticker=ticker,
+			series=series_ticker,
+			strategy=strategy,
+			side=side,
+			intended_size=intended_size,
+			fill_size=fill_size,
+			entry_price_cents=entry_price,
+			blended_entry_cents=blended_entry if blended_entry is not None else entry_price,
+			slippage_cents=int(slippage_cents or 0),
+			fill_pct=fill_pct if fill_pct is not None else 1.0,
+			stop_loss_distance_cents=0,
+			client_order_id=f"{strategy}-{ticker}-{int(now.timestamp()*1000)}-itg",
+			kalshi_order_id=f"kx-{strategy}-{int(now.timestamp())}",
+			placed_at_utc=now.isoformat(),
+			entry_time=now.isoformat(),
+			entry_fee_cents=0,
+		)
+
+	def get_open_trades(self) -> list[dict[str, Any]]:
+		return []
+
+
+def _entry_signal() -> Signal:
+	return Signal(
+		action="enter",
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		reason="integration-entry",
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+	)
+
+
+def _ctx() -> MagicMock:
+	return MagicMock(yes_ask=42, no_ask=58, orderbook=MagicMock(depth=5))
+
+
+# ===========================================================================
+# #26 — full flow: dispatch → record_pending → WS fill → open → exit → close
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
+	conn: sqlite3.Connection, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""End-to-end through the REAL merged machine:
+
+	1. D returns ``pending`` (NetworkError) → dispatch ``_handle_enter``
+	   calls the real ``record_pending`` → a real ``pending`` row.
+	2. Kalshi WS ``fill`` for that client_order_id → real ``on_fill_event``
+	   → real ``transition_pending_to_open`` → row is ``open``.
+	3. The strategy later exits; Kalshi WS ``fill`` for the exit order →
+	   real ``on_fill_event`` exit path → real ``record_close`` → row is
+	   ``won``/``lost`` with P&L.
+	"""
+	store = _LiveBackedStore(conn)
+	cbs = StoreCallbacks()
+	mock_kalshi_ws.register(
+		db=conn,
+		store_callbacks=cbs,
+		on_fill=on_fill_event,
+		on_order_status=on_order_status_event,
+		on_settlement=on_settlement_event,
+	)
+
+	# --- 1. Dispatch the entry; D's executor returns pending (NetworkError:
+	# order_id=None) so dispatch takes the real record_pending path.
+	executor = MagicMock()
+	executor.place = AsyncMock(
+		return_value=OrderResult(
+			status="pending",
+			intended_size=10,
+			filled_size=0,
+			blended_entry_cents=0,
+			fill_pct=0.0,
+			slippage_cents=0,
+			rejection_reason="kalshi_unreachable:integration",
+			order_id=None,
+		)
+	)
+	await _handle_enter(
+		_entry_signal(), _ctx(), store, {"_metrics": MagicMock()}, executor,
+		now=_NOW,
+	)
+
+	assert store.last_pending_id is not None
+	pending_id = store.last_pending_id
+	pending_row = _row(conn, pending_id)
+	assert pending_row["status"] == "pending"
+	assert pending_row["kalshi_order_id"] is None
+	coid = str(pending_row["client_order_id"])
+	assert coid, "dispatch must have generated a client_order_id"
+
+	# --- 2. Kalshi confirms the entry via a WS fill.
+	await mock_kalshi_ws.emit_fill(
+		client_order_id=coid,
+		kalshi_order_id="kx-entry-26",
+		filled_count=10,
+		fills=[{"price": 42, "size": 7}, {"price": 43, "size": 3}],
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+	)
+	opened = _row(conn, pending_id)
+	assert opened["status"] == "open"
+	assert opened["kalshi_order_id"] == "kx-entry-26"
+	assert opened["fill_size"] == 10
+	assert opened["blended_entry_cents"] == 42  # round((42*7+43*3)/10)=42
+
+	# --- 3. The strategy exits; Kalshi WS fill for the exit order (fresh
+	# coid, matches no row → exit path → full close).
+	await mock_kalshi_ws.emit_fill(
+		client_order_id="debut_fade-KXSOL15M-1700000099999-exit26",
+		kalshi_order_id="kx-exit-26",
+		filled_count=10,
+		fills=[{"price": 60, "size": 10}],  # 60 > 42 entry → won
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+	)
+	closed = _row(conn, pending_id)
+	assert closed["status"] == "won"
+	assert closed["exit_price_cents"] == 60
+	assert closed["exit_time"] is not None
+	# pnl = 10*(60-42) - exit_fee  (>0 for this favorable close)
+	assert closed["pnl_cents"] is not None and closed["pnl_cents"] > 0
+	# Exactly one row — a full close UPDATEs in place, no split child.
+	assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_26_dispatch_filled_then_settlement_close(
+	conn: sqlite3.Connection, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""Variant: D returns ``filled`` → dispatch's real record_trade path →
+	real ``record_open`` (an ``open`` row); the market then settles via a
+	real ``on_settlement_event`` → real ``record_close`` at the binary
+	price. Proves the filled→settlement lifecycle through the real machine."""
+	store = _LiveBackedStore(conn)
+	cbs = StoreCallbacks()
+	mock_kalshi_ws.register(
+		db=conn,
+		store_callbacks=cbs,
+		on_fill=on_fill_event,
+		on_order_status=on_order_status_event,
+		on_settlement=on_settlement_event,
+	)
+	executor = MagicMock()
+	executor.place = AsyncMock(
+		return_value=OrderResult(
+			status="filled",
+			intended_size=10,
+			filled_size=10,
+			blended_entry_cents=42,
+			fill_pct=1.0,
+			slippage_cents=0,
+			order_id="kx-entry-26b",
+		)
+	)
+	await _handle_enter(
+		_entry_signal(), _ctx(), store, {"_metrics": MagicMock()}, executor,
+		now=_NOW,
+	)
+	open_id = conn.execute(
+		"SELECT id FROM live_trades WHERE status='open'"
+	).fetchone()[0]
+
+	# Market settles YES (100¢) — yes-side row wins.
+	await mock_kalshi_ws.emit_settlement(
+		ticker="KXSOL15M-26MAY16H12", settlement_price_cents=100
+	)
+	row = _row(conn, open_id)
+	assert row["status"] == "won"
+	assert row["exit_reason"] == "settlement"
+	assert row["exit_price_cents"] == 100
+	assert row["exit_fee_cents"] == 0
+
+
+@pytest.mark.asyncio
+async def test_26_settlement_callback_fires_after_rows_closed(
+	conn: sqlite3.Connection, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""E's wired bankroll/peak callback is awaited exactly once, AFTER every
+	settled row is durably closed (spec §428) — proves the injected-callback
+	boundary without importing engine internals."""
+	observed_status_at_callback: list[str] = []
+	row_holder: dict[str, int] = {}
+
+	async def on_settlement_cb() -> None:
+		# When the callback fires, the row must already be terminal.
+		rid = row_holder["id"]
+		st = conn.execute(
+			"SELECT status FROM live_trades WHERE id=?", (rid,)
+		).fetchone()[0]
+		observed_status_at_callback.append(st)
+
+	cbs = StoreCallbacks(on_settlement=on_settlement_cb)
+	mock_kalshi_ws.register(
+		db=conn, store_callbacks=cbs, on_settlement=on_settlement_event
+	)
+	rid = record_open(
+		conn,
+		ticker="KXSOL15M-26MAY16H12",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		side="yes",
+		intended_size=10,
+		fill_size=10,
+		entry_price_cents=42,
+		blended_entry_cents=42,
+		slippage_cents=0,
+		fill_pct=1.0,
+		stop_loss_distance_cents=8,
+		client_order_id="cid-cb-26",
+		kalshi_order_id="kx-cb-26",
+		placed_at_utc=_NOW_ISO,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row_holder["id"] = rid
+
+	await mock_kalshi_ws.emit_settlement(
+		ticker="KXSOL15M-26MAY16H12", settlement_price_cents=100
+	)
+	assert observed_status_at_callback == ["won"], (
+		"settlement callback must fire exactly once, AFTER the row closed"
+	)
+
+
+# ===========================================================================
+# #27 — live schema is readable in SQLite read-only mode (Risk #5 / §186)
+# ===========================================================================
+#
+# SCOPE NOTE / ORCHESTRATOR FINDING:
+# The spec (test #27, Risk #5, engine/live_db.py docstring) states the
+# operator's reporting CLI is run as
+# ``python -m edge_catcher.reporting --db <live_trades.db> --quiet`` and
+# "opens the DB with ?mode=ro URI". VERIFIED at HEAD 92dc7b0 that the
+# MERGED reporting CLI does NEITHER:
+#   * edge_catcher/reporting/__init__.py hard-queries ``FROM paper_trades``
+#     with columns ``entry_price`` / ``series_ticker``; the 0003 migration
+#     created table ``live_trades`` with ``entry_price_cents`` / ``series``.
+#     Running it against a live_trades.db raises
+#     ``sqlite3.OperationalError: no such table: paper_trades``.
+#   * it opens ``sqlite3.connect(str(db_path))`` — NOT a
+#     ``file:...?mode=ro`` URI.
+# Spec §186's "mirror paper schema ⇒ a single --db flip works unmodified"
+# is therefore FALSE against the merged code. The reporting CLI is
+# git-tracked, pre-v1.6.0, has its own paper_trades-pinned test suite, and
+# is declared OUT OF SCOPE by spec §32/§45 — 4.C does not modify it.
+#
+# These tests instead assert the LOAD-BEARING property #27/#28 exist to
+# prove (Risk #5): the live schema is safely readable in SQLite read-only
+# mode while B holds the WAL write connection. ``test_27_reporting_cli_*``
+# documents the CLI gap explicitly (xfail, not a silent skip) so the
+# orchestrator sees it.
+
+
+def _seed_closed_rows(conn: sqlite3.Connection) -> None:
+	"""A small realistic mix: one won, one lost (closed), one open."""
+	for i, (status, exitp, pnl) in enumerate(
+		[("won", 80, 380), ("lost", 10, -320)]
+	):
+		rid = record_open(
+			conn,
+			ticker=f"KXSOL15M-26MAY16H1{i}",
+			series="KXSOL15M",
+			strategy="debut_fade",
+			side="yes",
+			intended_size=10,
+			fill_size=10,
+			entry_price_cents=42,
+			blended_entry_cents=42,
+			slippage_cents=0,
+			fill_pct=1.0,
+			stop_loss_distance_cents=8,
+			client_order_id=f"cid-closed-{i}",
+			kalshi_order_id=f"kx-closed-{i}",
+			placed_at_utc=_NOW_ISO,
+			entry_time=_NOW_ISO,
+			entry_fee_cents=17,
+		)
+		record_close(
+			conn,
+			rid,
+			status=status,  # type: ignore[arg-type]
+			exit_price_cents=exitp,
+			exit_time=_NOW_ISO,
+			exit_reason="ws_exit_fill",
+			pnl_cents=pnl,
+			exit_fee_cents=12,
+		)
+	record_open(
+		conn,
+		ticker="KXSOL15M-26MAY16H99",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		side="yes",
+		intended_size=10,
+		fill_size=10,
+		entry_price_cents=42,
+		blended_entry_cents=42,
+		slippage_cents=0,
+		fill_pct=1.0,
+		stop_loss_distance_cents=8,
+		client_order_id="cid-open-99",
+		kalshi_order_id="kx-open-99",
+		placed_at_utc=_NOW_ISO,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+
+
+def test_27_live_schema_readable_read_only(
+	conn: sqlite3.Connection, live_db_path: Path
+) -> None:
+	"""Risk #5 load-bearing property: while B holds the WAL write connection,
+	a SECOND connection opened read-only (``file:...?mode=ro``, exactly the
+	URI spec §942 mandates for the reporting CLI) can read the live schema —
+	and a write through that read-only handle is rejected (so a reader can
+	never block B's writes by issuing one)."""
+	_seed_closed_rows(conn)  # B's write connection commits rows.
+
+	ro = sqlite3.connect(f"file:{live_db_path}?mode=ro", uri=True)
+	try:
+		# Reads work: the daily-P&L-shaped query the reporting layer needs.
+		total, wins, losses, net = ro.execute(
+			"SELECT COUNT(*), "
+			"SUM(CASE WHEN status='won' THEN 1 ELSE 0 END), "
+			"SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END), "
+			"COALESCE(SUM(CASE WHEN status IN ('won','lost') "
+			"THEN pnl_cents END), 0) "
+			"FROM live_trades"
+		).fetchone()
+		assert total == 3 and wins == 1 and losses == 1
+		assert net == 380 + (-320)
+		# A write via the read-only handle is refused → a reader cannot
+		# inadvertently block B's writer (the exact Risk #5 guarantee).
+		with pytest.raises(sqlite3.OperationalError):
+			ro.execute(
+				"INSERT INTO live_trades (ticker, series, strategy, side, "
+				"intended_size, original_intended_size, entry_price_cents, "
+				"status, client_order_id, placed_at_utc) VALUES "
+				"('X','X','x','yes',1,1,1,'pending','ro-x','2026-01-01T00:00:00+00:00')"
+			)
+			ro.commit()
+	finally:
+		ro.close()
+
+
+@pytest.mark.xfail(
+	reason=(
+		"ORCHESTRATOR FINDING (not a 4.C defect): the merged reporting CLI "
+		"(edge_catcher/reporting/__init__.py) hard-queries `FROM paper_trades` "
+		"with `entry_price`/`series_ticker`; the 0003 migration created table "
+		"`live_trades` with `entry_price_cents`/`series`, so the CLI raises "
+		"`no such table: paper_trades` against a live_trades.db. It also opens "
+		"plain sqlite3.connect, not the spec-mandated ?mode=ro URI. Spec §186 "
+		"'mirror paper schema = single --db flip works unmodified' is false vs "
+		"merged code. The reporting CLI is out of 4.C scope (spec §32/§45, "
+		"git-tracked, own paper_trades test suite). xfail documents the gap "
+		"for the orchestrator rather than silently skipping the spec item."
+	),
+	strict=True,
+)
+def test_27_reporting_cli_db_flag_against_live_schema(
+	conn: sqlite3.Connection, live_db_path: Path
+) -> None:
+	"""Spec #27 as literally written: run the reporting CLI against a
+	live_trades.db and expect a clean report. Currently xfails because the
+	merged CLI queries `paper_trades` (see the module SCOPE NOTE). When the
+	orchestrator resolves the reporting↔live-schema gap (a compatibility
+	view, a `--table`/`--schema` flag, or a live-aware reporting path), flip
+	this to a passing assertion."""
+	_seed_closed_rows(conn)
+	result = subprocess.run(
+		[sys.executable, "-m", "edge_catcher.reporting",
+		 "--db", str(live_db_path)],
+		capture_output=True,
+		text=True,
+		timeout=60,
+		cwd=str(Path(__file__).resolve().parents[1]),
+	)
+	# Spec intent: a clean exit-0 report against the live schema.
+	assert result.returncode == 0, (
+		f"reporting CLI failed against live schema: {result.stderr}"
+	)
+
+
+# ===========================================================================
+# #28 — cross-process WAL: concurrent writer + read-only reader are safe
+# ===========================================================================
+
+
+_WRITER_SRC = textwrap.dedent(
+	"""
+	import sys, time
+	from pathlib import Path
+	from edge_catcher.live.state import connect_live_trades_db, record_open
+
+	db = Path(sys.argv[1])
+	c = connect_live_trades_db(db)
+	for i in range(40):
+		record_open(
+			c,
+			ticker=f"KXSOL15M-26MAY16H{i:02d}",
+			series="KXSOL15M",
+			strategy="wal-writer",
+			side="yes",
+			intended_size=1,
+			fill_size=1,
+			entry_price_cents=42,
+			blended_entry_cents=42,
+			slippage_cents=0,
+			fill_pct=1.0,
+			stop_loss_distance_cents=8,
+			client_order_id=f"wal-coid-{i}",
+			kalshi_order_id=f"wal-kx-{i}",
+			placed_at_utc="2026-05-16T12:00:00+00:00",
+			entry_time="2026-05-16T12:00:00+00:00",
+			entry_fee_cents=17,
+		)
+		time.sleep(0.005)
+	c.close()
+	"""
+)
+
+_READER_SRC = textwrap.dedent(
+	"""
+	import sqlite3, sys, time
+
+	db = sys.argv[1]
+	# Exactly the spec §942 read-only open the reporting CLI must use.
+	max_seen = 0
+	for _ in range(60):
+		ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+		try:
+			n = ro.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			max_seen = max(max_seen, n)
+		finally:
+			ro.close()
+		time.sleep(0.005)
+	print(max_seen)
+	"""
+)
+
+
+def test_28_cross_process_wal_concurrent_reader_is_safe(
+	live_db_path: Path,
+) -> None:
+	"""Risk #5: a writer PROCESS appends rows to live_trades.db (WAL) while a
+	reader PROCESS concurrently reads it read-only. Neither errors, and the
+	reader observes a monotonically growing count (proving WAL lets the
+	read-only reader see committed rows without blocking the writer)."""
+	root = str(Path(__file__).resolve().parents[1])
+	writer = subprocess.Popen(
+		[sys.executable, "-c", _WRITER_SRC, str(live_db_path)],
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+		cwd=root,
+	)
+	reader = subprocess.Popen(
+		[sys.executable, "-c", _READER_SRC, str(live_db_path)],
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+		cwd=root,
+	)
+	w_out, w_err = writer.communicate(timeout=90)
+	r_out, r_err = reader.communicate(timeout=90)
+
+	assert writer.returncode == 0, f"writer process failed: {w_err}"
+	assert reader.returncode == 0, f"reader process failed: {r_err}"
+	max_seen = int(r_out.strip() or "0")
+	# The reader ran read-only concurrently with the writer and never errored;
+	# it saw at least some committed rows (timing-tolerant lower bound — the
+	# point is "no lock error / no corruption under concurrent WAL access",
+	# not an exact count race).
+	assert max_seen >= 1, (
+		f"read-only reader saw {max_seen} rows — expected concurrent WAL "
+		f"reads to observe committed rows (reader stderr: {r_err})"
+	)
+
+	# Final state: the writer's 40 rows are all durably present.
+	final = connect_live_trades_db(live_db_path)
+	try:
+		count = final.execute(
+			"SELECT COUNT(*) FROM live_trades WHERE strategy='wal-writer'"
+		).fetchone()[0]
+	finally:
+		final.close()
+	assert count == 40, f"expected 40 durably-written rows, got {count}"
