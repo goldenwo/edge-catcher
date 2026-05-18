@@ -66,6 +66,18 @@ except ImportError:
 	class KillSwitchTripFailed(Exception):  # type: ignore[no-redef]
 		pass
 
+# RecordPendingFailed (B / PR 5) is the same ghost-reject defense for the
+# live-trades persistence layer: a failed record_pending/record_open INSERT
+# strands a funds-at-risk Kalshi-side order with no local row. It must
+# propagate out of run_engine for the same reason KillSwitchTripFailed does —
+# continuing past it would re-evaluate the gate against unchanged DB state.
+# Same runtime try/except so engine.py still imports when live.state is absent.
+try:
+	from edge_catcher.live.state import RecordPendingFailed  # noqa: PLC0415
+except ImportError:
+	class RecordPendingFailed(Exception):  # type: ignore[no-redef]
+		pass
+
 log = logging.getLogger(__name__)
 
 
@@ -691,6 +703,17 @@ async def run_engine(
 					# restarts the engine after the DB is fixed or manually trips
 					# the kill via the CLI.
 					raise
+				except RecordPendingFailed:
+					# B / PR 5 ghost-reject defense — same fail-loud contract as
+					# KillSwitchTripFailed. record_pending/record_open INSERT
+					# failed: a funds-at-risk Kalshi order is stranded with no
+					# local row. Reconnecting would re-enter the WS loop and let
+					# the next tick re-evaluate the gate against unchanged DB
+					# state. STOP so the operator investigates DB health and
+					# reconciles the stranded order via the Kalshi UI before
+					# restarting. Placed before the broad except for the same
+					# reason as the KillSwitchTripFailed clause above.
+					raise
 				except Exception:
 					log.exception("Unexpected WS error — reconnecting in %ds", reconnect_delay)
 					await asyncio.sleep(reconnect_delay)
@@ -799,6 +822,15 @@ async def _ws_loop(
 				# NOT swallow here either, otherwise the engine continues to the
 				# next message, the gate re-evaluates with no kill row persisted,
 				# and the previously-blocked trade goes through with real money.
+				# Propagate to the outer reconnect block (which also re-raises
+				# it) so run_engine terminates.
+				raise
+			except RecordPendingFailed:
+				# B / PR 5 ghost-reject defense — full chain, mirrors
+				# KillSwitchTripFailed. process_tick already re-raised past
+				# _handle_signal's broad except; swallowing here would let the
+				# engine continue to the next WS message with a funds-at-risk
+				# Kalshi order stranded and no local row for B's reconciler.
 				# Propagate to the outer reconnect block (which also re-raises
 				# it) so run_engine terminates.
 				raise

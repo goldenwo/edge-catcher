@@ -11,8 +11,12 @@ from edge_catcher.storage.models import Market, Trade
 # without per-test re-import. The MockKalshiServer module provides fixtures
 # (mock_kalshi_server / live_cfg / live_audit / signing_env / zero_backoff)
 # consumed by tests/test_engine_live_executor_integration.py and (later) E's
-# CR-5 parity test.
-pytest_plugins = ["tests.fixtures.mock_kalshi_server"]
+# CR-5 parity test. MockKalshiWS provides the in-process account-scope WS
+# stand-in (mock_kalshi_ws) for B's WS-handler + integration tests (PR 5/4.C).
+pytest_plugins = [
+	"tests.fixtures.mock_kalshi_server",
+	"tests.fixtures.mock_kalshi_ws",
+]
 
 
 # ---------------------------------------------------------------------------

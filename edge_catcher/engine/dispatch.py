@@ -62,6 +62,18 @@ except ImportError:
 	class KillSwitchTripFailed(Exception):  # type: ignore[no-redef]
 		pass
 
+# RecordPendingFailed mirrors KillSwitchTripFailed (B / PR 5 ghost-reject
+# defense): a failed record_pending/record_open INSERT means a funds-at-risk
+# Kalshi order is stranded with no local row. process_tick must re-raise it
+# past the broad per-signal except so the engine STOPS rather than re-entering
+# the gate against unchanged DB state. Same runtime-import + sentinel pattern
+# so dispatch.py still imports when live.state is absent (paper/replay).
+try:
+	from edge_catcher.live.state import RecordPendingFailed  # noqa: PLC0415
+except ImportError:
+	class RecordPendingFailed(Exception):  # type: ignore[no-redef]
+		pass
+
 log = logging.getLogger(__name__)
 
 # Module-level flag to ensure the "Gate constructed but dispatch wiring deferred"
@@ -216,6 +228,17 @@ async def process_tick(
 				# next tick re-enter ungated. This re-raise is the structural
 				# enforcement of E's gate-wiring contract — must NOT be
 				# swallowed by the broad except below.
+				raise
+			except RecordPendingFailed:
+				# B / PR 5 ghost-reject defense: record_pending/record_open
+				# INSERT failed, so a funds-at-risk Kalshi-side order is now
+				# stranded with NO local row for B's reconciler to find.
+				# Swallowing here would let the next tick re-enter the gate
+				# against unchanged DB state. Must propagate (mirrors
+				# KillSwitchTripFailed) so the WS loop + outer reconnect block
+				# terminate run_engine instead of continuing past a failed
+				# persistence. Placed before the broad except below for the
+				# same reason.
 				raise
 			except Exception:
 				log.exception(

@@ -814,11 +814,17 @@ class TestEquityComputation:
 # ===========================================================================
 
 class TestLiveDbStubMode:
-	def test_stub_mode_is_true(self) -> None:
-		"""C's PR ships with STUB_MODE=True. B's PR diffs this to False."""
+	def test_stub_mode_is_false(self) -> None:
+		"""Release gate (Risk #7): C's PR shipped STUB_MODE=True so the flip
+		was a visible reviewable diff; B's PR (PR 5) flips it to False and
+		ships the real queries. If a regression reverts this to True, C's
+		gate would see zero open positions + zero daily P&L (silent
+		gate-always-allows with real money) — this assertion fails CI at
+		merge time. Mirrored by tests/test_engine_live_db.py."""
 		import edge_catcher.engine.live_db as live_db
-		assert live_db.STUB_MODE is True, (
-			"STUB_MODE must be True in C's PR; B's PR flips it to False"
+		assert live_db.STUB_MODE is False, (
+			"STUB_MODE MUST be False once B's PR 5 ships the real live_db "
+			"queries — True here is a silent gate-always-allows (Risk #7)"
 		)
 
 	def test_read_open_positions_returns_empty(self) -> None:
