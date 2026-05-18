@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlencode
 
 import httpx
 
@@ -208,6 +209,105 @@ class KalshiOrderClient:
 		raw = response.get("market_positions", [])
 		return [self._parse_position(p) for p in raw]
 
+	async def list_orders(
+		self,
+		*,
+		status: str | None = None,
+		limit: int = 200,
+		cursor: str | None = None,
+		min_ts: int | None = None,
+	) -> list[Order]:
+		"""List portfolio orders via ``GET /portfolio/orders``.
+
+		Single bounded page per invocation — this method issues exactly one
+		REST call and does NOT internally follow the pagination cursor.
+		Sub-project B's phantom-pending poller relies on "ONE call to
+		``list_orders()`` per cycle" (it then matches locally by
+		``client_order_id``); a generous default ``limit`` covers the
+		recent-orders working set without forcing pagination. Callers that
+		genuinely need a later page pass the ``cursor`` token Kalshi returns
+		in the response envelope's ``cursor`` field back in via the
+		``cursor`` argument; advancing pages is the caller's responsibility,
+		kept out of this primitive to keep REST traffic bounded.
+
+		**Recency bound and the single-page assumption.** The result is one
+		page only and is server-side bounded by recency *only when* ``min_ts``
+		(Unix seconds; Kalshi ``GET /portfolio/orders`` accepts it exactly as
+		``GetTrades`` does — see ``adapters/kalshi/adapter.py``) is supplied.
+		Without ``min_ts`` this method assumes Kalshi returns orders
+		newest-first and that the recent working set fits within ``limit``.
+		If that ordering assumption ever breaks, an unbounded scan can have
+		>``limit`` orders and a genuine ``pending`` row's matching (possibly
+		*filled*) Kalshi order falls off page 1 — the reconciler then finds
+		no match and, after TTL, marks it ``rejected_post_hoc`` (stranded
+		real-money position + phantom rejection). Therefore **4.B's startup
+		reconcile MUST pass ``min_ts``** (bounded to e.g. "since now − the
+		reconcile lookback"); the low-volume 30s phantom-pending poller MAY
+		rely on the default (its working set is small by construction). This
+		mirrors the documented-assumption convention at
+		``adapters/kalshi/adapter.py`` (newest-first NOTE on ``GetTrades``).
+
+		``status`` is an optional server-side filter passed through verbatim
+		(Kalshi ``GET /portfolio/orders`` values: ``resting`` / ``executed``
+		/ ``canceled``; the order lifecycle additionally surfaces ``pending``
+		/ ``rejected`` in element bodies, which B's decision matrix keys off
+		``Order.status`` for). Omitted by default so B's startup/reconnect
+		reconcile sees active *and* recently-completed orders in one call.
+
+		``limit`` is clamped to ``[1, 1000]`` (Kalshi documented max page
+		size) so a typo'd value in a caller cannot silently shrink or blow
+		the reconciliation window.
+
+		Returns parsed :class:`Order` objects (empty list when none). Each
+		carries ``client_order_id`` / ``order_id`` / ``status`` /
+		``filled_count`` — sufficient for B's reconciliation decision matrix.
+		The full Kalshi element is preserved on ``Order.raw`` for
+		forward-compat. A single malformed element is skipped (logged at
+		WARNING) rather than aborting the whole batch — an all-or-nothing
+		parse would propagate out of B's ``_reconcile_pending_batch`` and
+		skip the entire reconcile cycle, pushing genuine pending rows toward
+		their TTL. 4xx/5xx flow through the shared ``_request`` dispatch
+		(generic :class:`KalshiAPIError`), identical to ``status()`` /
+		``positions()`` — no bespoke error handling.
+		"""
+		# Clamp before building params: floor 1 (a 0/negative would send an
+		# empty/invalid window), ceil 1000 (Kalshi documented max page size —
+		# a larger value is silently capped server-side anyway; clamp here so
+		# the signed/sent string reflects the real window).
+		limit = max(1, min(limit, 1000))
+		# Query params are threaded through _request so they are baked into
+		# the single signed-and-sent path string (Kalshi RSA signing strips
+		# the query before signing; the module invariant is that the string
+		# handed to make_auth_headers is byte-identical to the wire path —
+		# see _request). None values are dropped (never sent as empty).
+		params: dict[str, str | int] = {"limit": limit}
+		if status is not None:
+			params["status"] = status
+		if cursor is not None:
+			params["cursor"] = cursor
+		if min_ts is not None:
+			params["min_ts"] = min_ts
+		response = await self._get("/portfolio/orders", op="list_orders", params=params)
+		raw = response.get("orders", [])
+		# Defensive per-element parse: _parse_order is defensive-by-design for
+		# missing FIELDS, but a non-dict element makes its `.get` raise. This
+		# primitive is B's sole safety net for pending rows with
+		# kalshi_order_id IS NULL; one bad element must not strand every
+		# phantom-pending row that cycle. Skip-and-log, return the rest.
+		orders: list[Order] = []
+		for element in raw:
+			try:
+				orders.append(self._parse_order(element))
+			except (AttributeError, TypeError, ValueError, KeyError) as exc:
+				log.warning(
+					"list_orders: skipping malformed order element "
+					"(%s: %s) — element=%.200r",
+					type(exc).__name__,
+					exc,
+					element,
+				)
+		return orders
+
 	# ------------------------------------------------------------------
 	# Internal request layer
 	# ------------------------------------------------------------------
@@ -215,8 +315,14 @@ class KalshiOrderClient:
 	async def _post(self, path: str, body: dict, op: str, client_order_id: str | None) -> dict:
 		return await self._request("POST", path, op=op, json=body, client_order_id=client_order_id)
 
-	async def _get(self, path: str, op: str) -> dict:
-		return await self._request("GET", path, op=op)
+	async def _get(
+		self,
+		path: str,
+		op: str,
+		*,
+		params: dict[str, str | int] | None = None,
+	) -> dict:
+		return await self._request("GET", path, op=op, params=params)
 
 	async def _delete(self, path: str, op: str) -> dict:
 		return await self._request("DELETE", path, op=op)
@@ -229,10 +335,25 @@ class KalshiOrderClient:
 		op: str,
 		json: dict | None = None,
 		client_order_id: str | None = None,
+		params: dict[str, str | int] | None = None,
 	) -> dict:
 		# Build the full URL path explicitly so signing and sending use the
 		# exact same string. Keep base_url host-only; prepend the prefix here.
+		#
+		# Query params (GET filters/pagination) are encoded INTO this single
+		# string before make_auth_headers / the wire request — never passed
+		# to httpx as a separate `params=` dict. Kalshi RSA signing strips
+		# the query before signing (adapters.kalshi.auth), but the module
+		# invariant is stronger: the string handed to make_auth_headers is
+		# byte-identical to the path+query httpx puts on the wire, so the
+		# audit trail and the "signed == sent" regression guard hold. A
+		# separate httpx `params=` would be appended AFTER signing and break
+		# that invariant. `urlencode` gives deterministic, stable ordering
+		# (dict insertion order in py3.7+); None-valued params are dropped by
+		# the callers, so nothing is sent as an empty value.
 		full_path = _KALSHI_REST_PREFIX + path
+		if params:
+			full_path = f"{full_path}?{urlencode(params)}"
 		retries = 0
 		started = time.monotonic()
 		last_error: str | None = None
