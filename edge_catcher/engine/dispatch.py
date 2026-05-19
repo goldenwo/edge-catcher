@@ -353,6 +353,44 @@ async def _handle_enter(
 		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
 	)
 
+	# Pre-place durability hook (sub-project E / L1; spec §3 keystone + §3.1).
+	# Called UNCONDITIONALLY — no mode branch. The TradeStoreProtocol absorbs
+	# the paper/live difference: paper + InMemory record_intent is a strict
+	# no-op (return None — byte-exact-invisible to the parity sweep, §9), the
+	# live store durably INSERTs a `pending` row keyed by client_order_id
+	# BEFORE any order is sent. That makes a severed place→persist recoverable
+	# by B's reconciler via client_order_id — "no untracked real-money
+	# position" holds even if async code downstream is imperfect.
+	#
+	# 🚨 §3.1 FATAL: a live record_intent INSERT failure raises
+	# RecordPendingFailed. There is intentionally NO try/except here — it
+	# propagates UNCAUGHT so the entry ABORTS BEFORE `await executor.place`
+	# (nothing was sent ⇒ nothing at risk ⇒ a hard engine stop strands
+	# nothing — STRONGER than the post-place ghost-reject). It reaches
+	# process_tick's `except RecordPendingFailed: raise` (mirroring
+	# KillSwitchTripFailed) which halts the engine rather than re-entering
+	# the gate against unchanged DB state. intended_size is the pre-sizing
+	# PLACEHOLDER: req.size_contracts is 0 here (dispatch defers sizing to
+	# the executor pipeline; the sizing refactor lands later) — identical
+	# sizing-deferred convention as the engine-timeout pending row below;
+	# B's reconciler resolves the true size from Kalshi by client_order_id.
+	# entry_price_cents is the ORIGINAL Signal intent (NOT D's slippage-
+	# adjusted limit), matching the post-place record_pending contract.
+	# `now` is the threaded tick clock (module invariant L14-L18: handlers
+	# never read datetime.now()) so replay produces a byte-identical
+	# placed_at_utc to the original live execution.
+	store.record_intent(
+		ticker=signal.ticker,
+		series=signal.series,
+		strategy=signal.strategy,
+		side=signal.side,
+		intended_size=req.size_contracts,
+		entry_price_cents=signal.entry_price_cents,
+		stop_loss_distance_cents=signal.stop_loss_distance_cents,
+		client_order_id=req.client_order_id,
+		placed_at_utc=now.isoformat(),
+	)
+
 	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to
 	# never raise (every error path returns a defined OrderResult), but a
 	# bug in ``KalshiOrderClient``'s retry loop (infinite retry on a
