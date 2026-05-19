@@ -82,6 +82,206 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# §2 fail-closed mode-coherence invariant (NORMATIVE — spec §2 / §6)
+#
+# Wrong-mode is structurally unstartable. Before ANY WS connect, REST call,
+# DB open, or order placement, run_engine asserts the declared execution
+# mode coheres with EVERY independent live/paper signal. Any disagreement
+# aborts with a precise RuntimeError BEFORE the first side effect.
+#
+# §6 boot ordering: this is step (2) — called FIRST right after config load,
+# BEFORE the store/executor is constructed and BEFORE any network. It is
+# read-only: it resolves predicates (creds/channels/caps) without performing
+# I/O. A coherence check that itself touched the network, or that could be
+# bypassed, would defeat its own purpose.
+#
+# §9 G-parity: for paper mode only checks (1) executor key ∈ {live, paper}
+# and (2) paper ⟺ paper_trades*.db run; checks 3/4/5 are live-only and are
+# genuinely skipped. The paper path is byte-unchanged.
+# ---------------------------------------------------------------------------
+
+# Default unified-notifications config path — mirrors the reporting CLI's
+# _DEFAULT_NOTIFY_CONFIG (edge_catcher/reporting/__main__.py) so live engine
+# and live P&L cron resolve the SAME channels file by default.
+_DEFAULT_NOTIFY_CONFIG = "config.local/notifications.yaml"
+
+# Live trade-scope signing env-var names. A's design (adapters/kalshi/auth.py
+# docstring): the live trader passes trade-scope key var names so a leaked
+# read-only key cannot place orders. Overridable via the notifications/creds
+# config block; these defaults match the test signing_env fixture.
+_DEFAULT_LIVE_KEY_ID_ENV = "KALSHI_LIVE_KEY_ID"
+_DEFAULT_LIVE_PRIVATE_KEY_ENV = "KALSHI_LIVE_PRIVATE_KEY"
+
+
+def _coherence_fail(check: str, detail: str) -> RuntimeError:
+	"""Log a precise error naming WHICH coherence check failed and return
+	the RuntimeError to raise. Centralized so every abort path has an
+	identical, operator-actionable, grep-able shape ("coherence" + the
+	failed dimension + why)."""
+	msg = f"mode-coherence FAILED [{check}]: {detail}"
+	log.error("BOOT ABORT — %s. Wrong-mode is structurally unstartable "
+	          "(spec §2/§6); no network/order was performed.", msg)
+	return RuntimeError(msg)
+
+
+def _assert_mode_coherence(config: dict) -> None:
+	"""§2 fail-closed coherence invariant — the funds-safety boot gate.
+
+	Read-only. No network, no DB open, no order. Raises ``RuntimeError``
+	(message contains "coherence" + the failed check) on ANY disagreement
+	between the declared mode and the resolved db/creds/channel/caps.
+
+	Live mode asserts all five §2 dimensions; paper mode asserts only the
+	two that apply (executor key + db path) and skips the live-only ones
+	with ZERO behavior change (§9 G-parity).
+	"""
+	# --- Check 1: the `executor:` key is the mode of record (§2.1). ---
+	mode = config.get("executor")
+	if mode not in ("live", "paper"):
+		raise _coherence_fail(
+			"executor",
+			f"`executor:` must be 'live' or 'paper' (the mode of record, "
+			f"spec §2.1); got {mode!r}",
+		)
+
+	# --- Check 2: resolved DB path ⟺ mode (§2.2). Applies to BOTH modes
+	# symmetrically — a paper run must never touch the real-money DB and a
+	# live run must never write into the paper DB. Substring match on the
+	# resolved path (live_trades / paper_trades), matching the codebase
+	# convention (live/store.py, live/cli.py default data/live_trades.db;
+	# engine default data/paper_trades.db). ---
+	db_path = str(config.get("db_path", "data/paper_trades.db"))
+	db_name = Path(db_path).name.lower()
+	if mode == "live":
+		if "live_trades" not in db_name:
+			raise _coherence_fail(
+				"db",
+				f"executor=live but db_path {db_path!r} is not a "
+				f"live_trades*.db (a live run must write the real-money DB)",
+			)
+		if "paper_trades" in db_name:
+			raise _coherence_fail(
+				"db",
+				f"executor=live but db_path {db_path!r} looks like a paper "
+				f"DB (real-money rows must not land in the paper DB)",
+			)
+	else:  # paper
+		if "paper_trades" not in db_name:
+			raise _coherence_fail(
+				"db",
+				f"executor=paper but db_path {db_path!r} is not a "
+				f"paper_trades*.db",
+			)
+		if "live_trades" in db_name:
+			raise _coherence_fail(
+				"db",
+				f"executor=paper but db_path {db_path!r} looks like the "
+				f"live real-money DB (paper must never touch it)",
+			)
+
+	# Checks 3/4/5 are LIVE-ONLY. For paper they are skipped entirely so
+	# the paper path is byte-unchanged (§9). Return now for paper.
+	if mode == "paper":
+		return
+
+	notif_cfg = config.get("notifications", {}) or {}
+
+	# --- Check 3: creds resolvable via A's auth resolver (§2.3, live
+	# only). make_auth_headers reads the trade-scope env vars and signs a
+	# local string with RSA-PSS — NO network. A missing/invalid key raises
+	# KeyError/ValueError; we translate to the coherence RuntimeError. ---
+	key_id_env = notif_cfg.get("live_key_id_env", _DEFAULT_LIVE_KEY_ID_ENV)
+	private_key_env = notif_cfg.get(
+		"live_private_key_env", _DEFAULT_LIVE_PRIVATE_KEY_ENV
+	)
+	try:
+		make_auth_headers(
+			key_id_env=key_id_env, private_key_env=private_key_env
+		)
+	except KeyError as exc:
+		raise _coherence_fail(
+			"creds",
+			f"executor=live but Kalshi trade-scope credentials are "
+			f"unresolvable: env var {exc} is not set (checked "
+			f"{key_id_env!r}/{private_key_env!r})",
+		) from exc
+	except ValueError as exc:
+		raise _coherence_fail(
+			"creds",
+			f"executor=live but the resolved Kalshi private key is "
+			f"invalid: {exc}",
+		) from exc
+
+	# --- Check 4: the live Discord channel(s) resolvable from the unified
+	# notifications config (§2.4, live only). load_channels parses the
+	# YAML and constructs the adapter objects — NO network (delivery is
+	# lazy). E2 only CHECKS resolvability; it does NOT migrate engine
+	# notifications onto the unified layer (that is G). ---
+	notify_path = Path(
+		notif_cfg.get("config_path", _DEFAULT_NOTIFY_CONFIG)
+	)
+	live_channel = notif_cfg.get("live_channel")
+	if not live_channel:
+		raise _coherence_fail(
+			"channel",
+			"executor=live but no `notifications.live_channel` is "
+			"configured (live alerts/risk events would go nowhere)",
+		)
+	# Local import: keep engine.py importable on paper-only deployments
+	# that may not have the notifications extra wired, mirroring the
+	# risk.py / live.state runtime-import pattern at module top.
+	from edge_catcher.notifications import (  # noqa: PLC0415
+		NotificationConfigError,
+		load_channels,
+	)
+	try:
+		channels = load_channels(notify_path)
+	except NotificationConfigError as exc:
+		raise _coherence_fail(
+			"channel",
+			f"executor=live but the unified notifications config "
+			f"{str(notify_path)!r} is unresolvable: {exc}",
+		) from exc
+	if live_channel not in channels:
+		raise _coherence_fail(
+			"channel",
+			f"executor=live but the configured live channel "
+			f"{live_channel!r} is not defined in {str(notify_path)!r} "
+			f"(available: {sorted(channels)})",
+		)
+
+	# --- Check 5: Phase-1 caps present in the `risk:` block (§2.5, live
+	# only). Reuse RiskConfig.from_dict — the SAME authoritative parser
+	# build_risk_module uses (risk.py) — so there is no drift-prone
+	# duplicated key list; it raises KeyError on a missing cap and
+	# ValueError on an out-of-range one. Construction is pure (no I/O). ---
+	risk_block = config.get("risk")
+	if not isinstance(risk_block, dict) or not risk_block:
+		raise _coherence_fail(
+			"caps",
+			"executor=live but the `risk:` block is missing/empty — the "
+			"Phase-1 caps are mandatory for live (spec §2.5/§8)",
+		)
+	# Local import for the same paper-only-deployment resilience reason as
+	# the KillSwitchTripFailed/RecordPendingFailed runtime imports.
+	from edge_catcher.engine.risk import RiskConfig  # noqa: PLC0415
+	try:
+		RiskConfig.from_dict(risk_block)
+	except KeyError as exc:
+		raise _coherence_fail(
+			"caps",
+			f"executor=live but a required Phase-1 risk cap is absent "
+			f"from the `risk:` block: missing key {exc} "
+			f"(spec §2.5/§8; canonical set = RiskConfig.from_dict)",
+		) from exc
+	except (ValueError, TypeError) as exc:
+		raise _coherence_fail(
+			"caps",
+			f"executor=live but a Phase-1 risk cap is invalid: {exc}",
+		) from exc
+
+
+# ---------------------------------------------------------------------------
 # Async engine and background tasks
 #
 # The synchronous signal pipeline (process_tick, _handle_signal, _handle_enter,
@@ -517,6 +717,17 @@ async def run_engine(
 	"""
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
+
+	# 2. §2 fail-closed mode-coherence invariant (NORMATIVE — spec §2/§6
+	# boot step 2). Called FIRST, immediately after config load and BEFORE
+	# the store/executor is constructed or ANY network/WS/order. A
+	# wrong-mode start (executor:live with a mismatched db/creds/channel/
+	# caps, or executor:paper pointed at the real-money DB) raises a
+	# precise RuntimeError here — structurally unstartable, no side effect
+	# performed. For paper this passes cleanly with zero behavior change
+	# (§9 G-parity): only the executor-key + paper-DB checks apply.
+	_assert_mode_coherence(config)
+
 	# Operational metrics counter — stashed in config so tick-path functions
 	# (_handle_enter) that already receive config can read it without adding
 	# a new parameter to every handler. The underscore signals "internal".
