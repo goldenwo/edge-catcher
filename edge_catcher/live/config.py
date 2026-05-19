@@ -20,7 +20,19 @@ DEFAULT_AUDIT_LOG_PATH = Path("data/live_audit.jsonl")
 class LiveConfig(BaseModel):
 	"""Loaded from `config.local/live-trader.yaml`."""
 
-	model_config = {"extra": "forbid"}
+	# SC-E3a (spec §10 / §8): the LOCKED §8 design is ONE combined
+	# `config.local/live-trader.yaml` that also carries the engine's
+	# executor/risk/execution/strategies/db_path/notifications blocks. The
+	# live-trader composition root (`engine._compose_live`) loads ONLY this
+	# `LiveConfig` 5-field client subset from that same file; `extra: forbid`
+	# would hard-reject the engine's sibling keys (`extra_forbidden`) and make
+	# the combined file structurally unloadable. `ignore` relaxes ONLY
+	# UNDECLARED keys — the 5 declared client fields below stay strictly
+	# validated (type coercion + the `cli_max_order_dollars` field_validator
+	# still enforce the ABSOLUTE_MAX / floor). A's `live/cli.py` is unchanged
+	# (it already `getattr`s `db_path` with a default — an ignored key simply
+	# stays absent, exactly its prior behaviour).
+	model_config = {"extra": "ignore"}
 
 	cli_max_order_dollars: Annotated[float, Field(gt=0)] = 1.0
 	audit_log_path: Path = DEFAULT_AUDIT_LOG_PATH

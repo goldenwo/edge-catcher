@@ -303,7 +303,18 @@ async def _handle_signal(
 				_gate_unwired_warning_logged = True
 		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
-		_handle_exit(signal, ctx, store, bullet, now=now)
+		# SC-D3 (E3): _handle_exit is now async (it awaits executor.place for
+		# the exit order — the §1 seam: PaperExecutor resolves synchronously /
+		# LiveExecutor places a real IOC + B's async path owns the close) and
+		# receives executor/config UNCONDITIONALLY (no mode branch — the
+		# executor absorbs the live-vs-paper difference; paper close stays
+		# byte-EXACT via the unconditional store.exit_trade). `risk` is NOT
+		# threaded: exits bypass the entry gate (kills cap NEW exposure; they
+		# never trap existing exposure — see this function's docstring).
+		await _handle_exit(
+			signal, ctx, store, bullet, now=now,
+			executor=executor, config=config,
+		)
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
@@ -621,15 +632,42 @@ async def _handle_enter(
 		metrics.inc("entries_unhandled_status")
 
 
-def _handle_exit(
+async def _handle_exit(
 	signal: Signal,
 	ctx: TickContext,
 	store: TradeStoreProtocol,
 	bullet: str = "🔵",
 	*,
 	now: datetime,
+	executor: Executor,
+	config: dict,
 ) -> None:
-	"""Process an exit signal: compute exit price, close trade."""
+	"""Process an exit signal: place the exit via the executor, then close.
+
+	SC-D3 (spec §10 / §3 `:534/:537` / §1 keystone — E3's deliverable, the
+	controller-adjudicated R1 deferral from D3): the exit Signal is placed via
+	``executor.place(exit_req)`` UNCONDITIONALLY (no mode branch — the executor
+	IS the live-vs-paper seam, never a per-call ``isinstance``/mode test).
+
+	* PAPER: ``PaperExecutor.place`` resolves the sell synchronously as a
+	  deterministic exit-ACK (its fill fields are NOT consumed here); the
+	  AUTHORITATIVE paper close remains the SAME synchronous
+	  ``store.exit_trade(trade_id, ctx_bid)`` call dispatch has always made —
+	  byte-EXACT vs pre-E3 (mandatory K2 11/11 G-parity; the paper store does
+	  the won/lost/scratch + pnl arithmetic exactly as before).
+	* LIVE: ``LiveExecutor.place`` places a real IOC sell on Kalshi; the
+	  AUTHORITATIVE close is owned by B's async ``on_fill_event`` / reconciler
+	  (started by E3's composition root in live mode). The unconditional
+	  ``store.exit_trade`` below is then C5's IDEMPOTENT, NON-authoritative
+	  backstop: live ``store.exit_trade`` → ``live.state.record_close`` CAS
+	  (``exit_reason='ws_exit_fill'``) whose precondition
+	  ``status IN ('open','exit_pending')`` makes it race SAFELY with B's
+	  async path — whichever lands the CAS first wins, the other is a logged
+	  no-op that NEVER raises (the §4.2-adjudicated C5/D2 benign-lost-CAS
+	  property; B/Kalshi-truth is the authority + reconciler is the L3
+	  backstop). The store/Protocol absorbs the live-vs-paper difference; this
+	  function is mode-AGNOSTIC (§1).
+	"""
 	if signal.trade_id is None:
 		log.warning(
 			"Exit signal from %s for %s has no trade_id — skipping",
@@ -640,20 +678,76 @@ def _handle_exit(
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
-	# SC-D3 (spec-CORRECTION, controller-adjudicated R1 — §3/§1/§4.2): the §3
-	# table's literal "place exit via executor" + the prerequisite
-	# PaperExecutor sell path + executor/cfg/position threading are E3's
-	# deliverable (PaperExecutor.place is entries-only; routing this exit
-	# through executor.place unconditionally would run entry-sizing on a paper
-	# exit — a G-parity-BLOCKING paper behaviour change — and a mode branch
-	# would violate the §1 keystone). D3's exit path is the mode-AGNOSTIC,
-	# IDEMPOTENT store-shaped close: live `store.exit_trade` is C5's CAS to B
-	# `record_close` (exit_reason='ws_exit_fill'; lost-CAS = logged no-op,
-	# never raises) which races SAFELY with B's E3-wired async
-	# on_fill_event/reconciler (B/Kalshi-truth is the authority — whichever
-	# lands the CAS first wins, the other no-ops); paper `store.exit_trade` is
-	# today's byte-unchanged sync close. dispatch does NOT branch on mode —
-	# the store/Protocol absorbs the live-vs-paper difference (§1).
+	# Resolve the open position's size BEFORE the close (the close transitions
+	# the row out of 'open'; reading after would see fill_size on a closed
+	# row / miss it). get_trade_by_id is the mode-agnostic by-id read every
+	# store implements (paper TradeStore / replay InMemory / live
+	# SQLiteTradeStore) — NOT a mode branch. A missing/closed row ⇒ no
+	# position to place an exit for; fall through to the (idempotent)
+	# store.exit_trade which handles row-not-found / already-closed safely.
+	pos_row = store.get_trade_by_id(signal.trade_id)
+	exit_size = int((pos_row or {}).get("fill_size") or 0)
+
+	if exit_size > 0:
+		# Build the exit OrderRequest for the open position (action="sell";
+		# limit = the bid we sell into, the same price the paper close books
+		# at — so paper's executor-ACK and its store.exit_trade agree, and the
+		# live IOC sells at the strategy's exit price). client_order_id is a
+		# FRESH idempotency key (an EXIT order's coid intentionally matches NO
+		# pending row — B's on_fill_event keys exit fills by ticker+side, not
+		# coid; see ws_handlers._find_active_parent_for_exit). Constructed
+		# directly (NOT execution.build_exit_order, which couples to ExecCfg +
+		# strategy-populated target_price/exit_kind fields a bare TP/SL exit
+		# Signal need not carry; the exit price here is the live book bid,
+		# already the correct taker price). `config` is threaded for parity
+		# with the entry path / future exit-policy use; the exit limit is the
+		# bid (no slippage walk — selling into the resting bid is immediate).
+		exit_req = OrderRequest(
+			ticker=signal.ticker,
+			series=signal.series,
+			side=cast(Literal["yes", "no"], signal.side),
+			size_contracts=exit_size,
+			limit_price_cents=exit_price,
+			strategy=signal.strategy,
+			client_order_id=_make_client_order_id(
+				signal.strategy, signal.ticker, now
+			),
+			action="sell",
+		)
+		# Place the exit UNCONDITIONALLY through the executor (the §1 seam).
+		# PaperExecutor → synchronous deterministic ACK (not consumed here —
+		# the paper close is store.exit_trade below, byte-exact). LiveExecutor
+		# → real IOC sell; B's async on_fill_event/reconciler owns the
+		# authoritative close. Hard-capped exactly like the entry place() so a
+		# pathological client retry-loop cannot wedge the WS message loop.
+		try:
+			await asyncio.wait_for(
+				executor.place(exit_req),
+				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
+			)
+		except asyncio.TimeoutError:
+			# The exit POST may still have reached Kalshi (live) — we don't
+			# know, so we don't lie. B's reconciler resolves an in-flight
+			# exit by client_order_id / the exit_pending TTL path; the
+			# idempotent store.exit_trade backstop below still runs. Paper's
+			# PaperExecutor.place cannot time out (pure CPU) so this is a
+			# live-only safety net, not a paper-visible path (G-parity safe).
+			log.warning(
+				"exit executor.place exceeded %ds for %s %s (coid=%s) — "
+				"B's reconciler / exit_pending TTL owns recovery; the "
+				"idempotent store.exit_trade backstop still applies",
+				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy,
+				signal.ticker, exit_req.client_order_id,
+			)
+
+	# Mode-agnostic close (§1). PAPER: this IS the authoritative close
+	# (byte-EXACT vs pre-E3 — paper TradeStore.exit_trade does the
+	# won/lost/scratch + pnl + fee arithmetic synchronously, idempotent on
+	# WHERE status='open'). LIVE: C5's IDEMPOTENT non-authoritative backstop
+	# (store.exit_trade → record_close CAS; B's async on_fill_event /
+	# reconciler is the authority — whichever lands the CAS first wins, the
+	# other no-ops, NEVER raises — the §4.2-sound benign-lost-CAS property).
+	# dispatch does NOT branch on mode — the store/Protocol absorbs it.
 	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)

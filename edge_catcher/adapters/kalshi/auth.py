@@ -13,13 +13,33 @@ KALSHI_REST_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
 
+# Canonical Kalshi credential env-var names — the SINGLE source of truth.
+#
+# Two scopes exist:
+#   * read-only (``KALSHI_KEY_ID`` / ``KALSHI_PRIVATE_KEY``) — the paper
+#     trader's WebSocket auth; cannot place orders.
+#   * trade-scope (``KALSHI_LIVE_*``) — the live trader's order-signing key;
+#     a leaked read-only key therefore cannot place real-money orders.
+#
+# The live trade-scope names are referenced by BOTH the live signer
+# (``edge_catcher/live/client.py``'s ``_request``) AND the §2 fail-closed
+# coherence gate (``edge_catcher/engine/engine.py``). The gate exists to catch
+# signer/config drift — so gate & signer MUST resolve the SAME constant; a
+# duplicated literal in either site would silently defeat the gate. Defined
+# here (the module that already owns ``make_auth_headers``'s defaults) so
+# there is exactly one place to change a credential env-var name.
+KALSHI_KEY_ID_ENV = "KALSHI_KEY_ID"
+KALSHI_PRIVATE_KEY_ENV = "KALSHI_PRIVATE_KEY"
+KALSHI_LIVE_KEY_ID_ENV = "KALSHI_LIVE_KEY_ID"
+KALSHI_LIVE_PRIVATE_KEY_ENV = "KALSHI_LIVE_PRIVATE_KEY"
+
 
 def make_auth_headers(
 	method: str = "GET",
 	path: str = WS_PATH,
 	*,
-	key_id_env: str = "KALSHI_KEY_ID",
-	private_key_env: str = "KALSHI_PRIVATE_KEY",
+	key_id_env: str = KALSHI_KEY_ID_ENV,
+	private_key_env: str = KALSHI_PRIVATE_KEY_ENV,
 ) -> dict[str, str]:
 	"""Sign request and return Kalshi auth headers.
 

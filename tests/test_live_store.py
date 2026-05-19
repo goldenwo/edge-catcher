@@ -627,8 +627,13 @@ def test_close_is_idempotent(db_path: Path) -> None:
 # expectation with CONCRETE assertions of the IMPLEMENTED behaviour (mirrors
 # the ``tests/test_live_store_lifecycle.py`` canonical patterns). The
 # strategy-state methods (``save_state`` / ``load_state`` /
-# ``load_all_states``) remain deliberately fail-loud (out of E scope) — see
-# ``test_strategy_state_methods_remain_fail_loud``.
+# ``load_all_states``) are resolved by SC-E3b (spec §10 / CR-3) to the
+# spec-intended Phase-1 no-op (live starts FLAT every boot — positions
+# rehydrate from ``live_trades.db`` via B's reconciler, NOT a store-owned
+# ``strategy_state`` table) — positively asserted in
+# ``test_strategy_state_methods_are_phase1_intentional_noop`` (itself the
+# C6-precedent rewrite of the now-removed
+# ``test_strategy_state_methods_remain_fail_loud`` forcing-function guard).
 # ---------------------------------------------------------------------------
 
 
@@ -905,30 +910,71 @@ def test_get_open_trades_for_filters_by_strategy_and_ticker(
 	assert store.get_open_trades_for("debut_fade", "KXDOGE-NOPE") == []
 
 
-@pytest.mark.parametrize(
-	"method_call",
-	[
-		lambda s: s.save_state("debut_fade", {"k": 1}),
-		lambda s: s.load_state("debut_fade"),
-		lambda s: s.load_all_states(),
-	],
-)
-def test_strategy_state_methods_remain_fail_loud(
-	store: SQLiteTradeStore, method_call: Any
+def test_strategy_state_methods_are_phase1_intentional_noop(
+	store: SQLiteTradeStore,
 ) -> None:
-	"""C6 (G): the strategy-state Protocol methods (``save_state`` /
-	``load_state`` / ``load_all_states``) are DELIBERATELY still NOT wired in
-	E — live strategy state lives in ``live_trades.db`` (rehydrated by B's
-	reconciler), NOT a store-owned ``strategy_state`` table. They MUST remain
-	fail-loud (``NotImplementedError("live-only")``) rather than silently
-	no-op into a wrong real-money result — the loud guard if a wiring change
-	ever routes one here before that later E phase lands.
+	"""SC-E3b (spec §10 / CR-3) end-state — REWRITTEN from the C6-era
+	forcing-function ``test_strategy_state_methods_remain_fail_loud`` (the
+	same C6-precedent this file's own header at :625 sanctions: a
+	forcing-function test is REWRITTEN — not silently deleted — by the PR that
+	delivers the end-state it guarded the absence of; the OLD test pinned the
+	pre-E3 ``NotImplementedError("live-only")`` state, SC-E3b explicitly
+	resolves those 3 methods to the Phase-1 no-op, so the assertion INVERTS).
 
-	(The ``settle_trade`` / ``exit_trade`` / ``get_trade_by_id`` arms were
-	REMOVED from this parametrization by C6: C5 made them LIVE-CORRECT — they
-	route to B's ``record_close`` / the canonical by-id read and are no longer
-	fail-loud. Their implemented behaviour is positively asserted in
-	``test_pr6_live_lifecycle_methods_implemented`` and the
+	Failure mode prevented: a future edit silently turns a strategy-state
+	method into something OTHER than the spec-intended Phase-1 no-op (e.g.
+	re-raises ``NotImplementedError`` and wedges live boot — ``run_engine``'s
+	``store.load_all_states()`` is on the boot path — OR starts persisting a
+	bogus ``strategy_state`` row that a flat-start restart then mis-rehydrates
+	from). The SC-E3b/CR-3 contract: live starts FLAT every boot (zero
+	inherited positions; the open book rehydrates from ``live_trades.db`` via
+	B's reconciler, NOT a store-owned ``strategy_state`` table). Strategy
+	state is reconstructable ⇒ a restart is a flat start; this is the
+	spec-INTENDED behaviour (the store stays the sole live-vs-paper seam — the
+	§1/§3 keystone — so ``run_engine`` carries NO ``if live:`` strategy-state
+	branch), NOT a regression.
+
+	(Asserts the no-op is INTENTIONAL: ``load_all_states`` → ``{}``,
+	``save_state`` → ``None`` AND writes NO ``strategy_state`` row,
+	``load_state`` → the empty-state default ``{}`` — matching the paper
+	``TradeStore.load_state`` "no state" contract + the
+	``TradeStoreProtocol`` ``dict[str, Any]`` return. The C5 money path —
+	``record_*`` / ``exit_trade`` / ``settle_trade`` / ``get_*`` — is
+	UNTOUCHED by SC-E3b and stays positively asserted by
+	``test_pr6_live_lifecycle_methods_implemented`` + the
 	``tests/test_live_store_lifecycle.py`` C5 suite.)"""
-	with pytest.raises(NotImplementedError, match="live-only"):
-		method_call(store)
+	# load_all_states → {} (seeds run_engine's `all_states.get(name, {})` flat)
+	assert store.load_all_states() == {}, (
+		"SC-E3b: load_all_states must return {} (Phase-1 flat start — live "
+		"rehydrates from live_trades.db via B's reconciler, not a "
+		"strategy_state table)"
+	)
+
+	# save_state → no-op returning None, persisting NOTHING (no strategy_state
+	# row — a flat-start restart must NOT mis-rehydrate a stale strategy row).
+	assert store.save_state("debut_fade", {"k": 1}) is None, (
+		"SC-E3b: save_state is a Phase-1 no-op returning None"
+	)
+	tables = {
+		r[0]
+		for r in store._conn.execute(
+			"SELECT name FROM sqlite_master WHERE type='table'"
+		).fetchall()
+	}
+	assert "strategy_state" not in tables, (
+		"SC-E3b: save_state must write NO strategy_state row/table (Phase-1 "
+		"no-op — live has no store-owned strategy-state persistence)"
+	)
+
+	# load_state → the empty-state default {} (paper TradeStore.load_state "no
+	# state" contract + the TradeStoreProtocol dict[str, Any] return type).
+	assert store.load_state("debut_fade") == {}, (
+		"SC-E3b: load_state must return the empty-state default {} (Phase-1 "
+		"flat start), matching paper TradeStore.load_state's no-state return"
+	)
+	# Even after a save_state call it stays {} (the no-op persisted nothing).
+	store.save_state("debut_fade", {"k": 1})
+	assert store.load_state("debut_fade") == {}, (
+		"SC-E3b: load_state stays {} after save_state — the Phase-1 no-op "
+		"round-trip persists nothing (intentional flat-start, not a bug)"
+	)

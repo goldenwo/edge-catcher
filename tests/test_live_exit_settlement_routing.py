@@ -32,9 +32,22 @@ is:
   live path existed (status/pnl/exit_price/timing byte-identical). This is the
   mandatory K2 11/11 G-parity invariant: D3 changed nothing for paper.
 
-This file does NOT pre-implement E3 (no PaperExecutor sell path, no
-executor/cfg threading into ``_handle_exit``, no LiveExecutor/B-WS-task
-wiring). It drives the REAL ``edge_catcher.live.store.SQLiteTradeStore`` over a
+**Updated for the SC-D3 (E3) end-state (2026-05-19).** E3 has now delivered
+the deferred "place exit via executor" + the PaperExecutor sell path +
+executor/cfg threading into ``_handle_exit`` (the controller-adjudicated R1
+deferral from D3 → E3, spec §10 SC-D3). ``_handle_exit`` is therefore now
+``async`` and takes ``executor``/``config``; this file's harness drives it via
+the ``_run_exit`` helper (a ``PaperExecutor`` executor seam + ``config={}`` —
+the executor exit-ACK is deliberately inert, the asserted close is still
+``store.exit_trade``'s: PAPER byte-exact / LIVE C5 idempotent backstop while
+B's async path is authoritative). The forcing-function structural test that
+pinned the *absence* of executor threading was rewritten (NOT silently
+deleted) to assert the E3 end-state — the same C6 retire-the-forcing-function
+precedent the PR-5→PR-6 strict-xfail twin followed. The D3-cycle invariants
+(mode-AGNOSTIC, live = idempotent C5 B-CAS, paper byte-EXACT) are UNCHANGED —
+SC-D3 added the executor seam without changing the close money logic.
+
+It drives the REAL ``edge_catcher.live.store.SQLiteTradeStore`` over a
 real migrated ``live_trades.db`` (the established idiom from
 ``tests/test_live_state_integration.py`` /
 ``tests/test_live_store_lifecycle.py`` — the store's single held connection is
@@ -46,6 +59,7 @@ Run from the project venv (``.venv/Scripts/python.exe``).
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import logging
 import sqlite3
@@ -58,10 +72,38 @@ import pytest
 from edge_catcher.engine import dispatch as _dispatch_mod
 from edge_catcher.engine import engine as _engine_mod
 from edge_catcher.engine.dispatch import _handle_exit
+from edge_catcher.engine.executors.paper import PaperExecutor
+from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.strategy_base import Signal
 from edge_catcher.engine.trade_store import InMemoryTradeStore, TradeStore
 from edge_catcher.live.state import connect_live_trades_db, record_close
 from edge_catcher.live.store import SQLiteTradeStore
+
+
+def _run_exit(signal: Signal, ctx, store, *, now: datetime) -> None:
+	"""Drive the REAL ``dispatch._handle_exit`` at its SC-D3 (E3) end-state
+	signature: ``_handle_exit`` is now async (it awaits ``executor.place`` for
+	the exit order — the §1 seam) and takes ``executor``/``config``
+	UNCONDITIONALLY (no mode branch — the executor absorbs the live-vs-paper
+	difference; the unconditional ``store.exit_trade`` keeps the PAPER close
+	byte-EXACT and is C5's idempotent backstop for LIVE).
+
+	A ``PaperExecutor`` is used for the executor seam in EVERY case (incl. the
+	live-store cases): the SC-D3 contract is that the AUTHORITATIVE live close
+	is B's async ``on_fill_event``/reconciler while ``store.exit_trade`` is the
+	idempotent backstop these tests assert — so the executor's exit-ACK is
+	deliberately inert here (PaperExecutor's sell path is a deterministic ACK
+	whose fill fields ``_handle_exit`` does not consume). ``config={}`` — the
+	exit limit is the ctx bid (no ExecCfg slippage walk; selling into the
+	resting bid is the immediate taker price). Mirrors the established
+	harness so the dispatch test rigs stay in lock-step."""
+	asyncio.run(
+		_handle_exit(
+			signal, ctx, store, now=now,
+			executor=PaperExecutor(market_state=MarketState(), config={}),
+			config={},
+		)
+	)
 
 _NOW = datetime(2026, 5, 18, 12, 0, 0, tzinfo=timezone.utc)
 _NOW_ISO = _NOW.isoformat()
@@ -268,7 +310,7 @@ def test_live_exit_via_dispatch_routes_to_b_record_close_cas(
 		# ctx.yes_bid=60 (60 > 42 entry → won). _handle_exit calls
 		# store.exit_trade(trade_id, 60, now) UNCONDITIONALLY (no executor /
 		# config / mode in scope — re-confirmed Step A).
-		_handle_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
+		_run_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
 
 		row = _row(conn, tid)
 		# Booked through B's record_close CAS — not a paper-shaped UPDATE.
@@ -327,7 +369,7 @@ def test_live_exit_is_idempotent_vs_bs_async_authoritative_close(
 		conn = store._conn
 
 		# --- 1. D3's sync exit lands the close first (won @ 60¢).
-		_handle_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
+		_run_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
 		first = _row(conn, tid)
 		assert first["status"] == "won"
 
@@ -390,7 +432,7 @@ def test_live_exit_no_side_sells_into_no_bid_and_books_loss(
 		)
 		conn = store._conn
 		# no-side row → sells into ctx.no_bid=30 (30 < 42 entry → lost).
-		_handle_exit(
+		_run_exit(
 			_exit_signal(tid, "no"), _ctx(yes_bid=99, no_bid=30), store,
 			now=_LATER,
 		)
@@ -447,7 +489,7 @@ def test_live_exit_scratch_books_scratch_status_via_b_cas(
 
 		# yes-side row, exit price == the 42¢ blended entry (gross 0) → B's
 		# record_close books a pre-fee SCRATCH.
-		_handle_exit(
+		_run_exit(
 			_exit_signal(tid, "yes"), _ctx(yes_bid=42), store, now=_LATER
 		)
 
@@ -639,7 +681,7 @@ def test_paper_exit_via_dispatch_is_byte_exact(
 	)
 
 	# Same dispatch handler, same call — yes-side row sells into yes_bid=60.
-	_handle_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
+	_run_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
 
 	closed = store.get_trade_by_id(tid)
 	assert closed is not None
@@ -704,13 +746,13 @@ def test_paper_exit_idempotent_double_close_is_noop(tmp_path: Path) -> None:
 	store = TradeStore(tmp_path / "paper_trades.db")
 	tid = _seed_paper_open_row(store, side="yes", entry=42, fill_size=10)
 	# First close at _LATER (uniform with every other close in this file).
-	_handle_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
+	_run_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=60), store, now=_LATER)
 	first = store.get_trade_by_id(tid)
 	assert first is not None and first["status"] == "won"
 	# Second close at a STRICTLY-LATER instant AND a different price — if the
 	# guard were absent this would overwrite exit_time/exit_price/pnl; the
 	# idempotent no-op (WHERE status='open') leaves the first close intact.
-	_handle_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=5), store, now=_LATER2)
+	_run_exit(_exit_signal(tid, "yes"), _ctx(yes_bid=5), store, now=_LATER2)
 	after = store.get_trade_by_id(tid)
 	assert after == first, (
 		"a second paper exit must be an idempotent no-op (WHERE status='open')"
@@ -786,14 +828,24 @@ def test_handle_exit_has_no_mode_branch() -> None:
 	)
 
 
-def test_handle_signal_exit_dispatch_passes_no_executor_or_mode() -> None:
-	"""Failure mode prevented: the exit dispatch in ``_handle_signal`` starts
-	threading the executor / a mode flag into ``_handle_exit`` (pre-empting
-	E3's SC-D3 work or adding a §1-violating branch). Pins that the
-	``signal.action == 'exit'`` arm calls ``_handle_exit(signal, ctx, store,
-	bullet, now=now)`` — store-shaped, NO executor / config / mode argument —
-	and that the surrounding dispatch contains no mode discriminator around
-	the exit call."""
+def test_handle_signal_exit_dispatch_threads_executor_config_no_mode() -> None:
+	"""SC-D3 (E3) end-state — REWRITTEN from the D3-era forcing-function
+	``test_handle_signal_exit_dispatch_passes_no_executor_or_mode`` (the
+	C6-precedent: a forcing-function test is rewritten by the PR that delivers
+	the end-state it was guarding the absence of — exactly as the PR-5→PR-6
+	strict-xfail twin was retired by C6). The OLD test pinned the D3-era state
+	(``_handle_exit`` NOT yet executor-threaded); spec §10 SC-D3 explicitly
+	defers the "place exit via executor" + executor/cfg threading TO E3, so
+	the E3 end-state INVERTS that assertion.
+
+	Failure mode prevented (SC-D3 + §1 keystone): the ``signal.action ==
+	'exit'`` arm does NOT thread ``executor``/``config`` into ``_handle_exit``
+	(the live exit would never be placed via the executor — funds-at-risk), OR
+	it grows a mode/``isinstance`` discriminator around the exit call (§1
+	violation — the executor IS the seam, not a per-call branch). Pins:
+	``_handle_signal`` calls ``_handle_exit`` exactly once, passing
+	``executor`` and ``config`` (the SC-D3 deliverable), passing NO ``risk``
+	(exits bypass the entry gate), AND with no mode discriminator anywhere."""
 	src = inspect.getsource(_dispatch_mod._handle_signal)
 	tree = ast.parse(src).body[0]
 
@@ -810,22 +862,33 @@ def test_handle_signal_exit_dispatch_passes_no_executor_or_mode() -> None:
 		f"{len(exit_calls)}"
 	)
 	call = exit_calls[0]
-	# Positional args: signal, ctx, store, bullet — NO executor/config. The
-	# 4th positional must NOT be the executor (E3's SC-D3 deliverable).
+	# Collect arg names from BOTH positional and keyword forms (the exact call
+	# style is an impl detail; the contract is executor+config ARE threaded).
 	pos = [a.id if isinstance(a, ast.Name) else type(a).__name__
 	       for a in call.args]
-	assert "executor" not in pos and "config" not in pos, (
-		"the exit dispatch must NOT thread executor/config into _handle_exit "
-		f"— that is E3's SC-D3 deliverable, not D3's; got positional {pos!r}"
-	)
 	kw = {k.arg for k in call.keywords}
-	assert "executor" not in kw and "config" not in kw and "risk" not in kw, (
-		f"_handle_exit must receive no executor/config/risk kwarg; got {kw!r}"
+	all_args = set(pos) | kw
+	assert "executor" in all_args, (
+		"the exit dispatch MUST thread `executor` into _handle_exit (SC-D3 / "
+		f"spec §10 — E3's deliverable: place the exit via executor); got "
+		f"positional={pos!r} kwargs={sorted(kw)!r}"
 	)
-	# No isinstance/mode/live/paper discriminator anywhere in _handle_signal.
+	assert "config" in all_args, (
+		"the exit dispatch MUST thread `config` into _handle_exit (SC-D3 — "
+		f"the exit OrderRequest builder needs it); got positional={pos!r} "
+		f"kwargs={sorted(kw)!r}"
+	)
+	# Exits bypass the entry gate (kills cap NEW exposure; they never trap
+	# existing exposure — _handle_signal's own docstring) → no `risk` kwarg.
+	assert "risk" not in kw, (
+		f"_handle_exit must receive NO risk kwarg (exits bypass the entry "
+		f"gate); got {sorted(kw)!r}"
+	)
+	# Still NO isinstance/mode/live/paper discriminator anywhere in
+	# _handle_signal — the executor is the §1 seam, NOT a per-call branch.
 	assert not _branch_tests_a_mode(tree), (
 		"_handle_signal must not branch on mode/live/paper/isinstance around "
-		"the exit dispatch (§1 keystone)"
+		"the exit dispatch (§1 keystone — the executor absorbs the difference)"
 	)
 
 

@@ -91,14 +91,20 @@ letting B's reconciler close it (a halt stops B's reconciler/WS loop too).
 Same uniform taxonomy as C3/C4 (see the section header above
 ``settle_trade``).
 
-**Strategy-state methods still deliberately NOT implemented**
-(``save_state``, ``load_state``, ``load_all_states``): they raise
-:class:`NotImplementedError` rather than silently no-op into a wrong
-real-money result. Live strategy state lives in ``live_trades.db``
-(rehydrated by 4.B's reconciler), NOT a store-owned ``strategy_state``
-table. Out of C5 scope (a later E phase); the loud
-``NotImplementedError`` is the fail-loud guard if a wiring change ever
-routes one here before that phase lands.
+**Strategy-state methods — Phase-1 INTENTIONAL no-op** (``save_state``,
+``load_state``, ``load_all_states``): resolved by SC-E3b (spec §10 / CR-3).
+The live trader starts FLAT every boot — zero inherited positions; the
+open book is rehydrated from ``live_trades.db`` by B's reconciler
+(``startup_reconcile``), NOT from a store-owned ``strategy_state`` table.
+Phase-1 strategy state is reconstructable, so a restart is a flat start:
+``load_all_states`` returns ``{}``, ``load_state`` returns the empty-state
+default ``{}``, ``save_state`` is a no-op. This is the spec-INTENDED
+Phase-1 behaviour (the store absorbs the paper/live difference — the §1/§3
+keystone — so ``run_engine`` carries NO ``if live:`` strategy-state
+branch), NOT a weakening: strategy state is not money logic (the money
+path — ``record_*`` / ``exit_trade`` / ``settle_trade`` / ``get_*`` —
+remains fully implemented + C5-correct). A future phase MAY add real
+cross-restart live strategy-state if Phase-2 needs it.
 
 ----------------------------------------------------------------------------
 **PR-5 → PR-6 (E) CONTRACT — read before wiring this store into a live run.**
@@ -1449,30 +1455,43 @@ class SQLiteTradeStore:
 		return _trade_by_id_to_dict(row) if row is not None else None
 
 	# -------------------------------------------------------------------------
-	# Strategy-state Protocol methods — NOT reachable on the live dispatch
-	# path (live strategy state lives in live_trades.db, rehydrated by B's
-	# reconciler — NOT a store-owned strategy_state table). Fail-loud backstop
-	# if a wiring change ever routes one here; out of C5 scope (E's later
-	# phase). A silent no-op would be a real-money correctness hole.
+	# Strategy-state Protocol methods — Phase-1 INTENTIONAL no-op (SC-E3b /
+	# CR-3). The live trader starts FLAT every boot: zero inherited positions;
+	# the open book rehydrates from live_trades.db via B's reconciler
+	# (startup_reconcile), NOT a store-owned strategy_state table. Phase-1
+	# strategy state is reconstructable ⇒ a restart is a flat start. This is
+	# the spec-INTENDED behaviour — it keeps the store as the sole live-vs-
+	# paper seam (the §1/§3 keystone: run_engine carries NO `if live:`
+	# strategy-state branch), NOT a weakening (strategy state is not money
+	# logic; the C5 money path — record_*/exit_trade/settle_trade/get_* —
+	# stays fully implemented + correct). A future phase MAY add real cross-
+	# restart live strategy-state if Phase-2 needs it.
 	# -------------------------------------------------------------------------
 
-	def _live_only(self, method: str) -> NotImplementedError:
-		return NotImplementedError(
-			f"SQLiteTradeStore is live-only; {method} is a paper-path method "
-			f"not reachable on the live dispatch path. Live strategy state "
-			f"lives in live_trades.db (rehydrated by B's reconciler), NOT a "
-			f"store-owned strategy_state table — see "
-			f"edge_catcher/live/store.py module docstring."
-		)
-
 	def save_state(self, strategy: str, state_dict: dict[str, Any]) -> None:
-		raise self._live_only("save_state")
+		"""Phase-1 no-op (SC-E3b / CR-3). Live starts FLAT every boot — there
+		is no cross-restart strategy-state table; nothing to persist. NOT a
+		regression: the flat-start contract is spec-intended (positions
+		rehydrate from live_trades.db via B's reconciler, not from here)."""
+		return None
 
 	def load_state(self, strategy: str) -> dict[str, Any]:
-		raise self._live_only("load_state")
+		"""Phase-1 no-op (SC-E3b / CR-3): returns the empty-state default
+		(``{}``, matching the paper ``TradeStore.load_state`` "no state"
+		contract + the ``TradeStoreProtocol`` ``dict[str, Any]`` return). Live
+		starts FLAT — strategy state is reconstructable, a restart is a flat
+		start; positions rehydrate from live_trades.db via B's reconciler."""
+		return {}
 
 	def load_all_states(self) -> dict[str, dict[str, Any]]:
-		raise self._live_only("load_all_states")
+		"""Phase-1 no-op (SC-E3b / CR-3): returns ``{}`` so ``run_engine``'s
+		boot ``all_states.get(strat.name, {})`` seeds every strategy flat.
+		Live starts FLAT every boot (zero inherited positions; the open book
+		rehydrates from live_trades.db via B's reconciler — NOT a store-owned
+		strategy_state table). Spec-intended Phase-1 behaviour, NOT a
+		weakening — the store stays the sole live-vs-paper seam (§1/§3
+		keystone); a future phase MAY add real live strategy-state."""
+		return {}
 
 	# -------------------------------------------------------------------------
 	# Lifecycle

@@ -14,7 +14,12 @@ from typing import Any, Optional
 import httpx
 import websockets
 
-from edge_catcher.adapters.kalshi.auth import KALSHI_WS_URL, make_auth_headers
+from edge_catcher.adapters.kalshi.auth import (
+	KALSHI_LIVE_KEY_ID_ENV,
+	KALSHI_LIVE_PRIVATE_KEY_ENV,
+	KALSHI_WS_URL,
+	make_auth_headers,
+)
 from edge_catcher.engine.capture.bundle import (
 	assemble_daily_bundle,
 	delete_raw_jsonl,
@@ -82,6 +87,39 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# §6 boot step 3 — live risk-event callback slot (G3 fills the routing).
+#
+# spec §6 (NORMATIVE boot order): step (3) constructs the risk module AND
+# registers `_handle_risk_event` into the Gate's callback list BEFORE any
+# gate evaluation (reconcile in step 4, trading in step 5), so a boot-time
+# trip (e.g. the startup balance read already ≤ absolute_panic_floor) still
+# reaches the live risk channel. E3 only LEAVES/REGISTERS this slot per §6;
+# the CR-1 notification ROUTING (which Discord channel, the unified
+# notifications/ layer) is G3's deliverable, NOT E3's — so this is a typed,
+# documented no-op placeholder G3 replaces with the real send(). Signature
+# matches Gate._event_callbacks' contract (risk.py:923-927): called with a
+# single RiskEvent, sync, exceptions are swallowed by the Gate.
+# ---------------------------------------------------------------------------
+
+def _handle_risk_event(event: Any) -> None:
+	"""§6-step-3 risk-event callback SLOT (placeholder — G3 wires routing).
+
+	Registered into the live ``Gate``'s callback list at boot so the wiring
+	point exists before any gate evaluation. E3 deliberately does NOT route
+	notifications here (CR-1 / the unified ``notifications/`` convergence is
+	G3's chartered scope); it logs at WARNING so a boot-time / runtime trip is
+	never silently lost in the window before G3 lands. G3 replaces the body
+	with the real dedicated-live-risk-channel ``send()``."""
+	log.warning(
+		"RiskEvent (kind=%s reason=%s severity=%s) — E3 risk-event slot is a "
+		"placeholder; CR-1 channel routing lands in G3",
+		getattr(event, "kind", "?"),
+		getattr(event, "reason", "?"),
+		getattr(event, "severity", "?"),
+	)
+
+
+# ---------------------------------------------------------------------------
 # §2 fail-closed mode-coherence invariant (NORMATIVE — spec §2 / §6)
 #
 # Wrong-mode is structurally unstartable. Before ANY WS connect, REST call,
@@ -108,9 +146,12 @@ _DEFAULT_NOTIFY_CONFIG = "config.local/notifications.yaml"
 # Live trade-scope signing env-var names. A's design (adapters/kalshi/auth.py
 # docstring): the live trader passes trade-scope key var names so a leaked
 # read-only key cannot place orders. Overridable via the notifications/creds
-# config block; these defaults match the test signing_env fixture.
-_DEFAULT_LIVE_KEY_ID_ENV = "KALSHI_LIVE_KEY_ID"
-_DEFAULT_LIVE_PRIVATE_KEY_ENV = "KALSHI_LIVE_PRIVATE_KEY"
+# config block; these defaults are the CANONICAL auth constants — the SAME
+# objects the live signer (live/client.py `_request`) uses — so the §2
+# coherence gate (which exists to catch signer/config drift) and the signer
+# cannot drift apart (single source; spec Obl-3 / Minor#1).
+_DEFAULT_LIVE_KEY_ID_ENV = KALSHI_LIVE_KEY_ID_ENV
+_DEFAULT_LIVE_PRIVATE_KEY_ENV = KALSHI_LIVE_PRIVATE_KEY_ENV
 
 
 def _coherence_fail(check: str, detail: str) -> RuntimeError:
@@ -703,6 +744,111 @@ def _build_capture_transport(capture_cfg: dict) -> Optional[CaptureTransport]:
 	return None
 
 
+class _LiveRuntime:
+	"""Live-only composition products that §6 boot steps 4/5 still need.
+
+	Carried out of :func:`_compose_live` (boot step 3) so ``run_engine``'s
+	async-client block can run ``startup_reconcile`` (step 4) and start B's
+	reconciler/phantom-pending poller background task (step 5) with the SAME
+	wired ``Gate`` (its pre-refreshed bankroll cache) + ``KalshiOrderClient``
+	+ the live ``sqlite3.Connection`` (owned by ``SQLiteTradeStore``). Plain
+	attribute holder (no dataclass decorator needed — internal, never
+	serialized)."""
+
+	def __init__(self, gate: Any, kalshi_client: Any, db_conn: Any) -> None:
+		self.gate = gate
+		self.kalshi_client = kalshi_client
+		self.db_conn = db_conn
+
+
+async def _compose_live(
+	config: dict,
+	config_path: Path,
+	db_path: Path,
+	market_state: MarketState,
+	injected_executor: Executor | None,
+):
+	"""§6 boot step 3 — construct the LIVE composition.
+
+	Returns ``(store, executor, live_runtime)``:
+
+	* ``SQLiteTradeStore`` over ``live_trades.db`` (owns the single live
+	  ``sqlite3.Connection`` for its lifetime — §5; ``run_engine`` closes it
+	  exactly once on shutdown).
+	* ``LiveExecutor`` wrapping a ``KalshiOrderClient`` built from A's
+	  ``live/config.py`` (the trade-scope signing key — auth.py's canonical
+	  ``KALSHI_LIVE_*`` constants, single-sourced with the §2 gate). An
+	  explicitly-injected executor (tests) is honoured verbatim instead.
+	* ``_LiveRuntime`` carrying the wired ``Gate`` (``await
+	  build_risk_module`` — pre-refreshes the bankroll cache so the first
+	  ``gate_entry`` sees real cash) + the client + the conn, for steps 4/5.
+
+	``validate_exec_cfg(config["execution"])`` is also CALLED here at T0
+	(§2.5/§6) purely for its fail-fast side-effect — a malformed ``execution:``
+	block aborts at boot, not at first exit. Its typed result is intentionally
+	NOT returned/stashed: there is no consumer (the exit path builds its
+	``OrderRequest`` directly — see ``dispatch._handle_exit``), so binding it
+	would be YAGNI dead state (reviewer-prescribed).
+
+	The §6-step-3 ``_handle_risk_event`` slot is registered into the Gate's
+	callback list HERE (before any gate evaluation — reconcile in step 4,
+	trading in step 5) so a boot-time trip still reaches the (G3-routed)
+	risk channel. Lazy imports of ``edge_catcher.live.*`` /
+	``engine.risk`` / ``engine.execution`` mirror the established
+	paper-only-deployment resilience pattern (the
+	``_assert_mode_coherence`` local imports / the module-top
+	``KillSwitchTripFailed`` / ``RecordPendingFailed`` try-imports) so
+	``engine.py`` still imports on a paper-only box.
+	"""
+	# Lazy imports — keep engine.py importable on paper-only deployments.
+	from edge_catcher.engine.execution import validate_exec_cfg  # noqa: PLC0415
+	from edge_catcher.engine.executors.live import LiveExecutor  # noqa: PLC0415
+	from edge_catcher.engine.risk import build_risk_module  # noqa: PLC0415
+	from edge_catcher.live.audit import AuditLogger  # noqa: PLC0415
+	from edge_catcher.live.client import KalshiOrderClient  # noqa: PLC0415
+	from edge_catcher.live.config import load_config as load_live_config  # noqa: PLC0415
+	from edge_catcher.live.store import SQLiteTradeStore  # noqa: PLC0415
+
+	# Live store owns the single live_trades.db connection (WAL + 0003 +
+	# busy_timeout applied inside connect_live_trades_db — §5). The caller
+	# (run_engine) closes it exactly once on shutdown (drain order §4.3).
+	store = SQLiteTradeStore(db_path)
+	db_conn = store._conn
+
+	# A's live config (trade-scope creds via auth.py's canonical constants —
+	# single-sourced with the §2 gate; kalshi_rest_base / http_timeout /
+	# audit_log_path). load_config returns defaults if the file is absent.
+	live_cfg = load_live_config(config_path)
+	audit = AuditLogger(live_cfg.audit_log_path)
+	kalshi_client = KalshiOrderClient(live_cfg, audit)
+
+	# LiveExecutor wraps the one client for the process lifetime. An
+	# explicitly-injected executor (tests) wins — but the live store + B's
+	# async tasks still follow the config mode so the seam stays coherent.
+	executor: Executor = (
+		injected_executor
+		if injected_executor is not None
+		else LiveExecutor(client=kalshi_client)
+	)
+
+	# §2.5/§6: validate execution: at T0 — a malformed block fails at boot,
+	# not at first exit. Result intentionally not bound/returned (no consumer;
+	# the exit path builds its OrderRequest directly — see dispatch._handle_exit).
+	validate_exec_cfg(config.get("execution", {}))
+
+	# §6 step 3 — wire the risk module (pre-refreshes the bankroll cache so
+	# the first gate_entry sees real cash; a Kalshi-unreachable boot leaves
+	# the cache at 0 ⇒ KILL_AUTO_PANIC on first signal, the correct
+	# fail-closed behaviour). build_risk_module reads config["risk"].
+	gate = await build_risk_module(config, db_conn, kalshi_client)
+	# Register the §6-step-3 risk-event slot BEFORE any gate evaluation
+	# (reconcile/trading in steps 4/5) so a boot-time trip reaches it. G3
+	# replaces _handle_risk_event's body with the real CR-1 channel send.
+	gate._event_callbacks.append(_handle_risk_event)
+
+	return store, executor, _LiveRuntime(gate, kalshi_client, db_conn)
+
+
 async def run_engine(
 	config_path: Path,
 	executor: Executor | None = None,
@@ -739,14 +885,43 @@ async def run_engine(
 	reconnect_delay = ws_cfg.get("reconnect_delay", 30)
 	price_history_limit = ws_cfg.get("price_history_limit", 100)
 	state_flush_interval = recovery_cfg.get("state_flush_interval", 5)
-	store = TradeStore(db_path)
 	market_state = MarketState(limit=price_history_limit)
 
-	# Construct the default PaperExecutor if no executor was injected. PaperExecutor
-	# takes (market_state, config) — fees compute inside trade_store.record_trade,
-	# so no fee_model parameter is required.
-	if executor is None:
-		executor = PaperExecutor(market_state=market_state, config=config)
+	# -------------------------------------------------------------------
+	# §1/§3/§6 MODE-DRIVEN COMPOSITION ROOT (the keystone).
+	#
+	# Mode is decided ONCE, here, after the §2 coherence gate (boot step 2)
+	# and per the §6 NORMATIVE boot order. The live-vs-paper difference is
+	# WHICH components are wired at this single branch — NEVER a per-call
+	# conditional downstream (dispatch / the store-Protocol calls stay
+	# mode-agnostic; the executor + which store + whether B's async tasks
+	# run is the entire difference — §1). An explicitly-injected `executor`
+	# (tests) overrides the mode-driven construction but the store/B-tasks
+	# still follow the config mode so the seam stays coherent.
+	#
+	#   executor: live  ⇒ LiveExecutor(KalshiOrderClient from A's live
+	#       config) + SQLiteTradeStore + await build_risk_module + register
+	#       the §6 _handle_risk_event slot + validate_exec_cfg(execution:) +
+	#       (startup_reconcile + B's reconciler/poller task started in the
+	#       async-client block below — §6 steps 4/5).
+	#   executor: paper ⇒ PaperExecutor + paper TradeStore + NONE of B's
+	#       tasks (today's behaviour — byte-exact, §9 G-parity).
+	#
+	# `_assert_mode_coherence` already validated `config["executor"]` ∈
+	# {live, paper}; this is the SINGLE branch on it.
+	mode = config.get("executor")
+	live_runtime: _LiveRuntime | None = None
+	if mode == "live":
+		store, executor, live_runtime = await _compose_live(
+			config, config_path, db_path, market_state, executor,
+		)
+	else:  # paper (coherence-gated to exactly {live, paper})
+		store = TradeStore(db_path)
+		# Construct the default PaperExecutor if no executor was injected.
+		# PaperExecutor takes (market_state, config) — fees compute inside
+		# trade_store.record_trade, so no fee_model parameter is required.
+		if executor is None:
+			executor = PaperExecutor(market_state=market_state, config=config)
 
 	# Risk gate (Sub-project C) — Gate / BankrollCache / KillSwitch / etc.
 	# all live in engine/risk.py and SHIP in this PR (PR 3). However the
@@ -834,6 +1009,37 @@ async def run_engine(
 	async with httpx.AsyncClient(timeout=30.0) as client:
 		await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
 
+		# §6 boot step 4 — startup_reconcile (LIVE only). Pulls the
+		# authoritative Kalshi state at T0 (positions + recent orders) and
+		# resolves every divergence via B's 6-case matrix BEFORE the WS
+		# subscribes / any new order — so a severed prior run's pending /
+		# orphan position is reconciled by client_order_id first. Runs AFTER
+		# the risk module is wired (step 3) so a boot-time balance≤panic trip
+		# still reaches the §6 risk-event slot. Paper has no analog (no
+		# Kalshi-truth to reconcile) — this whole block is live-only,
+		# byte-exact-invisible to paper (§9 G-parity).
+		if live_runtime is not None:
+			from edge_catcher.live.reconciliation import (  # noqa: PLC0415
+				startup_reconcile,
+			)
+			try:
+				await startup_reconcile(
+					live_runtime.kalshi_client,
+					live_runtime.db_conn,
+					live_runtime.gate._bankroll,
+				)
+			except Exception:
+				# startup_reconcile's own contract: the cash-seed step is
+				# FATAL (a live engine that cannot read its balance must not
+				# proceed). Re-raise so the engine aborts BEFORE the WS loop
+				# rather than trading blind — consistent with the §2/§6
+				# fail-closed posture (no order has been placed yet).
+				log.exception(
+					"startup_reconcile FAILED — aborting live boot before the "
+					"WS loop (no order placed; fail-closed §2/§6)"
+				)
+				raise
+
 		# 5. Call on_startup for each strategy
 		all_open = store.get_open_trades()
 		for strat in strategies:
@@ -874,6 +1080,32 @@ async def run_engine(
 				name="ticker_refresh",
 			),
 		]
+
+		# §6 boot step 5 — start B's async lifecycle (LIVE only). B's
+		# phantom-pending poller continuously reconciles pending /
+		# exit_pending rows against Kalshi truth (one list_orders() per
+		# cycle, matched locally by client_order_id) so a row whose WS
+		# fill/reject event was missed still resolves (TTL → rejected_post_hoc
+		# / exit_pending → open). The settlement leg is already covered by the
+		# shared _settlement_poller above (mode-agnostic store.settle_trade →
+		# C5's settlement CAS for live); the account-scope WS event loop that
+		# pumps on_fill_event/on_order_status_event is F's daemon scope (not
+		# E3) — the poller is the E3-scope reconciliation backstop that makes
+		# the live lifecycle correct without it. CancelledError-safe by B's
+		# own contract (reconciliation.py:874). Paper starts NONE of this
+		# (byte-exact today — §1/§9 G-parity).
+		if live_runtime is not None:
+			from edge_catcher.live.reconciliation import (  # noqa: PLC0415
+				poll_pending_rows_loop,
+			)
+			tasks.append(
+				asyncio.create_task(
+					poll_pending_rows_loop(
+						live_runtime.kalshi_client, live_runtime.db_conn,
+					),
+					name="live_reconciler_poll_pending",
+				)
+			)
 
 		# Build strategy lookup by series
 		strat_by_series: dict[str, list[Strategy]] = {}
