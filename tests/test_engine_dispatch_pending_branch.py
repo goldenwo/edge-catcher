@@ -89,6 +89,17 @@ class _StubStore:
 		self.trade_calls.append(kwargs)
 		return 1  # synthetic trade id
 
+	def get_trade_by_id(self, trade_id: int) -> dict[str, Any]:
+		"""Paper-shaped no-op read: a just-record_trade'd id reads back as an
+		'open' row (paper TradeStore INSERTs literal 'open'). Present so
+		dispatch's D2 filled-arm durable-status re-read (spec §4.2 / §1
+		keystone) doesn't AttributeError — the same test-harness-conformance
+		analogue as the record_intent no-op above (D1). Returning 'open' keeps
+		the filled path on the pre-D2 celebratory branch, so these
+		pending/rejected-focused tests assert UNCHANGED behavior (NO side
+		effect on what this file pins)."""
+		return {"id": trade_id, "status": "open"}
+
 	def record_intent(self, **kwargs: Any) -> None:
 		"""No-op: paper/replay have no pre-place state (synchronous fills).
 		Present so dispatch's unconditional pre-place call (spec §3 keystone /

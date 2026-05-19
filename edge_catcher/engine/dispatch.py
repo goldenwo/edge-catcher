@@ -434,7 +434,15 @@ async def _handle_enter(
 
 	if result.status == "filled":
 		# Field-by-field match to the pre-G record_trade call shape — byte-exact
-		# preservation is the parity-sweep success criterion.
+		# preservation is the parity-sweep success criterion. Called
+		# UNCONDITIONALLY — NO mode branch (spec §1 keystone). The two identity
+		# keys are ADDITIVE keyword-only args: paper + InMemory record_trade
+		# accept-and-IGNORE them (byte-exact-invisible to the parity sweep,
+		# §9 / C2); the live store CONSUMES them to CAS-transition the C1
+		# pending row pending→open located by client_order_id, recording the
+		# Kalshi order id (spec §3 `:400 filled` row / §4.2). kalshi_order_id
+		# is result.order_id — the same field the pending arm threads at the
+		# record_pending call below (executor.py `OrderResult.order_id`).
 		trade_id = store.record_trade(
 			ticker=signal.ticker,
 			entry_price=entry_price,
@@ -449,22 +457,85 @@ async def _handle_enter(
 			slippage_cents=result.slippage_cents,
 			book_snapshot=result.book_snapshot,
 			now=now,
+			client_order_id=req.client_order_id,
+			kalshi_order_id=result.order_id,
 		)
 		metrics.inc("entries_filled")
 
-		display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
-		log_line, notify_line = _format_enter_message(
-			strategy=signal.strategy,
-			series=signal.series,
-			ticker=signal.ticker,
-			side=signal.side,
-			fill_size=result.filled_size,
-			entry_price=display_price,
-			trade_id=trade_id,
-			bullet=bullet,
-		)
-		log.info(log_line)
-		notify(notify_line)
+		# Notify/log the ACTUAL DURABLE PERSISTED status, not the optimistic
+		# IOC `filled` result — and do it MODE-AGNOSTICALLY (the §1 keystone:
+		# branch on persisted truth, never on paper-vs-live / isinstance).
+		#
+		# §4.2 lost-CAS race: B's reconciler can transition the C1 row
+		# pending→rejected_post_hoc (Kalshi-truth: TTL elapsed, list_orders
+		# found no order) BEFORE this filled branch runs. The live
+		# record_trade→transition_pending_to_open is a CAS on
+		# `WHERE status='pending'`, so it correctly NO-OPs (B's _cas_update
+		# never clobbers a non-pending/terminal row — the durable money state
+		# is authoritative & untouched, exactly one row) but record_trade still
+		# returns the located row_id. Firing the celebratory "filled" notify
+		# here would be a FALSE operator alert for a row the durable record
+		# holds as rejected. This is NOT a fund-loss (B's Kalshi-truth
+		# reconciler owns the authoritative lifecycle — §4.2 is LOCKED; D2
+		# does NOT change the money logic) — it is an operator-TRUST defect, so
+		# this is NOT fatal (§3.1): NEVER raise, just notify/log distinctly.
+		#
+		# get_trade_by_id is mode-agnostic: paper + InMemory ALWAYS yield an
+		# 'open' row for a just-record_trade'd id (paper INSERTs literal
+		# 'open'), so the celebratory branch fires byte-identically for
+		# paper/replay (mandatory K2 11/11 byte-exact). A non-'open' durable
+		# status is only ever reachable in LIVE on a genuine lost-CAS race.
+		durable = store.get_trade_by_id(trade_id)
+		durable_status = durable.get("status") if durable is not None else None
+		# Only a CONFIRMED non-'open' terminal status suppresses the
+		# celebratory alert. 'open' (the normal case — CAS landed; paper
+		# always) and the can't-happen-here None (record_trade located the row
+		# by this id ⇒ get_trade_by_id finds it) preserve the pre-D2 behavior
+		# byte-exactly.
+		if durable_status is None or durable_status == "open":
+			display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
+			log_line, notify_line = _format_enter_message(
+				strategy=signal.strategy,
+				series=signal.series,
+				ticker=signal.ticker,
+				side=signal.side,
+				fill_size=result.filled_size,
+				entry_price=display_price,
+				trade_id=trade_id,
+				bullet=bullet,
+			)
+			log.info(log_line)
+			notify(notify_line)
+		else:
+			# Live lost-CAS race: B's Kalshi-truth reconciler already resolved
+			# the C1 row to a terminal status. DO NOT fire the celebratory
+			# "filled" notify; emit a DISTINCT non-celebratory record instead.
+			# Uniform with the C3/C4/C5 lost-CAS observability taxonomy in
+			# live/store.py (coid + actual status + §-cite + best-effort/not
+			# fatal rationale). NEVER raise — the money state is already
+			# authoritative & untouched (§4.2); this only corrects the alert.
+			metrics.inc("entries_filled_lost_cas")
+			lost_cas_msg = (
+				"dispatch._handle_enter: IOC returned 'filled' but the durable "
+				"row for client_order_id=%r is %r (kalshi_order_id=%r) — B's "
+				"reconciler / Kalshi-truth is authoritative (spec §4.2); NOT "
+				"recording as a live fill, NOT firing the 'filled' alert. "
+				"§3.1 best-effort, not fatal (the durable money state is "
+				"authoritative & untouched — exactly one row, owned by B)."
+			)
+			log.error(
+				lost_cas_msg,
+				req.client_order_id,
+				durable_status,
+				result.order_id,
+			)
+			notify(
+				f"⚠️ **[{signal.strategy} | {signal.series}] LOST-CAS / "
+				f"NOT FILLED** — `{signal.ticker}` IOC returned filled but the "
+				f"durable order (`{req.client_order_id}`, kalshi=`{result.order_id}`) "
+				f"is `{durable_status}` (B reconciler / Kalshi-truth authoritative, "
+				f"§4.2); not recorded as a live fill"
+			)
 	elif result.status == "rejected":
 		if result.rejection_reason == "stale_book":
 			metrics.inc("entries_skipped_stale")
