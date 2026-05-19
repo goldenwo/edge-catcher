@@ -747,3 +747,408 @@ def test_record_pending_unexpected_non_db_error_is_best_effort_distinct_message(
 	assert r[0]["status"] == "pending"
 	assert r[0]["kalshi_order_id"] is None
 	s.close()
+
+
+# -----------------------------------------------------------------------------
+# C5 — LIVE exit_trade / settle_trade / get_trade_by_id route to B's CAS close,
+# NOT the paper single-UPDATE / fail-loud (spec §3 table `:534/:537 exit` +
+# `engine.py:895 settlement` + §5 conform-to-B).
+#
+# In live production the AUTHORITATIVE close is recorded by B's async WS
+# handler / reconciler (`record_close` / `record_partial_exit`) directly
+# against live_trades.db — D3 (later) rewires dispatch to NOT call
+# `store.exit_trade` synchronously in live mode. But `TradeStoreProtocol`
+# still EXPOSES exit_trade/settle_trade/get_trade_by_id (dispatch's paper
+# path + tests call them), so for LIVE these store methods must route to B's
+# CAS close (`live.state.record_close` — UPDATE-in-place won/lost/scratch
+# with entry-fee-remainder consumption), NOT the paper single-UPDATE and NOT
+# fail-loud. settlement = `record_close` with exit_reason='settlement',
+# exit_fee=0, binary 0/100 (B ships NO separate settlement fn — settlement is
+# `record_close` per ws_handlers.on_settlement_event + integration test #26).
+#
+# FATALITY (the genuinely-new funds-at-risk question): a close acts on a
+# real-money OPEN position — but the position's correct eventual close is
+# GUARANTEED by B's async reconciler/WS handler (the authoritative close
+# path), NOT by this synchronous store method. B's own `record_close`
+# contract makes a lost CAS race a logged WARNING no-op (NEVER raises;
+# settlement-vs-exit-fill is B's EXPECTED idempotent outcome). Raising here
+# would HALT the engine — strictly WORSE for a funds-at-risk open position
+# than logging ERROR and letting B's reconciler close it (a halted engine
+# stops B's reconciler/WS loop too, removing the very recovery mechanism).
+# So: caller-owned best-effort, the SAME uniform taxonomy as C3/C4 (distinct
+# ERROR, business keys, sqlite3.Error-vs-unexpected split, lost-CAS
+# observability), NEVER RecordPendingFailed (ghost-reject scope is
+# funds-at-risk PRE-PLACE INSERTs only — spec §3.1; a close is not one).
+# Contrast: C1 record_intent FATAL (pre-place INSERT, row does not exist yet
+# → strands a funds-at-risk order); C2 record_trade CAS pending→open
+# (loud-fail on a wiring bug — missing identity key); C3 record_rejected /
+# C4 record_pending best-effort (positionless / durable-row-already-exists).
+# C5 is the post-fill terminal close: best-effort because B's authoritative
+# async close path owns recovery — identical posture to C3/C4's "B's
+# reconciler owns it", applied to a close.
+# -----------------------------------------------------------------------------
+
+
+def _seed_open_live_row(s, *, coid="cid-A", kalshi_id="ord-1"):
+	"""Drive a realistic OPEN live row through the real C1→C2 path.
+
+	C1 ``record_intent`` INSERTs the pending row (INTENT: entry_price_cents=5,
+	intended_size=5, side=yes); then C2 ``record_trade`` CAS-transitions it to
+	``open`` with the authoritative fill recorded. Returns the row id.
+
+	With ``record_trade(fill_size=10, blended_entry=42, intended_size=10)``:
+	C2 computes ``entry_fee_cents = int(round(STANDARD_FEE.calculate(42,10)))``
+	= ``int(round(ceil(0.07*10*0.42*0.58*100)))`` = ``int(round(18.0))`` = 18,
+	and B's ``transition_pending_to_open`` seeds
+	``entry_fee_remaining_cents = entry_fee_cents`` = 18 — the remainder B's
+	``record_close`` later consumes.
+	"""
+	import datetime as _dt
+
+	s.record_intent(**dict(INTENT, client_order_id=coid))
+	s.record_trade(
+		ticker="KXSOL15M-X", entry_price=42, strategy="debut-fade",
+		side="yes", series_ticker="KXSOL15M", intended_size=10,
+		fill_size=10, blended_entry=42, book_depth=None, fill_pct=1.0,
+		slippage_cents=0, book_snapshot=None,
+		now=_dt.datetime.fromisoformat("2026-05-18T00:00:01+00:00"),
+		client_order_id=coid, kalshi_order_id=kalshi_id)
+	rid = s._conn.execute(
+		"SELECT id FROM live_trades WHERE client_order_id = ?", (coid,)
+	).fetchone()[0]
+	return int(rid)
+
+
+def test_get_trade_by_id_returns_live_row_dict(tmp_path):
+	"""C5 / spec §3 (`get_trade_by_id` → canonical by-id read of the live row
+	as a dict), §5.
+
+	On the LIVE store ``get_trade_by_id`` must return the live_trades row as a
+	paper-shaped dict (so dispatch's exit bookkeeping + tests stay
+	store-agnostic — same key set paper ``TradeStore.get_trade_by_id``
+	returns: id / ticker / entry_price / strategy / side / series_ticker /
+	entry_fee_cents / intended_size / fill_size / blended_entry / book_depth /
+	fill_pct / slippage_cents / status / entry_time / exit_price / exit_time /
+	pnl_cents). live_trades' cent-suffixed columns are aliased to the paper
+	names (entry_price ← entry_price_cents, blended_entry ←
+	blended_entry_cents, exit_price ← exit_price_cents) so strategy/dispatch
+	code stays venue/store agnostic; book_depth is absent in the live IOC
+	schema → reported as None to keep the shape stable. An absent id returns
+	None (paper-parity contract).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s)
+
+	row = s.get_trade_by_id(rid)
+	assert row is not None
+	assert row["id"] == rid
+	assert row["ticker"] == "KXSOL15M-X"
+	# entry_price ← entry_price_cents = the ORIGINAL Signal intent from C1's
+	# record_intent (INTENT.entry_price_cents=5). C2's
+	# transition_pending_to_open sets blended_entry_cents (the real fill
+	# price) but does NOT overwrite entry_price_cents (it stays the Signal
+	# intent — DDL 0003 comment "Signal's entry_price intent"), so these two
+	# legitimately differ on a live row.
+	assert row["entry_price"] == 5  # aliased from entry_price_cents (intent)
+	assert row["strategy"] == "debut-fade"
+	assert row["side"] == "yes"
+	assert row["series_ticker"] == "KXSOL15M"  # aliased from series
+	assert row["fill_size"] == 10
+	assert row["blended_entry"] == 42  # aliased from blended_entry_cents
+	assert row["book_depth"] is None  # no book-walk concept for live IOC
+	assert row["status"] == "open"
+	assert row["entry_fee_cents"] == 18
+	# An open row has no exit yet — the closed-trade keys exist (stable shape)
+	# but are None, exactly like paper get_trade_by_id's 18-key dict.
+	assert row["exit_price"] is None
+	assert row["exit_time"] is None
+	assert row["pnl_cents"] is None
+	# Paper-parity: an absent id is None, NOT a raise / NOT fail-loud.
+	assert s.get_trade_by_id(999_999) is None
+	s.close()
+
+
+def test_exit_trade_routes_to_B_record_close_full_close(tmp_path):
+	"""C5 / spec §3 table `:534/:537 exit` + §5.
+
+	On the LIVE store ``exit_trade(trade_id, exit_price, *, now)`` is NOT the
+	paper single ``status='open' → won/lost`` UPDATE — it routes to B's CAS
+	close ``live.state.record_close`` (UPDATE-in-place, CAS precondition
+	``status IN ('open','exit_pending')``, ENTRY-FEE-REMAINDER consumed). The
+	won/lost/scratch + pnl + exit_fee arithmetic mirrors B's
+	``ws_handlers.on_fill_event`` full-close path byte-for-byte (NOT
+	hand-rolled, NOT the paper formula) so F's P&L does not diverge by which
+	path booked the close:
+
+	* ``exit_fee = int(round(STANDARD_FEE.calculate(exit_price, fill_size)))``
+	  (B's ``_entry_fee_cents`` convention — used for exit fees too).
+	* ``pnl = fill_size*(exit_price - blended_entry) - entry_fee_remaining
+	  - exit_fee`` (B's DDL contract; record_close does NOT recompute pnl —
+	  the caller owns the arithmetic, same as on_fill_event).
+	* outcome = won if exit>entry, lost if exit<entry, scratch if equal
+	  (pre-fee; fees push a scratch to pnl<=0 — B's record_partial_exit rule).
+
+	Seed open row: fill_size=10, blended_entry=42, entry_fee_cents=18
+	(entry_fee_remaining_cents seeded =18 by C2). exit_trade(rid, 60):
+	exit_fee = int(round(STANDARD_FEE.calculate(60,10))) =
+	int(round(ceil(0.07*10*0.6*0.4*100))) = int(round(17.0)) = 17;
+	pnl = 10*(60-42) - 18 - 17 = 145; 60 > 42 → won. record_close then
+	consumes the remainder: entry_fee_cents = COALESCE(remaining=18,..) = 18,
+	entry_fee_remaining_cents = 0. EXACTLY ONE row (full close UPDATEs in
+	place — NO split child; record_partial_exit is the WS-handler split path,
+	unreachable via the Protocol's full-close exit_trade).
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s)
+
+	s.exit_trade(
+		rid, 60,
+		now=_dt.datetime.fromisoformat("2026-05-18T00:05:00+00:00"))
+
+	# Exactly one row — a full close UPDATEs in place (NO split child; spec
+	# §3 — the Protocol's exit_trade is a FULL close, record_partial_exit is
+	# the WS-handler split path, not reachable via this method).
+	assert s._conn.execute(
+		"SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+
+	s._conn.row_factory = sqlite3.Row
+	r = s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone()
+	assert r["status"] == "won"
+	assert r["exit_price_cents"] == 60
+	assert r["exit_time"] == "2026-05-18T00:05:00+00:00"
+	assert r["exit_fee_cents"] == 17
+	assert r["pnl_cents"] == 145
+	assert r["exit_reason"] == "ws_exit_fill"
+	# Entry-fee-remainder CONSUMED by B's record_close (the load-bearing
+	# B-CAS-close behaviour the paper single-UPDATE does NOT have):
+	# entry_fee_cents = COALESCE(entry_fee_remaining_cents, entry_fee_cents),
+	# then entry_fee_remaining_cents zeroed.
+	assert r["entry_fee_cents"] == 18
+	assert r["entry_fee_remaining_cents"] == 0
+	s.close()
+
+
+def test_exit_trade_loss_and_scratch_outcomes(tmp_path):
+	"""C5 — won/lost/scratch determination mirrors B (pre-fee vs blended
+	entry; fees then push a scratch to pnl<=0). Two more rows: a clear LOSS
+	(exit < entry) and a SCRATCH (exit == entry, pnl <= 0 after fees).
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	_now = _dt.datetime.fromisoformat("2026-05-18T00:06:00+00:00")
+
+	# LOSS: exit 20 < entry 42. exit_fee = int(round(ceil(
+	# 0.07*10*0.2*0.8*100))) = int(round(12.0)) = 12;
+	# pnl = 10*(20-42) - 18 - 12 = -250; 20 < 42 → lost.
+	rid_l = _seed_open_live_row(s, coid="cid-L", kalshi_id="ord-L")
+	s.exit_trade(rid_l, 20, now=_now)
+	s._conn.row_factory = sqlite3.Row
+	rl = s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid_l,)).fetchone()
+	assert rl["status"] == "lost"
+	assert rl["pnl_cents"] == -250
+	assert rl["entry_fee_remaining_cents"] == 0
+
+	# SCRATCH: exit 42 == entry 42 (pre-fee equal → scratch). exit_fee =
+	# int(round(ceil(0.07*10*0.42*0.58*100))) = 18;
+	# pnl = 10*(42-42) - 18 - 18 = -36 (fees push it negative; status still
+	# 'scratch' — outcome is the pre-fee compare, exactly as B does it).
+	rid_s = _seed_open_live_row(s, coid="cid-S", kalshi_id="ord-S")
+	s.exit_trade(rid_s, 42, now=_now)
+	rs = s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid_s,)).fetchone()
+	assert rs["status"] == "scratch"
+	assert rs["pnl_cents"] == -36
+	s.close()
+
+
+def test_settle_trade_routes_to_B_record_close_settlement(tmp_path):
+	"""C5 / spec §3 table `engine.py:895 settlement` + §5.
+
+	On the LIVE store ``settle_trade(trade_id, result, *, now)`` routes to B's
+	settlement close — ``live.state.record_close`` with
+	``exit_reason='settlement'``, binary ``exit_price_cents`` 100/0,
+	``exit_fee_cents=0`` (Kalshi charges no fee at settlement, spec §423),
+	entry-fee-remainder consumed. It SUPERSEDES ``exit_pending`` because
+	record_close's CAS precondition is ``status IN ('open','exit_pending')``.
+	won/lost by side-vs-result (binary — never scratch) mirrors B's
+	``ws_handlers._settlement_outcome`` / ``_settlement_pnl_cents``:
+
+	* payout = settlement_price for a yes-side row, (100 - settlement_price)
+	  for a no-side row.
+	* pnl = fill_size*(payout - blended_entry) - entry_fee_remaining.
+
+	Seed a yes-side open row (fill_size=10, blended_entry=42,
+	entry_fee_remaining=18). settle_trade(rid, "yes") → market resolved YES →
+	settlement_price 100, yes-side wins: payout=100,
+	pnl = 10*(100-42) - 18 = 562; exit_price_cents=100, exit_fee_cents=0,
+	exit_reason='settlement'; record_close consumes the remainder
+	(entry_fee_cents=18, entry_fee_remaining_cents=0).
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s)
+
+	s.settle_trade(
+		rid, "yes",
+		now=_dt.datetime.fromisoformat("2026-05-18T00:10:00+00:00"))
+
+	s._conn.row_factory = sqlite3.Row
+	r = s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone()
+	assert r["status"] == "won"
+	assert r["exit_price_cents"] == 100
+	assert r["exit_fee_cents"] == 0
+	assert r["exit_reason"] == "settlement"
+	assert r["exit_time"] == "2026-05-18T00:10:00+00:00"
+	assert r["pnl_cents"] == 562
+	# Entry-fee-remainder consumed by B's record_close.
+	assert r["entry_fee_cents"] == 18
+	assert r["entry_fee_remaining_cents"] == 0
+	# Exactly one row — settlement is a full UPDATE-in-place close.
+	assert s._conn.execute(
+		"SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	s.close()
+
+
+def test_settle_trade_loss_and_no_side(tmp_path):
+	"""C5 — settlement won/lost is by side-vs-result, never scratch (binary).
+
+	A yes-side row whose market settles NO loses; a NO-side row whose market
+	settles NO wins (payout = 100 - settlement_price). Mirrors B's
+	``_settlement_outcome`` / ``_settlement_pnl_cents`` exactly.
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	_now = _dt.datetime.fromisoformat("2026-05-18T00:11:00+00:00")
+
+	# yes-side row, market settles NO (result="no") → settlement_price 0,
+	# yes-side loses: payout=0, pnl = 10*(0-42) - 18 = -438.
+	rid_l = _seed_open_live_row(s, coid="cid-SN", kalshi_id="ord-SN")
+	s.settle_trade(rid_l, "no", now=_now)
+	s._conn.row_factory = sqlite3.Row
+	rl = s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid_l,)).fetchone()
+	assert rl["status"] == "lost"
+	assert rl["exit_price_cents"] == 0
+	assert rl["pnl_cents"] == -438
+	assert rl["exit_fee_cents"] == 0
+	s.close()
+
+
+def test_exit_trade_failure_is_best_effort_no_raise_no_RecordPendingFailed(
+	tmp_path, monkeypatch, caplog):
+	"""C5 / spec §3.1 + §5 — caller-owned best-effort: a TRANSIENT DB/disk
+	failure in B's CAS close is NOT fatal (log ERROR, do NOT raise; SPECIFICALLY
+	NOT ``RecordPendingFailed`` — ghost-reject scope is funds-at-risk PRE-PLACE
+	INSERTs only, spec §3.1; a terminal close is not one).
+
+	FATALITY justification (the genuinely-new funds-at-risk question): a close
+	acts on a real-money OPEN position, BUT the position's correct eventual
+	close is GUARANTEED by B's authoritative async reconciler / WS handler
+	(spec §3 table `:534/:537` — the live close is recorded by B's async
+	WS/reconciler against live_trades.db, NOT this synchronous store method;
+	D3 later rewires dispatch so store.exit_trade is not the live close path).
+	B's own ``record_close`` makes a lost CAS race a logged WARNING no-op and
+	NEVER raises (settlement-vs-exit-fill is B's EXPECTED idempotent outcome).
+	Raising here would HALT the engine — strictly WORSE for a funds-at-risk
+	open position than logging ERROR and letting B's reconciler close it (a
+	halted engine stops B's reconciler/WS loop too, removing the very recovery
+	mechanism). Identical posture + uniform taxonomy to C3/C4's "B's
+	reconciler owns recovery", applied to a close.
+
+	Patched AS RESOLVED BY ``store.exit_trade`` — store.py does
+	``from edge_catcher.live.state import record_close`` so the live
+	delegation binds ``edge_catcher.live.store.record_close``; patching
+	``edge_catcher.live.state.*`` would NOT intercept (C1's stale-binding
+	lesson). This exercises the ``except sqlite3.Error`` (transient/disk)
+	carve-out; the UNEXPECTED-non-DB branch is covered separately below.
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-EF", kalshi_id="ord-EF")
+	import datetime as _dt
+	import edge_catcher.live.store as store_mod
+	# sqlite3.Error subclass → lands in the transient/disk carve-out.
+	monkeypatch.setattr(store_mod, "record_close",
+		lambda *a, **k: (_ for _ in ()).throw(
+			sqlite3.OperationalError("disk I/O error")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — best-effort per §3.1; NOT RecordPendingFailed.
+		s.exit_trade(
+			rid, 60,
+			now=_dt.datetime.fromisoformat("2026-05-18T00:12:00+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"a write-failure in exit_trade must be logged at ERROR level (audit "
+		"gap), not silently swallowed")
+	msg = store_errs[-1].getMessage()
+	assert "DB/disk fault" in msg and "transient" in msg, (
+		"a sqlite3.Error must be logged via the transient DB/disk carve-out "
+		f"message, not the UNEXPECTED branch — got: {msg!r}")
+	assert "UNEXPECTED" not in msg, (
+		"sqlite3.Error must NOT be categorized as the UNEXPECTED/possible "
+		f"API-drift class — got: {msg!r}")
+	# The open position survived uncorrupted (the failed close neither
+	# transitioned nor wrote it) — B's authoritative async reconciler/WS
+	# handler still owns the eventual close. Exactly one row, still 'open'.
+	rows = s._conn.execute(
+		"SELECT status, client_order_id FROM live_trades").fetchall()
+	assert rows == [("open", "cid-EF")]
+	s.close()
+
+
+def test_settle_trade_unexpected_error_distinct_from_db_error(
+	tmp_path, monkeypatch, caplog):
+	"""C5 / §5 — the UNEXPECTED (non-``sqlite3.Error``) carve-out is DISTINCT
+	from the transient DB/disk one, mirroring C3/C4's split.
+
+	A non-DB exception out of ``record_close`` (e.g. a ``TypeError`` from a
+	wrong kwarg = B-API/signature drift) is a likely PERMANENT bug that would
+	otherwise log-and-continue forever with zero settled rows. It MUST still
+	be best-effort (no raise — B's authoritative async settlement path owns
+	recovery; SPECIFICALLY NOT ``RecordPendingFailed``) but logged with the
+	DISTINCT "UNEXPECTED … possible B-API / signature drift … escalate"
+	wording so an operator can escalate it faster than a transient disk fault.
+	Patched AS RESOLVED BY ``store.settle_trade`` (stale-binding lesson).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-SF", kalshi_id="ord-SF")
+	import datetime as _dt
+	import edge_catcher.live.store as store_mod
+	monkeypatch.setattr(store_mod, "record_close",
+		lambda *a, **k: (_ for _ in ()).throw(TypeError("bad kwarg")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — still §3.1 best-effort even for the permanent
+		# class (B's authoritative async path owns recovery).
+		s.settle_trade(
+			rid, "yes",
+			now=_dt.datetime.fromisoformat("2026-05-18T00:13:00+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"an unexpected non-DB error in settle_trade must be logged at ERROR "
+		"level, not silently swallowed")
+	msg = store_errs[-1].getMessage()
+	assert "UNEXPECTED" in msg and "signature drift" in msg \
+			and "escalate" in msg, (
+		"a non-sqlite3 error must be logged via the DISTINCT UNEXPECTED / "
+		f"possible-API-drift / escalate message — got: {msg!r}")
+	assert "DB/disk fault" not in msg, (
+		"a non-sqlite3 error must NOT be categorized as the transient "
+		f"DB/disk carve-out — got: {msg!r}")
+	# The open position survived uncorrupted.
+	rows = s._conn.execute(
+		"SELECT status, client_order_id FROM live_trades").fetchall()
+	assert rows == [("open", "cid-SF")]
+	s.close()
