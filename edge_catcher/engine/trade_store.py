@@ -404,6 +404,11 @@ class TradeStore:
 		behaviour."""
 		return
 
+	def record_intent(self, **kwargs) -> None:
+		"""No-op: paper/replay have no pre-place state (synchronous fills).
+		Present so dispatch calls it unconditionally (spec §3 keystone)."""
+		return None
+
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
 		"""Exit a trade at a specific price (TP/SL).
 
@@ -700,6 +705,11 @@ class InMemoryTradeStore:
 		do not contain rejected events for the same reason. Mirror of
 		SQLiteTradeStore.record_rejected no-op."""
 		return
+
+	def record_intent(self, **kwargs) -> None:
+		"""No-op: paper/replay have no pre-place state (synchronous fills).
+		Present so dispatch calls it unconditionally (spec §3 keystone)."""
+		return None
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None:
 		"""Mirror of SQLiteTradeStore.exit_trade — see trade_store.py:183.
