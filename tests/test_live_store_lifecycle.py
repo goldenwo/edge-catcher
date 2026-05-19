@@ -1152,3 +1152,276 @@ def test_settle_trade_unexpected_error_distinct_from_db_error(
 		"SELECT status, client_order_id FROM live_trades").fetchall()
 	assert rows == [("open", "cid-SF")]
 	s.close()
+
+
+def test_exit_trade_failure_unexpected_error_distinct_from_db_error(
+	tmp_path, monkeypatch, caplog):
+	"""C5 / §5 review-symmetry — close the asymmetric carve-out coverage gap:
+	C5 shipped only the ``exit_trade``-TRANSIENT + ``settle_trade``-UNEXPECTED
+	tests. This is the missing ``exit_trade``-UNEXPECTED half (its sibling
+	``test_settle_trade_failure_db_error_distinct_from_unexpected`` is the
+	missing ``settle_trade``-TRANSIENT half), so BOTH close methods now have
+	the full transient/unexpected pair — exact parity with C3/C4's symmetric
+	``record_rejected`` / ``record_pending`` carve-out pairs.
+
+	A non-``sqlite3.Error`` out of ``record_close`` (e.g. a ``TypeError`` from
+	a wrong kwarg = B-API/signature drift) is a likely PERMANENT bug that
+	would otherwise log-and-continue forever with zero closed rows. It MUST
+	still be best-effort (no raise — B's authoritative async WS/reconciler
+	owns recovery; SPECIFICALLY NOT ``RecordPendingFailed``) but logged with
+	the DISTINCT "UNEXPECTED … signature drift … escalate" wording so an
+	operator can escalate it faster than a transient disk fault. Patched AS
+	RESOLVED BY ``store.exit_trade`` (stale-binding lesson — store.py binds
+	``edge_catcher.live.store.record_close``; an ``edge_catcher.live.state.*``
+	patch would NOT intercept).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-EU", kalshi_id="ord-EU")
+	import datetime as _dt
+	import edge_catcher.live.store as store_mod
+	monkeypatch.setattr(store_mod, "record_close",
+		lambda *a, **k: (_ for _ in ()).throw(TypeError("bad kwarg")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — still §3.1 best-effort even for the permanent
+		# class (B's authoritative async WS/reconciler owns recovery).
+		s.exit_trade(
+			rid, 60,
+			now=_dt.datetime.fromisoformat("2026-05-18T00:14:00+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"an unexpected non-DB error in exit_trade must be logged at ERROR "
+		"level, not silently swallowed")
+	msg = store_errs[-1].getMessage()
+	assert "UNEXPECTED" in msg and "signature drift" in msg \
+			and "escalate" in msg, (
+		"a non-sqlite3 error must be logged via the DISTINCT UNEXPECTED / "
+		f"possible-API-drift / escalate message — got: {msg!r}")
+	assert "DB/disk fault" not in msg, (
+		"a non-sqlite3 error must NOT be categorized as the transient "
+		f"DB/disk carve-out — got: {msg!r}")
+	# The open position survived uncorrupted (the failed close neither
+	# transitioned nor wrote it). Exactly one row, still 'open'.
+	rows = s._conn.execute(
+		"SELECT status, client_order_id FROM live_trades").fetchall()
+	assert rows == [("open", "cid-EU")]
+	s.close()
+
+
+def test_settle_trade_failure_db_error_distinct_from_unexpected(
+	tmp_path, monkeypatch, caplog):
+	"""C5 / spec §3.1 + §5 review-symmetry — the missing
+	``settle_trade``-TRANSIENT half (sibling of
+	``test_exit_trade_failure_unexpected_error_distinct_from_db_error``).
+
+	A TRANSIENT DB/disk fault (``sqlite3.OperationalError``) in B's
+	settlement CAS close is NOT fatal (log ERROR, do NOT raise; SPECIFICALLY
+	NOT ``RecordPendingFailed`` — ghost-reject scope is funds-at-risk
+	PRE-PLACE INSERTs only, spec §3.1; B's authoritative async settlement
+	path / reconciler still owns the eventual close). It MUST land in the
+	``except sqlite3.Error`` (transient/disk) carve-out — the DISTINCT
+	"DB/disk fault … transient" wording, NOT the UNEXPECTED/API-drift one.
+	Patched AS RESOLVED BY ``store.settle_trade`` (stale-binding lesson).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-SD", kalshi_id="ord-SD")
+	import datetime as _dt
+	import edge_catcher.live.store as store_mod
+	# sqlite3.Error subclass → lands in the transient/disk carve-out.
+	monkeypatch.setattr(store_mod, "record_close",
+		lambda *a, **k: (_ for _ in ()).throw(
+			sqlite3.OperationalError("disk I/O error")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — best-effort per §3.1; NOT RecordPendingFailed.
+		s.settle_trade(
+			rid, "yes",
+			now=_dt.datetime.fromisoformat("2026-05-18T00:15:00+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"a write-failure in settle_trade must be logged at ERROR level "
+		"(audit gap), not silently swallowed")
+	msg = store_errs[-1].getMessage()
+	assert "DB/disk fault" in msg and "transient" in msg, (
+		"a sqlite3.Error must be logged via the transient DB/disk carve-out "
+		f"message, not the UNEXPECTED branch — got: {msg!r}")
+	assert "UNEXPECTED" not in msg, (
+		"sqlite3.Error must NOT be categorized as the UNEXPECTED/possible "
+		f"API-drift class — got: {msg!r}")
+	# The open position survived uncorrupted. Exactly one row, still 'open'.
+	rows = s._conn.execute(
+		"SELECT status, client_order_id FROM live_trades").fetchall()
+	assert rows == [("open", "cid-SD")]
+	s.close()
+
+
+def test_exit_trade_lost_cas_terminal_pre_status_logs_distinct_no_raise(
+	tmp_path, caplog):
+	"""C5 / FIX 3 — the lost-CAS-race observability branch in ``exit_trade``
+	(``if pre_status not in ('open','exit_pending')``). C5 had NO direct test
+	for it (C3's analogous ``record_rejected`` lost-race path is covered at
+	``:371``/``:434``); this closes that gap, mirroring C3's benign-duplicate
+	idiom applied to a close.
+
+	A row is closed ONCE legitimately via ``exit_trade`` (CAS open→won), so
+	its status is now terminal (``won``). A SECOND ``exit_trade`` for the same
+	id then finds ``pre_status='won'`` → B's ``record_close`` CAS no-ops (a
+	settlement/exit raced an already-applied close — B's EXPECTED idempotent
+	outcome). B's ``_cas_update`` only WARNs by ``row_id`` on the
+	``edge_catcher.live.state`` logger (no ``trade_id`` context on THIS
+	store's audit trail), so ``exit_trade`` surfaces it DISTINCTLY on the
+	store's logger with the business keys. It MUST NOT raise (§3.1 — B owns
+	the eventual close), and MUST NOT clobber the already-closed row (the
+	booked won/pnl must survive intact).
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-EL", kalshi_id="ord-EL")
+
+	# First exit — legit CAS open→won (60 > blended 42). NOT a lost race ⇒
+	# emits ZERO store-logger ERRORs (asserted, so the discrimination below
+	# cannot be satisfied by a stray happy-path ERROR — the inverted-predicate
+	# failure mode).
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		s.exit_trade(
+			rid, 60,
+			now=_dt.datetime.fromisoformat("2026-05-18T00:16:00+00:00"))
+	first_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert first_errs == [], (
+		"the FIRST exit is the won-CAS happy path (open→won succeeds), NOT a "
+		"lost race — it must emit NO store-logger ERROR; got: "
+		f"{[r.getMessage() for r in first_errs]!r}")
+	caplog.clear()
+
+	# Snapshot the booked close so we can prove the lost race did NOT clobber.
+	s._conn.row_factory = sqlite3.Row
+	before = dict(s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone())
+	assert before["status"] == "won"
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# Second exit — pre_status='won' (terminal), CAS lost race. MUST NOT
+		# raise; a DIFFERENT exit_price to prove it is NOT re-applied.
+		s.exit_trade(
+			rid, 99,
+			now=_dt.datetime.fromisoformat("2026-05-18T00:16:05+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	# EXACTLY ONE store ERROR — the genuine lost race only (with an inverted
+	# predicate the happy path above would also ERROR and this would not
+	# discriminate; the empty-first-errs + clear + exactly-one make it
+	# non-vacuous).
+	assert len(store_errs) == 1, (
+		"only the genuine lost race (2nd exit, row already 'won') must emit "
+		f"a store-logger ERROR — exactly one; got: "
+		f"{[r.getMessage() for r in store_errs]!r}")
+	msg = store_errs[0].getMessage()
+	# Distinct lost-CAS line WITH the business keys (trade_id + actual
+	# terminal pre_status) and the lost-race / not-re-applied wording.
+	assert f"id={rid}" in msg, (
+		f"the lost-CAS log must carry the trade_id — got: {msg!r}")
+	assert "lost CAS race" in msg, (
+		f"must be the distinct lost-CAS-race line — got: {msg!r}")
+	# pre_status is %r-formatted into the line ⇒ rendered as status='won'.
+	assert "status='won'" in msg, (
+		"the lost-CAS log must carry the actual terminal pre_status "
+		f"(status='won') — got: {msg!r}")
+	assert "not re-applied" in msg, (
+		f"must state the close was NOT re-applied — got: {msg!r}")
+
+	# The already-closed row was NOT clobbered by the lost-race 2nd exit:
+	# exactly one row, byte-identical to the first (legit) close — the CAS
+	# correctly no-op'd; the exit_price=99 did NOT overwrite the booked 60.
+	after = dict(s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone())
+	assert after == before, (
+		"a lost-CAS-race exit must NOT mutate the already-closed row — "
+		f"before={before!r} after={after!r}")
+	assert s._conn.execute(
+		"SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	s.close()
+
+
+def test_settle_trade_lost_cas_terminal_pre_status_logs_distinct_no_raise(
+	tmp_path, caplog):
+	"""C5 / FIX 3 — symmetric to
+	``test_exit_trade_lost_cas_terminal_pre_status_logs_distinct_no_raise``
+	for the lost-CAS-race branch in ``settle_trade``
+	(``if pre_status not in ('open','exit_pending')``; C5 had NO direct
+	test).
+
+	A row is closed ONCE legitimately via ``settle_trade`` (CAS open→won on
+	a yes-side row settling YES). A SECOND ``settle_trade`` then finds
+	``pre_status='won'`` → B's ``record_close`` CAS no-ops (settlement raced
+	an already-applied close — B's EXPECTED idempotent outcome). It MUST be
+	surfaced DISTINCTLY on the store's logger with the business keys, MUST
+	NOT raise (§3.1 — B's authoritative async settlement path owns it), and
+	MUST NOT clobber the already-settled row.
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	rid = _seed_open_live_row(s, coid="cid-SL", kalshi_id="ord-SL")
+
+	# First settle — legit CAS open→won (yes-side, settles YES). NOT a lost
+	# race ⇒ ZERO store-logger ERRORs (non-vacuity guard).
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		s.settle_trade(
+			rid, "yes",
+			now=_dt.datetime.fromisoformat("2026-05-18T00:17:00+00:00"))
+	first_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert first_errs == [], (
+		"the FIRST settle is the won-CAS happy path (open→won succeeds), NOT "
+		"a lost race — it must emit NO store-logger ERROR; got: "
+		f"{[r.getMessage() for r in first_errs]!r}")
+	caplog.clear()
+
+	s._conn.row_factory = sqlite3.Row
+	before = dict(s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone())
+	assert before["status"] == "won"
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# Second settle — pre_status='won' (terminal), CAS lost race. MUST
+		# NOT raise; a DIFFERENT result to prove it is NOT re-applied.
+		s.settle_trade(
+			rid, "no",
+			now=_dt.datetime.fromisoformat("2026-05-18T00:17:05+00:00"))
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert len(store_errs) == 1, (
+		"only the genuine lost race (2nd settle, row already 'won') must "
+		f"emit a store-logger ERROR — exactly one; got: "
+		f"{[r.getMessage() for r in store_errs]!r}")
+	msg = store_errs[0].getMessage()
+	assert f"id={rid}" in msg, (
+		f"the lost-CAS log must carry the trade_id — got: {msg!r}")
+	assert "lost CAS race" in msg, (
+		f"must be the distinct lost-CAS-race line — got: {msg!r}")
+	# pre_status is %r-formatted into the line ⇒ rendered as status='won'.
+	assert "status='won'" in msg, (
+		"the lost-CAS log must carry the actual terminal pre_status "
+		f"(status='won') — got: {msg!r}")
+	assert "not re-applied" in msg, (
+		f"must state the settlement close was NOT re-applied — got: {msg!r}")
+
+	# The already-settled row was NOT clobbered by the lost-race 2nd settle:
+	# exactly one row, byte-identical to the first (legit) settlement — the
+	# CAS correctly no-op'd; result='no' did NOT overwrite the booked YES.
+	after = dict(s._conn.execute(
+		"SELECT * FROM live_trades WHERE id = ?", (rid,)).fetchone())
+	assert after == before, (
+		"a lost-CAS-race settle must NOT mutate the already-settled row — "
+		f"before={before!r} after={after!r}")
+	assert s._conn.execute(
+		"SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	s.close()

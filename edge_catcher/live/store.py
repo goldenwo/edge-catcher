@@ -342,20 +342,36 @@ def _trade_by_id_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 	}
 
 
-def _close_fee_cents(price_cents: int, size: int) -> int:
-	"""B's canonical fill-fee convention, replicated verbatim from
-	``ws_handlers._entry_fee_cents`` /
+# Binary-market settlement prices, in cents. Replicated from B's private
+# ``ws_handlers._SETTLED_YES_PRICE`` / ``_SETTLED_NO_PRICE`` (NOT imported —
+# same "don't import a private symbol, replicate the trivial constant"
+# decision as ``_fee_cents`` above): a resolved YES market pays 100¢, a
+# resolved NO market pays 0¢. Naming the money boundary so ``settle_trade``'s
+# payout/outcome arithmetic is self-documenting rather than bare literals.
+_SETTLED_YES_PRICE = 100
+_SETTLED_NO_PRICE = 0
+
+
+def _fee_cents(price_cents: int, size: int) -> int:
+	"""B's canonical proportional fill-fee convention, replicated verbatim
+	from ``ws_handlers._entry_fee_cents`` /
 	``reconciliation._resolve_matched_pending``
 	(``int(round(STANDARD_FEE.calculate(price, size)))``).
 
-	Replicated (NOT imported — ``ws_handlers._entry_fee_cents`` is a private
-	module helper) so an ``exit_trade``-booked close's exit fee is
-	byte-identical to a WS-handler-booked close's exit fee: F's P&L analytics
-	must not diverge by which path booked the close (spec §283; same
-	documented "replicate a 1-line pure fee fn, don't import a private symbol"
-	decision ``ws_handlers._clamp_fill_pct`` / ``_entry_fee_cents`` already
-	made). ``calculate`` returns ceil'd cents as a float; the column is
-	INTEGER."""
+	The single source of this idiom for EVERY fee this store books — the
+	entry fee on ``record_trade``'s CAS pending→open AND the exit fee on
+	``exit_trade``'s CAS close (settlement charges no fee, spec §423). One
+	helper (rule-of-three: C2 entry + C5 exit + B's two private copies) so a
+	store-booked fill's fee is byte-identical to a WS-handler-/reconciler-
+	booked fill's fee: F's P&L analytics must not diverge by which path
+	booked the fill (spec §283).
+
+	Replicated, NOT imported — ``ws_handlers._entry_fee_cents`` is a private
+	module helper; the same documented "replicate a 1-line pure fee fn, don't
+	import a private symbol" decision ``ws_handlers._clamp_fill_pct`` /
+	``_entry_fee_cents`` already made (the C2/C3/C4 §5 controlled-duplication
+	adjudication stands). ``calculate`` returns ceil'd cents as a float; the
+	column is INTEGER."""
 	return int(round(STANDARD_FEE.calculate(price_cents, size)))
 
 
@@ -947,11 +963,10 @@ class SQLiteTradeStore:
 		# taken off a 0¢ basis.
 		blended_cents = blended_entry if blended_entry else entry_price
 		# B's canonical entry-fee convention (ws_handlers._entry_fee_cents /
-		# reconciliation._resolve_matched_pending) — keep byte-identical so
-		# F's P&L does not diverge by which path booked the fill (spec §283).
-		entry_fee_cents = int(
-			round(STANDARD_FEE.calculate(blended_cents, fill_size))
-		)
+		# reconciliation._resolve_matched_pending) — via the shared _fee_cents
+		# idiom (same fn exit_trade uses) so F's P&L does not diverge by which
+		# path booked the fill (spec §283).
+		entry_fee_cents = _fee_cents(blended_cents, fill_size)
 
 		transition_pending_to_open(
 			self._conn,
@@ -1135,9 +1150,11 @@ class SQLiteTradeStore:
 			# CAS (status IN ('open','exit_pending')) is the authority on
 			# whether the close applies; a terminal pre_status ⇒ the CAS
 			# no-ops (B logs its WARNING) — surfaced distinctly below.
-			settlement_price = 100 if result == "yes" else 0
+			settlement_price = (
+				_SETTLED_YES_PRICE if result == "yes" else _SETTLED_NO_PRICE
+			)
 			# B's _settlement_outcome: won iff (yes & YES) or (no & NO).
-			settled_yes = settlement_price >= 100
+			settled_yes = settlement_price >= _SETTLED_YES_PRICE
 			outcome = (
 				"won"
 				if (side == "yes" and settled_yes)
@@ -1147,7 +1164,9 @@ class SQLiteTradeStore:
 			# B's _settlement_pnl_cents: a YES contract pays
 			# settlement_price; a NO contract pays 100 - settlement_price.
 			payout = (
-				settlement_price if side == "yes" else 100 - settlement_price
+				settlement_price
+				if side == "yes"
+				else _SETTLED_YES_PRICE - settlement_price
 			)
 			pnl = (
 				fill_size * (payout - blended_entry) - entry_fee_remaining
@@ -1237,7 +1256,7 @@ class SQLiteTradeStore:
 		byte-for-byte so F's P&L does not diverge by which path booked the
 		close: ``exit_fee = int(round(STANDARD_FEE.calculate(exit_price,
 		fill_size)))`` (B's ``_entry_fee_cents`` convention, replicated as
-		``_close_fee_cents``); outcome ``won`` if exit beats the blended
+		the shared ``_fee_cents``); outcome ``won`` if exit beats the blended
 		entry, ``lost`` if worse, ``scratch`` if equal (pre-fee — fees push a
 		scratch to ``pnl <= 0``, B's ``record_partial_exit`` rule); ``pnl =
 		fill_size*(exit_price - blended_entry) - entry_fee_remaining -
@@ -1306,7 +1325,7 @@ class SQLiteTradeStore:
 				if blended_entry_cents
 				else entry_price_cents
 			)
-			exit_fee = _close_fee_cents(exit_price, fill_size)
+			exit_fee = _fee_cents(exit_price, fill_size)
 			# B's on_fill_event full-close outcome: pre-fee compare vs the
 			# blended entry; scratch only when exactly equal (fees then push
 			# a scratch to pnl<=0 — B's record_partial_exit rule).
