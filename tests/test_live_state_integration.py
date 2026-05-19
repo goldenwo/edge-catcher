@@ -608,21 +608,6 @@ def test_27_live_schema_readable_read_only(
 		ro.close()
 
 
-@pytest.mark.xfail(
-	reason=(
-		"ORCHESTRATOR FINDING (not a 4.C defect): the merged reporting CLI "
-		"(edge_catcher/reporting/__init__.py) hard-queries `FROM paper_trades` "
-		"with `entry_price`/`series_ticker`; the 0003 migration created table "
-		"`live_trades` with `entry_price_cents`/`series`, so the CLI raises "
-		"`no such table: paper_trades` against a live_trades.db. It also opens "
-		"plain sqlite3.connect, not the spec-mandated ?mode=ro URI. Spec §186 "
-		"'mirror paper schema = single --db flip works unmodified' is false vs "
-		"merged code. The reporting CLI is out of 4.C scope (spec §32/§45, "
-		"git-tracked, own paper_trades test suite). xfail documents the gap "
-		"for the orchestrator rather than silently skipping the spec item."
-	),
-	strict=True,
-)
 def test_27_reporting_cli_db_flag_against_live_schema(
 	conn: sqlite3.Connection, live_db_path: Path
 ) -> None:
