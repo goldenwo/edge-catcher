@@ -182,6 +182,60 @@ _OPEN_ROW_SQL = (
 )
 
 
+def _backfill_pending_kalshi_order_id(
+	conn: sqlite3.Connection, *, row_id: int, kalshi_order_id: str
+) -> bool:
+	"""Targeted, CAS-guarded ``kalshi_order_id`` backfill on a still-``pending``
+	row (C4 / spec §3 / §3.1 / §5).
+
+	B's ``live.state`` deliberately ships NO ``kalshi_order_id``-only backfill
+	writer: its CAS writers either move OUT of ``pending``
+	(``transition_pending_to_open`` → ``open`` and sets the fill fields;
+	``transition_pending_to_rejected`` → ``rejected``/``rejected_post_hoc``,
+	terminal). The executor-pending branch needs the row to STAY ``pending``
+	(fill state is still UNKNOWN; B's reconciler resolves it later via
+	``client_order_id``), with only ``kalshi_order_id`` learned. C4's task
+	contract explicitly sanctions "a single targeted guarded UPDATE on the
+	located row" as THE documented backfill mechanism when B has no writer.
+
+	This is that single UPDATE, mirroring B's canonical CAS-predicate idiom
+	verbatim (``WHERE id = ? AND status = '<precondition>'`` — identical shape
+	to ``transition_pending_to_open`` / ``touch_reconciled`` in
+	``live.state``): the ``status = 'pending'`` predicate makes it a
+	compare-and-swap, so a row that concurrently left ``pending`` (B's
+	reconciler / a fill landed) is an idempotent no-op (``rowcount == 0``),
+	never a blind clobber of a transitioned row. ``B._cas_update`` is a private
+	module helper not exported to this module; replicating its one-line
+	``rowcount``-check here (rather than importing a private symbol) keeps the
+	store↔state seam clean and is exactly the sanctioned "single targeted
+	UPDATE". A module-level function (not an inline ``self._conn`` UPDATE) so
+	C4's failure test can monkeypatch it at the ``edge_catcher.live.store``
+	namespace it is resolved from (C1's stale-binding lesson).
+
+	Returns ``True`` when the CAS won (the still-``pending`` row was
+	backfilled), ``False`` when it lost the race (row no longer ``pending`` or
+	absent) — the caller treats ``False`` as a benign idempotent no-op (the
+	row already moved on; B's reconciler owns it). Never raises on a lost CAS;
+	a genuine ``sqlite3.Error`` (disk/DB fault) propagates to the caller's
+	§3.1 best-effort ``try/except`` (NOT fatal there — the durable pending row
+	already exists from C1).
+	"""
+	if not kalshi_order_id:
+		# Self-guard so the helper is safe even if a future caller forgets
+		# the caller-side `if kalshi_order_id:` (defense-in-depth, both stay):
+		# never run `SET kalshi_order_id = NULL/''` (would null out an id C1
+		# or a prior call set). Makes the `kalshi_order_id: str` annotation
+		# honest. A benign no-op (treated like a lost CAS by the caller).
+		return False
+	cur = conn.execute(
+		"UPDATE live_trades SET kalshi_order_id = ? "
+		"WHERE id = ? AND status = 'pending'",
+		(kalshi_order_id, row_id),
+	)
+	conn.commit()
+	return cur.rowcount == 1
+
+
 def _open_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 	"""Map a live_trades open row to the paper open-trade dict shape.
 
@@ -312,33 +366,184 @@ class SQLiteTradeStore:
 		placed_at_utc: str,
 		rejection_reason: Optional[str],
 	) -> None:
-		"""Persist a ``pending`` row (dispatch's pending branch — D's
-		NetworkError / malformed-fills / engine-timeout OrderResult).
+		"""LIVE executor-pending write — an idempotent ``kalshi_order_id``
+		BACKFILL on the C1 ``pending`` row located by ``client_order_id``,
+		**NOT a 2nd insert** (spec §3 EXPLICITLY supersedes B's CR-4
+		insert-on-outcome / one-row-per-attempt model: "the live entry model is
+		insert-pending-then-CAS-transition, NOT insert-on-outcome").
 
-		Pure delegation to :func:`live.state.record_pending` over the held
-		connection. The locked 11-kwarg signature matches
-		``TradeStoreProtocol.record_pending`` verbatim (pinned by
-		``tests/test_engine_dispatch_pending_branch.py``).
+		Dispatch's executor-pending branch (``dispatch.py:478`` — fires on
+		D's NetworkError / timeout / malformed-fills OrderResult; the order MAY
+		be live on Kalshi, fill state UNKNOWN) calls this UNCONDITIONALLY — it
+		must never branch on paper-vs-live (spec §1 keystone) — so the
+		paper-shaped Protocol signature is preserved verbatim (the locked
+		11-kwarg signature; pinned by
+		``tests/test_engine_dispatch_pending_branch.py``). The durable
+		``pending`` row ALREADY EXISTS from C1's ``record_intent`` (INSERTed
+		pre-place, keyed by ``client_order_id``); this method only learns the
+		``kalshi_order_id`` (a NetworkError/timeout OrderResult may still carry
+		one) and keeps ``status='pending'`` (still unknown — B's reconciler
+		resolves it later via ``client_order_id``).
 
-		🚨 ``RecordPendingFailed`` (raised by ``live.state.record_pending`` on
-		INSERT failure — a stranded funds-at-risk Kalshi order with no local
-		row) propagates UNCAUGHT: there is intentionally **no** try/except
-		around this call. The engine's ghost-reject clauses depend on it.
+		Flow:
+
+		1. Locate the C1 ``pending`` row by ``client_order_id`` using B's
+		   canonical lookup query (the same ``WHERE client_order_id = ?``
+		   SELECT ``live.state`` itself / the reconciler / ``record_trade`` /
+		   ``record_rejected`` use — NOT hand-rolled SQL; §5). The select is
+		   extended to ``SELECT id, status`` so the pre-state rides the SAME
+		   round-trip. ``client_order_id`` is ``UNIQUE`` ⇒ at most one row.
+		2. If a non-empty ``kalshi_order_id`` is now known, BACKFILL it onto
+		   that row via :func:`_backfill_pending_kalshi_order_id` (the single
+		   sanctioned targeted CAS UPDATE — B ships no ``kalshi_order_id``-only
+		   backfill writer; ``status='pending'`` CAS predicate ⇒ idempotent,
+		   no clobber of a row that concurrently transitioned). A NULL/empty id
+		   (pure NetworkError, no id returned) is left as-is — never null out
+		   an id C1 or a prior call already set (idempotent).
+
+		**§3.1 NORMATIVE — caller-owned best-effort, NOT fatal (the INVERSE of
+		C1's ``record_intent``, like C3's ``record_rejected``):** post-place
+		``record_pending`` backfill failure ⇒ NOT fatal (log ERROR, continue).
+		The durable row already exists from ``record_intent``; B's reconciler
+		owns recovery via ``client_order_id``. Raising here would needlessly
+		halt the engine over an audit-grade backfill miss while the
+		funds-at-risk invariant is already satisfied. Contrast:
+
+		* **C1 ``record_intent`` — FATAL.** Its INSERT precedes ``place()``;
+		  the row does NOT exist yet, so a failure strands a funds-at-risk
+		  order with no local row → ``RecordPendingFailed`` propagates uncaught
+		  and the engine's ghost-reject clauses halt it. C4 is the opposite:
+		  the row ALREADY exists, nothing to strand.
+		* **C3 ``record_rejected`` — CAS ``pending → rejected``, best-effort.**
+		  Same §3.1 not-fatal posture; C4 differs only in that the CAS keeps
+		  ``status='pending'`` (state still unknown) instead of moving to a
+		  terminal ``rejected``.
+
+		Failure modes (all best-effort — log ERROR, never raise, never
+		``RecordPendingFailed``; ghost-reject scope is funds-at-risk
+		pre-place INSERTs only):
+
+		* **Row-not-found (no preceding C1 ``record_intent`` — defense in
+		  depth):** log ERROR audit gap and return. Do NOT fabricate a
+		  competing INSERT (that would resurrect B's superseded
+		  insert-on-outcome model; spec §3). B's reconciler is the backstop via
+		  ``client_order_id`` (mirrors C3's CAS-miss posture).
+		* **Backfill write failure — two carve-outs (both best-effort, never
+		  raise), mirroring C3's ``record_rejected`` split so an operator can
+		  triage faster:** ``sqlite3.Error`` is the transient/environmental
+		  disk/DB fault (or a CAS lost-race no-op) — log ERROR and continue; a
+		  non-DB ``Exception`` is flagged DISTINCTLY as an UNEXPECTED error (a
+		  possible permanent B-API/signature drift) which would otherwise
+		  log-and-continue forever with zero backfills — an operator should
+		  escalate that class. The C1 row is intact either way (the targeted
+		  CAS UPDATE applied or no-op'd — it never half-writes); B's reconciler
+		  resolves the row via ``client_order_id`` regardless.
+
+		This partially supersedes B's CR-4 insert-on-outcome for the
+		executor-pending case — a converged, locked §3 / §3.1 tradeoff,
+		INTENTIONAL, not a regression.
 		"""
-		record_pending(
-			self._conn,
-			ticker=ticker,
-			series=series,
-			strategy=strategy,
-			side=side,  # type: ignore[arg-type]  # Protocol widens to str; live.state narrows to Literal["yes","no"] — value is validated upstream (OrderRequest.side cast in dispatch); the side CHECK constraint is the runtime backstop
-			intended_size=intended_size,
-			entry_price_cents=entry_price_cents,
-			stop_loss_distance_cents=stop_loss_distance_cents,
-			client_order_id=client_order_id,
-			kalshi_order_id=kalshi_order_id,
-			placed_at_utc=placed_at_utc,
-			rejection_reason=rejection_reason,
-		)
+		try:
+			# B's canonical by-client_order_id lookup (identical predicate to
+			# live.state.py:807 / reconciliation / record_trade /
+			# record_rejected) — NOT hand-rolled; UNIQUE ⇒ at most one row.
+			# (id, status) in one round-trip: status discriminates the
+			# row-not-found audit gap from the normal still-pending backfill.
+			found = self._conn.execute(
+				"SELECT id, status FROM live_trades WHERE client_order_id = ?",
+				(client_order_id,),
+			).fetchone()
+			if found is None:
+				# §3.1 accepted audit gap: the C1 record_intent row is absent
+				# (defense-in-depth — should not happen; dispatch always
+				# record_intent's before place()). Log ERROR and return — NOT
+				# fatal, NOT a fabricated INSERT (spec §3 supersedes
+				# insert-on-outcome); B's reconciler is the backstop via
+				# client_order_id.
+				log.error(
+					"record_pending row-not-found: no C1 pending row for "
+					"client_order_id=%r reason=%r — record_intent must have "
+					"INSERTed it before the executor-pending write; §3.1 "
+					"accepted audit gap, not fatal (the durable row's absence "
+					"is recoverable by B's reconciler via client_order_id), "
+					"NOT a fabricated insert (spec §3 supersedes "
+					"insert-on-outcome)",
+					client_order_id,
+					rejection_reason,
+				)
+				return
+			row_id = int(found[0])
+			pre_status = found[1]
+			# Only backfill when a non-empty id is now known. A pure
+			# NetworkError returns no id (kalshi_order_id None/"") — leave the
+			# C1 NULL as-is; never null out an id C1 or a prior call set
+			# (idempotent: re-running with the same id is a no-op-equivalent —
+			# the CAS UPDATE rewrites the same value or no-ops if the row
+			# already left 'pending').
+			if kalshi_order_id:
+				backfilled = _backfill_pending_kalshi_order_id(
+					self._conn, row_id=row_id, kalshi_order_id=kalshi_order_id
+				)
+				if not backfilled:
+					# Lost CAS race: the row left 'pending' between the SELECT
+					# and the UPDATE (B's reconciler resolved it, or a fill
+					# landed). Idempotent no-op — surface DISTINCTLY on this
+					# store's coid-keyed audit logger (B's _cas_update is not
+					# in this path) so the audit trail records that the backfill
+					# did not apply; NOT fatal, NOT re-applied (the row already
+					# moved on; B owns it). pre_status is the row's status at
+					# SELECT time — a useful triage hint for the race window.
+					log.error(
+						"record_pending backfill lost CAS race for "
+						"client_order_id=%r reason=%r: row left 'pending' "
+						"(status at lookup=%r) before the kalshi_order_id=%r "
+						"backfill applied — §3.1 best-effort no-op, not fatal "
+						"(row already transitioned; B's reconciler owns it), "
+						"not re-applied",
+						client_order_id,
+						rejection_reason,
+						pre_status,
+						kalshi_order_id,
+					)
+		except sqlite3.Error as exc:
+			# §3.1 caller-owned best-effort — TRANSIENT/ENVIRONMENTAL DB or
+			# disk fault. The durable C1 pending row ALREADY exists (this is
+			# the INVERSE of C1's FATAL record_intent: there the row did NOT
+			# exist yet, here it does), so a failed kalshi_order_id backfill
+			# strands at most an audit-grade detail — B's reconciler resolves
+			# the row via client_order_id regardless. Log ERROR, do NOT raise
+			# — never RecordPendingFailed (ghost-reject = funds-at-risk
+			# pre-place INSERTs only; PR#34 438d843 best-effort precedent).
+			log.error(
+				"record_pending backfill failed (DB/disk fault) for "
+				"client_order_id=%r reason=%r: %s — §3.1 best-effort, not "
+				"fatal (the durable C1 pending row already exists; B's "
+				"reconciler owns recovery via client_order_id; transient)",
+				client_order_id,
+				rejection_reason,
+				exc,
+			)
+		except Exception as exc:
+			# §3.1 caller-owned best-effort — UNEXPECTED non-DB error. This
+			# is NOT the transient carve-out: it is most likely a PERMANENT
+			# programming / B-API signature drift (e.g. a wrong kwarg to
+			# _backfill_pending_kalshi_order_id) that would otherwise
+			# log-and-continue FOREVER with zero kalshi_order_id backfills.
+			# Still best-effort (never raise, never RecordPendingFailed — the
+			# durable C1 pending row already exists & B's reconciler owns
+			# recovery via client_order_id), but flagged DISTINCTLY so an
+			# operator can escalate this class faster than the transient one.
+			log.error(
+				"record_pending UNEXPECTED non-DB error (possible B-API / "
+				"signature drift — escalate; NOT a transient disk fault) for "
+				"client_order_id=%r reason=%r: %r — §3.1 best-effort, not "
+				"fatal (the durable C1 pending row already exists; B's "
+				"reconciler owns recovery via client_order_id), engine not "
+				"masked",
+				client_order_id,
+				rejection_reason,
+				exc,
+			)
 
 	def record_rejected(
 		self,

@@ -502,3 +502,248 @@ def test_record_rejected_lost_race_already_rejected_is_benign_no_anomaly(
 	assert r[0]["status"] == "rejected"
 	assert r[0]["rejection_reason"] == "kalshi_4xx"
 	s.close()
+
+
+# -----------------------------------------------------------------------------
+# C4 — LIVE record_pending = idempotent BACKFILL of kalshi_order_id on the C1
+# L1 row (NOT a 2nd insert-on-outcome), caller-owned best-effort (spec §3
+# supersedes B's CR-4 insert-on-outcome; §3.1 post-place backfill failure /
+# row-not-found is a logged ERROR audit gap, NOT fatal — the durable pending
+# row already exists from record_intent, B's reconciler owns recovery via
+# client_order_id; contrast C1's record_intent which IS fatal because there
+# the row did NOT exist yet).
+# -----------------------------------------------------------------------------
+
+
+def test_record_pending_backfills_kalshi_order_id_on_L1_row_no_second_insert(
+	tmp_path):
+	"""C4 / spec §3 (insert-pending-then-CAS, NOT insert-on-outcome), §4.2, §5.
+
+	The executor-pending branch (dispatch.py:478 — NetworkError / timeout /
+	malformed-fills; the order MAY be live on Kalshi, fill state UNKNOWN) calls
+	``store.record_pending(...)`` UNCONDITIONALLY. The durable ``pending`` row
+	ALREADY EXISTS from C1's ``record_intent`` (inserted pre-place, keyed by
+	``client_order_id``, ``kalshi_order_id`` NULL). On the LIVE store
+	``record_pending`` is therefore NOT a 2nd insert — it is an idempotent
+	BACKFILL of ``kalshi_order_id`` onto that C1 row (a NetworkError/timeout
+	OrderResult may still carry a Kalshi order id) while ``status`` stays
+	``'pending'`` (still unknown; B's reconciler resolves it later via
+	``client_order_id``). After ``record_intent`` then ``record_pending`` there
+	must be EXACTLY ONE row for the coid, still ``status='pending'``, with
+	``kalshi_order_id`` now backfilled — never a competing second INSERT (§3
+	explicitly supersedes B's CR-4 one-row-per-attempt insert model).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**dict(INTENT, client_order_id="cid-A"))  # C1 pending row
+
+	# Pre-state: exactly one pending row, kalshi_order_id still NULL.
+	pre = s._conn.execute(
+		"SELECT status, kalshi_order_id FROM live_trades "
+		"WHERE client_order_id = 'cid-A'").fetchall()
+	assert pre == [("pending", None)]
+
+	s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
+		strategy="debut-fade", side="yes", intended_size=5,
+		entry_price_cents=5, stop_loss_distance_cents=3,
+		client_order_id="cid-A", kalshi_order_id="ord-9",
+		placed_at_utc="2026-05-18T00:00:00+00:00",
+		rejection_reason="kalshi_unreachable:timeout")
+
+	# Exactly ONE row for the coid (no 2nd INSERT — §3/§4.2), still pending
+	# (state still unknown), kalshi_order_id BACKFILLED in place.
+	rows = s._conn.execute(
+		"SELECT status, kalshi_order_id, client_order_id FROM live_trades"
+	).fetchall()
+	assert rows == [("pending", "ord-9", "cid-A")]
+	s.close()
+
+
+def test_record_pending_backfill_failure_is_not_fatal(
+	tmp_path, monkeypatch, caplog):
+	"""C4 / spec §3.1 — caller-owned best-effort: a post-place backfill
+	failure is NOT fatal (log ERROR, do NOT raise, NOT ``RecordPendingFailed``).
+
+	Contrast C1's ``record_intent``: that failure IS fatal
+	(``RecordPendingFailed`` propagates, entry aborts BEFORE ``place()`` — the
+	row did NOT exist yet, a funds-at-risk INSERT). Here the durable ``pending``
+	row ALREADY exists from ``record_intent``; B's reconciler owns recovery via
+	``client_order_id``, so a failed ``kalshi_order_id`` backfill strands at
+	most an audit-grade detail — raising would needlessly halt the engine while
+	the funds-at-risk invariant is already satisfied.
+
+	Patched AS RESOLVED BY ``store.record_pending`` (the backfill writer the
+	live impl actually calls, in the ``edge_catcher.live.store`` namespace) so
+	the patch genuinely intercepts the call (C1's stale-binding lesson — a
+	``edge_catcher.live.state.*`` patch would NOT intercept). The C1 ``pending``
+	row MUST survive uncorrupted (still exactly one pending row for the coid).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**dict(INTENT, client_order_id="cid-B"))
+	import edge_catcher.live.store as store_mod
+	monkeypatch.setattr(store_mod, "_backfill_pending_kalshi_order_id",
+		lambda *a, **k: (_ for _ in ()).throw(
+			sqlite3.OperationalError("disk I/O error")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — best-effort per §3.1 (NOT RecordPendingFailed).
+		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
+			strategy="debut-fade", side="yes", intended_size=5,
+			entry_price_cents=5, stop_loss_distance_cents=3,
+			client_order_id="cid-B", kalshi_order_id="ord-9",
+			placed_at_utc="2026-05-18T00:00:00+00:00",
+			rejection_reason="kalshi_unreachable:timeout")
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"a post-place backfill failure in record_pending must be logged at "
+		"ERROR level (audit gap), not silently swallowed")
+
+	# Row not half-corrupted: the C1 pending row survives unchanged (the
+	# failed backfill neither transitioned nor wrote it); still exactly one.
+	rows = s._conn.execute(
+		"SELECT status, client_order_id FROM live_trades").fetchall()
+	assert rows == [("pending", "cid-B")]
+	s.close()
+
+
+def test_record_pending_row_not_found_is_logged_audit_gap_not_fatal(
+	tmp_path, caplog):
+	"""C4 / spec §3.1 — defense-in-depth: ``record_pending`` called with NO
+	preceding ``record_intent`` (the C1 row somehow absent). It MUST NOT raise,
+	MUST NOT fabricate a competing INSERT (that would resurrect B's superseded
+	insert-on-outcome model; spec §3), and MUST emit an ERROR-level audit-gap
+	log. B's reconciler is the backstop via ``client_order_id`` (mirrors C3's
+	CAS-miss posture for the positionless-rejected case).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	# NO record_intent — row-not-found by construction.
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — §3.1 accepted audit gap, not fatal.
+		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
+			strategy="debut-fade", side="yes", intended_size=5,
+			entry_price_cents=5, stop_loss_distance_cents=3,
+			client_order_id="cid-NEVER", kalshi_order_id="ord-9",
+			placed_at_utc="2026-05-18T00:00:00+00:00",
+			rejection_reason="kalshi_unreachable:timeout")
+
+	assert any(rec.name == "edge_catcher.live.store"
+			and rec.levelname == "ERROR" for rec in caplog.records), (
+		"a row-not-found (no C1 record_intent) in record_pending must be "
+		"logged at ERROR level (spec §3.1 accepted audit gap), not silent")
+
+	# No row written for that coid — row-not-found is NOT a silent INSERT
+	# fallback (§3 explicitly supersedes B's insert-on-outcome model).
+	rows = s._conn.execute(
+		"SELECT COUNT(*) FROM live_trades "
+		"WHERE client_order_id = 'cid-NEVER'").fetchone()
+	assert rows[0] == 0
+	s.close()
+
+
+def test_record_pending_is_idempotent_double_call(tmp_path):
+	"""C4 / spec §3 — idempotent. The executor-pending branch may fire more
+	than once for the same coid (a reconnect re-delivering the same
+	NetworkError outcome, or dispatch retrying). ``record_pending`` called
+	twice with the same ``kalshi_order_id`` MUST NOT raise, MUST leave exactly
+	ONE row, still ``status='pending'``, ``kalshi_order_id`` unchanged — a
+	re-run is a no-op-equivalent (no corruption, no 2nd row).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**dict(INTENT, client_order_id="cid-D"))
+
+	kw = dict(ticker="KXSOL15M-X", series="KXSOL15M", strategy="debut-fade",
+		side="yes", intended_size=5, entry_price_cents=5,
+		stop_loss_distance_cents=3, client_order_id="cid-D",
+		kalshi_order_id="ord-1",
+		placed_at_utc="2026-05-18T00:00:00+00:00",
+		rejection_reason="kalshi_unreachable:timeout")
+	s.record_pending(**kw)
+	s.record_pending(**kw)  # second call — idempotent, no raise, no 2nd row
+
+	rows = s._conn.execute(
+		"SELECT status, kalshi_order_id, client_order_id FROM live_trades"
+	).fetchall()
+	assert rows == [("pending", "ord-1", "cid-D")]
+	s.close()
+
+
+def test_record_pending_unexpected_non_db_error_is_best_effort_distinct_message(
+	tmp_path, monkeypatch, caplog):
+	"""C4 / spec §3.1 — the UNEXPECTED (non-``sqlite3.Error``) carve-out is
+	DISTINCT from the transient DB/disk one, mirroring C3's
+	``record_rejected`` split.
+
+	A non-DB exception out of ``_backfill_pending_kalshi_order_id`` (e.g. a
+	``TypeError`` from a wrong kwarg = a future B-API/signature drift, or a
+	programming bug) is a likely PERMANENT fault that — WITHOUT the
+	``except Exception`` carve-out — would NOT be ``RecordPendingFailed`` (so
+	it bypasses ghost-reject) and would ESCAPE ``record_pending`` entirely,
+	losing the coid-keyed audit signal + the drift classification and
+	violating §3.1's "all best-effort — log ERROR, never raise" promise
+	(inconsistent with C3). It MUST still be best-effort (no raise — the
+	durable C1 pending row already exists & B's reconciler owns recovery via
+	``client_order_id``; specifically NOT ``RecordPendingFailed``) but logged
+	with the DISTINCT "UNEXPECTED … possible B-API / signature drift …
+	escalate" wording so an operator can escalate it faster than a transient
+	disk fault.
+
+	Patched AS RESOLVED BY ``store.record_pending`` (the backfill writer the
+	live impl actually calls, in the ``edge_catcher.live.store`` namespace) so
+	the patch genuinely intercepts the call (C1's stale-binding lesson — an
+	``edge_catcher.live.state.*`` patch would NOT intercept). The C1
+	``pending`` row MUST survive uncorrupted (still exactly one pending row
+	for the coid, ``kalshi_order_id`` still NULL — the failed backfill did not
+	corrupt it).
+	"""
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**dict(INTENT, client_order_id="cid-A"))
+	import edge_catcher.live.store as store_mod
+	# Raise a NON-sqlite3.Error so it lands in the broad UNEXPECTED clause,
+	# NOT the `except sqlite3.Error` (transient/disk) carve-out.
+	monkeypatch.setattr(store_mod, "_backfill_pending_kalshi_order_id",
+		lambda *a, **k: (_ for _ in ()).throw(
+			TypeError("bad kwarg — simulated B-API drift")))
+
+	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
+		# MUST NOT raise — still §3.1 best-effort even for the permanent
+		# class; specifically NOT RecordPendingFailed (ghost-reject scope is
+		# funds-at-risk pre-place INSERTs only; the durable C1 row exists).
+		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
+			strategy="debut-fade", side="yes", intended_size=5,
+			entry_price_cents=5, stop_loss_distance_cents=3,
+			client_order_id="cid-A", kalshi_order_id="ord-9",
+			placed_at_utc="2026-05-18T00:00:00+00:00",
+			rejection_reason="kalshi_unreachable:timeout")
+
+	store_errs = [rec for rec in caplog.records
+		if rec.name == "edge_catcher.live.store" and rec.levelname == "ERROR"]
+	assert store_errs, (
+		"an unexpected non-DB error in record_pending must be logged at "
+		"ERROR level (audit gap), not silently swallowed or escaped")
+	msg = store_errs[-1].getMessage()
+	# The DISTINCT unexpected/API-drift/escalate wording, NOT the
+	# sqlite3/disk one — and it MUST carry the client_order_id.
+	assert "cid-A" in msg, (
+		f"the unexpected-error log must carry the client_order_id — "
+		f"got: {msg!r}")
+	assert "UNEXPECTED" in msg and "signature drift" in msg \
+			and "escalate" in msg, (
+		"a non-sqlite3 error must be logged via the DISTINCT UNEXPECTED / "
+		f"possible-API-drift / escalate message — got: {msg!r}")
+	assert "DB/disk fault" not in msg, (
+		"a non-sqlite3 error must NOT be categorized as the transient "
+		f"DB/disk carve-out — got: {msg!r}")
+
+	# Row not half-corrupted: the C1 pending row survives unchanged (the
+	# failed backfill neither transitioned nor wrote it); still exactly one
+	# row, still pending, kalshi_order_id still NULL.
+	s._conn.row_factory = sqlite3.Row
+	r = s._conn.execute(
+		"SELECT * FROM live_trades WHERE client_order_id = 'cid-A'"
+	).fetchall()
+	assert len(r) == 1
+	assert r[0]["status"] == "pending"
+	assert r[0]["kalshi_order_id"] is None
+	s.close()
