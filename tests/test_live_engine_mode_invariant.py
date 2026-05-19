@@ -158,17 +158,26 @@ _LIVE_KEY_ID_ENV = "KALSHI_LIVE_KEY_ID"
 _LIVE_PRIVATE_KEY_ENV = "KALSHI_LIVE_PRIVATE_KEY"
 
 
-def _write_notifications_yaml(path: Path, channel_name: str) -> None:
-	"""Write a minimal unified-notifications config with one resolvable
-	live channel (a `file` channel — zero network, deterministic, the
-	cheapest adapter `load_channels` can construct)."""
+def _write_notifications_yaml(
+	path: Path, channel_name: str, risk_channel_name: str = "live_risk_alerts"
+) -> None:
+	"""Write a minimal unified-notifications config with TWO resolvable
+	channels (both `file` — zero network, deterministic, the cheapest
+	adapter `load_channels` can construct): the general live channel AND
+	the DEDICATED risk channel (§2.4/§6 G3 made the latter a mandatory
+	coherence dimension for a fully-coherent live config — see
+	`_assert_mode_coherence` Check-4b)."""
 	cfg = {
 		"version": 1,
 		"channels": {
 			channel_name: {
 				"type": "file",
 				"path": str(path.parent / "live_alerts.log"),
-			}
+			},
+			risk_channel_name: {
+				"type": "file",
+				"path": str(path.parent / "live_risk_alerts.log"),
+			},
 		},
 	}
 	path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
@@ -178,12 +187,14 @@ def make_live_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 	"""Produce a fully-coherent LIVE config dict + the on-disk + env-var
 	side state it references. No real network or real Kalshi keys.
 
-	Coherent means all five §2 checks pass:
+	Coherent means all §2 checks pass:
 	  1. executor: live
 	  2. db_path points at a live_trades*.db
 	  3. creds resolvable — a throwaway RSA-2048 keypair in the trade-scope
 	     env vars A's auth resolver reads
 	  4. live Discord channel resolvable from a unified notifications.yaml
+	  4b. the DEDICATED risk channel resolvable (§2.4/§6 G3 — a kill-switch
+	      trip's only operator signal; mandatory for a coherent live config)
 	  5. the Phase-1 `risk:` caps all present
 	"""
 	# (3) throwaway signing creds in the live trade-scope env vars.
@@ -196,9 +207,12 @@ def make_live_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 	monkeypatch.setenv(_LIVE_KEY_ID_ENV, "test-live-key")
 	monkeypatch.setenv(_LIVE_PRIVATE_KEY_ENV, pem.decode())
 
-	# (4) a resolvable live channel in a unified notifications config.
+	# (4 / 4b) a resolvable general live channel AND a resolvable dedicated
+	# risk channel in a unified notifications config (Check-4 + Check-4b).
 	notify_path = tmp_path / "notifications.yaml"
-	_write_notifications_yaml(notify_path, "live_pnl_discord")
+	_write_notifications_yaml(
+		notify_path, "live_pnl_discord", "live_risk_alerts"
+	)
 
 	return {
 		"executor": "live",
@@ -207,6 +221,9 @@ def make_live_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 		"notifications": {
 			"config_path": str(notify_path),
 			"live_channel": "live_pnl_discord",
+			# (4b) the dedicated risk channel — §2.4/§6 G3 made this a
+			# mandatory coherence dimension for a fully-coherent live config.
+			"live_risk_channel": "live_risk_alerts",
 			"live_key_id_env": _LIVE_KEY_ID_ENV,
 			"live_private_key_env": _LIVE_PRIVATE_KEY_ENV,
 		},

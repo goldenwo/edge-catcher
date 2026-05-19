@@ -89,35 +89,187 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# §6 boot step 3 — live risk-event callback slot (G3 fills the routing).
+# §6 boot step 3 — live risk-event routing to a DEDICATED risk channel (G3).
 #
 # spec §6 (NORMATIVE boot order): step (3) constructs the risk module AND
-# registers `_handle_risk_event` into the Gate's callback list BEFORE any
-# gate evaluation (reconcile in step 4, trading in step 5), so a boot-time
-# trip (e.g. the startup balance read already ≤ absolute_panic_floor) still
-# reaches the live risk channel. E3 only LEAVES/REGISTERS this slot per §6;
-# the CR-1 notification ROUTING (which Discord channel, the unified
-# notifications/ layer) is G3's deliverable, NOT E3's — so this is a typed,
-# documented no-op placeholder G3 replaces with the real send(). Signature
-# matches Gate._event_callbacks' contract (risk.py:923-927): called with a
-# single RiskEvent, sync, exceptions are swallowed by the Gate.
+# registers `_handle_risk_event` into the Gate's callback list + binds the
+# dedicated live risk channel BEFORE any gate evaluation (reconcile in step 4,
+# trading in step 5), so a boot-time trip (e.g. the startup balance read
+# already ≤ absolute_panic_floor, tripping KILL_AUTO_PANIC on the first
+# gate_entry inside startup_reconcile) still reaches the operator's dedicated
+# risk channel.
+#
+# A `RiskEvent` is a kill-switch / auto-panic trip — the ONLY signal a human
+# operator gets that real-money trading has HALTED. It MUST reach the
+# operator; a risk alert that silently "goes nowhere" is a serious
+# operator-safety defect. The channel's resolvability is therefore ALSO a
+# fail-closed §2.4 coherence check (`_assert_mode_coherence` Check-4,
+# additive to the general `live_channel` branch — see there).
+#
+# G1 (`engine/notifications.py`) converged the GENERAL notify onto the
+# unified layer with a boot-resolved module binding + `configure_notify`.
+# G3 mirrors that shape for the DEDICATED risk channel, with one crucial
+# difference: `_handle_risk_event` is SYNC (the Gate-callback contract —
+# risk.py ~:944 calls `cb(event)` directly; spec §6: "`Gate.trip()` and
+# `send()` are both sync"), so it calls the unified `send()` DIRECTLY /
+# synchronously — it does NOT schedule an async task the way G1's `notify`
+# does (a kill-switch alert must not depend on a running event loop and
+# must not be droppable by a bounded queue). Signature matches
+# Gate._event_callbacks' contract (risk.py ~:944-948): called with a single
+# RiskEvent, sync, exceptions swallowed by the Gate (so this never raises).
+#
+# §9 G-parity: paper has NO risk-event surface — this whole slot is
+# live-only. `_handle_risk_event` is appended to the Gate ONLY inside
+# `_compose_live` (step-3); paper composition never registers it and never
+# resolves a risk channel, so the paper trade-row path is byte-unchanged.
 # ---------------------------------------------------------------------------
 
-def _handle_risk_event(event: Any) -> None:
-	"""§6-step-3 risk-event callback SLOT (placeholder — G3 wires routing).
+# Boot-resolved DEDICATED risk-channel binding (§6 step-3). Empty until
+# `_configure_risk_channel` is called once inside the live `_compose_live`
+# (the paper analog is "never bound" — paper has no risk surface). NEVER
+# re-resolved per trip (mirrors the §1 keystone: wired at boot, not per-call).
+_risk_channels: list = []
 
-	Registered into the live ``Gate``'s callback list at boot so the wiring
-	point exists before any gate evaluation. E3 deliberately does NOT route
-	notifications here (CR-1 / the unified ``notifications/`` convergence is
-	G3's chartered scope); it logs at WARNING so a boot-time / runtime trip is
-	never silently lost in the window before G3 lands. G3 replaces the body
-	with the real dedicated-live-risk-channel ``send()``."""
+
+def _configure_risk_channel(channels: list) -> None:
+	"""Install the boot-resolved DEDICATED risk channel(s) (§6 step-3).
+
+	Called ONCE from the live ``_compose_live`` (boot step-3) BEFORE the
+	``_handle_risk_event`` callback is registered into the Gate and BEFORE
+	any gate evaluation (reconcile in step-4, trading in step-5), so a
+	boot-time trip still reaches the operator. Subsequent ``_handle_risk_
+	event`` calls deliver to these channels via the unified ``send()`` —
+	there is no per-trip re-resolution.
+
+	An empty list means "no dedicated risk channel bound" — ``_handle_risk_
+	event`` then logs at ERROR (the trip is still recorded in the journal /
+	the kill row; this binding is the operator ALERT, not the trip record).
+	In live mode the §2.4 coherence gate guarantees a resolvable risk
+	channel, so an empty binding in live is unreachable defence; paper never
+	binds it (live-only surface — §9 G-parity)."""
+	global _risk_channels
+	_risk_channels = list(channels)
+
+
+def _resolve_risk_channel(config: dict) -> list:
+	"""§6 step-3 — resolve the DEDICATED live risk channel for the boot bind.
+
+	Reuses the SAME unified ``notifications.yaml`` / ``load_channels``
+	mechanism the §2.4 coherence gate parses (spec §6: "channels resolved
+	per §2.4's invariant clause") — there is no second bespoke channel
+	loader. Reads ``notifications.config_path`` (default
+	``_DEFAULT_NOTIFY_CONFIG``) + ``notifications.live_risk_channel``.
+
+	Returns the resolved ``[Channel]`` (a one-element list). In live mode
+	the §2.4 coherence gate has ALREADY hard-verified this channel is
+	configured AND resolvable BEFORE this runs (boot step-2, before
+	step-3), so reaching here means it resolves; a defensive empty-list
+	fallback on the (coherence-unreachable) missing/unresolvable case keeps
+	this delivery-only resolution from ever aborting boot itself."""
+	notif_cfg = config.get("notifications", {}) or {}
+	channel_name = notif_cfg.get("live_risk_channel")
+	if not channel_name:
+		# Unreachable in live (the §2.4 gate aborts boot first); defensive.
+		log.error(
+			"risk-channel resolution: no `notifications.live_risk_channel` "
+			"configured — kill-switch alerts have NO dedicated channel this "
+			"run (the §2.4 coherence gate should have aborted boot earlier)"
+		)
+		return []
+	notify_path = Path(notif_cfg.get("config_path", _DEFAULT_NOTIFY_CONFIG))
+	# Local import: keep engine.py importable on paper-only deployments that
+	# may not have the notifications extra wired (same pattern as the §2.4
+	# gate / the risk.py / live.state runtime-import convention).
+	from edge_catcher.notifications import (  # noqa: PLC0415
+		NotificationConfigError,
+		load_channels,
+	)
+	try:
+		channels = load_channels(notify_path)
+	except NotificationConfigError as exc:
+		# Unreachable in live (the §2.4 gate parses the SAME file first).
+		log.error(
+			"risk-channel resolution: unified config %r unresolvable (%s) — "
+			"kill-switch alerts have NO dedicated channel this run",
+			str(notify_path), exc,
+		)
+		return []
+	channel = channels.get(channel_name)
+	if channel is None:
+		log.error(
+			"risk-channel resolution: configured risk channel %r not defined "
+			"in %r (available: %s) — kill-switch alerts have NO dedicated "
+			"channel this run",
+			channel_name, str(notify_path), sorted(channels),
+		)
+		return []
+	return [channel]
+
+
+def _handle_risk_event(event: Any) -> None:
+	"""§6-step-3 risk-event callback — route a kill trip to the operator.
+
+	Registered into the live ``Gate``'s callback list at boot step-3 (inside
+	``_compose_live``, BEFORE any gate evaluation) so a boot-time trip still
+	reaches the operator. A ``RiskEvent`` is a kill-switch / auto-panic trip
+	— it MUST reach the operator.
+
+	SYNC by contract: the Gate invokes ``cb(event)`` directly in ``trip()``
+	(risk.py ~:944; spec §6: "``Gate.trip()`` and ``send()`` are both
+	sync"), so this builds a :class:`Notification` from the event and hands
+	it to the unified ``send()`` SYNCHRONOUSLY — it does NOT schedule an
+	async task (a kill-switch alert must not depend on a running event loop
+	nor be droppable by a bounded queue, unlike G1's general ``notify``).
+
+	``send()`` is sync and never raises (per-channel ``DeliveryResult``);
+	the Gate additionally swallows callback exceptions — so this can never
+	perturb the trip path. With no dedicated channel bound it logs at ERROR
+	(unreachable in live: the §2.4 coherence gate guarantees a resolvable
+	risk channel; this is the paper/unconfigured defensive analog)."""
+	kind = getattr(event, "kind", "?")
+	reason = getattr(event, "reason", "?")
+	detail = getattr(event, "detail", "")
+	severity = getattr(event, "severity", "error")
+	occurred_at = getattr(event, "occurred_at", "?")
+
+	if not _risk_channels:
+		# No dedicated channel bound. Unreachable in live (§2.4 gate aborts
+		# boot first); still log LOUD so the trip is never silently lost.
+		log.error(
+			"RISK EVENT (kind=%s reason=%s severity=%s detail=%s) but NO "
+			"dedicated risk channel is bound — alert NOT delivered (the §2.4 "
+			"coherence gate should have made this unreachable in live)",
+			kind, reason, severity, detail,
+		)
+		return
+
+	# RiskEvent.severity ∈ {"info","warn","error"} maps 1:1 onto
+	# Notification.severity (same Literal); default to "error" defensively
+	# (a kill trip is operationally an error-class event).
+	note_severity = severity if severity in ("info", "warn", "error") else "error"
+	title = f"edge-catcher RISK: {reason} ({kind})"
+	body = (
+		f"Live trading risk event — {kind}.\n"
+		f"reason={reason}\n"
+		f"severity={severity}\n"
+		f"detail={detail}\n"
+		f"occurred_at={occurred_at}"
+	)
+	# Local import: keep engine.py importable on paper-only deployments
+	# (same runtime-import convention as the §2.4 gate / _resolve_risk_channel).
+	from edge_catcher.notifications import (  # noqa: PLC0415
+		Notification,
+		send,
+	)
+	# SYNC send — never raises (per-channel DeliveryResult). The Gate also
+	# swallows callback exceptions, so this cannot perturb the trip path.
+	send(
+		Notification(title=title, body=body, severity=note_severity),
+		_risk_channels,
+	)
 	log.warning(
-		"RiskEvent (kind=%s reason=%s severity=%s) — E3 risk-event slot is a "
-		"placeholder; CR-1 channel routing lands in G3",
-		getattr(event, "kind", "?"),
-		getattr(event, "reason", "?"),
-		getattr(event, "severity", "?"),
+		"RISK EVENT routed to dedicated channel (kind=%s reason=%s "
+		"severity=%s)", kind, reason, severity,
 	)
 
 
@@ -291,6 +443,35 @@ def _assert_mode_coherence(config: dict) -> None:
 			f"executor=live but the configured live channel "
 			f"{live_channel!r} is not defined in {str(notify_path)!r} "
 			f"(available: {sorted(channels)})",
+		)
+
+	# --- Check 4b: the DEDICATED risk channel resolvable (§2.4 / §6 G3,
+	# live only). ADDITIVE to the general `live_channel` check above (which
+	# is untouched). spec §6/§2.4 require "the live channels resolvable"
+	# (plural): a RiskEvent is a kill-switch / auto-panic trip — the ONLY
+	# signal the operator gets that real-money trading HALTED — so it routes
+	# to a DEDICATED channel (`_handle_risk_event` → §6 step-3). If that
+	# channel is missing/unresolvable a tripped kill-switch alert would
+	# silently go nowhere, defeating G3's entire purpose — that is exactly
+	# the "would go nowhere" funds-safety failure this gate exists to make
+	# impossible, so it is fail-closed (boot abort). Reuses the SAME
+	# already-loaded `channels` (no second load_channels — single source). ---
+	live_risk_channel = notif_cfg.get("live_risk_channel")
+	if not live_risk_channel:
+		raise _coherence_fail(
+			"risk_channel",
+			"executor=live but no `notifications.live_risk_channel` is "
+			"configured — a kill-switch / auto-panic trip (the operator's "
+			"ONLY signal that real-money trading HALTED) would go nowhere "
+			"(spec §2.4/§6 G3: the dedicated risk channel is mandatory)",
+		)
+	if live_risk_channel not in channels:
+		raise _coherence_fail(
+			"risk_channel",
+			f"executor=live but the configured risk channel "
+			f"{live_risk_channel!r} is not defined in {str(notify_path)!r} "
+			f"(available: {sorted(channels)}) — a kill-switch trip alert "
+			f"would go nowhere (spec §2.4/§6 G3)",
 		)
 
 	# --- Check 5: Phase-1 caps present in the `risk:` block (§2.5, live
@@ -918,9 +1099,18 @@ async def _compose_live(
 	# the cache at 0 ⇒ KILL_AUTO_PANIC on first signal, the correct
 	# fail-closed behaviour). build_risk_module reads config["risk"].
 	gate = await build_risk_module(config, db_conn, kalshi_client)
+	# G3 (§6 step-3): bind the DEDICATED risk channel BEFORE the callback is
+	# registered, so the instant `_handle_risk_event` could fire it already
+	# has a channel. `build_risk_module` does NOT evaluate/trip during
+	# construction — it pre-refreshes the bankroll cache while the Gate's
+	# `_emit_trip_fn` is still None (risk.py docstring), so the FIRST trip
+	# can only occur in step-4 reconcile / step-5 trading, strictly AFTER
+	# this. The §2.4 coherence gate (boot step-2, already passed) hard-
+	# verified this channel is configured + resolvable, so this resolves.
+	_configure_risk_channel(_resolve_risk_channel(config))
 	# Register the §6-step-3 risk-event slot BEFORE any gate evaluation
-	# (reconcile/trading in steps 4/5) so a boot-time trip reaches it. G3
-	# replaces _handle_risk_event's body with the real CR-1 channel send.
+	# (reconcile/trading in steps 4/5) so a boot-time trip reaches it AND
+	# (G3) routes to the now-bound dedicated risk channel via send().
 	gate._event_callbacks.append(_handle_risk_event)
 
 	return store, executor, _LiveRuntime(gate, kalshi_client, db_conn)
