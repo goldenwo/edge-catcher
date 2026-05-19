@@ -25,7 +25,7 @@ def _setup_logging(verbose: bool = False) -> None:
 def main() -> None:
 	from edge_catcher.cli import (
 		download, backtest, research,
-		paper_trade, formalize, interpret, utils,
+		paper_trade, live_trade, formalize, interpret, utils,
 		replay_backtest,
 	)
 
@@ -38,7 +38,7 @@ def main() -> None:
 	sub = parser.add_subparsers(dest="command")
 
 	for module in [download, backtest, research,
-	               paper_trade, formalize, interpret, utils,
+	               paper_trade, live_trade, formalize, interpret, utils,
 	               replay_backtest]:
 		module.register(sub)
 
