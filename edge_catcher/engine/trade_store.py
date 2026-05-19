@@ -37,7 +37,20 @@ class TradeStoreProtocol(Protocol):
 		book_snapshot: Optional[str] = ...,
 		*,
 		now: datetime,
-	) -> int: ...
+		client_order_id: Optional[str] = ...,
+		kalshi_order_id: Optional[str] = ...,
+	) -> int:
+		"""Record a filled entry; return the trade row id.
+
+		``client_order_id`` / ``kalshi_order_id`` are the live-execution
+		identity keys (sub-project E). Dispatch's filled branch passes them
+		UNCONDITIONALLY (it must never branch on paper-vs-live — spec §1
+		keystone). Paper ``TradeStore`` / ``InMemoryTradeStore`` ACCEPT and
+		IGNORE them (behaviour byte-unchanged — G-parity-guarded); the live
+		``SQLiteTradeStore`` USES them to CAS-transition the C1 ``pending``
+		row to ``open`` (spec §3) — see edge_catcher/live/store.py.
+		"""
+		...
 
 	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None: ...
 
@@ -279,13 +292,23 @@ class TradeStore:
 		book_snapshot: Optional[str] = None,
 		*,
 		now: datetime,
+		client_order_id: Optional[str] = None,
+		kalshi_order_id: Optional[str] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id.
 
 		`now` is written as `entry_time`. The caller passes
 		`datetime.now(timezone.utc)` (live engine) or the captured `recv_ts`
 		(replay backtester). This is required for parity between the two paths.
+
+		``client_order_id`` / ``kalshi_order_id`` are the live-execution
+		identity keys. Dispatch passes them UNCONDITIONALLY (spec §1
+		keystone — never branches on mode); the paper store ACCEPTS and
+		IGNORES them so its behaviour is byte-identical to before the live
+		path existed (G-parity-guarded). Only the live ``SQLiteTradeStore``
+		consumes them.
 		"""
+		del client_order_id, kalshi_order_id  # paper: accept-and-ignore (spec §1)
 		if now.tzinfo is None:
 			raise ValueError("now must be timezone-aware")
 		# Treat blended_entry=0 as None — sub-cent book levels round to 0¢ and must
@@ -591,10 +614,18 @@ class InMemoryTradeStore:
 		book_snapshot: Optional[str] = None,
 		*,
 		now: datetime,
+		client_order_id: Optional[str] = None,
+		kalshi_order_id: Optional[str] = None,
 	) -> int:
 		"""Mirror of SQLiteTradeStore.record_trade — see trade_store.py:106.
 		Computes entry_fee_cents internally using STANDARD_FEE. Raises
-		DuplicateOpenTradeError on composite-key collision (spec §4.1)."""
+		DuplicateOpenTradeError on composite-key collision (spec §4.1).
+
+		``client_order_id`` / ``kalshi_order_id`` are ACCEPTED and IGNORED
+		(spec §1 keystone — dispatch passes them unconditionally; replay's
+		in-memory store has no live identity model so its behaviour is
+		byte-identical with or without them — G-parity-guarded)."""
+		del client_order_id, kalshi_order_id  # in-memory: accept-and-ignore (spec §1)
 		if now.tzinfo is None:
 			raise ValueError("now must be timezone-aware")
 		blended_entry = blended_entry if blended_entry else None

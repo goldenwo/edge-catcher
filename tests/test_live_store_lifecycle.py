@@ -24,6 +24,8 @@ into its own namespace) so the patch genuinely intercepts the call and the
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from edge_catcher.live.state import RecordPendingFailed
@@ -57,4 +59,106 @@ def test_record_intent_failure_raises_RecordPendingFailed(tmp_path, monkeypatch)
 		lambda *a, **k: (_ for _ in ()).throw(RecordPendingFailed("disk")))
 	with pytest.raises(RecordPendingFailed):
 		s.record_intent(**INTENT)
+	s.close()
+
+
+def test_record_trade_cas_pending_to_open(tmp_path):
+	"""C2 / spec §3 (`:400 filled` row), §4.2, §5.
+
+	On the LIVE store ``record_trade`` is NOT an insert — it is a CAS
+	``pending → open`` transition on the C1-inserted row located by
+	``client_order_id``, via B's ``live.state.transition_pending_to_open``
+	(no hand-rolled SQL). After ``record_intent`` (C1 inserts the pending
+	row) then ``record_trade`` there must be EXACTLY ONE row, now
+	``status='open'`` with the real ``kalshi_order_id`` set and the fill
+	fields populated — a transition, never a competing second INSERT
+	(§4.2). Entry fee follows B's canonical convention
+	``int(round(STANDARD_FEE.calculate(blended_entry_cents, fill_size)))``
+	(ws_handlers._entry_fee_cents / reconciliation._resolve_matched_pending).
+
+	With INTENT (entry_price_cents=5, intended_size=5, coid='cid-A') then
+	record_trade(fill_size=5, blended_entry=5): blended=5, fill_size=5 →
+	STANDARD_FEE.calculate(5,5) = ceil(0.07*5*0.05*0.95*100)=ceil(1.6625)
+	=2.0 → int(round(2.0))=2, so entry_fee_cents == 2 and
+	entry_fee_remaining_cents seeds == 2 (transition_pending_to_open sets
+	both). slippage_cents/fill_pct passed verbatim by the caller.
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**INTENT)
+	tid = s.record_trade(
+		ticker="KXSOL15M-X", entry_price=5, strategy="debut-fade",
+		side="yes", series_ticker="KXSOL15M", intended_size=5,
+		fill_size=5, blended_entry=5, book_depth=None, fill_pct=1.0,
+		slippage_cents=0, book_snapshot=None,
+		now=_dt.datetime.fromisoformat("2026-05-18T00:00:01+00:00"),
+		client_order_id="cid-A", kalshi_order_id="ord-1")
+
+	# Exactly one row, transitioned in place — NOT a second INSERT (§4.2).
+	rows = s._conn.execute(
+		"SELECT status, kalshi_order_id FROM live_trades").fetchall()
+	assert rows == [("open", "ord-1")]
+
+	# Full post-transition row shape (modelled on B's
+	# tests/test_live_state_integration.py fixtures): pending → open with
+	# the authoritative fill recorded; original_intended_size immutable.
+	s._conn.row_factory = sqlite3.Row
+	r = s._conn.execute(
+		"SELECT * FROM live_trades WHERE client_order_id = 'cid-A'"
+	).fetchone()
+	assert r["status"] == "open"
+	assert r["kalshi_order_id"] == "ord-1"
+	assert r["fill_size"] == 5
+	assert r["blended_entry_cents"] == 5
+	assert r["slippage_cents"] == 0
+	assert r["fill_pct"] == 1.0
+	assert r["entry_time"] == "2026-05-18T00:00:01+00:00"
+	assert r["entry_fee_cents"] == 2
+	assert r["entry_fee_remaining_cents"] == 2
+	# record_trade returns the transitioned row's id (paper parity:
+	# record_trade -> int trade id).
+	assert tid == r["id"]
+	s.close()
+
+
+def test_record_trade_requires_kalshi_order_id(tmp_path):
+	"""C2 hardening / spec §3 — symmetric fail-loud on the OTHER identity key.
+
+	``record_trade`` already raises ``ValueError`` on a missing
+	``client_order_id`` (the C1 row is located by it). ``kalshi_order_id`` is
+	symmetrically load-bearing on the live filled path: B's WS reconciler /
+	``on_fill_event`` key off it, so an empty / None id would write
+	unreconcilable silent-bad-state. On the real live entry path D's
+	``place()`` always supplies a real id; an absent one is a wiring bug that
+	MUST fail loud (zero-error-with-live-money lens), symmetric to the
+	``client_order_id`` guard.
+
+	Same args as ``test_record_trade_cas_pending_to_open`` so the ONLY
+	variable is the missing ``kalshi_order_id`` (None, then ""). Both must
+	raise ``ValueError``, and the C1 ``pending`` row MUST be left
+	uncorrupted — exactly one row, still ``status='pending'`` (the failed
+	``record_trade`` must not have transitioned or written it).
+	"""
+	import datetime as _dt
+
+	s = SQLiteTradeStore(tmp_path / "live_trades.db")
+	s.record_intent(**INTENT)
+
+	for bad_kalshi_id in (None, ""):
+		with pytest.raises(ValueError):
+			s.record_trade(
+				ticker="KXSOL15M-X", entry_price=5, strategy="debut-fade",
+				side="yes", series_ticker="KXSOL15M", intended_size=5,
+				fill_size=5, blended_entry=5, book_depth=None, fill_pct=1.0,
+				slippage_cents=0, book_snapshot=None,
+				now=_dt.datetime.fromisoformat("2026-05-18T00:00:01+00:00"),
+				client_order_id="cid-A", kalshi_order_id=bad_kalshi_id)
+
+		# C1 row uncorrupted: still exactly one row, still pending — the
+		# failed record_trade neither transitioned nor wrote it.
+		rows = s._conn.execute(
+			"SELECT status, client_order_id FROM live_trades").fetchall()
+		assert rows == [("pending", "cid-A")]
+
 	s.close()
