@@ -9,9 +9,32 @@ Math fixes:
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.request import pathname2url
+
+
+def _db_ro_uri(db_path: Path) -> str:
+	"""Build a strictly read-only SQLite ``file:`` URI for ``db_path``.
+
+	Spec §5/§7: reporting runs against the LIVE money DB and must NEVER be
+	able to write it — it opens with ``mode=ro``.
+
+	Why not a naive ``f"file:{db_path}?mode=ro"``: a SQLite file URI's PATH
+	portion must be URI-encoded while ``?mode=ro`` stays a real query. An
+	un-encoded path silently breaks when it contains a space, ``#`` or
+	``?`` (``#`` starts a URI fragment / ``?`` a query — SQLite then opens
+	a *different* (often fresh, empty) DB), and a Windows ``C:\\...`` drive
+	path is not a valid file-URI body. ``pathname2url`` over the *resolved*
+	(absolute) path yields the correct cross-platform body — ``/C:/...`` on
+	Windows, ``/abs/path`` on POSIX — with spaces/special chars
+	percent-encoded; the literal ``?mode=ro`` is appended AFTER encoding so
+	it remains a live query parameter (not percent-encoded away).
+	"""
+	encoded = pathname2url(os.fspath(Path(db_path).resolve()))
+	return f"file:{encoded}?mode=ro"
 
 
 def generate_report(db_path: Path, date: str | None = None) -> dict:
@@ -29,7 +52,8 @@ def generate_report(db_path: Path, date: str | None = None) -> dict:
 	if not Path(db_path).exists():
 		return {"error": f"DB not found at {db_path}"}
 	date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-	con = sqlite3.connect(str(db_path))
+	# §5/§7: read-only URI connect — reporting can never write the money DB.
+	con = sqlite3.connect(_db_ro_uri(db_path), uri=True)
 	try:
 		all_time = _all_time_stats(con)
 		today = _today_stats(con, date_str)

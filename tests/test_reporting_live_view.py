@@ -28,6 +28,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from edge_catcher.reporting import generate_report
 from edge_catcher.storage.migrations import apply_migrations
 
@@ -798,3 +800,213 @@ def test_live_scratch_counts_in_closed_and_winrate_denominator(
 	assert abs_["live-strat"]["net_pnl_cents"] == 43, (
 		"all_time_by_strategy net_pnl includes scratch's real pnl"
 	)
+
+
+# ===========================================================================
+# H3 — reporting opens a strictly READ-ONLY connection to the money DB
+#      (spec §5 / §7: reporting can NEVER write live_trades.db).
+#
+# §7 NORMATIVE: `sqlite3.connect(f"file:{db}?mode=ro", uri=True)` with
+# cross-platform path normalization (Windows CI + Pi Linux prod) — pinned
+# + tested. The faithful realization URI-encodes the filesystem path
+# (urllib pathname2url over the resolved path) so a path containing a
+# space / '#' / a Windows drive letter still yields a VALID file: URI
+# whose `?mode=ro` stays a real query parameter. A naive
+# `f"file:{Path(db).as_posix()}?mode=ro"` silently opens the WRONG (or a
+# fresh empty) DB when the path contains '#'/special chars — the exact
+# correctness risk this task pins.
+# ===========================================================================
+
+import os  # noqa: E402  (test-only import, kept local to the H3 block)
+from urllib.request import pathname2url  # noqa: E402
+
+
+def _seed_paper_db(db: Path) -> None:
+	"""Create a minimal paper-shaped DB file with one closed + one open row
+	so generate_report returns a REAL report (not an {'error': ...})."""
+	con = sqlite3.connect(str(db))
+	con.executescript(_paper_schema_sql())
+	con.executemany(
+		"INSERT INTO paper_trades VALUES (?,?,?,?,?,?,?,?)",
+		[
+			("s", "KXBTC", "won", 50, 2, 90, 1, "2026-05-19T16:00:00Z"),
+			("s", "KXBTC", "open", 50, 1, None, 1, None),
+		],
+	)
+	con.commit()
+	con.close()
+
+
+def _expected_ro_uri(db: Path) -> str:
+	"""The cross-platform-correct read-only URI the production code MUST
+	construct: URI-encoded resolved path + a live `?mode=ro` query."""
+	return f"file:{pathname2url(os.fspath(db.resolve()))}?mode=ro"
+
+
+# ---------------------------------------------------------------------------
+# (1) generate_report opens the EXACT read-only URI with uri=True
+# ---------------------------------------------------------------------------
+
+def test_generate_report_opens_readonly_uri(tmp_path, monkeypatch) -> None:
+	"""generate_report must call sqlite3.connect with a `file:...?mode=ro`
+	URI and uri=True (NOT the legacy `sqlite3.connect(str(db_path))`).
+	Intercept the connect call and assert the exact argument shape."""
+	db = tmp_path / "live.db"
+	_seed_paper_db(db)
+
+	captured: dict = {}
+	real_connect = sqlite3.connect
+
+	def _spy(*args, **kwargs):
+		# Record only the first (production report) connect.
+		captured.setdefault("args", args)
+		captured.setdefault("kwargs", kwargs)
+		return real_connect(*args, **kwargs)
+
+	monkeypatch.setattr(sqlite3, "connect", _spy)
+	report = generate_report(db)
+
+	assert "error" not in report, f"expected a real report, got {report!r}"
+	assert captured, "generate_report never called sqlite3.connect"
+
+	dsn = captured["args"][0]
+	assert isinstance(dsn, str), f"connect DSN must be a str URI, got {dsn!r}"
+	assert dsn.startswith("file:"), (
+		f"reporting must open a `file:` URI (read-only), got {dsn!r} — "
+		f"legacy `sqlite3.connect(str(db_path))` is forbidden by §5/§7"
+	)
+	assert dsn.endswith("?mode=ro"), (
+		f"the URI must carry a LIVE `?mode=ro` query (not percent-encoded "
+		f"away), got {dsn!r}"
+	)
+	assert captured["kwargs"].get("uri") is True, (
+		f"sqlite3.connect must be called with uri=True, got "
+		f"kwargs={captured['kwargs']!r}"
+	)
+	assert dsn == _expected_ro_uri(db), (
+		f"URI mismatch:\n  got      {dsn!r}\n  expected {_expected_ro_uri(db)!r}"
+	)
+
+
+# ---------------------------------------------------------------------------
+# (2) behavioral read-only — a write through reporting's conn mechanism
+#     raises OperationalError (the §5 'can never write the money DB' proof)
+# ---------------------------------------------------------------------------
+
+def test_reporting_connection_is_behaviorally_readonly(tmp_path, monkeypatch) -> None:
+	"""Replay the EXACT connect args `generate_report` used and prove a
+	write through a connection opened that way raises
+	sqlite3.OperationalError 'readonly' — the concrete §5 guarantee that
+	reporting can never mutate the live money DB. RED against the legacy
+	`sqlite3.connect(str(db_path))`: those recorded args open a plain
+	read-write filename connection, so the INSERT SUCCEEDS (no raise) and
+	this test fails."""
+	db = tmp_path / "live.db"
+	_seed_paper_db(db)
+
+	captured: dict = {}
+	real_connect = sqlite3.connect
+
+	def _spy(*args, **kwargs):
+		captured.setdefault("args", args)
+		captured.setdefault("kwargs", kwargs)
+		return real_connect(*args, **kwargs)
+
+	monkeypatch.setattr(sqlite3, "connect", _spy)
+	report = generate_report(db)
+	monkeypatch.undo()  # restore real sqlite3.connect for the replay below
+
+	assert "error" not in report and report["all_time"]["total_trades"] == 2, (
+		f"sanity: read-only report must still read paper data, got {report!r}"
+	)
+	assert captured, "generate_report never opened a connection"
+
+	# Re-open with the IDENTICAL args/kwargs reporting used. If reporting
+	# opened a read-only URI, the INSERT raises; if it used the legacy
+	# rw-filename connect, the INSERT succeeds and pytest.raises fails.
+	con = real_connect(*captured["args"], **captured["kwargs"])
+	try:
+		with pytest.raises(sqlite3.OperationalError) as exc:
+			con.execute("INSERT INTO paper_trades (status) VALUES ('won')")
+			con.commit()
+		assert "readonly" in str(exc.value).lower(), (
+			f"expected a read-only write rejection, got {exc.value!r}"
+		)
+	finally:
+		con.close()
+
+	# The DB file is byte-unchanged (the RO conn could not insert).
+	verify = real_connect(str(db))
+	try:
+		n = verify.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0]
+	finally:
+		verify.close()
+	assert n == 2, f"read-only conn must not have mutated the DB, got {n} rows"
+
+
+# ---------------------------------------------------------------------------
+# (3) cross-platform path normalization — Windows drive-letter AND POSIX
+#     absolute paths both yield a VALID `file:...?mode=ro` URI
+# ---------------------------------------------------------------------------
+
+def test_ro_uri_normalization_cross_platform() -> None:
+	"""The path→URI normalization helper must produce a valid SQLite
+	`file:` URI for BOTH a Windows drive-letter absolute path and a POSIX
+	absolute path, with spaces/special chars percent-encoded and
+	`?mode=ro` preserved as a real query. Pins the 'cross-platform path
+	normalization' clause of §7 against a regression to a naive f-string."""
+	from edge_catcher.reporting import _db_ro_uri
+
+	# POSIX-style absolute path.
+	posix_uri = _db_ro_uri(Path("/var/lib/edge/live.db"))
+	assert posix_uri.startswith("file:"), posix_uri
+	assert posix_uri.endswith("?mode=ro"), posix_uri
+	assert " " not in posix_uri, "spaces must be percent-encoded"
+
+	# Windows drive-letter absolute path WITH a space — pathname2url yields
+	# the canonical `///C:/...` form and `%20` for the space.
+	win_uri = _db_ro_uri(Path(r"C:\a b\live.db"))
+	assert win_uri.startswith("file:"), win_uri
+	assert win_uri.endswith("?mode=ro"), win_uri
+	assert "%20" in win_uri, (
+		f"the space in the Windows path must be %20-encoded, got {win_uri!r}"
+	)
+	# Exactly ONE '?' (the query delimiter) — no path '?'/'#' leaked in raw.
+	assert win_uri.count("?") == 1, (
+		f"only the `?mode=ro` query `?` may appear, got {win_uri!r}"
+	)
+
+
+# ---------------------------------------------------------------------------
+# (4) FORCING FUNCTION — DB at a path containing a SPACE (and a '#', which
+#     deterministically breaks the naive `as_posix()` form: '#' starts a
+#     URI fragment and silently truncates the path → wrong/empty DB).
+#     generate_report MUST open it and return a REAL report.
+# ---------------------------------------------------------------------------
+
+def test_generate_report_path_with_space_and_hash(tmp_path) -> None:
+	"""§7 'cross-platform path normalization' forcing function: a DB whose
+	directory contains a SPACE and a '#' must still be opened read-only and
+	produce a real report. A naive `f"file:{Path(db).as_posix()}?mode=ro"`
+	FAILS here — '#' begins a URI fragment, so SQLite opens a *different*
+	(fresh, empty) DB and the report is wrong/empty (no 'won'/'open' rows).
+	The URI-encoded normalization (%23 / %20) is the correct realization."""
+	weird_dir = tmp_path / "dir with space #1"
+	weird_dir.mkdir()
+	db = weird_dir / "live.db"
+	_seed_paper_db(db)
+
+	report = generate_report(db)
+
+	assert "error" not in report, (
+		f"space/'#' path must be URI-encoded and OPEN, got {report!r}"
+	)
+	# The seeded data must actually be read back (proves we opened the
+	# RIGHT DB, not a fresh empty one a naive f-string would create).
+	assert report["all_time"]["total_trades"] == 2, (
+		f"the report must reflect the seeded rows (1 won + 1 open) — a "
+		f"truncated-URI naive form would yield 0 rows; got {report['all_time']!r}"
+	)
+	assert report["all_time"]["closed_trades"] == 1
+	assert report["all_time"]["wins"] == 1
+	assert report["open_positions"], "the seeded open row must be reported"
