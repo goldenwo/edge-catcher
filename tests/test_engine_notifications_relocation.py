@@ -1,88 +1,97 @@
-"""Regression test for the monitors/notifications.py -> engine/notifications.py move.
+"""Regression guard for the engine notify path's backend (post-G1).
 
-Sub-project G relocates the paper-trader-internal Discord webhook helper from
-``edge_catcher.monitors.notifications`` to ``edge_catcher.engine.notifications``.
-The wire-shape MUST be byte-identical across the move so the live paper trader
-keeps producing the exact same Discord posts after cutover.
+History: sub-project G relocated the paper-trader Discord webhook helper
+``monitors.notifications`` → ``engine.notifications``; this module locked
+the wire-shape byte-identical across that move.
 
-This is the strongest mitigation for the "notifications-routing risk" called out
-in spec §Risks: mock ``httpx.AsyncClient.post`` and assert the request URL +
-JSON body match the pre-G behavior verbatim.
+Sub-project E Phase G1 (spec §6 Path B) then RETIRED the single-webhook
+env-var facade entirely: the engine notify path delegates to the unified
+``edge_catcher.notifications`` layer with the mode's channel resolved once
+at boot. The "notifications-routing risk" mitigation is now: the engine
+notify path has exactly ONE delivery backend (the unified ``send()``) and
+no ``DISCORD_*WEBHOOK*`` env-var second path. That invariant is asserted
+here; the converged-delivery contract detail lives in
+``test_notification_mode_label.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from edge_catcher.engine.notifications import discord_notify
+import edge_catcher.engine.notifications as notif
+from edge_catcher.notifications.envelope import DeliveryResult, Notification
+
+
+class _SpyChannel:
+	def __init__(self, name: str = "spy") -> None:
+		self.name = name
+		self.sent: list[Notification] = []
+
+	def send(self, notification: Notification) -> DeliveryResult:
+		self.sent.append(notification)
+		return DeliveryResult(channel_name=self.name, success=True, latency_ms=0.1)
 
 
 @pytest.fixture(autouse=True)
 def _reset_notify_state(monkeypatch):
-	"""Drop the module-level rate-limit timestamp + reusable client between tests
-	so each test sees a clean state regardless of order.
-	"""
-	import edge_catcher.engine.notifications as notif
-
-	monkeypatch.setattr(notif, "_last_notify_time", 0.0, raising=False)
-	monkeypatch.setattr(notif, "_client", None, raising=False)
+	"""Clean module state between tests regardless of order."""
+	monkeypatch.setattr(notif, "_channels", [], raising=False)
+	monkeypatch.setattr(notif, "_pending_tasks", set(), raising=False)
 	yield
 
 
-def test_discord_notify_posts_to_paper_webhook_url(monkeypatch):
-	"""When DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL is set, post lands there
-	with the engine's canonical ``{"content": text}`` body.
+def test_env_var_facade_is_retired():
+	"""No ``DISCORD_*WEBHOOK*`` env-var path remains — the engine notify
+	path has a single delivery backend (the unified layer).
+
+	Targets executable code (comments/docstrings stripped): the module
+	docstring legitimately *describes* the retired facade.
 	"""
-	monkeypatch.setenv(
-		"DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL",
-		"https://discord.com/api/webhooks/PAPER-TEST",
+	import inspect
+	import io
+	import tokenize
+
+	src = inspect.getsource(notif)
+	code = " ".join(
+		tok.string
+		for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+		if tok.type not in (tokenize.COMMENT, tokenize.STRING)
 	)
-	mock_post = AsyncMock()
-	mock_post.return_value.status_code = 200
-
-	with patch("httpx.AsyncClient.post", mock_post):
-		asyncio.run(discord_notify("hello world"))
-
-	mock_post.assert_called_once()
-	args, kwargs = mock_post.call_args
-	assert args[0] == "https://discord.com/api/webhooks/PAPER-TEST"
-	assert kwargs["json"] == {
-		"content": "hello world",
-		"allowed_mentions": {"parse": []},
-	}
+	assert "os.environ" not in code
+	assert "WEBHOOK" not in code.upper()
+	assert not hasattr(notif, "discord_notify")
 
 
-def test_discord_notify_falls_back_to_logs_webhook(monkeypatch):
-	"""Pre-G facade behavior: prefers DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL,
-	falls back to DISCORD_LOGS_WEBHOOK_URL when the paper-specific var is unset.
+def test_engine_notify_delivers_via_unified_layer():
+	"""The rendered notify line reaches the boot-resolved unified channel
+	verbatim (the converged, byte-stable delivery backend).
 	"""
-	monkeypatch.delenv("DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL", raising=False)
-	monkeypatch.setenv(
-		"DISCORD_LOGS_WEBHOOK_URL",
-		"https://discord.com/api/webhooks/FALLBACK",
-	)
-	mock_post = AsyncMock()
-	mock_post.return_value.status_code = 200
+	spy = _SpyChannel()
+	notif.configure_notify([spy])
 
-	with patch("httpx.AsyncClient.post", mock_post):
-		asyncio.run(discord_notify("hello world"))
+	async def _run():
+		notif.notify("hello world")
+		await asyncio.sleep(0.05)
 
-	mock_post.assert_called_once()
-	assert mock_post.call_args.args[0] == "https://discord.com/api/webhooks/FALLBACK"
+	asyncio.run(_run())
+
+	assert len(spy.sent) == 1
+	assert spy.sent[0].body == "hello world"
 
 
-def test_discord_notify_silent_no_op_without_webhook_url(monkeypatch):
-	"""Neither env var set -> the function must short-circuit before touching
-	httpx, so test environments without webhooks don't fire stray POSTs.
+def test_silent_no_op_without_a_configured_channel():
+	"""No channel resolved at boot (the paper analog of "no webhook env var
+	set") -> notify short-circuits, firing no delivery.
 	"""
-	monkeypatch.delenv("DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL", raising=False)
-	monkeypatch.delenv("DISCORD_LOGS_WEBHOOK_URL", raising=False)
-	mock_post = AsyncMock()
+	spy = _SpyChannel()
+	# Intentionally do NOT configure_notify — _channels stays [].
 
-	with patch("httpx.AsyncClient.post", mock_post):
-		asyncio.run(discord_notify("hello world"))
+	async def _run():
+		notif.notify("hello world")
+		await asyncio.sleep(0.05)
 
-	mock_post.assert_not_called()
+	asyncio.run(_run())
+
+	assert spy.sent == []

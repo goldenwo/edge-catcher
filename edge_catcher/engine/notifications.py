@@ -1,96 +1,136 @@
-"""Discord webhook notifications — engine signal-flow notify path.
+"""Engine signal-flow notify path — converged onto the unified layer.
 
-Thin facade kept inside the engine package through G's transition. The unified
-`edge_catcher.notifications` package has a different envelope-based API; engine
-dispatch's `notify(text)` callable shape stays unchanged here so paper trader
-behavior is byte-exact across the migration.
+Spec §6 Path B (NORMATIVE). The engine's notify path delegates to the
+unified ``edge_catcher.notifications`` layer (multi-channel:
+``load_channels()`` + ``send(Notification, [channels])``, sync,
+never-raises / ``DeliveryResult``). The single-webhook env-var facade
+that previously lived here (a ``DISCORD_*WEBHOOK*`` reader) is **RETIRED**
+— there is no dead second path a future contributor could wire live
+alerts through.
 
-# TODO(E/CR-1): migrate onto edge_catcher.notifications (unified package).
-# Owned by sub-project E's spec; not G's scope.
+Boot-resolved channel (§6 / §1 keystone): the mode's channel(s) are
+resolved ONCE at boot via :func:`configure_notify` (called from
+``run_engine`` after the §2 coherence gate, reusing the SAME
+``notifications:`` config the §2.4 coherence check parses). ``notify`` is
+NOT re-resolved per call — it builds a :class:`Notification` and hands it
+to the unified ``send()`` with the boot-resolved channel list.
+
+``send()`` is sync and never raises (returns per-channel
+``DeliveryResult``), so a notification failure CANNOT perturb the trade
+path (§6 / §9). ``notify`` itself stays the SAME ``notify(text: str)``
+sync, non-blocking, bounded-queue shape every existing engine call site
+already uses — only the delivery backend changed (env-var-webhook →
+unified ``send``); the paper trade-row-producing path is byte-unchanged
+(notify is a side-effect, not trade state).
+
+G2 parameterizes the mode label in the rendered message; G3 wires the
+dedicated live-risk channel + ``_handle_risk_event`` body. G1 is the
+general notify helper + the facade retirement only.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any
 
-import httpx
+from edge_catcher.notifications import Channel, Notification, send
 
 logger = logging.getLogger(__name__)
 
-_last_notify_time: float = 0.0
-_NOTIFY_MIN_INTERVAL: float = 1.0  # min seconds between webhook calls
 _MAX_PENDING: int = 20  # max queued notification tasks
 _pending_tasks: set[asyncio.Task] = set()
-_client: httpx.AsyncClient | None = None
 
-# Discord's "allowed_mentions" controls which @-mentions in `content` are
-# parsed into pings. Setting "parse": [] disables ALL mentions (@everyone,
-# @here, @user, @role) so a strategy name or rendered audit line containing
-# `@everyone` literally appears as text instead of mass-pinging the channel.
-# Markdown injection (bold/italic/links) is cosmetic-tier and handled at the
-# call site; mention injection is the security-critical vector.
-_DISCORD_ALLOWED_MENTIONS: dict[str, list] = {"parse": []}
+# Boot-resolved channel binding (§6 Path B). Empty until ``configure_notify``
+# is called once at boot (the paper analog of "no webhook env var set" is an
+# empty list ⇒ notify is a silent no-op, preserving the pre-G facade's
+# silent-without-a-webhook property). NEVER re-resolved per call.
+_channels: list[Channel] = []
 
 
-def _get_client() -> httpx.AsyncClient:
-	"""Reuse a single httpx client for all notifications."""
-	global _client
-	if _client is None or _client.is_closed:
-		_client = httpx.AsyncClient(timeout=5.0)
-	return _client
+def configure_notify(channels: list[Channel]) -> None:
+	"""Install the boot-resolved notification channel(s) (§6 Path B).
+
+	Called ONCE from ``run_engine`` after the §2 coherence gate, with the
+	mode's channel(s) resolved from the unified ``notifications:`` config
+	(the SAME config the §2.4 coherence check parses). Subsequent ``notify``
+	calls deliver to these channels via the unified ``send()`` — there is no
+	per-call re-resolution (mirrors the §1 keystone: wired at boot, not
+	per-call).
+
+	An empty list is valid and means "notifications disabled" — ``notify``
+	then short-circuits silently (the paper analog of the retired facade's
+	"no webhook env var set" no-op).
+	"""
+	global _channels
+	_channels = list(channels)
 
 
-async def discord_notify(text: str) -> None:
-	"""POST a message to Discord webhook. Rate-limited to avoid 429s."""
-	global _last_notify_time
-	url = (
-		os.environ.get("DISCORD_PAPER_TRADE_LOGS_WEBHOOK_URL")
-		or os.environ.get("DISCORD_LOGS_WEBHOOK_URL")
-	)
-	if not url:
-		return
-	now = time.monotonic()
-	wait = _NOTIFY_MIN_INTERVAL - (now - _last_notify_time)
-	if wait > 0:
-		await asyncio.sleep(wait)
-	_last_notify_time = time.monotonic()
-	try:
-		client = _get_client()
-		resp = await client.post(
-			url,
-			json={"content": text, "allowed_mentions": _DISCORD_ALLOWED_MENTIONS},
-		)
-		if resp.status_code == 429:
-			retry_after = float(resp.headers.get("Retry-After", "2"))
-			await asyncio.sleep(retry_after)
-	except Exception:
-		pass
+def _deliver(text: str) -> None:
+	"""Build a :class:`Notification` from the rendered line every existing
+	engine call site passes and hand it to the unified ``send()``.
+
+	The call sites pass a single fully-rendered string (``_format_enter_/
+	close_message`` output, the lost-CAS / shutdown lines). The unified
+	envelope is channel-agnostic; the rendered line is carried verbatim as
+	the body so the delivered content is preserved across the convergence.
+	``send()`` is sync and never raises (per-channel ``DeliveryResult``);
+	this function therefore cannot perturb its caller / the trade path.
+	"""
+	notification = Notification(title="edge-catcher", body=text)
+	send(notification, _channels)
 
 
-_notify_fn: Callable[[str], Awaitable[None]] = discord_notify
+# Indirection seam: tests swap the delivery function (the unified-layer
+# analog of the retired ``set_notify_backend``). Production always uses
+# ``_deliver``; ``notify`` awaits this so a synchronous ``send()`` still
+# runs off the trade path's critical section via the event loop.
+_notify_fn: Callable[[str], Any] = _deliver
 
 
-def set_notify_backend(fn: Callable[[str], Awaitable[None]]) -> None:
-	"""Replace the notification backend (default: discord_notify)."""
+def set_notify_backend(fn: Callable[[str], Any]) -> None:
+	"""Replace the delivery function (default: :func:`_deliver`).
+
+	Test seam only — production resolves channels via
+	:func:`configure_notify` and delivers through the unified ``send()``.
+	"""
 	global _notify_fn
 	_notify_fn = fn
+
+
+async def _deliver_async(text: str) -> None:
+	"""Run the (sync, never-raising) delivery without blocking the loop.
+
+	The unified ``send()`` is synchronous; offload it to a thread so a slow
+	channel (e.g. a webhook POST) never stalls the engine's event loop.
+	Defensive ``except`` is belt-and-suspenders only — ``send()`` already
+	never raises; a raising test backend must still not perturb the caller.
+	"""
+	try:
+		await asyncio.to_thread(_notify_fn, text)
+	except Exception:  # noqa: BLE001 — never let a notify perturb the trade path
+		logger.debug("notify delivery raised (absorbed; trade path unaffected)", exc_info=True)
 
 
 def notify(text: str) -> None:
 	"""Schedule a notification from sync context (requires a running event loop).
 
-	Bounded: drops notifications if more than _MAX_PENDING are in flight.
+	Same shape every existing engine call site uses: sync, non-blocking,
+	bounded — drops notifications if more than ``_MAX_PENDING`` are in
+	flight. With no running loop, or no channel configured, it is a silent
+	no-op (the paper analog of the retired facade's no-webhook no-op). The
+	delivery backend is now the unified ``send()`` (§6 Path B), not an
+	env-var webhook; the paper trade-row path is byte-unchanged.
 	"""
+	if not _channels:
+		# Nothing resolved at boot (paper analog of "no webhook env var").
+		return
 	try:
 		loop = asyncio.get_running_loop()
 	except RuntimeError:
 		return
 
-	# Prune completed tasks
-	_pending_tasks.discard(None)  # no-op, just triggers the set's internal cleanup
+	# Prune completed tasks.
 	done = {t for t in _pending_tasks if t.done()}
 	_pending_tasks.difference_update(done)
 
@@ -98,12 +138,7 @@ def notify(text: str) -> None:
 		logger.debug("Notification queue full (%d pending), dropping: %s", len(_pending_tasks), text[:80])
 		return
 
-	# Cast: _notify_fn is typed as Callable[[str], Awaitable[None]] for caller
-	# flexibility (override-by-injection in tests), but asyncio.create_task
-	# wants a Coroutine. The runtime contract is satisfied by both adapters
-	# (discord_notify is a coroutine function); the type signature is the
-	# narrower one that mypy can verify.
-	coro: Coroutine[Any, Any, None] = _notify_fn(text)  # type: ignore[assignment]
+	coro: Coroutine[Any, Any, None] = _deliver_async(text)
 	task: asyncio.Task = loop.create_task(coro)
 	_pending_tasks.add(task)
 	task.add_done_callback(_pending_tasks.discard)

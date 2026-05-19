@@ -48,7 +48,7 @@ from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.market_state import MarketState
-from edge_catcher.engine.notifications import notify
+from edge_catcher.engine.notifications import configure_notify, notify
 from edge_catcher.engine.recovery import (
 	check_market_result,
 	fetch_active_tickers_for_series,
@@ -322,6 +322,81 @@ def _assert_mode_coherence(config: dict) -> None:
 			"caps",
 			f"executor=live but a Phase-1 risk cap is invalid: {exc}",
 		) from exc
+
+
+# ---------------------------------------------------------------------------
+# §6 boot step 3 — unified notifications channel resolution (Path B).
+#
+# Resolves the mode's notification channel(s) ONCE at boot from the SAME
+# unified `notifications:` config the §2.4 coherence check already parses
+# (`config_path` + `live_channel`/`paper_channel`), then hands them to the
+# engine notify helper via `configure_notify`. `notify` is NEVER re-resolved
+# per call (mirrors the §1 keystone: wired at boot, not per-call). The
+# env-var facade is retired — there is no second path; delivery is the
+# unified `send()` (sync, never-raises, so a notify cannot perturb the
+# trade path — §6/§9).
+#
+# §9 G-parity: paper resolves `notifications.paper_channel` (optional — the
+# paper analog of the retired `DISCORD_*WEBHOOK*` env var; absent ⇒ empty
+# list ⇒ notify is a silent no-op, byte-equivalent to the pre-G facade's
+# no-webhook no-op). The paper trade-row path is byte-unchanged: notify is
+# a side-effect, not trade state, and an unresolvable/absent paper channel
+# never aborts boot (live channel resolvability is already enforced by the
+# §2.4 coherence gate; this resolution is delivery-only).
+# ---------------------------------------------------------------------------
+
+def _resolve_notify_channels(config: dict) -> list:
+	"""§6 Path B — resolve the mode's notify channel(s) for the boot helper.
+
+	Returns the list of unified-layer ``Channel`` objects ``notify`` will
+	deliver to (``[]`` if none configured — a silent-no-op, the paper analog
+	of the retired facade's no-webhook behaviour). Reuses the SAME
+	``notifications:`` keys the §2.4 coherence gate parses so the engine and
+	the live P&L cron resolve identical channels. Best-effort: a malformed/
+	absent config logs a WARNING and yields ``[]`` (delivery-only — the
+	live-channel resolvability hard-gate is the §2.4 coherence check, not
+	here; a notify failure must never abort the engine — §6/§9).
+	"""
+	notif_cfg = config.get("notifications", {}) or {}
+	mode = config.get("executor")
+	channel_name = (
+		notif_cfg.get("live_channel")
+		if mode == "live"
+		else notif_cfg.get("paper_channel")
+	)
+	if not channel_name:
+		# Paper with no `paper_channel` (the common case — the paper analog
+		# of "no webhook env var set"): notify is a silent no-op. Live
+		# without `live_channel` is already a hard coherence abort upstream;
+		# reaching here in live means the gate passed, so this is defensive.
+		return []
+	notify_path = Path(notif_cfg.get("config_path", _DEFAULT_NOTIFY_CONFIG))
+	# Local import: keep engine.py importable on paper-only deployments that
+	# may not have the notifications extra wired (same pattern as the §2.4
+	# gate / the risk.py / live.state runtime-import convention).
+	from edge_catcher.notifications import (  # noqa: PLC0415
+		NotificationConfigError,
+		load_channels,
+	)
+	try:
+		channels = load_channels(notify_path)
+	except NotificationConfigError as exc:
+		log.warning(
+			"notify channel resolution: unified config %r unresolvable "
+			"(%s) — engine notifications disabled this run (delivery-only; "
+			"trade path unaffected)",
+			str(notify_path), exc,
+		)
+		return []
+	channel = channels.get(channel_name)
+	if channel is None:
+		log.warning(
+			"notify channel resolution: configured channel %r not defined "
+			"in %r (available: %s) — engine notifications disabled this run",
+			channel_name, str(notify_path), sorted(channels),
+		)
+		return []
+	return [channel]
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1014,15 @@ async def run_engine(
 	# ships, the engine starts paper-style (gate not consulted) — see the
 	# warning in dispatch._handle_signal when a Gate is constructed
 	# without dispatch wiring.
+
+	# §6 Path B — install the boot-resolved notify channel(s) ONCE here
+	# (after the §2 coherence gate + the mode-composition branch; the live
+	# channel's resolvability was already hard-gated by §2.4). `notify` then
+	# delegates to the unified `send()` with these channels and is never
+	# re-resolved per call. Delivery-only: an absent/unresolvable channel
+	# yields a silent-no-op notify and never aborts boot (§6/§9 — notify is
+	# a side-effect, not trade state; the paper trade-row path is unchanged).
+	configure_notify(_resolve_notify_channels(config))
 
 	# Cutover-verification beacon. Pi cutover step 5 greps journalctl for this
 	# exact substring to prove the engine/ package is loaded (NOT monitors/).
