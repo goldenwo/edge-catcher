@@ -212,6 +212,65 @@ class SQLiteTradeStore:
 	# Live-path WRITE surface — delegate to live.state free functions
 	# -------------------------------------------------------------------------
 
+	def record_intent(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: Optional[int],
+		stop_loss_distance_cents: Optional[int],
+		client_order_id: str,
+		placed_at_utc: str,
+	) -> None:
+		"""LIVE pre-place durability hook (spec §3 / §3.1 / §4.2).
+
+		Dispatch (E's later wiring) calls this UNCONDITIONALLY immediately
+		BEFORE ``await executor.place(req)``. On the live store it durably
+		INSERTs a ``pending`` row keyed by ``client_order_id`` BEFORE any
+		order is sent, so a severed place→persist is recoverable by B's
+		reconciler (it discriminates by ``client_order_id`` via Kalshi truth)
+		and there is never an untracked real-money position. An un-sent
+		order's row is indistinguishable-to-recovery from a never-received
+		one — both TTL-expire safely — so a pre-place INSERT preceding the
+		order is strictly safe (spec §4.2).
+
+		Pure delegation to :func:`live.state.record_pending` over the held
+		connection with ``kalshi_order_id=None`` (no order placed yet) and
+		``rejection_reason=None`` (no rejection — this is the intent, not a
+		terminal outcome). The 9-kwarg signature matches
+		``TradeStoreProtocol.record_intent`` verbatim; the post-place outcome
+		(open / rejected / pending-on-failure) is a later CAS transition on
+		THIS row, not this method's concern.
+
+		🚨 §3.1 NORMATIVE — FATAL on failure. ``live.state.record_pending``
+		raises :class:`RecordPendingFailed` (chained from the underlying
+		``sqlite3.Error``) on INSERT failure. There is intentionally **no**
+		try/except around this call: the exception propagates UNCAUGHT so the
+		entry aborts BEFORE ``place()`` (safe by construction — nothing was
+		sent, no money at risk) and the engine's three
+		``except RecordPendingFailed: raise`` ghost-reject clauses
+		(``dispatch.process_tick`` / ``engine._ws_loop`` / ``engine`` outer
+		reconnect) halt the engine rather than swallowing a failed
+		pre-place persistence.
+		"""
+		record_pending(
+			self._conn,
+			ticker=ticker,
+			series=series,
+			strategy=strategy,
+			side=side,  # type: ignore[arg-type]  # Protocol widens to str; live.state narrows to Literal["yes","no"] — value validated upstream (OrderRequest.side cast in dispatch); the side CHECK constraint is the runtime backstop
+			intended_size=intended_size,
+			entry_price_cents=entry_price_cents,
+			stop_loss_distance_cents=stop_loss_distance_cents,
+			client_order_id=client_order_id,
+			kalshi_order_id=None,
+			placed_at_utc=placed_at_utc,
+			rejection_reason=None,
+		)
+
 	def record_pending(
 		self,
 		*,
