@@ -1010,3 +1010,194 @@ def test_generate_report_path_with_space_and_hash(tmp_path) -> None:
 	assert report["all_time"]["closed_trades"] == 1
 	assert report["all_time"]["wins"] == 1
 	assert report["open_positions"], "the seeded open row must be reported"
+
+
+# ===========================================================================
+# H4 (E / §7 / §9, K1-green) — the ONE positive reporting-CLI-against-a-
+#   SEEDED-live-DB end-to-end test.
+#
+# Earlier C6/H1 retired the obligation-#2 strict-xfail forcing-function; the
+# thin returncode-only `test_27_reporting_cli_db_flag_against_live_schema`
+# (tests/test_live_state_integration.py) is SUBSUMED by + REMOVED in favour of
+# this richer test. It runs `python -m edge_catcher.reporting --db <live.db>`
+# as a SUBPROCESS (the operator's real invocation) against a freshly-migrated
+# live_trades.db carrying a representative mix of EVERY status the H1
+# `paper_trades` compat VIEW must handle, and asserts BOTH `returncode == 0`
+# AND a value-SANE report (parsed from the CLI's stdout JSON, cross-checked
+# against an in-process `generate_report` on the same DB). It would FAIL if
+# the reporting CLI broke, if the H1 VIEW regressed (exit_pending→open,
+# rename projections), or if the read-only connect path errored on a real DB.
+# ===========================================================================
+
+import json  # noqa: E402  (test-only, kept local to the H4 block)
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+# Settlement bucket: reporting's `today` filter is
+# date(datetime(exit_time, '-4 hours')) == --date. With exit_time noon UTC,
+# minus 4h = 08:00 same calendar day, so the bucket date is the date below.
+_H4_EXIT_TIME = "2026-05-19T12:00:00+00:00"
+_H4_DATE = "2026-05-19"
+
+
+def _seed_live_representative_mix(con: sqlite3.Connection) -> None:
+	"""Seed ONE row per status the H1 VIEW must handle, via _insert_live_row
+	(direct INSERT — exercises arbitrary status, unlike record_open/close).
+
+	closed (won/lost/scratch) carry exit_time in the _H4_DATE bucket so the
+	`today` sub-report is deterministic; scratch carries a REAL small non-zero
+	pnl (§7:147 — never hardcoded 0). exit_pending is a STILL-HELD position
+	the VIEW must project as `open`; pending/rejected pass through RAW and are
+	naturally excluded by reporting's open/won/lost/scratch matching."""
+	closed_common = dict(
+		strategy="h4-strat",
+		series="KXBTC",
+		entry_price_cents=50,
+		fill_size=2,
+		entry_fee_cents=1,
+		exit_time=_H4_EXIT_TIME,
+	)
+	# 2 won, 1 lost, 1 scratch  → closed_trades = 4 ; wins = 2 ; losses = 1
+	_insert_live_row(con, status="won", client_order_id="h4-w1",
+					  pnl_cents=120, **closed_common)
+	_insert_live_row(con, status="won", client_order_id="h4-w2",
+					  pnl_cents=60, **closed_common)
+	_insert_live_row(con, status="lost", client_order_id="h4-l1",
+					  pnl_cents=-80, **closed_common)
+	_insert_live_row(con, status="scratch", client_order_id="h4-s1",
+					  pnl_cents=3, **closed_common)  # real non-zero pnl
+	# 1 genuinely-open + 1 exit_pending (VIEW → open) → open_trades = 2
+	_insert_live_row(con, status="open", client_order_id="h4-o1",
+					  strategy="h4-strat", series="KXBTC",
+					  entry_price_cents=50, fill_size=1, pnl_cents=None)
+	_insert_live_row(con, status="exit_pending", client_order_id="h4-ep1",
+					  strategy="h4-strat", series="KXBTC",
+					  entry_price_cents=50, fill_size=1, pnl_cents=None)
+	# 1 pending + 1 rejected → pass through RAW, excluded by reporting.
+	_insert_live_row(con, status="pending", client_order_id="h4-p1",
+					  strategy="h4-strat", series="KXBTC")
+	_insert_live_row(con, status="rejected", client_order_id="h4-r1",
+					  strategy="h4-strat", series="KXBTC",
+					  rejection_reason="kalshi_4xx:400")
+
+
+def _assert_sane_live_report(report: dict) -> None:
+	"""Concrete value assertions on a reporting dict produced from the
+	_seed_live_representative_mix data over the H1 paper_trades VIEW."""
+	assert "error" not in report, f"expected a real report, got {report!r}"
+	at = report["all_time"]
+
+	# total_trades = COUNT(*) over the VIEW = ALL 8 seeded rows (the VIEW does
+	# not filter; reporting's per-bucket predicates do).
+	assert at["total_trades"] == 8, (
+		f"all 8 seeded live_trades rows must surface via the VIEW; "
+		f"got {at['total_trades']}"
+	)
+	# closed = won(2)+lost(1)+scratch(1); pending/rejected/open/exit_pending
+	# are NOT closed.
+	assert at["closed_trades"] == 4, (
+		f"closed_trades must be won+lost+scratch=4; got {at['closed_trades']}"
+	)
+	assert at["wins"] == 2, f"wins must be 2; got {at['wins']}"
+	assert at["losses"] == 1, f"losses must be 1; got {at['losses']}"
+	# net_pnl = 120 + 60 - 80 + 3 (scratch's REAL pnl, never 0) = 103.
+	assert at["net_pnl_cents"] == 103, (
+		f"net_pnl must reflect seeded won/lost/scratch pnls (120+60-80+3=103); "
+		f"got {at['net_pnl_cents']}"
+	)
+	# open = genuinely-open(1) + exit_pending→open via the H1 CASE(1) = 2.
+	# pending/rejected pass through RAW so the status='open' predicate excludes
+	# them — proves the VIEW's exit_pending→open projection AND raw-passthrough.
+	assert at["open_trades"] == 2, (
+		f"open_trades must count the open row + the exit_pending row the H1 "
+		f"VIEW projects as open (NOT pending/rejected); got {at['open_trades']}"
+	)
+	# win_rate over the §7:147 denominator: 2 wins / 4 closed = 50.0%.
+	assert at["win_rate_pct"] == 50.0, (
+		f"win_rate = 2 wins / 4 closed (scratch dilutes) = 50.0; "
+		f"got {at['win_rate_pct']}"
+	)
+	# `today` settlement bucket: the 4 closed rows all settled in _H4_DATE.
+	assert report["today"]["settled_count"] == 4, (
+		f"all 4 closed rows settled in the _H4_DATE bucket; "
+		f"got {report['today']['settled_count']}"
+	)
+	assert report["today"]["pnl_cents"] == 103, (
+		f"today pnl must equal the closed net (103); "
+		f"got {report['today']['pnl_cents']}"
+	)
+	# open_positions lists the still-held exposure (open + exit_pending),
+	# grouped by strategy/series → one ('h4-strat','KXBTC') line, count 2.
+	op = {(r["strategy"], r["series_ticker"]): r["count"]
+		  for r in report["open_positions"]}
+	assert op.get(("h4-strat", "KXBTC")) == 2, (
+		f"open_positions must show 2 still-held (open + exit_pending) for "
+		f"h4-strat/KXBTC; got {report['open_positions']!r}"
+	)
+	# scratch appears as its OWN by-strategy line (neither won nor lost).
+	statuses = {(r["strategy"], r["status"]) for r in report["today_by_strategy"]}
+	assert ("h4-strat", "scratch") in statuses, (
+		f"scratch must be its own status='scratch' by-strategy line; "
+		f"got {sorted(statuses)}"
+	)
+
+
+def test_reporting_cli_against_live_db(tmp_path) -> None:
+	"""H4 (1): the ONE positive reporting-CLI-against-live-DB test.
+
+	Runs the reporting CLI as a SUBPROCESS (the operator's real invocation,
+	exactly as the removed thin `test_27_reporting_cli_db_flag_against_live_
+	schema` did) against a freshly-migrated, representatively-SEEDED
+	live_trades.db, and asserts BOTH:
+
+	  * `returncode == 0` (the CLI runs clean against the live schema via the
+	    H1 paper_trades compat VIEW — the obligation-#2 contract, now a
+	    positive assertion since C6/H1 retired the xfail), AND
+	  * a value-SANE report: the CLI's stdout JSON parses and its numbers
+	    match the seeded won/lost/scratch/open/exit_pending mix (closed-count
+	    includes scratch, net_pnl reflects seeded pnls, exit_pending counted
+	    as open, pending/rejected excluded). Cross-checked against an
+	    in-process `generate_report` on the SAME DB so a stdout-format change
+	    alone cannot mask a value regression.
+
+	This STRICTLY SUBSUMES the removed thin test (which asserted only
+	`returncode == 0`): same subprocess invocation + every assertion it made
+	plus the sane-value checks. It would FAIL if reporting broke, if the H1
+	VIEW regressed, or if the read-only connect path errored on a real DB."""
+	db = tmp_path / "live_trades.db"
+	# Real migration runner (0001..0003) → the H1 paper_trades VIEW exists.
+	c = sqlite3.connect(str(db))
+	apply_migrations(c, _MIGRATIONS_DIR)
+	_seed_live_representative_mix(c)
+	c.close()
+
+	repo_root = Path(__file__).resolve().parents[1]
+	result = subprocess.run(
+		[sys.executable, "-m", "edge_catcher.reporting",
+		 "--db", str(db), "--date", _H4_DATE],
+		capture_output=True,
+		text=True,
+		timeout=60,
+		cwd=str(repo_root),
+	)
+
+	# (a) clean exit-0 against the live schema (obligation-#2, positive).
+	assert result.returncode == 0, (
+		f"reporting CLI must exit 0 against a seeded live_trades.db via the "
+		f"H1 VIEW; rc={result.returncode}\nstderr:\n{result.stderr}"
+	)
+
+	# (b) the stdout JSON parses and is value-sane (no --notify ⇒ the CLI
+	# prints `json.dumps(report, indent=2)` to stdout and returns 0).
+	try:
+		cli_report = json.loads(result.stdout)
+	except json.JSONDecodeError as exc:  # pragma: no cover  (diagnostic)
+		raise AssertionError(
+			f"reporting CLI stdout was not valid JSON ({exc}):\n{result.stdout!r}"
+		) from exc
+	_assert_sane_live_report(cli_report)
+
+	# (c) cross-check: an in-process generate_report on the SAME live DB
+	# yields the same sane numbers — a stdout-format change alone cannot
+	# mask a value regression, and this pins the live read path directly.
+	_assert_sane_live_report(generate_report(db, date=_H4_DATE))

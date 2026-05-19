@@ -608,28 +608,17 @@ def test_27_live_schema_readable_read_only(
 		ro.close()
 
 
-def test_27_reporting_cli_db_flag_against_live_schema(
-	conn: sqlite3.Connection, live_db_path: Path
-) -> None:
-	"""Spec #27 as literally written: run the reporting CLI against a
-	live_trades.db and expect a clean report. Currently xfails because the
-	merged CLI queries `paper_trades` (see the module SCOPE NOTE). When the
-	orchestrator resolves the reporting↔live-schema gap (a compatibility
-	view, a `--table`/`--schema` flag, or a live-aware reporting path), flip
-	this to a passing assertion."""
-	_seed_closed_rows(conn)
-	result = subprocess.run(
-		[sys.executable, "-m", "edge_catcher.reporting",
-		 "--db", str(live_db_path)],
-		capture_output=True,
-		text=True,
-		timeout=60,
-		cwd=str(Path(__file__).resolve().parents[1]),
-	)
-	# Spec intent: a clean exit-0 report against the live schema.
-	assert result.returncode == 0, (
-		f"reporting CLI failed against live schema: {result.stderr}"
-	)
+# NOTE: the thin spec-#27 reporting-CLI-against-live-schema test
+# (`test_27_reporting_cli_db_flag_against_live_schema`, returncode-only) was
+# REMOVED in Phase H4 — it is STRICTLY SUBSUMED by
+# `tests/test_reporting_live_view.py::test_reporting_cli_against_live_db`,
+# which runs the SAME `python -m edge_catcher.reporting --db <live.db>`
+# subprocess invocation against a freshly-migrated, representatively-SEEDED
+# live_trades.db (every status the H1 paper_trades VIEW handles) and asserts
+# BOTH `returncode == 0` AND value-sane report numbers. C6/H1 retired the
+# obligation-#2 strict-xfail forcing-function and added the H1 compat VIEW, so
+# the reporting↔live-schema gap this test documented is closed and the single
+# positive live-DB reporting test now lives with the Phase-H VIEW coverage.
 
 
 # ===========================================================================
