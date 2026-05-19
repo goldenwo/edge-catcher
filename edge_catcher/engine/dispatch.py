@@ -640,6 +640,20 @@ def _handle_exit(
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
+	# SC-D3 (spec-CORRECTION, controller-adjudicated R1 — §3/§1/§4.2): the §3
+	# table's literal "place exit via executor" + the prerequisite
+	# PaperExecutor sell path + executor/cfg/position threading are E3's
+	# deliverable (PaperExecutor.place is entries-only; routing this exit
+	# through executor.place unconditionally would run entry-sizing on a paper
+	# exit — a G-parity-BLOCKING paper behaviour change — and a mode branch
+	# would violate the §1 keystone). D3's exit path is the mode-AGNOSTIC,
+	# IDEMPOTENT store-shaped close: live `store.exit_trade` is C5's CAS to B
+	# `record_close` (exit_reason='ws_exit_fill'; lost-CAS = logged no-op,
+	# never raises) which races SAFELY with B's E3-wired async
+	# on_fill_event/reconciler (B/Kalshi-truth is the authority — whichever
+	# lands the CAS first wins, the other no-ops); paper `store.exit_trade` is
+	# today's byte-unchanged sync close. dispatch does NOT branch on mode —
+	# the store/Protocol absorbs the live-vs-paper difference (§1).
 	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)

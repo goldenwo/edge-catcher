@@ -131,6 +131,18 @@ async def _settlement_poller(
 							"entry_time": trade.get("entry_time"),
 							"result": result,
 						}, recv_ts=now)
+					# SC-D3 (settlement leg — see dispatch._handle_exit's SC-D3
+					# note for the shared §1-keystone / R1-deferral rationale,
+					# not restated here): live `store.settle_trade` is C5's
+					# settlement CAS to B `record_close`
+					# (exit_reason='settlement', SUPERSEDES an in-flight
+					# `exit_pending`, consumes the entry-fee-remainder) and
+					# races SAFELY with B's E3-wired async on_settlement_event;
+					# paper `store.settle_trade` is byte-unchanged. The §3
+					# "place exit via executor" obligation is the strategy/
+					# TP-SL exit (E3's deliverable per the dispatch._handle_exit
+					# SC-D3 note); settlement has NO executor leg — it is purely
+					# this store-shaped resolution.
 					store.settle_trade(trade["id"], result, now=now)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
