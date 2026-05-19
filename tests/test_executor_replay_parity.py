@@ -71,9 +71,22 @@ Diff reuse + tolerance
 ----------------------
 The comparison machinery is REUSED from ``tests/test_replay_parity.py``
 (``PARITY_COLUMNS`` / ``_composite_key`` / ``_diff_rows`` are imported, never
-edited). The CR-5 tolerance is applied on top: ``exit_price`` /
-``blended_entry`` / ``fill_size`` must match EXACTLY; ``slippage_cents`` may
-differ by ≤ 1¢.
+edited). The CR-5 tolerance is applied on top: the money trio ``exit_price`` /
+``blended_entry`` / ``fill_size`` must match EXACTLY (ENFORCED, never
+excluded); ``slippage_cents`` may differ by ≤ 1¢ (ENFORCED within that band).
+
+Two paper-only book-introspection columns are excluded from the comparison —
+``book_depth`` AND ``book_snapshot`` — on the INDEPENDENT structural ground
+that ``LiveExecutor`` cannot populate them (``_translate_order`` never sets
+them ⇒ ``OrderResult`` defaults both ``None`` for live; Kalshi REST returns
+only the fills array, no book depth/snapshot — orderbook-walk artifacts). To
+be PRECISE about the reused whitelist: ``test_replay_parity.py``'s
+``PARITY_COLUMNS`` itself excludes ONLY ``book_snapshot``; it INCLUDES /
+ENFORCES ``book_depth`` (PARITY_COLUMNS line 55). CR-5 therefore excludes
+``book_depth`` on the SAME structural-impossibility reason as
+``book_snapshot`` — NOT on any ``test_replay_parity.py`` precedent (that
+precedent exists for ``book_snapshot`` but NOT for ``book_depth``). See the
+``_PAPER_ONLY_BOOK_COLUMNS`` block comment for the full rationale.
 """
 from __future__ import annotations
 
@@ -120,19 +133,29 @@ _SYNTHETIC_BUNDLE = (
 # test_replay_parity.py (the import contract in spec SC-I2 step 4).
 #
 # Paper-only book-introspection columns (book_depth / book_snapshot) are
-# EXCLUDED from the CR-5 economic-parity comparison. They are artifacts of
+# EXCLUDED from the CR-5 economic-parity comparison. Both are artifacts of
 # PaperExecutor's orderbook WALK (it reads MarketState's captured book and
 # records its depth + the consumed levels). LiveExecutor structurally CANNOT
-# produce them: Kalshi's REST fill response carries only the per-fill array,
-# no orderbook depth or book snapshot — so ``OrderResult.book_depth`` /
-# ``book_snapshot`` are ``None`` for every live order BY DESIGN (executor.py:
-# the ``OrderResult`` docstring documents these as paper-side fields D omits).
-# This is the SAME class of exclusion ``test_replay_parity.py`` itself applies
-# to ``book_snapshot`` ("not material for P&L parity") — and the ≥5-real-
-# bundle runbook gate (the authoritative verdict) tolerates it for the same
-# structural reason. CR-5 asks an ECONOMIC question (does live translate
-# Kalshi's fills into the same size / cost basis / slippage / pnl?), NOT
-# whether live can reconstruct paper's book-walk introspection.
+# produce either: ``LiveExecutor._translate_order`` never sets them, so
+# ``OrderResult`` defaults both to ``None`` for every live order, and Kalshi's
+# REST fill response carries only the per-fill array — no orderbook depth, no
+# book snapshot (executor.py: the ``OrderResult`` docstring documents these as
+# paper-side fields D omits). The exclusion rests SOLELY on that independent
+# structural-impossibility ground (orderbook-walk artifacts; Kalshi REST has
+# no book depth/snapshot → ``None`` for live BY DESIGN) — NOT on a
+# ``test_replay_parity.py`` precedent. PRECISELY: ``test_replay_parity.py``'s
+# ``PARITY_COLUMNS`` excludes ONLY ``book_snapshot`` ("not material for P&L
+# parity"); it INCLUDES / ENFORCES ``book_depth`` (PARITY_COLUMNS line 55).
+# CR-5 excludes ``book_depth`` too, but on the SAME structural reason as
+# ``book_snapshot`` (LiveExecutor cannot populate it), distinct from "the
+# existing parity test already excludes it" — which is true of book_snapshot
+# but NOT of book_depth. The ≥5-real-bundle runbook gate (the authoritative
+# verdict) tolerates both for that same structural reason. The CR-5 money trio
+# ``exit_price`` / ``blended_entry`` / ``fill_size`` (EXACT) and
+# ``slippage_cents`` (±1¢) remain ENFORCED and are NOT excluded. CR-5 asks an
+# ECONOMIC question (does live translate Kalshi's fills into the same size /
+# cost basis / slippage / pnl?), NOT whether live can reconstruct paper's
+# book-walk introspection.
 # ---------------------------------------------------------------------------
 
 _SLIPPAGE_TOLERANCE_CENTS = 1
