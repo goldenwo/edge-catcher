@@ -17,9 +17,13 @@ matching ``live.state`` / ``engine.live_db`` function.
 **Live-path surface (only what ``engine/dispatch.py`` invokes when the
 executor is ``LiveExecutor`` — statuses rejected / pending):**
 
-* ``record_rejected`` → :func:`live.state.record_rejected` (rejected branch,
+* ``record_rejected`` → CAS ``pending → rejected`` of the C1 row via
+  :func:`live.state.transition_pending_to_rejected` (rejected branch,
   non-``stale_book`` only; ``stale_book`` is the paper-side reject path that
-  ``dispatch.py`` short-circuits before the store).
+  ``dispatch.py`` short-circuits before the store). NOT an insert — spec §3
+  supersedes B's CR-4 insert-on-outcome model; a CAS-miss / write failure is
+  a logged ERROR audit gap, NOT fatal (§3.1: a rejected order holds no
+  position ⇒ not funds-at-risk).
 * ``record_pending`` → :func:`live.state.record_pending` (pending branch —
   NetworkError / malformed-fills / engine-timeout).
 * ``get_open_trades`` / ``get_open_trades_for`` → ``live_trades`` open-row
@@ -131,10 +135,15 @@ reason on the filled-entry INSERT, but that call is made by E's PR-6 wiring
 directly against ``live.state`` — NOT through this adapter — so the
 ghost-reject contract there is E's to preserve, not this store's.) The
 ``record_rejected`` audit-write best-effort carve-out (a failed
-rejected-row INSERT strands only an audit row, no money) is *inherited*
-from ``live.state.record_rejected`` (it catches its own ``sqlite3.Error``,
-logs ``rejected_audit_write_failed``, returns 0); this adapter neither
-re-raises nor adds its own swallow.
+``pending → rejected`` CAS, or a CAS-miss because the C-gate rejected the
+order *before* C1 inserted a pending row, strands at most an audit gap —
+no Kalshi position, no money) is **caller-owned here, not inherited**: B's
+``transition_pending_to_rejected`` owns only a lost-CAS-race WARNING no-op
+(not a write-failure carve-out), so ``record_rejected`` wraps the whole
+locate+CAS in its own ``try/except`` that logs ERROR and does NOT raise
+(mirroring the PR#34 ``438d843`` precedent). This is a converged, locked
+§3.1 tradeoff that partially supersedes B's CR-4 audit-completeness for the
+positionless-rejected case — INTENTIONAL, not a regression.
 """
 from __future__ import annotations
 
@@ -148,8 +157,8 @@ from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.live.state import (
 	connect_live_trades_db,
 	record_pending,
-	record_rejected,
 	transition_pending_to_open,
+	transition_pending_to_rejected,
 )
 
 log = logging.getLogger(__name__)
@@ -345,35 +354,190 @@ class SQLiteTradeStore:
 		placed_at_utc: str,
 		rejection_reason: str,
 	) -> None:
-		"""Persist a ``rejected`` audit row (dispatch's rejected branch,
-		non-``stale_book`` only).
+		"""LIVE rejected write — a CAS ``pending → rejected`` TRANSITION of
+		the C1 row located by ``client_order_id``, **NOT an insert** (spec §3
+		EXPLICITLY supersedes B's CR-4 insert-on-outcome / one-row-per-attempt
+		model: "the live entry model is insert-pending-then-CAS-transition,
+		NOT insert-on-outcome").
 
-		Pure delegation to :func:`live.state.record_rejected`. The locked
-		10-kwarg signature (no ``kalshi_order_id``; ``rejection_reason``
-		REQUIRED) matches ``TradeStoreProtocol.record_rejected`` verbatim
-		(pinned by ``tests/test_engine_dispatch_pending_branch.py``).
+		Dispatch's rejected branch (non-``stale_book`` only; ``stale_book`` is
+		short-circuited before the store) calls this UNCONDITIONALLY — it must
+		never branch on paper-vs-live (spec §1 keystone) — so the paper-shaped
+		Protocol signature is preserved verbatim (the locked 10-kwarg
+		signature, no ``kalshi_order_id``; ``rejection_reason`` REQUIRED;
+		pinned by ``tests/test_engine_dispatch_pending_branch.py``).
 
-		The audit-write best-effort **carve-out is inherited, not
-		re-implemented**: ``live.state.record_rejected`` catches its own
-		``sqlite3.Error``, logs ``rejected_audit_write_failed``, and returns 0
-		(a failed rejected-row INSERT strands only an audit row — no Kalshi
-		position, no money). This adapter adds no swallow and no re-raise, so
-		it never raises ``RecordPendingFailed`` here (ghost-reject scope is
-		funds-at-risk INSERTs only) and never masks a different error.
+		Flow:
+
+		1. Locate the C1 ``pending`` row by ``client_order_id`` using B's
+		   canonical lookup query (the same ``WHERE client_order_id = ?``
+		   SELECT ``live.state`` itself / the reconciler / ``record_trade``
+		   use — NOT hand-rolled SQL; §5). The select is extended to
+		   ``SELECT id, status`` so the pre-CAS status is captured in the
+		   SAME round-trip (no extra read vs B's ``_status_of``).
+		   ``client_order_id`` is ``UNIQUE`` so this is at most one row.
+		2. CAS ``pending → rejected`` via B's
+		   :func:`live.state.transition_pending_to_rejected`
+		   (``kalshi_order_id=None`` — a rejected order never got a Kalshi
+		   id on this path). On a won CAS (pre-status was ``pending``) the
+		   normal path stays quiet (B emits its own ``pending→rejected``
+		   INFO). A LOST CAS race (the row had already left ``pending``) is
+		   surfaced DISTINCTLY here on THIS module's coid-keyed audit logger
+		   WITH the business keys (``client_order_id`` / ``rejection_reason``
+		   / actual current status) — B's ``_cas_update`` only emits a
+		   generic WARNING keyed by ``row_id`` on the ``edge_catcher.live.state``
+		   logger (no coid, no reason), invisible on the store's audit trail.
+		   The dangerous sub-case is a ``status='open'`` row (the order
+		   FILLED): a subsequent ``record_rejected`` for the same coid means
+		   the system believes one order both filled AND was rejected — a
+		   fill/reject ORDERING ANOMALY (a real-money concern the zero-error
+		   lens targets), logged explicitly as such; any other terminal
+		   pre-status (``rejected`` / ``rejected_post_hoc`` / ``cancelled``)
+		   is the benign late/duplicate-reject variant. Either way this is a
+		   best-effort observability log, NOT a raise (spec §3.1 — a rejected
+		   order holds no position).
+
+		**§3.1 best-effort — caller-owned, NOT fatal (unlike C1's
+		``record_intent``):** ``record_intent`` failure is FATAL
+		(``RecordPendingFailed`` propagates, entry aborts BEFORE ``place()``
+		— a funds-at-risk INSERT). ``record_rejected`` is the inverse: a
+		rejected order **holds no position**, so per spec §3.1
+		("``record_rejected`` CAS-miss/failure ⇒ NOT fatal,
+		audit-best-effort, log ERROR … a rejected order holds no position")
+		every failure mode here is a logged ERROR audit gap, never a raise:
+
+		* **CAS-miss (no preceding C1 ``pending`` row):** the spec author
+		  KNEW pre-place C-gate rejects (``absolute_max_exceeded`` /
+		  ``invalid_intended_size``) reject the order BEFORE C1 inserts a
+		  pending row, and DELIBERATELY accepted that as a logged audit gap,
+		  NOT fatal. Log ERROR and return — do NOT raise, do NOT INSERT a
+		  fabricated row (that would resurrect B's superseded
+		  insert-on-outcome model; spec §3).
+		* **Lost CAS race (row found but not ``pending``):** surfaced
+		  DISTINCTLY on this store's coid-keyed audit logger with the
+		  business keys + the actual current status, explicitly flagged as a
+		  fill/reject ordering anomaly when the row is ``open`` (real-money
+		  concern) vs benign late/duplicate reject otherwise. Best-effort log
+		  only — never raise (the row exists and is terminal/filled; nothing
+		  to strand).
+		* **Write failure — categorized into two carve-outs (both
+		  best-effort, never raise):** B's ``transition_pending_to_rejected``
+		  owns only the lost-race WARNING no-op, NOT a write-failure
+		  carve-out, so the CALLER owns the ``try/except`` (PR#34 ``438d843``
+		  precedent). It is split so an operator can triage faster:
+		  ``sqlite3.Error`` is the transient/environmental disk/DB fault (the
+		  documented §3.1 carve-out — mirrors B's ``record_pending``
+		  ``except sqlite3.Error``); a non-DB ``Exception`` is flagged
+		  DISTINCTLY as an UNEXPECTED error (a possible permanent
+		  B-API/signature drift, e.g. a wrong kwarg) which would otherwise
+		  log-and-continue forever with zero rejected audit rows — an
+		  operator should escalate that class. Neither raises
+		  ``RecordPendingFailed`` (ghost-reject scope is funds-at-risk
+		  INSERTs only).
+
+		This partially supersedes B's CR-4 audit-completeness for the
+		positionless-rejected case — a converged, locked §3.1 tradeoff,
+		INTENTIONAL, not a regression.
 		"""
-		record_rejected(
-			self._conn,
-			ticker=ticker,
-			series=series,
-			strategy=strategy,
-			side=side,
-			intended_size=intended_size,
-			entry_price_cents=entry_price_cents,
-			stop_loss_distance_cents=stop_loss_distance_cents,
-			client_order_id=client_order_id,
-			placed_at_utc=placed_at_utc,
-			rejection_reason=rejection_reason,
-		)
+		try:
+			# B's canonical by-client_order_id lookup (identical predicate to
+			# live.state.py:807 / reconciliation.py:706 / record_trade) —
+			# NOT hand-rolled; UNIQUE ⇒ at most one row. The select is
+			# extended to (id, status) so the pre-CAS status rides the SAME
+			# round-trip (preferred over a separate _status_of read): a
+			# pending pre-status ⇒ the CAS below wins; any other pre-status ⇒
+			# the CAS is a no-op and the resulting status == this pre-status,
+			# so this value is the authoritative lost-race status without a
+			# second query.
+			found = self._conn.execute(
+				"SELECT id, status FROM live_trades WHERE client_order_id = ?",
+				(client_order_id,),
+			).fetchone()
+			if found is None:
+				# §3.1 accepted audit gap: pre-place C-gate reject (no C1
+				# pending row). Log ERROR and return — NOT fatal, NOT a
+				# fabricated INSERT (spec §3 supersedes insert-on-outcome).
+				log.error(
+					"record_rejected CAS-miss: no pending row for "
+					"client_order_id=%r reason=%r — pre-place C-gate reject "
+					"(no C1 record_intent); §3.1 accepted audit gap, not "
+					"fatal (a rejected order holds no position)",
+					client_order_id,
+					rejection_reason,
+				)
+				return
+			row_id = int(found[0])
+			pre_status = found[1]
+			# CAS pending → rejected via B's writer (no hand-rolled UPDATE;
+			# §5). A rejected order never got a Kalshi id on this path.
+			transition_pending_to_rejected(
+				self._conn,
+				row_id,
+				kalshi_order_id=None,
+				rejection_reason=rejection_reason,
+			)
+			# FIX 1 — lost-CAS-race observability. The CAS only fires when
+			# the row was 'pending'; if pre_status was anything else the row
+			# already left 'pending' (lost race) and is UNCHANGED, so
+			# pre_status IS the resulting status. Surface that DISTINCTLY on
+			# THIS store's coid-keyed audit logger with the business keys
+			# (B's _cas_update only WARNs by row_id on a different logger).
+			# Mirror B's `if changed:`-style gating (state.py:948) — keep the
+			# normal won-CAS path quiet (B logs its own pending→rejected
+			# INFO); only the lost race is noteworthy here.
+			if pre_status != "pending":
+				anomaly = (
+					"FILL/REJECT ORDERING ANOMALY (real-money concern: the "
+					"system believes this order both filled and was "
+					"rejected)"
+					if pre_status == "open"
+					else "benign late/duplicate reject"
+				)
+				log.error(
+					"record_rejected lost CAS race for client_order_id=%r "
+					"reason=%r: row already left 'pending' (current "
+					"status=%r) — %s; §3.1 best-effort, not fatal (a "
+					"rejected order holds no position), not re-applied",
+					client_order_id,
+					rejection_reason,
+					pre_status,
+					anomaly,
+				)
+		except sqlite3.Error as exc:
+			# §3.1 caller-owned best-effort — TRANSIENT/ENVIRONMENTAL DB or
+			# disk fault (the documented carve-out; mirrors B's
+			# record_pending `except sqlite3.Error`). A rejected order holds
+			# no position, so this strands at most an audit gap. Log ERROR,
+			# do NOT raise — never RecordPendingFailed (ghost-reject =
+			# funds-at-risk INSERTs only), never mask the engine.
+			log.error(
+				"record_rejected audit-write failed (DB/disk fault) for "
+				"client_order_id=%r reason=%r: %s — §3.1 best-effort, not "
+				"fatal (a rejected order holds no position; transient; PR#34 "
+				"438d843 precedent)",
+				client_order_id,
+				rejection_reason,
+				exc,
+			)
+		except Exception as exc:
+			# §3.1 caller-owned best-effort — UNEXPECTED non-DB error. This
+			# is NOT the transient carve-out: it is most likely a PERMANENT
+			# programming / B-API signature drift (e.g. a wrong kwarg to
+			# transition_pending_to_rejected) that would otherwise
+			# log-and-continue FOREVER with zero rejected audit rows. Still
+			# best-effort (never raise, never RecordPendingFailed — a
+			# rejected order holds no position), but flagged DISTINCTLY so an
+			# operator can escalate this class faster than the transient one.
+			log.error(
+				"record_rejected UNEXPECTED non-DB error (possible B-API / "
+				"signature drift — escalate; NOT a transient disk fault) for "
+				"client_order_id=%r reason=%r: %r — §3.1 best-effort, not "
+				"fatal (a rejected order holds no position), engine not "
+				"masked",
+				client_order_id,
+				rejection_reason,
+				exc,
+			)
 
 	def record_trade(
 		self,
