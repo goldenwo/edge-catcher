@@ -443,3 +443,236 @@ async def test_seed_market_state_derives_first_seen(
 	assert ms2.update_price("KXNOTSEEN-T1", 50) is True, (
 		f"[{schema_label}] update_price for an un-seeded ticker must return True"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Plan I1 / spec §9 + §10.2 — additive `executor` injection seam in
+# replay_capture. The default (no arg) MUST stay byte-identical: replay is
+# paper-fidelity-critical and a separate hard G-parity merge gate diffs
+# replay trade rows vs main. I2/CR-5 (NOT this scope) will inject
+# LiveExecutor + MockKalshiServer through this same seam.
+# ---------------------------------------------------------------------------
+
+
+def _minimal_bundle(tmp_path, *, name: str = "2026-04-15") -> Path:
+	"""Build the same minimal (manifest + empty JSONL) bundle the existing
+	round-trip test uses — no events to dispatch, fully deterministic."""
+	bundle = tmp_path / name
+	bundle.mkdir()
+	(bundle / "manifest.json").write_text(
+		json.dumps({
+			"schema_version": 1,
+			"capture_date": name,
+			"engine_commit": "test",
+			"engine_dirty": False,
+		}),
+		encoding="utf-8",
+	)
+	(bundle / f"kalshi_engine_{name}.jsonl").write_text("", encoding="utf-8")
+	return bundle
+
+
+@pytest.mark.asyncio
+async def test_replay_capture_uses_injected_executor(tmp_path):
+	"""The injected executor instance — not a fresh PaperExecutor — is the
+	exact object handed to dispatch_message. Spy on dispatch_message to
+	capture the executor it receives by identity."""
+	import edge_catcher.engine.replay.backtester as bt
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
+
+	class NoopStrategy(Strategy):
+		name = "noop-strat"
+		supported_series = ["KXTEST"]
+		default_params: dict = {}
+
+		def on_tick(self, ctx):
+			return []
+
+	class SpyExecutor:
+		"""Satisfies the Executor protocol (single async `place`). Distinct
+		type from PaperExecutor so identity/type assertions are unambiguous."""
+
+		def __init__(self) -> None:
+			self.place_calls = 0
+
+		async def place(self, req):  # pragma: no cover - not reached (empty JSONL)
+			self.place_calls += 1
+			raise AssertionError("no events in the minimal bundle")
+
+	bundle = _minimal_bundle(tmp_path)
+	config = {"strategies": {"noop-strat": {"series": ["KXTEST"]}}}
+	injected = SpyExecutor()
+
+	seen: dict = {}
+	orig_dispatch = bt.dispatch_message
+
+	async def _spy_dispatch(*args, **kwargs):
+		seen["executor"] = kwargs.get("executor")
+		return await orig_dispatch(*args, **kwargs)
+
+	bt.dispatch_message = _spy_dispatch
+	try:
+		result = await replay_capture(
+			bundle_path=bundle,
+			strategies=[NoopStrategy()],
+			config=config,
+			executor=injected,
+		)
+	finally:
+		bt.dispatch_message = orig_dispatch
+
+	# Empty JSONL ⇒ dispatch_message is never called, so assert the executor
+	# resolved inside replay_capture is the injected instance by capturing it
+	# off the result-path is not possible; instead drive ONE event so the spy
+	# fires. Re-run with a single trade event below.
+	assert result is not None
+	# Now prove the wire-up with one event so _spy_dispatch actually runs.
+	bundle2 = tmp_path / "2026-04-16"
+	bundle2.mkdir()
+	(bundle2 / "manifest.json").write_text(
+		json.dumps({
+			"schema_version": 1,
+			"capture_date": "2026-04-16",
+			"engine_commit": "test",
+			"engine_dirty": False,
+		}),
+		encoding="utf-8",
+	)
+	(bundle2 / "kalshi_engine_2026-04-16.jsonl").write_text(
+		json.dumps({
+			"source": "ws",
+			"recv_ts": "2026-04-16T12:00:00+00:00",
+			"recv_seq": 1,
+			"payload": {
+				"type": "trade",
+				"msg": {
+					"market_ticker": "KXTEST-FOO",
+					"yes_price": 0.50,
+					"taker_side": "yes",
+					"count": 1,
+				},
+			},
+		}) + "\n",
+		encoding="utf-8",
+	)
+	injected2 = SpyExecutor()
+	seen.clear()
+	bt.dispatch_message = _spy_dispatch
+	try:
+		await replay_capture(
+			bundle_path=bundle2,
+			strategies=[NoopStrategy()],
+			config=config,
+			executor=injected2,
+		)
+	finally:
+		bt.dispatch_message = orig_dispatch
+
+	assert "executor" in seen, "dispatch_message was never called for the single event"
+	assert seen["executor"] is injected2, (
+		"replay_capture did not pass the INJECTED executor to dispatch_message "
+		f"— got {type(seen['executor']).__name__} (id={id(seen['executor'])}), "
+		f"expected the SpyExecutor instance (id={id(injected2)})"
+	)
+
+
+@pytest.mark.asyncio
+async def test_replay_capture_default_executor_is_paperexecutor_unchanged(tmp_path):
+	"""With NO executor arg the default path constructs a PaperExecutor
+	(byte-identical to pre-seam behavior) and produces a deterministic,
+	value-identical ReplayResult across runs."""
+	import edge_catcher.engine.replay.backtester as bt
+	from edge_catcher.engine.executors.paper import PaperExecutor
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
+
+	class NoopStrategy(Strategy):
+		name = "noop-strat"
+		supported_series = ["KXTEST"]
+		default_params: dict = {}
+
+		def on_tick(self, ctx):
+			return []
+
+	config = {"strategies": {"noop-strat": {"series": ["KXTEST"]}}}
+
+	# Single trade event so dispatch_message actually runs and the default
+	# executor is observable via the dispatch spy.
+	def _bundle_with_event(name: str) -> Path:
+		b = tmp_path / name
+		b.mkdir()
+		(b / "manifest.json").write_text(
+			json.dumps({
+				"schema_version": 1,
+				"capture_date": name,
+				"engine_commit": "test",
+				"engine_dirty": False,
+			}),
+			encoding="utf-8",
+		)
+		(b / f"kalshi_engine_{name}.jsonl").write_text(
+			json.dumps({
+				"source": "ws",
+				"recv_ts": "2026-04-15T12:00:00+00:00",
+				"recv_seq": 1,
+				"payload": {
+					"type": "trade",
+					"msg": {
+						"market_ticker": "KXTEST-FOO",
+						"yes_price": 0.50,
+						"taker_side": "yes",
+						"count": 1,
+					},
+				},
+			}) + "\n",
+			encoding="utf-8",
+		)
+		return b
+
+	seen: dict = {}
+	orig_dispatch = bt.dispatch_message
+
+	async def _spy_dispatch(*args, **kwargs):
+		seen["executor"] = kwargs.get("executor")
+		return await orig_dispatch(*args, **kwargs)
+
+	bundle_a = _bundle_with_event("2026-04-15")
+	bt.dispatch_message = _spy_dispatch
+	try:
+		result_a = await replay_capture(
+			bundle_path=bundle_a,
+			strategies=[NoopStrategy()],
+			config=config,
+		)
+	finally:
+		bt.dispatch_message = orig_dispatch
+
+	# Default path ⇒ PaperExecutor reaches dispatch (NOT None, NOT some other type).
+	assert isinstance(seen.get("executor"), PaperExecutor), (
+		"default (no executor arg) must reconstruct a PaperExecutor — got "
+		f"{type(seen.get('executor')).__name__}"
+	)
+
+	# Determinism / byte-identical default: a second independent run on an
+	# identical fixture yields a value-identical ReplayResult.trades list.
+	bundle_b = _bundle_with_event("2026-04-15-b")
+	# capture_date is embedded in the JSONL filename; rewrite manifest+file so
+	# the second bundle is content-identical to the first (same capture_date).
+	import shutil
+
+	shutil.rmtree(bundle_b)
+	bundle_b = tmp_path / "run_b"
+	shutil.copytree(bundle_a, bundle_b)
+
+	result_b = await replay_capture(
+		bundle_path=bundle_b,
+		strategies=[NoopStrategy()],
+		config=config,
+	)
+
+	assert result_a.trades == result_b.trades, (
+		"default-path ReplayResult.trades not deterministic across identical "
+		f"fixtures: {result_a.trades!r} != {result_b.trades!r}"
+	)
+	assert result_a.events_processed == result_b.events_processed
