@@ -38,9 +38,11 @@ from edge_catcher.engine.discovery import (
 	load_config,
 )
 from edge_catcher.engine.dispatch import (
+	_OPERATOR_KILL,
 	_format_close_message,
 	_pnl_label,
 	dispatch_message,
+	drain_inflight_sections,
 )
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
@@ -1114,6 +1116,18 @@ async def run_engine(
 			for s in strat_series:
 				strat_by_series.setdefault(s, []).append(strat)
 
+		# §4.3 drain discriminator. The ``while True`` WS loop NEVER falls
+		# through normally — it exits only via an exception: a SIGTERM/parent
+		# ``CancelledError`` (the §4.3 graceful-shutdown path), or the two
+		# fatal ghost-reject re-raises (KillSwitch/RecordPending — a crash-stop,
+		# NOT a clean operator shutdown), or a reconnect-and-continue. So the
+		# ``finally`` is reached only on a stop. This flag distinguishes the
+		# CLEAN SIGTERM/cancel drain (steps 1 & 7 — operator-kill + the final
+		# "shutting down" alert — fire) from a fatal crash-stop and, critically,
+		# keeps the §9 G-parity contract: paper replay/backtest/CI never
+		# SIGTERM, so the non-signal path sets NEITHER the operator-kill flag
+		# NOR emits a new alert — byte-identical to F1's drain.
+		_shutdown_via_cancel = False
 		try:
 			# 7. WS loop with reconnect
 			while True:
@@ -1131,6 +1145,9 @@ async def run_engine(
 					# wrap shutdown-time errors as OSError, which would route us into
 					# the reconnect_delay sleep + run_recovery() call before honouring
 					# the cancel. Propagate immediately so shutdown is prompt.
+					# Record that THIS is the clean SIGTERM/cancel drain so the
+					# §4.3 finally runs steps 1 (operator-kill) & 7 (final alert).
+					_shutdown_via_cancel = True
 					raise
 				except (
 					websockets.ConnectionClosed,
@@ -1176,17 +1193,90 @@ async def run_engine(
 					await run_recovery(client, market_state, active_series, capture_writer=capture_writer)
 
 		finally:
-			# 8. Graceful shutdown
+			# ===============================================================
+			# 8. Graceful shutdown — the §4.3 NORMATIVE 7-step money-safe
+			#    drain ORDER (sub-project E / spec §4.2 L2 + §4.3). The order
+			#    is LOAD-BEARING:
+			#
+			#  (1) set the operator-kill flag FIRST — the risk gate then
+			#      rejects every NEW entry via KILL_OPERATOR, so no new
+			#      place→persist section can enter the in-flight registry
+			#      DURING the drain (signal/cancel path only — §9 G-parity);
+			#  (2) stop WS/dispatch intake — the WS loop has already exited
+			#      (we are in its ``finally``) and ``ws_ref`` is dropped, so
+			#      no further tick reaches dispatch;
+			#  (3) AWAIT the §4.2-L2 in-flight place→persist registry to
+			#      completion — the DRAIN owns this await (NOT a naive
+			#      ``await shield`` in dispatch). A SIGTERM that landed
+			#      EXACTLY between ``executor.place()`` returning ``filled``
+			#      and the ``record_trade`` persist is made safe HERE: the
+			#      shielded section is still running; we wait for its persist
+			#      to become durable BEFORE closing the DB;
+			#  (4) cancel B's loops (CancelledError-safe by B's contract);
+			#  (5) ``gather(*tasks, return_exceptions=True)``;
+			#  (6) ``store.close()`` EXACTLY once (the SQLiteTradeStore
+			#      ``_closed`` idempotent guard) — STRICTLY AFTER step (3):
+			#      never close the live DB connection while a shielded persist
+			#      is mid-write (FUNDS-AT-RISK);
+			#  (7) final "shutting down" alert to the live ops channel — LAST
+			#      (signal/cancel path only; the existing ``notify`` path —
+			#      G's CR-1 channel convergence is out of F2 scope).
+			#
+			# Steps (2)/(4)/(5)/(6) are the pre-existing F1 drain effects in
+			# the SAME relative order, with step (3) inserted before close and
+			# steps (1)/(7) added signal-only. For paper (no live runtime, an
+			# always-empty in-flight registry, ``_shutdown_via_cancel`` False
+			# on the non-signal path) this is byte-identical to F1's drain:
+			# step (1)/(7) are skipped, step (3) is a no-op
+			# (``drain_inflight_sections`` returns immediately on an empty
+			# set), and (2)/(4)/(5)/(6) are exactly F1's
+			# save_state→cancel→gather→close→capture-close sequence.
+			# ===============================================================
 			log.info("Shutting down engine")
+
+			# (1) operator-kill FIRST (signal/cancel drain only — paper
+			# byte-exact: the non-signal path must NOT set it).
+			if _shutdown_via_cancel:
+				_OPERATOR_KILL.activate()
+				log.info(
+					"shutdown drain: operator-kill set — gate now rejects new "
+					"entries via KILL_OPERATOR for the duration of the drain "
+					"(§4.3 step 1)"
+				)
+
+			# (2) stop WS/dispatch intake. The WS loop already exited into
+			# this finally; drop the socket ref so nothing re-enters dispatch.
+			ws_ref[0] = None
+
+			# (2 cont.) flush per-strategy state — part of "stop intake": no new tick will mutate it; persist BEFORE the in-flight drain (do NOT move past (3) drain_inflight_sections / (6) store.close()).
 			for strat in strategies:
 				state = pending_states.get(strat.name)
 				if state is not None:
 					store.save_state(strat.name, state)
+
+			# (3) await the §4.2-L2 in-flight place→persist registry to
+			# completion — STRICTLY BEFORE store.close() (step 6). The DRAIN
+			# owns this await. No-op on an empty registry (paper always; live
+			# steady-state when no entry is mid-flight at SIGTERM).
+			await drain_inflight_sections()
+
+			# (4) cancel B's loops + base tasks (CancelledError-safe).
 			for task in tasks:
 				task.cancel()
+			# (5) gather.
 			await asyncio.gather(*tasks, return_exceptions=True)
+			# (6) store.close() exactly once — STRICTLY AFTER step (3).
 			store.close()
 			capture_writer.close()
+
+			# (7) final "shutting down" alert — LAST, signal/cancel only
+			# (paper byte-exact: the non-signal path emits no new notify).
+			if _shutdown_via_cancel:
+				notify(
+					"🛑 **edge-catcher engine shutting down** — SIGTERM "
+					"drain complete (in-flight place→persist sections drained, "
+					"trade store closed)"
+				)
 
 
 async def _ws_loop(

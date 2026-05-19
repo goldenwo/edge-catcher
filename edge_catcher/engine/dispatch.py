@@ -82,6 +82,104 @@ log = logging.getLogger(__name__)
 _gate_unwired_warning_logged = False
 
 
+# ===========================================================================
+# Sub-project E / §4.2 L2 + §4.3 — money-safe SIGTERM drain primitives.
+#
+# Two engine-scoped objects the §4.3 graceful-shutdown drain (in
+# ``run_engine``'s ``finally:``) depends on:
+#
+#  1. ``_INFLIGHT_SECTIONS`` — the in-flight-section registry. ``_handle_enter``
+#     wraps EXACTLY the place→persist critical region (one IOC round-trip + one
+#     local sync write) in an ``asyncio.shield`` whose underlying task is
+#     registered here on entry and removed on completion (INCLUDING on
+#     exception). The §4.3 drain step (3) explicitly AWAITS every registered
+#     section to completion *before* ``store.close()`` — a SIGTERM landing
+#     EXACTLY between ``executor.place()`` returning ``filled`` and the local
+#     ``record_trade`` persist therefore cannot orphan a real-money position
+#     (the shielded task finishes the persist; the drain waits for it). Naive
+#     ``await asyncio.shield(x)`` is FORBIDDEN by the spec (it does NOT
+#     guarantee completion if the awaiting task is cancelled) — the DRAIN owns
+#     the await, via :func:`drain_inflight_sections`.
+#
+#  2. ``_OPERATOR_KILL`` — the engine-scoped operator-kill flag. §4.3 drain
+#     step (1) sets it FIRST (before awaiting the in-flight registry) so the
+#     risk gate rejects any NEW entry via ``KILL_OPERATOR`` and no new section
+#     enters the registry mid-drain. This is the concrete realization of the
+#     B/C→E ``RiskContext.operator_kill_active`` contract (risk.py:683): the
+#     value the per-call ``RiskContext`` reads is sourced from this flag. (The
+#     dispatch-side ``gate_entry`` call is deferred past E by design — see
+#     ``_handle_signal``'s docstring — so the load-bearing F2 guarantee that
+#     actually prevents new registry entries during the drain is step (1) here
+#     + step (2) stop-intake; the flag is wired so the gate is correct the
+#     moment that deferred call lands, with zero further change.)
+#
+# §9 G-parity: PAPER replay/backtest/CI never SIGTERM and ``PaperExecutor.place``
+# is synchronous, so the shield over an already-resolving sync path adds no
+# observable behavior (the section registers and immediately deregisters within
+# the one ``_handle_enter`` call with no suspension the paper path exercises),
+# and the operator-kill flag is only ever set by the signal-driven drain. The
+# non-signal path is byte-identical.
+# ===========================================================================
+
+# The currently-shielded place→persist section tasks. A set keyed by task
+# identity; ``_handle_enter`` add()s its shielded task on entry and discard()s
+# it on completion (incl. exception). The §4.3 drain awaits these.
+_INFLIGHT_SECTIONS: set[asyncio.Task[Any]] = set()
+
+
+class _OperatorKill:
+	"""Engine-scoped operator-kill flag (the §4.3 step-1 / B-C→E
+	``RiskContext.operator_kill_active`` source of truth).
+
+	One process-lifetime instance (``_OPERATOR_KILL``). ``activate()`` is
+	called by the §4.3 drain as its FIRST step; once active it stays active
+	(tripped-kill ≠ process exit is F3's scope — F2 only SETS it). The
+	per-gate-call ``RiskContext`` reads :attr:`active` so a NEW entry during
+	the drain is rejected with ``KILL_OPERATOR``.
+	"""
+
+	__slots__ = ("active",)
+
+	def __init__(self) -> None:
+		self.active: bool = False
+
+	def activate(self) -> None:
+		"""Idempotently mark operator-kill active (§4.3 drain step 1)."""
+		self.active = True
+
+
+# Process-lifetime singleton. Module-scoped (NOT engine-instance-scoped):
+# there is exactly one engine per process (one ``asyncio.run`` root), and the
+# future ``RiskContext`` construction reads it without threading a new param
+# through every handler — same rationale as ``_gate_unwired_warning_logged``.
+_OPERATOR_KILL = _OperatorKill()
+
+
+async def drain_inflight_sections() -> None:
+	"""Await EVERY registered in-flight place→persist section to completion.
+
+	The §4.3 drain step (3): the DRAIN owns the await (NOT a naive
+	``await asyncio.shield(...)`` inside ``_handle_enter`` — that does not
+	guarantee completion when the awaiting task is cancelled). Each section is
+	an ``asyncio.shield``-protected task that finishes its one IOC round-trip +
+	one local write regardless of the cancel; this gathers them so the durable
+	persist has happened BEFORE ``store.close()`` (step 6). ``return_exceptions``
+	keeps a single section's failure from masking the rest of the drain (the
+	failed section's own row-state is the reconciler's concern, not the drain's).
+	Snapshot the set first — a section deregisters itself as it completes, which
+	would mutate the set during iteration.
+	"""
+	sections = list(_INFLIGHT_SECTIONS)
+	if not sections:
+		return
+	log.info(
+		"shutdown drain: awaiting %d in-flight place→persist section(s) to "
+		"completion before store.close() (§4.3 step 3)",
+		len(sections),
+	)
+	await asyncio.gather(*sections, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers (relocated from engine.py verbatim)
 # ---------------------------------------------------------------------------
@@ -413,64 +511,123 @@ async def _handle_enter(
 	# capping infinite-retry pathology. On timeout: synthesize a pending+None
 	# OrderResult (Kalshi may still have received the POST; we don't know
 	# the truth, so we don't lie) and let B's reconciler resolve it.
-	try:
-		result = await asyncio.wait_for(executor.place(req), timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS)
-	except asyncio.TimeoutError:
-		# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
-		# sizing to the executor pipeline; the real sizing refactor lands in
-		# PR 5/E). So the synthesized pending row carries intended_size=0.
-		# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
-		# reconciler MUST treat an engine_timeout pending row's
-		# intended_size=0 as "unknown — resolve the true size from Kalshi by
-		# client_order_id", same as the NetworkError-pending path. Flagged by
-		# the PR #38 pass-3 review (G2); the clean fix is gated on the
-		# deferred sizing refactor, so we surface it loudly instead.
-		log.warning(
-			"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
-			"synthesizing pending+None (intended_size=0, sizing-deferred "
-			"placeholder) for B's reconciler to resolve via client_order_id",
-			_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
-			req.client_order_id,
-		)
-		result = OrderResult(
-			status="pending",
-			intended_size=req.size_contracts,
-			filled_size=0,
-			blended_entry_cents=0,
-			fill_pct=0.0,
-			slippage_cents=0,
-			rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
-			order_id=None,
-		)
+	#
+	# ┌─ §4.2 L2 — the place→persist in-flight SHIELD (money-safety, maximal) ─┐
+	# The single worst-case for live funds: a SIGTERM landing EXACTLY between
+	# ``place()`` returning ``filled`` and the ``record_trade`` persist would
+	# orphan a real-money Kalshi position (C1 ``pending`` row never CAS'd to
+	# ``open``). L1's pre-place ``record_intent`` (above) already makes that
+	# RECOVERABLE by B's reconciler; L2 is the common-case optimization that
+	# AVOIDS the orphan window entirely: wrap EXACTLY the place→persist critical
+	# region (one IOC round-trip already bounded by ``_ENTRY_PLACEMENT_TIMEOUT_
+	# SECONDS`` + one local sync write — and NOTHING more) in an
+	# ``asyncio.shield``-protected task registered in ``_INFLIGHT_SECTIONS``.
+	# The §4.3 drain (run_engine's finally, step 3) explicitly AWAITS that
+	# registry to completion BEFORE ``store.close()`` — so even though THIS
+	# awaiting frame may be cancelled by the SIGTERM, the shielded task still
+	# finishes the persist and the drain waits for it. The DRAIN owns the await
+	# (``drain_inflight_sections``); a naive ``await asyncio.shield(x)`` HERE is
+	# forbidden by the spec (it does NOT guarantee completion when this frame is
+	# cancelled). §9 G-parity: ``PaperExecutor.place`` resolves synchronously,
+	# so the shielded task runs to completion before the very next loop tick —
+	# the section registers and immediately deregisters within this one
+	# ``_handle_enter`` call with no suspension the paper path observes; the
+	# shield is a no-op-equivalent and paper behaviour is byte-identical.
+
+	async def _place_and_persist() -> tuple[OrderResult, int | None]:
+		"""The §4.2-L2 critical region: ONE IOC round-trip + (if filled) the
+		ONE immediate local persist. Bounded above by the existing
+		``_ENTRY_PLACEMENT_TIMEOUT_SECONDS`` cap on ``place()``. Returns
+		``(result, trade_id_or_None)`` so the (non-money) post-persist
+		notify/lost-CAS observability stays OUTSIDE the shield, keeping the
+		shielded span EXACTLY place+persist (spec: do not shield more)."""
+		try:
+			_result = await asyncio.wait_for(
+				executor.place(req),
+				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
+			)
+		except asyncio.TimeoutError:
+			# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
+			# sizing to the executor pipeline; the real sizing refactor lands in
+			# PR 5/E). So the synthesized pending row carries intended_size=0.
+			# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
+			# reconciler MUST treat an engine_timeout pending row's
+			# intended_size=0 as "unknown — resolve the true size from Kalshi by
+			# client_order_id", same as the NetworkError-pending path. Flagged by
+			# the PR #38 pass-3 review (G2); the clean fix is gated on the
+			# deferred sizing refactor, so we surface it loudly instead.
+			log.warning(
+				"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
+				"synthesizing pending+None (intended_size=0, sizing-deferred "
+				"placeholder) for B's reconciler to resolve via client_order_id",
+				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
+				req.client_order_id,
+			)
+			_result = OrderResult(
+				status="pending",
+				intended_size=req.size_contracts,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
+				order_id=None,
+			)
+
+		_trade_id: int | None = None
+		if _result.status == "filled":
+			# Field-by-field match to the pre-G record_trade call shape — byte-exact
+			# preservation is the parity-sweep success criterion. Called
+			# UNCONDITIONALLY — NO mode branch (spec §1 keystone). The two identity
+			# keys are ADDITIVE keyword-only args: paper + InMemory record_trade
+			# accept-and-IGNORE them (byte-exact-invisible to the parity sweep,
+			# §9 / C2); the live store CONSUMES them to CAS-transition the C1
+			# pending row pending→open located by client_order_id, recording the
+			# Kalshi order id (spec §3 `:400 filled` row / §4.2). kalshi_order_id
+			# is result.order_id — the same field the pending arm threads at the
+			# record_pending call below (executor.py `OrderResult.order_id`).
+			_trade_id = store.record_trade(
+				ticker=signal.ticker,
+				entry_price=entry_price,
+				strategy=signal.strategy,
+				side=signal.side,
+				series_ticker=signal.series,
+				intended_size=_result.intended_size,
+				fill_size=_result.filled_size,
+				blended_entry=_result.blended_entry_cents,
+				book_depth=_result.book_depth,
+				fill_pct=_result.fill_pct,
+				slippage_cents=_result.slippage_cents,
+				book_snapshot=_result.book_snapshot,
+				now=now,
+				client_order_id=req.client_order_id,
+				kalshi_order_id=_result.order_id,
+			)
+		return _result, _trade_id
+
+	# Register the shielded place→persist task in the in-flight registry the
+	# §4.3 drain awaits, then await it via ``asyncio.shield``. If a SIGTERM
+	# cancels THIS frame mid-region, the shield keeps ``_section`` running and
+	# the drain (``drain_inflight_sections``) awaits it to completion before
+	# close — the persist is NEVER skipped.
+	#
+	# Deregistration is bound to the SECTION's OWN completion via
+	# ``add_done_callback`` — NOT a ``try/finally`` around this ``await``. That
+	# distinction is load-bearing: when THIS frame is cancelled the section is
+	# still running; a ``finally: discard`` here would yank it out of the
+	# registry the drain awaits and reopen the orphan window. The done-callback
+	# fires only when ``_section`` ITSELF finishes (normally OR with an
+	# exception, INCLUDING if the section task itself is cancelled), so the
+	# registry holds the section exactly until its persist is durable and never
+	# leaks a completed task.
+	_section: asyncio.Task[tuple[OrderResult, int | None]] = asyncio.ensure_future(
+		_place_and_persist()
+	)
+	_INFLIGHT_SECTIONS.add(_section)
+	_section.add_done_callback(_INFLIGHT_SECTIONS.discard)
+	result, trade_id = await asyncio.shield(_section)
 
 	if result.status == "filled":
-		# Field-by-field match to the pre-G record_trade call shape — byte-exact
-		# preservation is the parity-sweep success criterion. Called
-		# UNCONDITIONALLY — NO mode branch (spec §1 keystone). The two identity
-		# keys are ADDITIVE keyword-only args: paper + InMemory record_trade
-		# accept-and-IGNORE them (byte-exact-invisible to the parity sweep,
-		# §9 / C2); the live store CONSUMES them to CAS-transition the C1
-		# pending row pending→open located by client_order_id, recording the
-		# Kalshi order id (spec §3 `:400 filled` row / §4.2). kalshi_order_id
-		# is result.order_id — the same field the pending arm threads at the
-		# record_pending call below (executor.py `OrderResult.order_id`).
-		trade_id = store.record_trade(
-			ticker=signal.ticker,
-			entry_price=entry_price,
-			strategy=signal.strategy,
-			side=signal.side,
-			series_ticker=signal.series,
-			intended_size=result.intended_size,
-			fill_size=result.filled_size,
-			blended_entry=result.blended_entry_cents,
-			book_depth=result.book_depth,
-			fill_pct=result.fill_pct,
-			slippage_cents=result.slippage_cents,
-			book_snapshot=result.book_snapshot,
-			now=now,
-			client_order_id=req.client_order_id,
-			kalshi_order_id=result.order_id,
-		)
 		metrics.inc("entries_filled")
 
 		# Notify/log the ACTUAL DURABLE PERSISTED status, not the optimistic

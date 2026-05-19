@@ -447,3 +447,436 @@ async def test_bridge_is_additive_normal_completion_unaffected(
 	monkeypatch.setattr(engmod, "run_engine", _boom_engine)
 	with pytest.raises(_EngineBoom):
 		await mod.run_engine_with_signal_bridge(config_path=tmp_path / "x.yaml")
+
+
+# ===========================================================================
+# 4. F2 -- money-safe SIGTERM drain ORDER + the place->persist asyncio.shield.
+#
+# THE money-safety task. FUNDS-AT-RISK at maximum: a SIGTERM landing EXACTLY
+# between ``executor.place()`` returning ``filled`` and the local ``record_trade``
+# persist must NOT orphan a real-money position. The shielded place->persist
+# critical region + the drain's explicit await of the in-flight registry
+# guarantee the row is persisted (one ``open`` row, NOT left ``pending``).
+# Normative design: converged spec sec 4.2 L2 + sec 4.3 (the 7-step drain).
+# ===========================================================================
+
+from datetime import datetime, timezone  # noqa: E402
+
+import edge_catcher.engine.dispatch as dispmod  # noqa: E402
+from edge_catcher.engine.executor import OrderResult  # noqa: E402
+from edge_catcher.engine.strategy_base import Signal as _Sig  # noqa: E402
+from edge_catcher.live.state import connect_live_trades_db  # noqa: E402
+from edge_catcher.live.store import SQLiteTradeStore  # noqa: E402
+
+_F2_NOW = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _f2_entry_signal() -> _Sig:
+	"""A minimal valid entry Signal (mirrors test_live_state_integration's
+	``_entry_signal``) so the real ``dispatch._handle_enter`` runs end to end."""
+	return _Sig(
+		action="enter",
+		ticker="KXSOL15M-19MAY19H12",
+		side="yes",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		reason="f2-orphan-safety",
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+	)
+
+
+class _CancelBetweenPlaceAndPersistExecutor:
+	"""Stub executor whose ``place()`` returns ``filled`` and, AT THE EXACT
+	seam between place-returns and the local persist, deterministically
+	cancels the ``_handle_enter`` AWAITING FRAME (the live ``systemctl stop``
+	interrupt at its single worst instant).
+
+	Deterministic injection (NOT a sleep race): ``place()`` schedules
+	``cancel_target.cancel()`` via ``loop.call_soon`` so the cancellation is
+	delivered at the VERY NEXT event-loop iteration — i.e. the first ``await``
+	AFTER ``place()`` returns, which (sans shield) would be the resumption of
+	``_handle_enter`` BEFORE ``record_trade``. ``cancel_target`` is the
+	``_handle_enter`` task (set by the test right after it creates it) — NOT
+	the inner shielded section (cancelling the section would just be an
+	ordinary mid-place cancel; the money-safety claim is specifically that the
+	AWAITING FRAME is cancelled yet the SHIELDED section still persists).
+	Without the §4.2-L2 shield + the drain's registry await that cancel lands
+	before ``record_trade`` and the funds-at-risk row is orphaned at
+	``pending``; with them it completes to a durable ``open`` row.
+	"""
+
+	def __init__(self) -> None:
+		self.place_calls = 0
+		# Set by the test to the _handle_enter task immediately after
+		# create_task (the awaiting frame, NOT the inner section).
+		self.cancel_target: asyncio.Task | None = None
+
+	async def place(self, req) -> OrderResult:  # noqa: ANN001
+		self.place_calls += 1
+		# Arm a cancel of the AWAITING FRAME for the next loop tick — the
+		# instant control would leave the shielded region if it were not
+		# shielded. call_soon (not call_later) = zero wall-clock dependency;
+		# the cancel is queued behind the current callback and fires at the
+		# next iteration deterministically.
+		assert self.cancel_target is not None, (
+			"test must set cancel_target to the _handle_enter task"
+		)
+		loop = asyncio.get_running_loop()
+		loop.call_soon(self.cancel_target.cancel)
+		return OrderResult(
+			status="filled",
+			intended_size=10,
+			filled_size=10,
+			blended_entry_cents=42,
+			fill_pct=1.0,
+			slippage_cents=0,
+			order_id="kx-f2-entry",
+		)
+
+
+@pytest.fixture
+def _f2_live_db(tmp_path: Path) -> Path:
+	"""A fresh migrated live_trades.db (0003 + WAL) -- the real money DB the
+	real ``SQLiteTradeStore`` CAS-persists into (no shim; the C/D idiom)."""
+	p = tmp_path / "live_trades.db"
+	connect_live_trades_db(p).close()
+	return p
+
+
+@pytest.fixture(autouse=True)
+def _reset_f2_engine_singletons():
+	"""Reset the PROCESS-LIFETIME F2 singletons between tests.
+
+	``dispatch._OPERATOR_KILL`` is intentionally process-scoped (one engine
+	per process; "tripped-kill ≠ process exit" — F3 scope) and
+	``_INFLIGHT_SECTIONS`` is a module set; neither is reset in production.
+	Tests, however, share the interpreter, so a prior test that activated the
+	flag / registered a section would leak into the next. Snapshot + restore
+	around every test in this module so each F2 assertion starts from the
+	pristine process state (no production behaviour change — test-only)."""
+	prev_active = dispmod._OPERATOR_KILL.active
+	dispmod._OPERATOR_KILL.active = False
+	prev_sections = set(dispmod._INFLIGHT_SECTIONS)
+	dispmod._INFLIGHT_SECTIONS.clear()
+	try:
+		yield
+	finally:
+		dispmod._OPERATOR_KILL.active = prev_active
+		dispmod._INFLIGHT_SECTIONS.clear()
+		dispmod._INFLIGHT_SECTIONS.update(prev_sections)
+
+
+@pytest.mark.asyncio
+async def test_sigterm_between_place_and_persist_persists_row(
+	_f2_live_db: Path,
+) -> None:
+	"""NORMATIVE (FUNDS-AT-RISK, maximal). A SIGTERM/cancel lands EXACTLY
+	between ``executor.place()`` returning ``filled`` and the local
+	``record_trade`` persist. Without the sec 4.2-L2 ``asyncio.shield`` around
+	the place->persist critical region (and the drain's explicit await of the
+	in-flight registry), the cancel interrupts ``_handle_enter`` before
+	``record_trade`` -> the C1 ``pending`` row is NEVER transitioned ->
+	a real-money Kalshi position is orphaned with the local row stuck at
+	``pending``.
+
+	Drives the REAL ``dispatch._handle_enter`` (real ``SQLiteTradeStore`` over
+	a migrated live_trades.db, the C/D integration idiom) as a task; the stub
+	executor injects the cancel at the precise seam. Asserts: exactly ONE
+	``open`` row for the dispatch-generated client_order_id (NOT ``pending``,
+	NOT orphaned) because the shielded section + the registry drain completed
+	it; the in-flight registry is empty again after the drain (the section
+	deregistered on completion)."""
+	store = SQLiteTradeStore(_f2_live_db)
+	try:
+		conn = store._conn
+		signal = _f2_entry_signal()
+		ctx = type("C", (), {"yes_ask": 42, "no_ask": 58})()
+		executor = _CancelBetweenPlaceAndPersistExecutor()
+		cfg: dict = {}
+
+		# The registry must start empty and end empty (the section registers
+		# on entry, deregisters on completion -- even though the task that
+		# AWAITS the shield is cancelled at the seam).
+		assert len(dispmod._INFLIGHT_SECTIONS) == 0
+
+		root = asyncio.create_task(
+			dispmod._handle_enter(
+				signal, ctx, store, cfg, executor, now=_F2_NOW,
+			)
+		)
+		# Arm the executor to cancel THIS awaiting frame (not the inner
+		# shielded section) at the place->persist seam.
+		executor.cancel_target = root
+
+		# The cancel fires (call_soon, armed inside place()) the instant
+		# _handle_enter would leave the shielded region. _handle_enter's
+		# awaiting frame IS cancelled -- but the registered shielded task
+		# runs to completion regardless. The drain (run_engine's finally,
+		# step 3) is what AWAITS the registry; here we emulate exactly that
+		# drain step deterministically: await every registered section to
+		# completion, then assert the durable money state.
+		with pytest.raises(asyncio.CancelledError):
+			await root
+
+		# === sec 4.3 drain step (3): await the in-flight registry to
+		# completion (the DRAIN owns the await -- NOT a naive `await shield`).
+		# Call the REAL drain entry point run_engine's finally invokes, so this
+		# orphan-safety test exercises the actual step-(3) code (it diverges if
+		# the inline copy ever drifts from drain_inflight_sections); the
+		# orphan-safety guarantee is that AFTER this the persist has happened.
+		await dispmod.drain_inflight_sections()
+
+		# The funds-at-risk row is DURABLE and NOT orphaned: exactly one row,
+		# status 'open' (the C1 'pending' row was CAS-transitioned by the
+		# shielded record_trade), carrying D's real kalshi_order_id.
+		coid_row = conn.execute(
+			"SELECT status, kalshi_order_id, COUNT(*) OVER () AS n "
+			"FROM live_trades"
+		).fetchone()
+		assert coid_row is not None, (
+			"FUNDS-AT-RISK: a SIGTERM between place()->filled and the persist "
+			"orphaned the real-money position -- NO live_trades row exists "
+			"(the C1 pending row must have been written by record_intent and "
+			"transitioned to open by the shielded record_trade)"
+		)
+		status, kalshi_order_id, n = coid_row
+		assert n == 1, (
+			f"exactly one live_trades row expected (C1 row CAS-transitioned, "
+			f"not a 2nd insert); got {n}"
+		)
+		assert status == "open", (
+			"FUNDS-AT-RISK: the row is %r, NOT 'open' -- the shielded "
+			"place->persist region did NOT complete the record_trade CAS "
+			"under the SIGTERM; the real-money position is orphaned at "
+			"'pending'" % (status,)
+		)
+		assert kalshi_order_id == "kx-f2-entry", (
+			"the durable open row must carry D's real OrderResult.order_id "
+			f"(kalshi_order_id); got {kalshi_order_id!r}"
+		)
+		assert executor.place_calls == 1, "place() must run exactly once"
+
+		# The shielded section deregistered itself on completion (even though
+		# the awaiting frame was cancelled at the seam) -- no leak.
+		assert len(dispmod._INFLIGHT_SECTIONS) == 0, (
+			"the in-flight registry must be empty after the section completes "
+			f"(deregister-on-completion); leaked: {dispmod._INFLIGHT_SECTIONS!r}"
+		)
+	finally:
+		store.close()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_drain_follows_normative_4_3_order(
+	tmp_path: Path, _drain_spies, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""NORMATIVE (sec 4.3 drain ORDER). On a SIGTERM/cancel the ``run_engine``
+	``finally:`` drain MUST run the EXACT sequence:
+
+	  (1) set the operator-kill flag (gate then rejects new entries via
+	      KILL_OPERATOR) -- FIRST, so no new entry enters the in-flight
+	      registry during the drain;
+	  (2) stop WS/dispatch intake;
+	  (3) await the L2 in-flight registry to completion;
+	  (4) cancel B's loops;
+	  (5) gather(*tasks, return_exceptions=True);
+	  (6) store.close() exactly once -- STRICTLY AFTER (3);
+	  (7) final 'shutting down' alert to the live ops channel -- LAST.
+
+	The order is load-bearing: operator_kill BEFORE awaiting in-flight (no new
+	entries enter the registry during drain); close STRICTLY AFTER the
+	in-flight await (never close the DB while a shielded persist is mid-write).
+	Asserts a concrete recorded call-order list (non-vacuous)."""
+	order: list[str] = []
+
+	# Spy the engine-scoped operator-kill flag set (drain step 1). The drain
+	# sets dispmod._OPERATOR_KILL.active = True; record the transition.
+	assert dispmod._OPERATOR_KILL.active is False, (
+		"operator-kill must start inactive (a fresh process is not killed)"
+	)
+	_orig_ok_setter = type(dispmod._OPERATOR_KILL).activate
+
+	def _spy_activate(self) -> None:
+		order.append("operator_kill")
+		_orig_ok_setter(self)
+
+	monkeypatch.setattr(
+		type(dispmod._OPERATOR_KILL), "activate", _spy_activate
+	)
+
+	# Spy the in-flight registry drain (step 3). engine.py imported
+	# ``drain_inflight_sections`` BY NAME, so the live reference the drain
+	# calls is ``engmod.drain_inflight_sections`` — patch THERE (patching
+	# ``dispmod.drain_inflight_sections`` would not rebind engine's name).
+	_orig_drain = engmod.drain_inflight_sections
+
+	async def _spy_drain() -> None:
+		order.append("await_inflight")
+		return await _orig_drain()
+
+	monkeypatch.setattr(engmod, "drain_inflight_sections", _spy_drain)
+
+	# Spy store.close (step 6). The _drain_spies fixture already wraps
+	# TradeStore.close for the count; here we additionally record ORDER.
+	_ts_close_counted = engmod.TradeStore.close
+
+	def _ts_close_ordered(self):  # noqa: ANN001
+		order.append("store_close")
+		return _ts_close_counted(self)
+
+	monkeypatch.setattr(engmod.TradeStore, "close", _ts_close_ordered)
+
+	# Spy the final 'shutting down' alert (step 7). The drain emits it via
+	# engmod.notify ONLY on the signal/cancel path (paper byte-exact on the
+	# normal path -- asserted by the additive test below).
+	_orig_notify = engmod.notify
+
+	def _spy_notify(text: str) -> None:
+		if "shut" in text.lower() or "drain" in text.lower():
+			order.append("final_alert")
+		return _orig_notify(text)
+
+	monkeypatch.setattr(engmod, "notify", _spy_notify)
+
+	cfg_path = _paper_cfg_path(tmp_path)
+	root = asyncio.create_task(engmod.run_engine(config_path=cfg_path))
+	await asyncio.wait_for(_drain_spies["ws_loop_entered"].wait(), timeout=10.0)
+	root.cancel()
+	with pytest.raises(asyncio.CancelledError):
+		await root
+
+	# The operator-kill flag is left active (tripped-kill != process exit is
+	# F3's scope; F2 only sets it as drain step 1 -- assert it WAS set).
+	assert dispmod._OPERATOR_KILL.active is True, (
+		"sec 4.3 step 1: the drain MUST set the operator-kill flag (the gate "
+		"then rejects new entries via KILL_OPERATOR during the drain)"
+	)
+
+	# Concrete, non-vacuous order assertions. Every load-bearing pair:
+	assert "operator_kill" in order, "drain step 1 (operator_kill) must run"
+	assert "await_inflight" in order, "drain step 3 (await in-flight) must run"
+	assert "store_close" in order, "drain step 6 (store.close) must run"
+	assert "final_alert" in order, (
+		"drain step 7 (final shutting-down alert) must run on the signal path"
+	)
+
+	i_ok = order.index("operator_kill")
+	i_inflight = order.index("await_inflight")
+	i_close = order.index("store_close")
+	i_alert = order.index("final_alert")
+
+	assert i_ok < i_inflight, (
+		"sec 4.3: operator_kill (step 1) MUST precede the in-flight await "
+		f"(step 3) -- no new entry may enter the registry mid-drain; got {order}"
+	)
+	assert i_inflight < i_close, (
+		"sec 4.3: the in-flight registry await (step 3) MUST complete STRICTLY "
+		"BEFORE store.close() (step 6) -- never close the DB while a shielded "
+		f"persist is mid-write (FUNDS-AT-RISK); got {order}"
+	)
+	assert i_close < i_alert, (
+		"sec 4.3: the final 'shutting down' alert (step 7) is LAST -- after "
+		f"store.close(); got {order}"
+	)
+
+	# B/base background tasks were cancelled + gathered (steps 4/5) -- reuse
+	# the F1 drain-spy assertion (the tasks the drain cancelled are all done).
+	bg = _drain_spies["bg_tasks"]
+	assert bg and all(t.done() for t in bg), (
+		"sec 4.3 steps 4/5: the drain must cancel + gather ALL B/base tasks; "
+		f"still-running: {[t.get_name() for t in bg if not t.done()]!r}"
+	)
+	# store.close() exactly once (sec 4.3 step 6 idempotent-guard contract).
+	assert _drain_spies["store_close_calls"] == 1, (
+		"store.close() must be called EXACTLY once in the reordered drain "
+		f"(close-once contract); got {_drain_spies['store_close_calls']}"
+	)
+
+
+@pytest.mark.asyncio
+async def test_f2_paper_byte_exact_non_signal_completion_unchanged(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""sec 9 G-parity (BLOCKING). The F2 reorder + shield must be INVISIBLE on
+	the NON-signal path:
+
+	  * a NORMAL (non-signal) ``run_engine`` completion does NOT set the
+	    operator-kill flag and does NOT emit the final 'shutting down' alert
+	    (those are signal-drain-only; paper replay/backtest/CI never SIGTERM);
+	  * the ``asyncio.shield`` around place->persist is a no-op for the sync
+	    ``PaperExecutor`` path -- a normal paper entry persists EXACTLY as
+	    before (one shielded section, registered + immediately deregistered,
+	    no suspension the paper path observes), and the in-flight registry is
+	    empty afterwards.
+
+	A normal completion is exercised by making ``discover_strategies`` return
+	NO strategies -> ``run_engine`` hits the early ``store.close(); return``
+	(engine.py:984-987), a clean non-signal exit (the same byte-exact basis
+	F1's additive test used)."""
+	# (a) Normal completion: NO strategies -> run_engine returns cleanly
+	# WITHOUT entering the signal-drain finally body's signal-only steps.
+	monkeypatch.setattr(engmod, "discover_strategies", lambda: [])
+	assert dispmod._OPERATOR_KILL.active is False
+
+	alerts: list[str] = []
+	_orig_notify = engmod.notify
+
+	def _capture_notify(text: str) -> None:
+		alerts.append(text)
+		return _orig_notify(text)
+
+	monkeypatch.setattr(engmod, "notify", _capture_notify)
+
+	cfg = make_paper_cfg(tmp_path)
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	await engmod.run_engine(config_path=cfg_path)
+
+	assert dispmod._OPERATOR_KILL.active is False, (
+		"sec 9 G-parity: a NORMAL (non-signal) completion must NOT set the "
+		"operator-kill flag -- it is signal-drain-only (paper byte-exact)"
+	)
+	assert not any(
+		("shut" in a.lower() or "drain" in a.lower()) for a in alerts
+	), (
+		"sec 9 G-parity: a NORMAL completion must NOT emit the final "
+		f"'shutting down' alert (signal-drain-only); got {alerts!r}"
+	)
+
+	# (b) The shield is a no-op for the SYNC PaperExecutor place->persist:
+	# a normal paper entry persists EXACTLY as before; the registry is empty
+	# after (registered + immediately deregistered within the one call, no
+	# suspension the paper path observes).
+	from edge_catcher.engine.executors.paper import PaperExecutor
+	from edge_catcher.engine.market_state import MarketState
+	from edge_catcher.engine.trade_store import TradeStore
+
+	assert len(dispmod._INFLIGHT_SECTIONS) == 0
+	ms = MarketState(limit=50)
+	pcfg: dict = {
+		"sizing": {"risk_per_trade_cents": 500, "max_slippage_cents": 5,
+		           "min_fill": 1},
+	}
+	pexec = PaperExecutor(market_state=ms, config=pcfg)
+	pstore = TradeStore(tmp_path / "paper_trades.db")
+	try:
+		# A degenerate-price signal returns BEFORE place (no row) -- fine; we
+		# only assert the shield/registry leave NO residue on the paper path
+		# regardless of fill outcome (the byte-exact invariant is "invisible").
+		sig = _f2_entry_signal()
+		pctx = type("C", (), {"yes_ask": 42, "no_ask": 58})()
+		await dispmod._handle_enter(
+			sig, pctx, pstore, pcfg, pexec, now=_F2_NOW,
+		)
+		assert len(dispmod._INFLIGHT_SECTIONS) == 0, (
+			"sec 9 G-parity: the place->persist shield must leave the "
+			"in-flight registry EMPTY on the sync PaperExecutor path "
+			f"(register + immediately deregister); leaked: "
+			f"{dispmod._INFLIGHT_SECTIONS!r}"
+		)
+	finally:
+		pstore.close()
