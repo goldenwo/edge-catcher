@@ -89,6 +89,14 @@ class _StubStore:
 		self.trade_calls.append(kwargs)
 		return 1  # synthetic trade id
 
+	def record_intent(self, **kwargs: Any) -> None:
+		"""No-op: paper/replay have no pre-place state (synchronous fills).
+		Present so dispatch's unconditional pre-place call (spec §3 keystone /
+		D1) doesn't AttributeError — the test-harness analogue of the paper
+		``TradeStoreProtocol.record_intent`` no-op. These tests assert
+		paper-shaped dispatch behavior, so this introduces NO side effect."""
+		return None
+
 	def record_pending(self, **kwargs: Any) -> None:
 		"""Capture kwargs verbatim. B's eventual implementation writes a row;
 		our stub just records what dispatch passed."""

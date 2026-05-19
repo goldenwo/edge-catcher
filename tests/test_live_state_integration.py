@@ -158,19 +158,23 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 ) -> None:
 	"""End-to-end through the REAL merged machine + the REAL
 	``SQLiteTradeStore`` adapter (spec §922 flow), updated to the E keystone
-	insert-pending-then-CAS model:
+	insert-pending-then-CAS model. POST-D1 (commit ``1802920``) dispatch's
+	``_handle_enter`` ITSELF performs the unconditional pre-place
+	``record_intent`` INSERT — the test no longer seeds it manually; it
+	asserts dispatch's own behavior:
 
-	0. C1 ``record_intent`` durably INSERTs the ``pending`` row keyed by
-	   ``client_order_id`` BEFORE ``place()`` (the pre-place hook; PR-5
-	   dispatch does not yet wire this call, so the test performs the C1 step
-	   explicitly with the exact coid dispatch will generate — ``uuid4`` is
-	   stubbed so the coid is deterministic, exactly as
-	   ``_make_client_order_id``'s docstring sanctions for tests).
-	1. D returns ``pending`` (NetworkError) → dispatch ``_handle_enter``
-	   calls the real ``SQLiteTradeStore.record_pending``, which under the E
-	   keystone is an idempotent ``kalshi_order_id`` BACKFILL of the C1 row
-	   (NOT a 2nd INSERT) — ``status`` STAYS ``pending`` (fill state still
-	   unknown; ``order_id=None`` ⇒ nothing to backfill here).
+	1. dispatch ``_handle_enter`` UNCONDITIONALLY calls the real
+	   ``SQLiteTradeStore.record_intent`` BEFORE ``place()`` (D1 / spec §3
+	   keystone), durably INSERTing the ``pending`` row keyed by
+	   ``client_order_id``. D then returns ``pending`` (NetworkError) →
+	   dispatch calls the real ``SQLiteTradeStore.record_pending``, which
+	   under the E keystone is an idempotent ``kalshi_order_id`` BACKFILL of
+	   the row dispatch's own ``record_intent`` just inserted (NOT a 2nd
+	   INSERT) — ``status`` STAYS ``pending`` (fill state still unknown;
+	   ``order_id=None`` ⇒ nothing to backfill here). ``uuid4`` is stubbed so
+	   the coid is deterministic (exactly as ``_make_client_order_id``'s
+	   docstring sanctions for tests), letting the test assert the
+	   dispatch-created row is keyed by the EXACT coid dispatch generates.
 	2. Kalshi WS ``fill`` for that client_order_id → real ``on_fill_event``
 	   → real ``transition_pending_to_open`` (carrying the real
 	   ``kalshi_order_id`` FROM the WS event, NOT synthesized) → row ``open``.
@@ -188,9 +192,10 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 	# Deterministic client_order_id: stub uuid4 so the coid dispatch's
 	# _make_client_order_id generates is known up-front (its docstring
 	# explicitly sanctions mocking uuid.uuid4 for tests that need a
-	# deterministic id). This lets the test perform the C1 record_intent step
-	# (PR-5 dispatch doesn't wire the pre-place hook yet) with the EXACT coid
-	# dispatch will then pass to record_pending.
+	# deterministic id). POST-D1 dispatch's _handle_enter owns the pre-place
+	# record_intent INSERT; this lets the test assert the dispatch-created
+	# pending row is keyed by the EXACT coid dispatch generates + then
+	# backfills via record_pending.
 	class _FixedUUID:
 		hex = "deadbeefcafef00d"
 
@@ -217,32 +222,14 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 			on_settlement=on_settlement_event,
 		)
 
-		# --- 0. C1 pre-place durability hook: record_intent INSERTs the
-		# pending row keyed by the exact coid dispatch will generate. (In
-		# production this is dispatch's pre-place call; PR-5 dispatch doesn't
-		# wire it yet, so the test performs the C1 step. record_pending below
-		# is then a BACKFILL of THIS row, never a competing 2nd INSERT.)
-		store.record_intent(
-			ticker="KXSOL15M-26MAY16H12",
-			series="KXSOL15M",
-			strategy="debut_fade",
-			side="yes",
-			intended_size=10,
-			entry_price_cents=42,
-			stop_loss_distance_cents=8,
-			client_order_id=expected_coid,
-			placed_at_utc=_NOW_ISO,
-		)
-		seeded_id = conn.execute(
-			"SELECT id FROM live_trades WHERE client_order_id=?",
-			(expected_coid,),
-		).fetchone()[0]
-		assert _row(conn, seeded_id)["status"] == "pending"
-
-		# --- 1. Dispatch the entry; D's executor returns pending
-		# (NetworkError: order_id=None) so dispatch takes the real
+		# --- 1. Dispatch the entry. POST-D1 ``_handle_enter`` ITSELF makes the
+		# unconditional pre-place ``record_intent`` INSERT (D1 / spec §3
+		# keystone) BEFORE calling ``place()``; D's executor then returns
+		# pending (NetworkError: order_id=None) so dispatch takes the real
 		# ``SQLiteTradeStore.record_pending`` path — an idempotent backfill of
-		# the C1 row (order_id=None ⇒ nothing to backfill, stays pending).
+		# the row dispatch's own ``record_intent`` just inserted (order_id=None
+		# ⇒ nothing to backfill, stays pending). No manual seed: the test
+		# asserts dispatch's own pre-place behavior, not a hand-inserted row.
 		executor = MagicMock()
 		executor.place = AsyncMock(
 			return_value=OrderResult(
@@ -261,24 +248,28 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 			executor, now=_NOW,
 		)
 
-		# record_pending was a BACKFILL of the C1 row, NOT a 2nd INSERT:
-		# exactly ONE row, the SAME id, still pending, kalshi_order_id still
-		# NULL (NetworkError returned no order_id).
+		# dispatch's pre-place ``record_intent`` INSERT + its post-place
+		# ``record_pending`` BACKFILL operated on ONE row, NOT two INSERTs:
+		# exactly ONE row, created BY dispatch, still pending, kalshi_order_id
+		# still NULL (NetworkError returned no order_id).
 		assert (
 			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
 			== 1
-		), "record_pending must backfill the C1 row, not mint a 2nd (§3/§4.2)"
+		), (
+			"dispatch's record_intent INSERT + record_pending BACKFILL must "
+			"operate on ONE row, not mint a 2nd (D1 / §3/§4.2)"
+		)
 		pending_id = conn.execute(
 			"SELECT id FROM live_trades WHERE status='pending'"
 		).fetchone()[0]
-		assert pending_id == seeded_id, (
-			"the pending row must be the SAME C1 record_intent row"
-		)
 		pending_row = _row(conn, pending_id)
 		assert pending_row["status"] == "pending"
 		assert pending_row["kalshi_order_id"] is None
 		coid = str(pending_row["client_order_id"])
-		assert coid == expected_coid
+		assert coid == expected_coid, (
+			"the single pending row must be the one dispatch's pre-place "
+			"record_intent (D1) created, keyed by the coid dispatch generates"
+		)
 
 		# --- 2. Kalshi confirms the entry via a WS fill → real on_fill_event
 		# → real transition_pending_to_open (kalshi_order_id is the WS event's
