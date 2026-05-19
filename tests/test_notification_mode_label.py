@@ -29,6 +29,10 @@ import io
 import tokenize
 
 import edge_catcher.engine.notifications as notif
+from edge_catcher.engine.dispatch import (
+	_format_close_message,
+	_format_enter_message,
+)
 from edge_catcher.notifications.envelope import DeliveryResult, Notification
 
 
@@ -251,3 +255,161 @@ def test_notify_outside_event_loop_is_silent(monkeypatch):
 	notif.configure_notify([_SpyChannel()])
 	# No running event loop here — must return without raising.
 	notif.notify("no loop running")
+
+
+# ---------------------------------------------------------------------------
+# G2 — mode-label parameterization + Class-C cross-contamination guard
+# (spec §6 NORMATIVE). The hardcoded "PAPER" in ``_format_enter_message``
+# becomes mode-driven; the Class-C invariant is: a LIVE message never
+# contains "PAPER", a PAPER message never contains "LIVE". ``_format_
+# close_message`` carries no mode token and must STAY that way (regression
+# defense — pinned here even though it is vacuously clean today).
+# ---------------------------------------------------------------------------
+
+# The byte-exact pre-change paper render of ``_format_enter_message`` captured
+# from the unmodified ``bca26ef`` (branch base) — the G-parity merge-gate pin.
+# Paper output must remain BYTE-IDENTICAL to this literal post-change.
+_PRE_CHANGE_PAPER_NOTIFY_YES = (
+	"🟣 **[strategy_b | SERIES_G] PAPER BUY YES** — "
+	"`SERIES_G-26APR12LANMUS-2-LAN` 100 @ 2¢ (200¢ cost)"
+)
+_PRE_CHANGE_PAPER_NOTIFY_NO = (
+	"🔵 **[strategy_a | SERIES_B] PAPER BUY NO** — "
+	"`SERIES_B-xyz` 5 @ 40¢ (200¢ cost)"
+)
+
+
+class TestModeLabelClassCGuard:
+	"""Class-C cross-contamination guard (spec §6, NORMATIVE).
+
+	A LIVE-mode rendered message must NEVER contain the token ``PAPER``;
+	a PAPER-mode message must NEVER contain ``LIVE``. Covers BOTH engine
+	message formatters: ``_format_enter_message`` (carries the mode label)
+	and ``_format_close_message`` (carries none — pinned clean as a
+	regression defense so a future label addition there can't silently
+	cross-contaminate).
+	"""
+
+	def _enter(self, *, mode_label: str, side: str = "yes") -> str:
+		_log, notify_line = _format_enter_message(
+			strategy="strategy_b",
+			series="SERIES_G",
+			ticker="SERIES_G-26APR12LANMUS-2-LAN",
+			side=side,
+			fill_size=100,
+			entry_price=2,
+			trade_id=1234,
+			bullet="🟣",
+			mode_label=mode_label,
+		)
+		return notify_line
+
+	def _close(self, **over) -> tuple[str, str]:
+		kw = dict(
+			event="SETTLED",
+			outcome="LOSS",
+			strategy="strategy_b",
+			series="SERIES_G",
+			ticker="SERIES_G-26APR12LANMUS-2-LAN",
+			side="yes",
+			fill_size=100,
+			effective_entry=2,
+			exit_price=0,
+			pnl_cents=-202,
+			fee_cents=2,
+			settled_result="no",
+			trade_id=1234,
+			bullet="🟣",
+		)
+		kw.update(over)
+		return _format_close_message(**kw)
+
+	# --- Class-C: LIVE never contains "PAPER" --------------------------------
+
+	def test_enter_live_mode_never_contains_paper(self):
+		notify_line = self._enter(mode_label="LIVE")
+		assert "PAPER" not in notify_line, (
+			"Class-C violation: a LIVE entry message must never contain "
+			f"'PAPER' — got {notify_line!r}"
+		)
+		# And the live label IS present (the parameterization actually took).
+		assert "LIVE BUY YES" in notify_line, (
+			f"LIVE mode must render the LIVE label — got {notify_line!r}"
+		)
+
+	# --- Class-C: PAPER never contains "LIVE" --------------------------------
+
+	def test_enter_paper_mode_never_contains_live(self):
+		notify_line = self._enter(mode_label="PAPER")
+		assert "LIVE" not in notify_line, (
+			"Class-C violation: a PAPER entry message must never contain "
+			f"'LIVE' — got {notify_line!r}"
+		)
+		assert "PAPER BUY YES" in notify_line
+
+	# --- G-parity pin: PAPER render is BYTE-IDENTICAL to pre-change ----------
+
+	def test_enter_paper_render_is_byte_identical_to_pre_change(self):
+		"""HARD G-parity merge-gate pin: the PAPER notify_line must equal the
+		byte-exact pre-change literal captured from ``bca26ef`` — a single
+		differing byte fails the merge gate.
+		"""
+		assert self._enter(mode_label="PAPER", side="yes") == _PRE_CHANGE_PAPER_NOTIFY_YES
+		# A second shape (NO side, different strategy/series/bullet) to pin
+		# the whole template, not just one substitution.
+		_log, notify_no = _format_enter_message(
+			strategy="strategy_a",
+			series="SERIES_B",
+			ticker="SERIES_B-xyz",
+			side="no",
+			fill_size=5,
+			entry_price=40,
+			trade_id=42,
+			bullet="🔵",
+			mode_label="PAPER",
+		)
+		assert notify_no == _PRE_CHANGE_PAPER_NOTIFY_NO
+
+	def test_enter_mode_label_defaults_to_paper_failsafe(self):
+		"""Money-safety: a caller that omits ``mode_label`` gets PAPER (the
+		fail-safe default — accidental LIVE is impossible without an explicit
+		LIVE label). Production dispatch always passes it explicitly; this
+		pins the default so a future caller can't fall into LIVE by omission.
+		"""
+		_log, notify_default = _format_enter_message(
+			strategy="strategy_b",
+			series="SERIES_G",
+			ticker="SERIES_G-26APR12LANMUS-2-LAN",
+			side="yes",
+			fill_size=100,
+			entry_price=2,
+			trade_id=1234,
+			bullet="🟣",
+		)
+		assert notify_default == _PRE_CHANGE_PAPER_NOTIFY_YES
+		assert "LIVE" not in notify_default
+
+	# --- Regression defense: close message stays mode-token-free -------------
+
+	def test_close_message_carries_no_mode_token_either_mode(self):
+		"""``_format_close_message`` has no mode label today and must STAY
+		clean: neither 'PAPER' nor 'LIVE' may appear in the EXIT or SETTLED
+		notify/log lines. Pinned so a later label addition there cannot
+		silently cross-contaminate (Class-C, NORMATIVE).
+		"""
+		for over in (
+			{"event": "SETTLED", "settled_result": "no"},
+			{"event": "SETTLED", "outcome": "WIN", "settled_result": "yes",
+			 "exit_price": 100, "pnl_cents": 9798},
+			{"event": "EXIT", "outcome": "WIN", "settled_result": None,
+			 "exit_price": 48, "pnl_cents": 23},
+		):
+			log_line, notify_line = self._close(**over)
+			assert "PAPER" not in notify_line and "PAPER" not in log_line, (
+				f"close message must carry no 'PAPER' token — got "
+				f"notify={notify_line!r} log={log_line!r}"
+			)
+			assert "LIVE" not in notify_line and "LIVE" not in log_line, (
+				f"close message must carry no 'LIVE' token — got "
+				f"notify={notify_line!r} log={log_line!r}"
+			)

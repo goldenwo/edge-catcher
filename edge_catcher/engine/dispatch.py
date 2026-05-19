@@ -209,8 +209,17 @@ def _format_enter_message(
 	entry_price: int,
 	trade_id: int,
 	bullet: str,
+	mode_label: str = "PAPER",
 ) -> tuple[str, str]:
-	"""Format an ENTER event for log + Discord."""
+	"""Format an ENTER event for log + Discord.
+
+	``mode_label`` is the operator-facing mode of record ("PAPER"/"LIVE"),
+	a pure presentation token resolved by the caller from ``config`` (the
+	G1-blessed mode-of-record lookup — NOT a trade-path mode branch). It
+	defaults to ``"PAPER"`` so a caller that omits it can never accidentally
+	emit a LIVE alert (money-safe fail-safe); the production dispatch call
+	site always passes it explicitly.
+	"""
 	side_label = "YES" if side == "yes" else "NO"
 	tag = f"{strategy} | {series}"
 	cost = fill_size * entry_price
@@ -219,7 +228,7 @@ def _format_enter_message(
 		f"cost={cost}c [id={trade_id}]"
 	)
 	notify_line = (
-		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
+		f"{bullet} **[{tag}] {mode_label} BUY {side_label}** — "
 		f"`{ticker}` {fill_size} @ {entry_price}¢ ({cost}¢ cost)"
 	)
 	return log_line, notify_line
@@ -662,6 +671,10 @@ async def _handle_enter(
 		# byte-exactly.
 		if durable_status is None or durable_status == "open":
 			display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
+			# Presentation-only mode-of-record lookup (the G1-blessed pattern
+			# — reading config["executor"] for a display label is NOT a §1
+			# keystone trade-path branch). config is already threaded here.
+			mode_label = "LIVE" if config.get("executor") == "live" else "PAPER"
 			log_line, notify_line = _format_enter_message(
 				strategy=signal.strategy,
 				series=signal.series,
@@ -671,6 +684,7 @@ async def _handle_enter(
 				entry_price=display_price,
 				trade_id=trade_id,
 				bullet=bullet,
+				mode_label=mode_label,
 			)
 			log.info(log_line)
 			notify(notify_line)
