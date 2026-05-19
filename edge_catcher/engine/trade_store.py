@@ -118,6 +118,24 @@ class TradeStoreProtocol(Protocol):
 		"""
 		...
 
+	def record_intent(
+		self,
+		*,
+		ticker: str,
+		series: str,
+		strategy: str,
+		side: str,
+		intended_size: int,
+		entry_price_cents: int,
+		stop_loss_distance_cents: int,
+		client_order_id: str,
+		placed_at_utc: str,
+	) -> None:
+		"""Pre-place durability hook (sub-project E / L1). Paper + InMemory =
+		no-op. Live = INSERT a `pending` row keyed by client_order_id BEFORE
+		the order is sent (spec §3/§3.1/§4.2). Additive — no member removed."""
+		...
+
 	def get_open_trades(self) -> list[dict[str, Any]]: ...
 
 	def get_trade_by_id(self, trade_id: int) -> dict[str, Any] | None: ...
