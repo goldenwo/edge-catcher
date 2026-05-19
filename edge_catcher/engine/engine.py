@@ -1174,6 +1174,18 @@ async def run_engine(
 					# operator sees the crash, investigates DB health, and either
 					# restarts the engine after the DB is fixed or manually trips
 					# the kill via the CLI.
+					#
+					# §4.3 tripped-kill ≠ process exit (the OPPOSITE case): a
+					# SUCCESSFUL C auto-kill trip does NOT reach here — the gate
+					# returns ``Reject`` with NO exception (risk.py gate_entry,
+					# the §4.3 NORMATIVE block), so this ``while True`` simply
+					# continues awaiting ``_ws_loop`` and the engine keeps
+					# running with the gate in KILL state (new entries rejected,
+					# exits still allowed). Only this FAILED-write case (and a
+					# crash / SIGTERM-drain) stops the process. That asymmetry is
+					# what makes the live unit's ``Restart=always`` safe — a
+					# tripped auto-kill never exits, so systemd can never restart
+					# past it and clear operator intent.
 					raise
 				except RecordPendingFailed:
 					# B / PR 5 ghost-reject defense — same fail-loud contract as

@@ -41,6 +41,7 @@ real ``os.kill``/signal. Run from the project venv
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import signal
@@ -280,30 +281,66 @@ def test_both_entrypoints_route_through_the_shared_bridge_helper() -> None:
 
 	from edge_catcher.cli import live_trade, paper_trade
 
-	live_src = inspect.getsource(live_trade._run_live_trade)
-	paper_src = inspect.getsource(paper_trade._run_paper_trade)
-	assert "run_engine_with_signal_bridge" in live_src, (
+	# Structural AST guard (idiom-consistent with
+	# tests/test_live_composition_root.py's §1 guards -- ``inspect.getsource``
+	# -> ``ast.parse(...).body[0]`` -> ``ast.walk``). Asserts the call inside
+	# EACH wrapper is ``run_engine_with_signal_bridge(...)`` -- NOT a bare
+	# ``run_engine(...)`` (whose finally-drain is dead under systemctl stop).
+	# An AST walk of the called names is durable where the prior
+	# whitespace-strip substring NEGATIVE checks were brittle: it cannot be
+	# fooled by a comment / string / reformat, and asserting the POSITIVE
+	# called name subsumes the "no bare run_engine(" negative (a call named
+	# exactly ``run_engine`` would fail the positive assertion).
+	def _engine_call_names(fn) -> set[str]:
+		"""The set of top-level callee names invoked in ``fn``'s body that are
+		engine entrypoints (``run_engine`` or ``run_engine_with_signal_bridge``
+		-- bare ``Name`` callees or ``module.attr`` callees). Non-vacuous: the
+		wrapper MUST invoke exactly the bridge helper, never bare run_engine."""
+		import textwrap
+
+		src = textwrap.dedent(inspect.getsource(fn))
+		tree = ast.parse(src).body[0]
+		names: set[str] = set()
+		for node in ast.walk(tree):
+			if not isinstance(node, ast.Call):
+				continue
+			fnode = node.func
+			callee: str | None = None
+			if isinstance(fnode, ast.Name):
+				callee = fnode.id
+			elif isinstance(fnode, ast.Attribute):
+				callee = fnode.attr
+			if callee in ("run_engine", "run_engine_with_signal_bridge"):
+				names.add(callee)
+		return names
+
+	live_calls = _engine_call_names(live_trade._run_live_trade)
+	paper_calls = _engine_call_names(paper_trade._run_paper_trade)
+
+	assert "run_engine_with_signal_bridge" in live_calls, (
 		"_run_live_trade must call the shared run_engine_with_signal_bridge "
-		"helper (not a bare asyncio.run(run_engine(...)) -- that drain is dead "
-		"under systemctl stop)"
+		"helper (AST-verified callee) -- a bare asyncio.run(run_engine(...)) "
+		"drain is dead under systemctl stop; called engine entrypoints="
+		f"{live_calls!r}"
 	)
-	assert "run_engine_with_signal_bridge" in paper_src, (
+	assert "run_engine_with_signal_bridge" in paper_calls, (
 		"_run_paper_trade must ALSO route through the shared bridge helper "
 		"(single-sourced fix; paper benefits too -- byte-exact on the "
-		"non-signal path)"
+		f"non-signal path); called engine entrypoints={paper_calls!r}"
 	)
-	# Neither entrypoint keeps its own bare asyncio.run(run_engine(...)).
-	# The anti-pattern is `asyncio.run(run_engine(` -- the open-paren directly
-	# after `run_engine` (the dead bare engine call). The legitimate
-	# `asyncio.run(run_engine_with_signal_bridge(` has `_` after `run_engine`
-	# so the trailing `(` precisely distinguishes the two.
-	assert "asyncio.run(run_engine(" not in live_src.replace(" ", ""), (
-		"_run_live_trade must NOT retain the bare asyncio.run(run_engine(...)) "
-		"-- it must route through run_engine_with_signal_bridge"
+	# The POSITIVE-callee assertion subsumes the old brittle negative substring
+	# check: a wrapper that called bare ``run_engine(`` would surface
+	# ``run_engine`` here and lack ``run_engine_with_signal_bridge``, failing
+	# the asserts above. Pin it explicitly too -- neither wrapper may invoke
+	# the bare engine entrypoint directly (its finally-drain is unreachable
+	# without the bridge).
+	assert "run_engine" not in live_calls, (
+		"_run_live_trade must NOT invoke the bare run_engine(...) directly "
+		f"(AST callee check) -- route through the bridge; got {live_calls!r}"
 	)
-	assert "asyncio.run(run_engine(" not in paper_src.replace(" ", ""), (
-		"_run_paper_trade must NOT retain the bare asyncio.run(run_engine(...)) "
-		"-- it must route through run_engine_with_signal_bridge"
+	assert "run_engine" not in paper_calls, (
+		"_run_paper_trade must NOT invoke the bare run_engine(...) directly "
+		f"(AST callee check) -- route through the bridge; got {paper_calls!r}"
 	)
 
 
@@ -880,3 +917,404 @@ async def test_f2_paper_byte_exact_non_signal_completion_unchanged(
 		)
 	finally:
 		pstore.close()
+
+
+# ===========================================================================
+# 5. F3 -- deploy/live-trader.service systemd unit (spec §8).
+#
+# The deploy unit that wires `systemctl stop` -> SIGTERM -> F1/F2's graceful
+# §4.3 drain on the live Pi daemon. It MIRRORS deploy/paper-trader.service
+# (same User/WorkingDirectory/EnvironmentFile/MemoryMax/CPUQuota conventions);
+# only the name + ExecStart + the EXPLICIT TimeoutStopSec=30 (the F1/F2 drain
+# budget, NOT systemd's 90s default) + the explicit KillSignal=SIGTERM differ.
+# A lint test (not a real systemctl run -- CI is Windows) parses the unit and
+# pins the F3-load-bearing keys + structural equivalence to the paper unit.
+# ===========================================================================
+
+_DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
+
+
+def _parse_unit(path: Path) -> dict[str, dict[str, str]]:
+	"""Minimal systemd-unit parser: ``[Section]`` headers + ``key=value``
+	lines (comments / blanks ignored). systemd allows a key to repeat
+	(list-append semantics); the F3 keys under test are all single-valued so
+	last-wins is sufficient + keeps the lint test simple. Mirrors how
+	deploy/paper-trader.service is structured (a flat INI-like unit)."""
+	sections: dict[str, dict[str, str]] = {}
+	current: str | None = None
+	for raw in path.read_text(encoding="utf-8").splitlines():
+		line = raw.strip()
+		if not line or line.startswith("#") or line.startswith(";"):
+			continue
+		if line.startswith("[") and line.endswith("]"):
+			current = line[1:-1]
+			sections.setdefault(current, {})
+			continue
+		if "=" in line and current is not None:
+			k, _, v = line.partition("=")
+			sections[current][k.strip()] = v.strip()
+	return sections
+
+
+def test_live_trader_service_exists_and_parses() -> None:
+	"""Failure mode prevented: the live daemon has NO systemd unit (or a
+	malformed one) -> it cannot be deployed under systemd at all, so the F1/F2
+	`systemctl stop` -> graceful-drain path is never exercised in production.
+	Asserts deploy/live-trader.service exists and parses into the expected
+	[Unit]/[Service]/[Install] section shape (same as the paper unit)."""
+	unit_path = _DEPLOY_DIR / "live-trader.service"
+	assert unit_path.is_file(), (
+		f"deploy/live-trader.service must exist (spec §8); looked at {unit_path}"
+	)
+	parsed = _parse_unit(unit_path)
+	assert {"Unit", "Service", "Install"} <= set(parsed), (
+		"the unit must have [Unit], [Service] and [Install] sections (mirroring "
+		f"deploy/paper-trader.service); parsed sections={sorted(parsed)}"
+	)
+
+
+def test_live_trader_service_pins_f1_f2_drain_contract() -> None:
+	"""Failure mode prevented (FUNDS-AT-RISK): the live unit omits the
+	bounded-drain wiring -> `systemctl stop` SIGKILLs the money daemon (or
+	uses systemd's 90s default) while a shielded place->persist is mid-write,
+	OR a tripped C auto-kill that exited would be restarted past operator
+	intent. Pins the F3 load-bearing [Service] keys:
+
+	  * Type=simple                      (mirrors paper)
+	  * Restart=always + RestartSec=5    (long-running loop; §4.3-safe ONLY
+	                                       because a tripped auto-kill never
+	                                       exits -- tested below)
+	  * TimeoutStopSec=30                (EXPLICIT F1/F2 drain budget, NOT the
+	                                       90s systemd default)
+	  * KillSignal=SIGTERM               (explicit -- F1 bridges it to the
+	                                       §4.3 F2 graceful drain)
+	  * ExecStart -> `-m edge_catcher live-trade` + the live config path
+	"""
+	svc = _parse_unit(_DEPLOY_DIR / "live-trader.service")["Service"]
+
+	assert svc.get("Type") == "simple", f"Type must be simple; got {svc.get('Type')!r}"
+	assert svc.get("Restart") == "always", (
+		f"Restart must be always (long-running daemon); got {svc.get('Restart')!r}"
+	)
+	assert svc.get("RestartSec") == "5", (
+		f"RestartSec must mirror the paper unit (5s); got {svc.get('RestartSec')!r}"
+	)
+	# THE F3 deliverable: the drain budget is set EXPLICITLY to 30s. systemd's
+	# default is 90s -- relying on it would let a slow/hung drain linger 3x
+	# longer before SIGKILL on a money daemon.
+	assert svc.get("TimeoutStopSec") == "30", (
+		"deploy/live-trader.service MUST set TimeoutStopSec=30 EXPLICITLY (the "
+		"F1/F2 §4.3 drain budget -- NOT systemd's 90s default); got "
+		f"{svc.get('TimeoutStopSec')!r}"
+	)
+	# KillSignal=SIGTERM is the systemd default but stated explicitly now that
+	# F1/F2 handle SIGTERM gracefully -- a money daemon must never be SIGKILL'd
+	# while a shielded place->persist is mid-write.
+	assert svc.get("KillSignal") == "SIGTERM", (
+		"deploy/live-trader.service MUST set KillSignal=SIGTERM explicitly "
+		f"(F1 bridges it to the §4.3 drain); got {svc.get('KillSignal')!r}"
+	)
+	exec_start = svc.get("ExecStart", "")
+	assert "-m edge_catcher live-trade" in exec_start, (
+		"ExecStart must invoke the E1 live entrypoint (`python -m edge_catcher "
+		f"live-trade`); got {exec_start!r}"
+	)
+	assert "config.local/live-trader.yaml" in exec_start, (
+		"ExecStart must point at the live config (config.local/live-trader.yaml "
+		f"-- the E1 default); got {exec_start!r}"
+	)
+
+
+def test_live_trader_service_mirrors_paper_unit_conventions() -> None:
+	"""Failure mode prevented: the live unit silently diverges from the
+	validated paper unit's deploy conventions (a different User /
+	WorkingDirectory / EnvironmentFile / resource shape) -> the live daemon
+	runs under the wrong account or unbounded resources. Asserts the live unit
+	mirrors deploy/paper-trader.service EXACTLY on the shared deploy keys; only
+	name/ExecStart/TimeoutStopSec/KillSignal legitimately differ."""
+	paper = _parse_unit(_DEPLOY_DIR / "paper-trader.service")
+	live = _parse_unit(_DEPLOY_DIR / "live-trader.service")
+
+	# [Service] keys that MUST be byte-identical to the paper unit (the
+	# validated deploy conventions -- account, cwd, env, resource caps).
+	for key in (
+		"Type", "User", "Group", "WorkingDirectory", "Environment",
+		"EnvironmentFile", "Restart", "RestartSec", "StartLimitIntervalSec",
+		"StartLimitBurst", "MemoryMax", "CPUQuota", "Nice",
+	):
+		assert live["Service"].get(key) == paper["Service"].get(key), (
+			f"live-trader.service [Service] {key}={live['Service'].get(key)!r} "
+			f"must mirror paper-trader.service {key}="
+			f"{paper['Service'].get(key)!r} (shared deploy convention)"
+		)
+
+	# [Install] mirrors paper exactly.
+	assert live.get("Install") == paper.get("Install"), (
+		f"[Install] must mirror the paper unit; live={live.get('Install')!r} "
+		f"paper={paper.get('Install')!r}"
+	)
+
+	# The legitimate differences: the live unit has its OWN ExecStart (the
+	# live entrypoint, not paper-trade) and adds TimeoutStopSec/KillSignal
+	# (the paper unit relies on systemd defaults; the money daemon must not).
+	assert live["Service"]["ExecStart"] != paper["Service"]["ExecStart"], (
+		"the live unit must run the live entrypoint, NOT paper-trade"
+	)
+	assert "TimeoutStopSec" not in paper["Service"], (
+		"sanity: the paper unit relies on systemd's default stop timeout; the "
+		"live unit adds an EXPLICIT one (the asymmetry F3 introduces)"
+	)
+
+
+# ===========================================================================
+# 6. F3 -- §4.3 NORMATIVE: tripped-kill ≠ process exit (THE invariant).
+#
+# A C auto-kill (panic / drawdown / daily-loss KillSwitch trip) keeps the
+# process RUNNING: the gate enters KILL state (rejects new entries; exits
+# still allowed) and the engine continues. ONLY a crash or `systemctl stop`
+# (SIGTERM -> F1 bridge -> the §4.3 F2 drain) stops it. This is what makes
+# the live unit's Restart=always safe -- a tripped auto-kill never reaches
+# systemd, so a restart can never clear operator intent and let the
+# previously-blocked trades flow (catastrophic with real money).
+#
+# Step-1 verification (the task's MANDATORY prerequisite) established the
+# invariant ALREADY HOLDS structurally:
+#   * a SUCCESSFUL auto-kill: Gate.gate_entry calls _emit_trip ->
+#     KillSwitch.trip() INSERT succeeds -> returns normally -> gate returns
+#     Reject with NO exception -> process_tick / the WS loop / the reconnect
+#     block all CONTINUE (engine keeps running);
+#   * KillSwitchTripFailed (the OPPOSITE -- a FAILED kill WRITE): trip()'s
+#     INSERT fails -> raises KillSwitchTripFailed -> propagates UNCAUGHT out
+#     of run_engine -> process STOPS (C-spec L214 ghost-reject defense);
+#   * SIGTERM: F1 cancels the root task -> run_engine's §4.3 finally drain
+#     runs -> graceful exit (proven by section 1's drain test).
+# So F3 is a documenting comment + these PINNING tests -- ZERO money-logic
+# change. The tests below concretely distinguish all THREE outcomes.
+# ===========================================================================
+
+import sqlite3  # noqa: E402
+
+from edge_catcher.engine.risk import (  # noqa: E402
+	BankrollCache,
+	Gate,
+	KillSwitch,
+	KillSwitchTripFailed,
+	PeakTracker,
+	RiskConfig,
+	RiskContext,
+)
+
+_F3_NOW = datetime(2026, 5, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _f3_risk_cfg() -> RiskConfig:
+	"""A valid Phase-1-shaped RiskConfig. ``absolute_panic_floor_cents`` is
+	deliberately HIGH (1_000_000c = $10k) so any realistic equity is ≤ floor
+	and Gate.gate_entry takes the KILL_AUTO_PANIC first-trip branch
+	deterministically (no network / no real balance needed)."""
+	return RiskConfig.from_dict({
+		"sizing_pct": 0.005,
+		"daily_loss_pct": 0.02,
+		"drawdown_pct": 0.05,
+		"max_open": 3,
+		"min_fill_contracts": 1,
+		"absolute_panic_floor_cents": 1_000_000,
+		"absolute_max_cents": 5000,
+		"kelly_shrinkage": 0.5,
+		"bankroll_ttl_seconds": 300.0,
+		"bankroll_failures_until_kill": 2,
+	})
+
+
+class _ZeroBalanceSource:
+	"""Stub BalanceSource (no network) -- cash stays at the 0 default, so
+	equity (0) ≤ the high panic floor and the panic branch trips."""
+
+	async def balance_cents(self) -> int:
+		return 0
+
+
+def _f3_gate(conn: sqlite3.Connection) -> Gate:
+	"""A REAL Gate over a migrated live_trades.db: real KillSwitch (the actual
+	trip()/INSERT path), real BankrollCache (stub source, never refreshed ->
+	0 cash), real PeakTracker. Built directly (NOT build_risk_module, which
+	pre-refreshes against a live Kalshi client -- network) so the test is
+	hermetic + Windows-correct."""
+	cfg = _f3_risk_cfg()
+	bankroll = BankrollCache(_source=_ZeroBalanceSource(), _cfg=cfg)
+	kill_switch = KillSwitch(conn=conn)
+	peak = PeakTracker(conn=conn)
+	return Gate(cfg=cfg, bankroll=bankroll, kill_switch=kill_switch, peak_tracker=peak)
+
+
+def _f3_ctx(*, operator_kill: bool = False) -> RiskContext:
+	from edge_catcher.engine.market_state import MarketState
+
+	return RiskContext(
+		now_utc=_F3_NOW,
+		market_state=MarketState(limit=50),
+		open_positions=[],
+		daily_pnl_cents=0,
+		operator_kill_active=operator_kill,
+	)
+
+
+def _f3_entry_signal() -> Signal:
+	return Signal(
+		action="enter",
+		ticker="KXSOL15M-19MAY19H12",
+		side="yes",
+		series="KXSOL15M",
+		strategy="debut_fade",
+		reason="f3-invariant",
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+	)
+
+
+def test_successful_auto_kill_does_not_exit_engine_continues(
+	tmp_path: Path,
+) -> None:
+	"""§4.3 NORMATIVE -- the CORE invariant. A SUCCESSFUL C auto-kill
+	(KILL_AUTO_PANIC here) MUST NOT propagate an exception: Gate.gate_entry
+	returns a plain ``Reject`` (NO raise), the kill row IS persisted, and a
+	subsequent gate call hits the steady-state ``active_auto_kill`` path and
+	STILL returns ``Reject`` (entries stay blocked) -- the engine would keep
+	running. Crucially ``gate_exit`` STILL ALLOWS exits under the auto-kill
+	(kills cap NEW exposure; they never trap existing exposure). If a
+	successful auto-kill raised/exited, ``Restart=always`` would loop-clear
+	operator intent (catastrophic with real money)."""
+	from edge_catcher.live.state import connect_live_trades_db
+	from edge_catcher.engine.risk import Reject
+
+	db = tmp_path / "live_trades.db"
+	connect_live_trades_db(db).close()
+	conn = connect_live_trades_db(db)
+	try:
+		gate = _f3_gate(conn)
+		ctx = _f3_ctx()
+		sig = _f3_entry_signal()
+
+		# (1) First entry: the panic branch trips. The trip's INSERT SUCCEEDS
+		# (real migrated DB) so gate_entry returns Reject -- it MUST NOT raise.
+		decision = gate.gate_entry(sig, ctx)  # must not raise
+		assert isinstance(decision, Reject), (
+			"a successful auto-kill must yield a Reject decision, not raise; "
+			f"got {decision!r}"
+		)
+		assert decision.reason == "KILL_AUTO_PANIC", (
+			f"expected the panic first-trip; got {decision.reason!r}"
+		)
+
+		# (2) The kill row WAS persisted (this is why no exception fired -- a
+		# successful trip is the documenting-comment'd §4.3 path).
+		row = conn.execute(
+			"SELECT reason FROM kill_switch WHERE cleared_at IS NULL"
+		).fetchone()
+		assert row is not None and row[0] == "KILL_AUTO_PANIC", (
+			"the successful trip MUST have persisted a kill_switch row "
+			f"(steady-state KILL state); got {row!r}"
+		)
+
+		# (3) A SECOND entry now takes the steady-state active_auto_kill branch
+		# and STILL returns Reject WITHOUT raising -- the engine keeps running
+		# in KILL state, rejecting every new entry, indefinitely.
+		decision2 = gate.gate_entry(sig, ctx)  # must not raise
+		assert isinstance(decision2, Reject), (
+			"steady-state: a persisted auto-kill must keep returning Reject "
+			f"(no raise -- engine continues); got {decision2!r}"
+		)
+
+		# (4) gate_exit STILL ALLOWS exits under the auto-kill (only an
+		# operator kill blocks exits) -- the engine continues to wind DOWN
+		# existing exposure while blocking new entries. This is the behaviour
+		# `Restart=always` must NOT be able to reset.
+		exit_decision = gate.gate_exit(sig, ctx)
+		assert type(exit_decision).__name__ == "Allow", (
+			"auto-kill must STILL allow exits (kills cap new exposure, never "
+			f"trap existing) -- got {exit_decision!r}"
+		)
+	finally:
+		conn.close()
+
+
+def test_kill_switch_trip_failed_propagates_and_halts(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""§4.3 -- the OPPOSITE case (must stay opposite). A FAILED kill-state
+	WRITE (KillSwitch.trip's INSERT fails) raises ``KillSwitchTripFailed``,
+	which MUST propagate out of ``Gate.gate_entry`` UNCAUGHT (the C-spec L214
+	ghost-reject defense -- the engine then STOPS rather than re-evaluating
+	the gate next tick against unpersisted state). This is deliberately the
+	inverse of the successful-trip path above: a successful kill must NOT
+	halt; a FAILED kill-write MUST. F3 must not blur the two."""
+	from edge_catcher.live.state import connect_live_trades_db
+
+	db = tmp_path / "live_trades.db"
+	connect_live_trades_db(db).close()
+	conn = connect_live_trades_db(db)
+	try:
+		gate = _f3_gate(conn)
+		ctx = _f3_ctx()
+		sig = _f3_entry_signal()
+
+		# Simulate the trip's INSERT failing exactly as a real DB failure
+		# would: KillSwitch.trip() wraps a sqlite3.Error and raises
+		# KillSwitchTripFailed. Patch ONLY KillSwitch.trip (NOT conn.execute --
+		# the gate's branch-2 ``active_auto_kill`` SELECT must keep working so
+		# the flow reaches the panic-trip branch and exercises the REAL
+		# _emit_trip -> trip() -> KillSwitchTripFailed propagation chain).
+		def _trip_boom(*_a, **_kw):
+			raise KillSwitchTripFailed(
+				"kill_switch INSERT failed for reason='KILL_AUTO_PANIC': "
+				"disk I/O error (simulated)"
+			)
+
+		monkeypatch.setattr(
+			gate._kill_switch, "trip", _trip_boom
+		)
+
+		# It MUST propagate UNCAUGHT out of gate_entry (the C-spec L214
+		# ghost-reject defense -- engine then STOPS; the opposite of a
+		# successful trip which returns Reject and continues).
+		with pytest.raises(KillSwitchTripFailed):
+			gate.gate_entry(sig, ctx)
+	finally:
+		monkeypatch.undo()
+		conn.close()
+
+
+@pytest.mark.asyncio
+async def test_sigterm_drains_then_exits_distinct_from_auto_kill(
+	tmp_path: Path, _drain_spies,
+) -> None:
+	"""§4.3 -- the THIRD outcome (distinct from the two gate cases above).
+	SIGTERM is the ONLY non-crash path that stops the process, and it does so
+	via the F1 bridge -> run_engine's §4.3 F2 drain -> a clean exit (NOT a
+	raised/propagated kill). Drives the REAL ``run_engine`` (paper, the F1
+	harness) to the WS-loop seam, cancels the root task (exactly what F1's
+	signal handler does -- ``task.cancel()``; CI is Windows so NEVER a real
+	signal), and asserts it exited THROUGH the §4.3 finally drain
+	(``store.close()`` ran, the operator-kill flag was set as drain step 1) --
+	i.e. SIGTERM => drain-then-exit, categorically different from a successful
+	auto-kill (continues) and a KillSwitchTripFailed (raises out)."""
+	cfg_path = _paper_cfg_path(tmp_path)
+	root = asyncio.create_task(engmod.run_engine(config_path=cfg_path))
+	await asyncio.wait_for(_drain_spies["ws_loop_entered"].wait(), timeout=10.0)
+
+	# F1's signal handler effect: cancel the root task.
+	root.cancel()
+	with pytest.raises(asyncio.CancelledError):
+		await root
+
+	# It exited THROUGH the §4.3 drain (NOT a bare process kill): the drain's
+	# store.close() ran and the operator-kill flag was set (drain step 1).
+	assert _drain_spies["store_close_calls"] >= 1, (
+		"SIGTERM must exit via the §4.3 F2 drain (store.close ran) -- NOT a "
+		"bare kill, and NOT the gate-Reject (auto-kill) path"
+	)
+	assert dispmod._OPERATOR_KILL.active is True, (
+		"the §4.3 drain (SIGTERM path) sets the operator-kill flag as step 1; "
+		"this is the ONLY one of the three outcomes that stops the process "
+		"gracefully (auto-kill continues; KillSwitchTripFailed raises out)"
+	)
