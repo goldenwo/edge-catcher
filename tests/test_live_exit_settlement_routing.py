@@ -76,7 +76,7 @@ from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.strategy_base import Signal
 from edge_catcher.engine.trade_store import InMemoryTradeStore, TradeStore
-from edge_catcher.live.state import connect_live_trades_db, record_close
+from edge_catcher.live.state import record_close
 from edge_catcher.live.store import SQLiteTradeStore
 
 

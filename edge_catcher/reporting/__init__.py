@@ -83,7 +83,8 @@ def _all_time_stats(con: sqlite3.Connection) -> dict:
 			SUM(CASE WHEN status='scratch' THEN 1 ELSE 0 END) AS scratches,
 			COALESCE(SUM(CASE WHEN status IN ('won','lost','scratch') THEN pnl_cents END), 0) AS net_pnl_cents,
 			COALESCE(SUM(CASE WHEN status IN ('won','lost','scratch') THEN entry_fee_cents END), 0) AS fees_cents,
-			COALESCE(SUM(CASE WHEN status IN ('won','lost','scratch') THEN entry_price * fill_size END), 0) AS deployed_cents
+			COALESCE(SUM(CASE WHEN status IN ('won','lost','scratch')
+					THEN entry_price * fill_size END), 0) AS deployed_cents
 		FROM paper_trades"""
 	).fetchone()
 	total, open_, wins, losses, scratches, net_pnl, fees, deployed = row

@@ -10,8 +10,15 @@ E2 will extend this module with the fail-closed mode-coherence invariant.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import subprocess
 import sys
+from pathlib import Path
+
+import pytest
+import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -120,15 +127,6 @@ def test_paper_trade_help_still_exits_zero() -> None:
 # behavior change (checks 3/4/5 are live-only and skipped; check 2 = paper
 # ⟺ paper_trades*.db). The invariant must not perturb the paper path.
 # ===========================================================================
-
-import asyncio
-from pathlib import Path
-
-import pytest
-import yaml
-
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 # The canonical Phase-1 `risk:` block — the EXACT key set RiskConfig.from_dict

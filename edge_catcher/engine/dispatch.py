@@ -639,6 +639,16 @@ async def _handle_enter(
 	if result.status == "filled":
 		metrics.inc("entries_filled")
 
+		# Type-narrow the documented invariant: a `filled` result ALWAYS carries
+		# a persisted trade_id — `_place_and_persist` only returns a non-None
+		# trade_id on the filled path (paper/InMemory record_trade INSERTs and
+		# returns the rowid; live transition_pending_to_open CAS returns the
+		# located row_id even on a lost race). NEVER fires for paper/replay, so
+		# byte-exact (K2). Codifies the invariant for mypy + as a money-path
+		# tripwire (durable_status below MAY still be None — get_trade_by_id can
+		# find no row — and that is handled gracefully; trade_id itself is not).
+		assert trade_id is not None, "filled result must carry a persisted trade_id"
+
 		# Notify/log the ACTUAL DURABLE PERSISTED status, not the optimistic
 		# IOC `filled` result — and do it MODE-AGNOSTICALLY (the §1 keystone:
 		# branch on persisted truth, never on paper-vs-live / isinstance).

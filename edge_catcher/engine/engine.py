@@ -9,7 +9,7 @@ import logging
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional, cast
 
 import httpx
 import websockets
@@ -246,7 +246,13 @@ def _handle_risk_event(event: Any) -> None:
 	# RiskEvent.severity ∈ {"info","warn","error"} maps 1:1 onto
 	# Notification.severity (same Literal); default to "error" defensively
 	# (a kill trip is operationally an error-class event).
-	note_severity = severity if severity in ("info", "warn", "error") else "error"
+	# `severity` is Any (getattr on a duck-typed event) and `x in (...)` does
+	# not narrow Any to the target Literal for mypy — cast after the runtime
+	# membership guard (which guarantees one of the three, else "error").
+	note_severity = cast(
+		Literal["info", "warn", "error"],
+		severity if severity in ("info", "warn", "error") else "error",
+	)
 	title = f"edge-catcher RISK: {reason} ({kind})"
 	body = (
 		f"Live trading risk event — {kind}.\n"
@@ -1534,7 +1540,9 @@ async def run_engine(
 			# this finally; drop the socket ref so nothing re-enters dispatch.
 			ws_ref[0] = None
 
-			# (2 cont.) flush per-strategy state — part of "stop intake": no new tick will mutate it; persist BEFORE the in-flight drain (do NOT move past (3) drain_inflight_sections / (6) store.close()).
+			# (2 cont.) flush per-strategy state — part of "stop intake": no new
+			# tick will mutate it; persist BEFORE the in-flight drain (do NOT move
+			# past (3) drain_inflight_sections / (6) store.close()).
 			for strat in strategies:
 				state = pending_states.get(strat.name)
 				if state is not None:

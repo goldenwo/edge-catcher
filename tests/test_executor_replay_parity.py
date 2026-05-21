@@ -110,7 +110,6 @@ from edge_catcher.engine.replay.backtester import replay_capture
 
 # REUSE the parity machinery — import, never edit (spec SC-I2 step 4).
 from tests.test_replay_parity import (
-	PARITY_COLUMNS,
 	_composite_key,
 	_diff_rows,
 )

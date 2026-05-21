@@ -33,7 +33,6 @@ import copy
 from pathlib import Path
 
 import pytest
-import yaml
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa

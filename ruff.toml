@@ -4,6 +4,19 @@
 line-length = 120
 indent-width = 4
 
+# Exclude the gitignored local-only files (per CLAUDE.md private-file rules) —
+# they exist on developer machines but not on CI, so they must not enter the
+# lint gate. Mirrors the [tool.mypy] `exclude` in pyproject.toml. force-exclude
+# makes the exclusion hold even when a parent dir is passed explicitly
+# (e.g. `ruff check edge_catcher/ tests/`), not only when the file is passed.
+extend-exclude = [
+  "edge_catcher/runner/strategies_local.py",
+  "edge_catcher/monitors/strategies_local.py",
+  "edge_catcher/engine/strategies_local.py",
+  "edge_catcher/hypotheses/local",
+]
+force-exclude = true
+
 [lint]
 select = ["E", "F", "W"]  # pycodestyle errors, pyflakes, warnings (not full default set)
 ignore = ["W191", "E101"]  # tab-indentation rules don't apply — codebase uses tabs

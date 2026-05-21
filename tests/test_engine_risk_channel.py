@@ -50,7 +50,6 @@ from edge_catcher.notifications.envelope import DeliveryResult, Notification
 # verbatim so all three rigs stay in lock-step (the established idiom).
 from tests.test_live_engine_mode_invariant import (  # noqa: E402
 	_write_cfg,
-	_write_notifications_yaml,
 	make_live_cfg,
 	make_paper_cfg,
 )
@@ -200,7 +199,7 @@ def test_handle_risk_event_no_longer_a_logging_only_placeholder() -> None:
 
 
 def test_boot_time_trip_reaches_dedicated_channel_before_reconcile(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _compose_spies,
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _compose_spies,  # noqa: F811 — pytest fixture injected by name (imported at module top for registration)
 ) -> None:
 	"""THE operator-safety acceptance test. Failure mode prevented: the
 	startup balance read is already ≤ ``absolute_panic_floor`` (Kalshi
@@ -404,7 +403,7 @@ def test_coherent_paper_cfg_needs_no_risk_channel(tmp_path: Path) -> None:
 
 
 def test_paper_compose_never_registers_risk_callback_or_resolves_channel(
-	tmp_path: Path, _compose_spies,
+	tmp_path: Path, _compose_spies,  # noqa: F811 — pytest fixture injected by name (imported at module top for registration)
 ) -> None:
 	"""Failure mode prevented (G-parity BLOCKING): G3 leaks the risk-channel
 	resolution / ``_handle_risk_event`` registration into the paper path —
