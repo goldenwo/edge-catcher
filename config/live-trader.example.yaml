@@ -7,6 +7,13 @@
 # Write these to a bare KEY=VALUE file (NOT ~/.bashrc) and EnvironmentFile=
 # it from the systemd live-trader unit so they never touch the repo.
 
+# Mode of record. `live` arms real-money order placement; `paper` runs the
+# simulated executor. The fail-closed boot coherence gate (engine.py
+# `_assert_mode_coherence`) cross-checks this against db_path, the resolved
+# trade-scope creds, the notification channels, and the Phase-1 risk caps —
+# any disagreement aborts boot before a single order is placed.
+executor: live
+
 db_path: data/live_trades.db
 
 ws:
@@ -24,8 +31,44 @@ strategies:
   # See config.local/live-trader.yaml for the real strategy list.
   my-strategy:
     enabled: false
-    series: [KXETH15M]
+    series: [KXETH15M, KXBTC15M]   # 2-series allowlist placeholder
     params: {}
+
+# ---------------------------------------------------------------------------
+# Notifications (Sub-project E / G)
+# ---------------------------------------------------------------------------
+# The live trader resolves its alert channels from the unified notifications
+# config at boot (the same file the CLI uses). Channel NAMES below must exist
+# in that file's `channels:` map. `config_path` points at the operator's real
+# notifications config; the channel names here are examples that match
+# config/notifications.example.yaml so a copied skeleton resolves cleanly.
+#
+# Trade-scope signing creds come from the DEFAULT env vars
+# (KALSHI_LIVE_KEY_ID / KALSHI_LIVE_PRIVATE_KEY) — see the header comment. We
+# deliberately do NOT pin `live_key_id_env` / `live_private_key_env` here; the
+# defaults are correct and keep the skeleton lean. Override only if you store
+# the trade-scope key under non-default env-var names.
+notifications:
+  config_path: config.local/notifications.yaml   # operator's real channels
+  live_channel: pnl_discord        # general live alerts (fills, daily P&L)
+  live_risk_channel: ops_slack     # DEDICATED kill-switch / auto-panic alerts
+                                   # (must be DISTINCT from live_channel so a
+                                   # halt signal is never lost in the noise)
+
+# ---------------------------------------------------------------------------
+# Execution (Sub-project D)
+# ---------------------------------------------------------------------------
+# Slippage budgets (cents) applied when building IOC limit orders. Entry adds
+# slippage to cross the spread; each exit kind gets its own budget. EVERY
+# ExitKind literal (take_profit / stop_loss / time_exit) must be present —
+# `validate_exec_cfg` aborts boot on a missing kind rather than failing at the
+# first exit signal. Tune these to your fill experience.
+execution:
+  entry_slippage_cents: 2
+  exit_slippage_cents:
+    take_profit: 1
+    stop_loss: 2
+    time_exit: 2
 
 # ---------------------------------------------------------------------------
 # Risk gates (Sub-project C)
