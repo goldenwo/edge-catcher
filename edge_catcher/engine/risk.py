@@ -706,6 +706,16 @@ class Gate:
 				detail=f"entry={entry}c sl={sl}c",
 			)
 
+		# Staleness backstop (spec §5.3): never make an equity-based decision
+		# against an untrusted balance. SOFT, transient — NOT a persisted kill;
+		# auto-recovers on the next successful refresh. Faster tripwire than the
+		# refresh-failure -> KILL_AUTO_PANIC path.
+		if self._bankroll.is_stale():
+			return Reject(
+				"STALE_BANKROLL",
+				detail="bankroll cache older than TTL — entry gated until refresh",
+			)
+
 		# Equity — recomputed fresh each gate call
 		equity_cents = self._compute_equity(ctx)
 
