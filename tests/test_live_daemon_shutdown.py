@@ -1154,6 +1154,7 @@ def _f3_ctx(*, operator_kill: bool = False) -> RiskContext:
 		now_utc=_F3_NOW,
 		market_state=MarketState(limit=50),
 		open_positions=[],
+		open_count=0,
 		daily_pnl_cents=0,
 		operator_kill_active=operator_kill,
 	)

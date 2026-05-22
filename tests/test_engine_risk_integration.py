@@ -107,10 +107,12 @@ def _make_ctx(
 	daily_pnl_cents: int = 0,
 	operator_kill_active: bool = False,
 ) -> RiskContext:
+	positions = open_positions or []
 	return RiskContext(
 		now_utc=now or datetime.now(timezone.utc),
 		market_state=MarketState(),
-		open_positions=open_positions or [],
+		open_positions=positions,
+		open_count=len(positions),
 		daily_pnl_cents=daily_pnl_cents,
 		operator_kill_active=operator_kill_active,
 	)

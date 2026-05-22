@@ -611,17 +611,19 @@ class RiskContext:
 	Built fresh per gate call by E's dispatch path.  Frozen + slots ensures
 	the gate cannot mutate inputs and makes unit tests trivial (build context
 	with synthetic values, assert decision).
+
+	``open_count`` counts open+pending+exit_pending rows (all MAX_OPEN slots);
+	``open_positions`` is status='open' only (for equity MTM) — they
+	intentionally differ (spec §3).  The caller (RiskContextProvider) supplies
+	``open_count`` via ``read_open_count`` so in-flight ``pending`` entries
+	correctly hold their MAX_OPEN slot.
 	"""
 	now_utc: datetime
 	market_state: MarketState
 	open_positions: list[OpenPosition]
+	open_count: int
 	daily_pnl_cents: int
 	operator_kill_active: bool
-
-	@property
-	def open_count(self) -> int:
-		"""Derived from open_positions so the two can never disagree."""
-		return len(self.open_positions)
 
 
 # ---------------------------------------------------------------------------
