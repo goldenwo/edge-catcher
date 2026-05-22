@@ -44,6 +44,13 @@ if TYPE_CHECKING:
 	# Import only for type-checking so dispatch doesn't fail to import when
 	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
 	from edge_catcher.engine.risk import Gate
+	# RiskContextProvider builds one RiskContext per signal (live only; C3).
+	# TYPE_CHECKING-only import: same rationale as Gate — paper/replay paths
+	# never instantiate this and must not fail when risk_context_provider.py
+	# is absent. The param is annotated as the class name; mypy resolves it
+	# from this block; at runtime the annotation is a string (from __future__
+	# import annotations at the top of the file).
+	from edge_catcher.engine.risk_context_provider import RiskContextProvider
 
 
 # Hard ceiling on a single ``await executor.place(req)`` call. Set to
@@ -313,6 +320,7 @@ async def process_tick(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Run every enabled strategy against the current tick context.
 
@@ -347,7 +355,7 @@ async def process_tick(
 
 		for signal in signals:
 			try:
-				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk)
+				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk, risk_ctx_provider=risk_ctx_provider)
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
 				# means the kill is NOT persisted (funds-at-risk). The engine
@@ -374,6 +382,39 @@ async def process_tick(
 				)
 
 
+def _consult_entry_gate(
+	risk: Gate,
+	signal: Signal,
+	rctx: Any,
+	metrics: Metrics,
+) -> tuple[int | None, bool]:
+	"""Call gate_entry and translate the GateDecision into dispatch primitives.
+
+	Extracted from ``_handle_signal`` so the ``isinstance`` check lives here, not
+	inside ``_handle_signal`` (an AST-level structural guard in
+	``test_live_exit_settlement_routing.py`` forbids ``isinstance`` in
+	``_handle_signal`` because it serves as a proxy for mode-discriminator
+	branches — any ``isinstance`` in that function would trip the assertion).
+
+	Returns:
+		``(allowed_size, rejected)`` where ``allowed_size`` is the contract count
+		from ``Allow.size_contracts`` (or ``None`` on paper path — never reached
+		from this function) and ``rejected`` is ``True`` when ``gate_entry``
+		returned a ``Reject`` (caller must return immediately without placing).
+
+	May raise ``KillSwitchTripFailed`` — callers must NOT catch it.
+	"""
+	decision = risk.gate_entry(signal, rctx)  # may raise KillSwitchTripFailed — do NOT catch
+	_inc_gate_metric(metrics, decision)
+	if isinstance(decision, Reject):
+		log.info(
+			"Gate REJECT enter %s %s: %s (%s)",
+			signal.strategy, signal.ticker, decision.reason, decision.detail,
+		)
+		return None, True
+	return decision.size_contracts, False
+
+
 async def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
@@ -384,6 +425,7 @@ async def _handle_signal(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
@@ -406,29 +448,34 @@ async def _handle_signal(
 	  exposure). The gate_exit check (operator-kill only) is E's responsibility
 	  to call from the WS-close handler path where it has a RiskContext.
 	"""
+	# LIVE only: build one RiskContext per signal (spec §3), reused by whichever
+	# gate the action routes to. Paper/replay never builds one (risk is None) —
+	# G-parity: the paper path is BYTE-IDENTICAL; no RiskContext construction,
+	# no gate call, no conditional divergence on this path.
+	rctx = risk_ctx_provider.build(signal, ctx, now) if risk is not None else None
+
 	if signal.action == "enter":
-		# Gate consultation surface — live path only. PR 3 (C) ships the
-		# Gate building blocks (engine/risk.py); E's PR wires the actual
-		# invocation here. E owns:
-		#   1. constructing the RiskContext from engine state (sqlite conn,
-		#      bankroll cache, open-positions reader from engine/live_db.py),
-		#   2. adding the `risk.gate_entry(signal, ctx)` call here,
-		#   3. handling Reject (log + return) and propagating exceptions
-		#      from `_emit_trip` so the engine STOPS on kill-switch DB
-		#      failure (C-spec §Risks #4 ghost-reject defense — do NOT
-		#      catch broadly here; infrastructure exceptions are fatal).
-		# Until E lands, dispatch passes through ungated. If a Gate is
-		# constructed before E (e.g. in tests), warn so the gap is visible
-		# rather than silently allowing trades.
+		# Entry gate — live path only (spec §2.1). Paper/replay (risk is None)
+		# short-circuits to allowed_size=None and calls _handle_enter ungated,
+		# preserving the byte-exact paper path.
+		#
+		# On Allow: proceed with allowed_size = decision.size_contracts.
+		# On Reject: log at INFO and return — NO notify() (spec §4.1: routine
+		#   rejects are silent; audit/Discord routing is E's RiskEvent contract).
+		# KillSwitchTripFailed: do NOT catch — let it propagate so the engine
+		#   STOPS rather than re-entering ungated (C-spec L214 ghost-reject
+		#   defense). process_tick already re-raises it past the broad except.
+		allowed_size: int | None = None  # paper sentinel — None = ungated paper path
 		if risk is not None:
-			global _gate_unwired_warning_logged
-			if not _gate_unwired_warning_logged:
-				log.warning(
-					"Risk gate constructed but dispatch wiring deferred to E; "
-					"all signals pass through ungated until E's PR lands."
-				)
-				_gate_unwired_warning_logged = True
-		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
+			# _consult_entry_gate holds the isinstance(Reject) check so this
+			# function stays free of it (structural AST guard in test suite).
+			# KillSwitchTripFailed propagates untouched — do NOT catch here.
+			allowed_size, rejected = _consult_entry_gate(
+				risk, signal, rctx, config.get("_metrics") or Metrics(),
+			)
+			if rejected:
+				return
+		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now, allowed_size=allowed_size)
 	elif signal.action == "exit":
 		# SC-D3 (E3): _handle_exit is now async (it awaits executor.place for
 		# the exit order — the §1 seam: PaperExecutor resolves synchronously /

@@ -424,41 +424,6 @@ async def test_process_tick_swallows_non_kill_switch_exceptions(monkeypatch, mar
 	assert any("Error handling" in rec.message for rec in caplog.records)
 
 
-@pytest.mark.asyncio
-async def test_gate_unwired_warning_fires_only_once(monkeypatch, market_state, store, caplog):
-	"""Q2 regression: when risk is not None but dispatch wiring isn't done
-	yet (E hasn't shipped), the "ungated passes through" warning fires
-	once per process, not per signal — module-level _gate_unwired_warning_logged
-	flag prevents log spam.
-	"""
-	# Reset the module-level flag for an isolated test.
-	monkeypatch.setattr(dispatch_module, "_gate_unwired_warning_logged", False)
-
-	# Stub _handle_enter so we don't actually try to place orders.
-	async def fake_handle_enter(*args, **kwargs):
-		return None
-	monkeypatch.setattr(dispatch_module, "_handle_enter", fake_handle_enter)
-
-	ctx = _make_tick_ctx()
-	# Use a sentinel object as 'risk' — _handle_signal only checks `risk is not None`.
-	fake_risk = object()
-
-	with caplog.at_level(logging.WARNING):
-		# Process 3 ticks — each emits one signal, all 3 reach _handle_signal
-		# with risk=fake_risk. Warning should fire ONCE total.
-		for _ in range(3):
-			await process_tick(
-				ctx, [_StubStrategy()], store, config={},
-				executor=PaperExecutor(market_state=market_state, config={}),
-				now=_now(),
-				risk=fake_risk,  # type: ignore[arg-type]
-			)
-
-	gate_warnings = [r for r in caplog.records if "Risk gate constructed" in r.message]
-	assert len(gate_warnings) == 1, (
-		f"warning should fire once across 3 signals, fired {len(gate_warnings)}"
-	)
-
 
 # ---------------------------------------------------------------------------
 # KillSwitchTripFailed propagation chain — C-spec L214 ghost-reject defense
