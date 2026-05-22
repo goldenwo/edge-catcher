@@ -34,7 +34,7 @@ from edge_catcher.engine.market_state import (
 	_is_tradeable_cents,
 	derive_event_ticker,
 )
-from edge_catcher.engine.metrics import Metrics
+from edge_catcher.engine.metrics import Metrics, _GATE_REJECT_COUNTER
 from edge_catcher.engine.notifications import notify
 from edge_catcher.engine.strategy_base import Signal, Strategy
 from edge_catcher.engine.trade_store import TradeStoreProtocol
@@ -73,6 +73,17 @@ try:
 except ImportError:
 	class RecordPendingFailed(Exception):  # type: ignore[no-redef]
 		pass
+
+# Allow / Reject / GateDecision are needed at runtime by _inc_gate_metric
+# (dispatch-side counter translation, spec §4.2). Same try/except pattern so
+# dispatch still imports cleanly on the paper/replay path where risk.py is
+# absent (though _inc_gate_metric is only called from the live gate path).
+try:
+	from edge_catcher.engine.risk import Allow, GateDecision, Reject  # noqa: PLC0415
+except ImportError:
+	Allow = None  # type: ignore[assignment,misc]
+	Reject = None  # type: ignore[assignment,misc]
+	GateDecision = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +208,15 @@ def _pnl_label(pnl: int | None) -> tuple[str, str]:
 	if pnl < 0:
 		return "LOSS", f"{pnl:+d}¢"
 	return "SCRATCH", "0¢"
+
+
+def _inc_gate_metric(metrics: Metrics, decision: "GateDecision") -> None:
+	"""Increment the per-decision risk-gate counter (dispatch-side; the gate
+	holds no Metrics handle — spec §4.2). Entry-gate only."""
+	if isinstance(decision, Allow):
+		metrics.inc("risk_gate_allowed")
+	else:  # Reject
+		metrics.inc(_GATE_REJECT_COUNTER[decision.reason])
 
 
 def _format_enter_message(
