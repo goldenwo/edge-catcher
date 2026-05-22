@@ -83,7 +83,7 @@ try:
 except ImportError:
 	Allow = None  # type: ignore[assignment,misc]
 	Reject = None  # type: ignore[assignment,misc]
-	GateDecision = None  # type: ignore[assignment]
+	GateDecision = None  # type: ignore[assignment,misc]
 
 log = logging.getLogger(__name__)
 
@@ -520,11 +520,11 @@ async def _handle_enter(
 	# nothing — STRONGER than the post-place ghost-reject). It reaches
 	# process_tick's `except RecordPendingFailed: raise` (mirroring
 	# KillSwitchTripFailed) which halts the engine rather than re-entering
-	# the gate against unchanged DB state. intended_size is the pre-sizing
-	# PLACEHOLDER: req.size_contracts is 0 here (dispatch defers sizing to
-	# the executor pipeline; the sizing refactor lands later) — identical
-	# sizing-deferred convention as the engine-timeout pending row below;
-	# B's reconciler resolves the true size from Kalshi by client_order_id.
+	# the gate against unchanged DB state. intended_size reflects
+	# req.size_contracts, which is the real sized count on the LIVE path and
+	# 0 on the PAPER/replay path (where the executor sizes internally) —
+	# same convention as the engine-timeout pending row below;
+	# B's reconciler resolves the true filled size from Kalshi by client_order_id.
 	# entry_price_cents is the ORIGINAL Signal intent (NOT D's slippage-
 	# adjusted limit), matching the post-place record_pending contract.
 	# `now` is the threaded tick clock (module invariant L14-L18: handlers
@@ -589,15 +589,14 @@ async def _handle_enter(
 				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
 			)
 		except asyncio.TimeoutError:
-			# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
-			# sizing to the executor pipeline; the real sizing refactor lands in
-			# PR 5/E). So the synthesized pending row carries intended_size=0.
-			# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
-			# reconciler MUST treat an engine_timeout pending row's
-			# intended_size=0 as "unknown — resolve the true size from Kalshi by
-			# client_order_id", same as the NetworkError-pending path. Flagged by
-			# the PR #38 pass-3 review (G2); the clean fix is gated on the
-			# deferred sizing refactor, so we surface it loudly instead.
+			# NOTE: req.size_contracts is the real sized count on the LIVE path
+			# and 0 on the PAPER/replay path (where the executor sizes
+			# internally), so the synthesized pending row carries
+			# intended_size=req.size_contracts accordingly. B's reconciler MUST
+			# treat an engine_timeout pending row as "unknown — resolve the true
+			# filled size from Kalshi by client_order_id", same as the
+			# NetworkError-pending path. Flagged by the PR #38 pass-3 review
+			# (G2); surfaced loudly so the reconciler never silently drops it.
 			log.warning(
 				"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
 				"synthesizing pending+None (intended_size=0, sizing-deferred "
