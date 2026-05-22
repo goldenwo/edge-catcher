@@ -2,8 +2,6 @@ import sqlite3
 import typing
 from datetime import datetime, timezone
 
-import pytest
-
 from edge_catcher.engine.metrics import Metrics, _GATE_REJECT_COUNTER
 from edge_catcher.engine.risk import (
 	BankrollCache,
@@ -56,7 +54,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
 	apply_migrations(conn, migrations_dir)
 
 
-def _make_fresh_gate(*, stale: bool) -> Gate:
+def _make_gate(*, stale: bool) -> Gate:
 	"""Build a Gate whose bankroll cache is fresh or stale on demand.
 
 	``stale=True``  → ``_last_refresh_ts = 0.0`` (never refreshed — is_stale() = True).
@@ -127,7 +125,7 @@ class TestGateEntryStaleBankroll:
 
 	def test_gate_entry_soft_rejects_when_bankroll_stale(self) -> None:
 		"""Stale bankroll (never refreshed) → Reject("STALE_BANKROLL") before equity."""
-		gate = _make_fresh_gate(stale=True)
+		gate = _make_gate(stale=True)
 		sig = _make_valid_signal()
 		ctx = _make_ctx()
 
@@ -138,7 +136,7 @@ class TestGateEntryStaleBankroll:
 
 	def test_gate_entry_proceeds_when_bankroll_fresh(self) -> None:
 		"""Fresh bankroll → gate_entry must NOT return STALE_BANKROLL."""
-		gate = _make_fresh_gate(stale=False)
+		gate = _make_gate(stale=False)
 		sig = _make_valid_signal()
 		ctx = _make_ctx()
 
@@ -147,3 +145,22 @@ class TestGateEntryStaleBankroll:
 		assert getattr(decision, "reason", None) != "STALE_BANKROLL", (
 			f"fresh bankroll should not produce STALE_BANKROLL; got {decision!r}"
 		)
+
+	def test_gate_entry_rejects_when_cache_aged_past_ttl(self) -> None:
+		"""Aging path: _last_refresh_ts set to (now - ttl - 1) exercises the
+		``time.monotonic() - ts > ttl`` branch of is_stale(), distinct from the
+		never-refreshed sentinel (ts == 0.0) tested above.
+		"""
+		import time  # noqa: PLC0415
+
+		gate = _make_gate(stale=False)  # start fresh so bankroll._cash_cents is populated
+		ttl = gate._bankroll._cfg.bankroll_ttl_seconds  # 300.0 per _make_gate cfg
+		gate._bankroll._last_refresh_ts = time.monotonic() - (ttl + 1)
+
+		sig = _make_valid_signal()
+		ctx = _make_ctx()
+
+		decision = gate.gate_entry(sig, ctx)
+
+		assert isinstance(decision, Reject), f"expected Reject, got {decision!r}"
+		assert decision.reason == "STALE_BANKROLL"
