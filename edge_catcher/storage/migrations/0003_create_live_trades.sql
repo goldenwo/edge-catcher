@@ -79,3 +79,45 @@ CREATE INDEX IF NOT EXISTS live_trades_pending_idx ON live_trades(status, placed
 -- Partial index for daily P&L computation (closed-trade rows only).
 CREATE INDEX IF NOT EXISTS live_trades_exit_idx ON live_trades(exit_time)
     WHERE status IN ('won', 'lost', 'scratch');
+
+-- Compatibility VIEW: the daily-P&L reporting CLI
+-- (edge_catcher.reporting) hardcodes `FROM paper_trades` and reads the
+-- paper-DB column names. This VIEW lets `python -m edge_catcher.reporting
+-- --db <live_trades.db>` run UNMODIFIED against the live DB (Phase H1;
+-- spec §7 / R2-Gap2).
+--
+--   * entry_price_cents -> entry_price, series -> series_ticker: the
+--     reporting CLI reads the paper names; pnl_cents, entry_fee_cents,
+--     fill_size, exit_time, strategy pass through unchanged.
+--   * status is NOT a dumb pass-through: `exit_pending` is a STILL-HELD
+--     position (exit order in flight; no paper analog) so it MUST project
+--     as `open` or the operator UNDER-sees live exposure. The other
+--     live-only statuses (pending/rejected/rejected_post_hoc/cancelled/
+--     lost_truth) pass through RAW and are naturally excluded because
+--     reporting only matches open/won/lost/scratch. Per-row column
+--     transform, NOT aggregation — no GROUP BY, no row collapsing (a
+--     split-row partial-exit residual stays `open` -> excluded from
+--     closed sums; children carry allocated fee+pnl).
+--   * SQLite has no CREATE OR REPLACE VIEW. Bare CREATE VIEW errors on a
+--     0003 re-run (see runner "Atomicity warning"); CREATE VIEW IF NOT
+--     EXISTS would silently retain a STALE definition after any future
+--     projection change. So DROP VIEW IF EXISTS then CREATE VIEW —
+--     re-run-safe AND always picks up the latest projection. This does
+--     NOT violate this file's data-preservation contract (lines 10-12
+--     forbid DROP/rename of TABLES/COLUMNS = live data; a VIEW is
+--     derived, stateless, holds ZERO rows — dropping/recreating it
+--     loses nothing).
+DROP VIEW IF EXISTS paper_trades;
+CREATE VIEW paper_trades AS
+SELECT
+  id, ticker,
+  series            AS series_ticker,
+  strategy, side, intended_size, fill_size,
+  entry_price_cents AS entry_price,
+  blended_entry_cents, slippage_cents, fill_pct,
+  stop_loss_distance_cents,
+  CASE WHEN status = 'exit_pending' THEN 'open' ELSE status END AS status,
+  client_order_id, kalshi_order_id, placed_at_utc, entry_time, exit_time,
+  reconciled_at_utc, exit_price_cents, pnl_cents,
+  entry_fee_cents, exit_fee_cents, exit_reason, rejection_reason, notes
+FROM live_trades;

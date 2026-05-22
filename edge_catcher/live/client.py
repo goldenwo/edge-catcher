@@ -13,7 +13,11 @@ from urllib.parse import urlencode
 
 import httpx
 
-from edge_catcher.adapters.kalshi.auth import make_auth_headers
+from edge_catcher.adapters.kalshi.auth import (
+	KALSHI_LIVE_KEY_ID_ENV,
+	KALSHI_LIVE_PRIVATE_KEY_ENV,
+	make_auth_headers,
+)
 from edge_catcher.live.audit import AuditLogger, AuditEvent
 from edge_catcher.live.config import (
 	LiveConfig,
@@ -365,12 +369,15 @@ class KalshiOrderClient:
 				# Live trader uses a separate trade-scope Kalshi key so a leak
 				# of the paper trader's read-only key (KALSHI_KEY_ID) cannot
 				# place orders. Both keys live in `.env`; auth.py reads them
-				# by env-var name.
+				# by env-var name. The env-var NAMES are the canonical auth
+				# constants — the SAME objects the §2 coherence gate
+				# (engine.py) checks — so signer & gate cannot drift apart
+				# (single source; spec Obl-3 / Minor#1).
 				headers = make_auth_headers(
 					method,
 					full_path,
-					key_id_env="KALSHI_LIVE_KEY_ID",
-					private_key_env="KALSHI_LIVE_PRIVATE_KEY",
+					key_id_env=KALSHI_LIVE_KEY_ID_ENV,
+					private_key_env=KALSHI_LIVE_PRIVATE_KEY_ENV,
 				)
 				resp = await self._http.request(method, full_path, json=json, headers=headers)
 				response_status = resp.status_code

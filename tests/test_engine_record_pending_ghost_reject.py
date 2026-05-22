@@ -126,6 +126,19 @@ class _RaisingPendingStore:
 	def __init__(self) -> None:
 		self.rejected_calls: list[dict[str, Any]] = []
 
+	def record_intent(self, **kwargs: Any) -> None:
+		"""No-op conformance shim (D1 / commit 1802920). dispatch's
+		``_handle_enter`` now calls ``store.record_intent(...)`` UNCONDITIONALLY
+		(spec §3 keystone) BEFORE the ``record_pending`` branch. Without this
+		method dispatch ``AttributeError``s at that pre-place call — which the
+		broad per-signal ``except Exception`` swallows, so the ghost-reject
+		path under test (``record_pending`` raising ``RecordPendingFailed``) is
+		NEVER reached and the test passes for the wrong reason. Mirrors the
+		paper ``TradeStoreProtocol.record_intent`` no-op + ``_StubStore`` /
+		``_OrderRecordingStore`` (commit 057f214); introduces NO side effect so
+		the REAL ``except RecordPendingFailed: raise`` behaviour is exercised."""
+		return None
+
 	def record_pending(self, **kwargs: Any) -> None:
 		raise RecordPendingFailed("simulated live_trades INSERT failure")
 
@@ -137,7 +150,26 @@ class _ValueErrorPendingStore:
 	"""Store whose record_pending raises a NON-ghost-reject exception — must
 	stay swallowed by the per-signal broad except (counter-test)."""
 
+	def __init__(self) -> None:
+		self.record_pending_reached = False
+
+	def record_intent(self, **kwargs: Any) -> None:
+		"""No-op conformance shim (D1 / commit 1802920) — see
+		``_RaisingPendingStore.record_intent``. WITHOUT this, dispatch's
+		unconditional pre-place ``record_intent`` ``AttributeError``s first and
+		that (swallowed) error — NOT the intended ``record_pending``
+		``ValueError`` — is what the broad except absorbs, so the counter-test
+		passes VACUOUSLY (it can no longer prove the re-raise clause is SPECIFIC
+		to ``RecordPendingFailed`` rather than ``except Exception: raise``).
+		The shim restores the test to genuinely reach ``record_pending``."""
+		return None
+
 	def record_pending(self, **kwargs: Any) -> None:
+		# Tripwire: proves dispatch actually reached the record_pending branch
+		# (not short-circuited by a missing-record_intent AttributeError). The
+		# counter-test asserts this is True so a regression to the vacuous-pass
+		# state fails LOUD instead of silently eroding the specificity guard.
+		self.record_pending_reached = True
 		raise ValueError("simulated non-ghost-reject business error")
 
 
@@ -197,6 +229,16 @@ async def test_process_tick_swallows_non_record_pending_failed() -> None:
 		executor=executor,
 		now=_NOW,
 		risk=None,
+	)
+
+	# The counter-test is only meaningful if dispatch ACTUALLY reached
+	# record_pending and the ValueError it raised there was the exception the
+	# broad except swallowed. Pre-D1-shim this was False (a missing-
+	# record_intent AttributeError short-circuited first and the test passed
+	# vacuously); asserting it pins the swallow to the INTENDED path.
+	assert store.record_pending_reached, (
+		"dispatch must reach record_pending so the swallowed exception is the "
+		"intended ValueError (not a pre-place record_intent AttributeError)"
 	)
 
 
@@ -363,10 +405,30 @@ async def test_record_rejected_insert_failure_is_swallowed_not_ghost_reject(
 	"""
 
 	class _RaisingRejectedStore:
+		def record_intent(self, **kwargs: Any) -> None:
+			"""No-op conformance shim (D1 / commit 1802920) — see
+			``_RaisingPendingStore.record_intent``. WITHOUT this, dispatch's
+			unconditional pre-place ``record_intent`` ``AttributeError``s
+			before the rejected branch, the broad except swallows THAT (not
+			the intended ``record_rejected`` ``OperationalError``), and the
+			carve-out under test (a failed audit INSERT must NOT escape as
+			``RecordPendingFailed``) is never actually exercised — the test
+			passes only because the wrong error happens to also log ERROR.
+			The shim lets the rejected branch + ``record_rejected`` run."""
+			return None
+
+		def __init__(self) -> None:
+			self.record_rejected_reached = False
+
 		def record_pending(self, **kwargs: Any) -> None:  # pragma: no cover
 			raise AssertionError("rejected path must not touch record_pending")
 
 		def record_rejected(self, **kwargs: Any) -> None:
+			# Tripwire: proves dispatch actually reached the rejected branch
+			# (not short-circuited by a missing-record_intent AttributeError),
+			# so the ERROR log + no-escape assertions below pin the INTENDED
+			# carve-out, not an incidental pre-place failure.
+			self.record_rejected_reached = True
 			raise sqlite3.OperationalError("simulated audit-row INSERT failure")
 
 	store = _RaisingRejectedStore()
@@ -385,6 +447,16 @@ async def test_record_rejected_insert_failure_is_swallowed_not_ghost_reject(
 			now=_NOW,
 			risk=None,
 		)
+
+	# The carve-out is only exercised if dispatch ACTUALLY reached the
+	# rejected branch + record_rejected (pre-D1-shim a missing-record_intent
+	# AttributeError short-circuited first and this test passed vacuously —
+	# the ERROR log was the wrong error).
+	assert store.record_rejected_reached, (
+		"dispatch must reach record_rejected so the swallowed/logged failure "
+		"is the intended audit-INSERT OperationalError (not a pre-place "
+		"record_intent AttributeError)"
+	)
 
 	# Sanity: the failure surfaced in the log (operator-visible audit gap),
 	# never silently dropped.

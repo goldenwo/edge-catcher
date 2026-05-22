@@ -30,7 +30,6 @@ import pytest
 
 from edge_catcher.engine.trade_store import TradeStoreProtocol
 from edge_catcher.live.state import (
-	RecordPendingFailed,
 	connect_live_trades_db,
 	record_open,
 )
@@ -90,6 +89,28 @@ def _locked_pending_kwargs(**overrides: Any) -> dict[str, Any]:
 		"kalshi_order_id": None,
 		"placed_at_utc": _NOW_ISO,
 		"rejection_reason": "kalshi_unreachable:connection refused",
+	}
+	base.update(overrides)
+	return base
+
+
+def _intent_kwargs(**overrides: Any) -> dict[str, Any]:
+	"""The exact 9-kwarg set dispatch.py passes to ``record_intent`` (the
+	pre-place durability hook — no ``kalshi_order_id`` / ``rejection_reason``;
+	a subset of the locked pending kwargs). Used to seed the C1 ``pending``
+	row before exercising the E-keystone CAS / backfill paths
+	(``record_trade`` / ``record_pending`` / ``record_rejected``) — the exact
+	insert-pending-then-CAS-transition model the live store now implements."""
+	base: dict[str, Any] = {
+		"ticker": "KXSOL15M-26MAY16H12",
+		"series": "KXSOL15M",
+		"strategy": "strat_34",
+		"side": "yes",
+		"intended_size": 10,
+		"entry_price_cents": 42,
+		"stop_loss_distance_cents": 8,
+		"client_order_id": "strat_34-KXSOL15M-26MAY16H12-cafebabe",
+		"placed_at_utc": _NOW_ISO,
 	}
 	base.update(overrides)
 	return base
@@ -200,78 +221,141 @@ def test_satisfies_trade_store_protocol_runtime_duck(store: SQLiteTradeStore) ->
 
 
 # ---------------------------------------------------------------------------
-# #2 — record_pending writes a real pending row, kwargs forwarded faithfully
+# #2 — record_pending = idempotent kalshi_order_id BACKFILL of the C1 row
+#      (E keystone — spec §3 supersedes B's CR-4 insert-on-outcome; the
+#      durable pending row already exists from record_intent, this only
+#      learns the kalshi_order_id while status STAYS 'pending'). C6 (F):
+#      rewritten from the superseded B-era "INSERT a pending row" model.
 # ---------------------------------------------------------------------------
 
 
-def test_record_pending_writes_real_pending_row(
+def test_record_pending_backfills_kalshi_order_id_on_c1_row(
 	store: SQLiteTradeStore, db_path: Path
 ) -> None:
-	"""dispatch's pending branch → a real status='pending' row in
-	live_trades.db with every locked kwarg faithfully forwarded to
-	live.state.record_pending."""
+	"""The live ``record_pending`` is NOT a 2nd insert — it BACKFILLS
+	``kalshi_order_id`` onto the C1 ``record_intent`` row (located by
+	``client_order_id``) while ``status`` stays ``'pending'`` (fill state
+	still UNKNOWN; B's reconciler resolves it later). Exactly ONE row for the
+	coid, still ``pending``, ``kalshi_order_id`` now set — never a competing
+	second INSERT (spec §3/§4.2)."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-pend0001"
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+
+	# Pre-state: exactly one pending C1 row, kalshi_order_id still NULL.
+	pre = _query_one(
+		db_path,
+		"SELECT status, kalshi_order_id FROM live_trades "
+		"WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert pre["status"] == "pending"
+	assert pre["kalshi_order_id"] is None
+
 	kw = _locked_pending_kwargs(
-		client_order_id="strat_34-KXSOL15M-26MAY16H12-pend0001",
+		client_order_id=coid,
 		kalshi_order_id="ord-kx-malformed-abc",  # malformed-fills path
 		rejection_reason="kalshi_malformed_fills",
 	)
 	store.record_pending(**kw)
 
+	# Exactly one row for the coid — backfilled in place, NOT a 2nd INSERT.
+	all_rows = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert all_rows["n"] == 1, "backfill must not mint a second row (§3/§4.2)"
 	row = _query_one(
 		db_path,
 		"SELECT * FROM live_trades WHERE client_order_id = ?",
-		(kw["client_order_id"],),
+		(coid,),
 	)
-	assert row is not None, "pending row must be committed to live_trades.db"
+	assert row is not None
+	# Status STAYS 'pending' (still unknown — B's reconciler resolves later).
 	assert row["status"] == "pending"
 	assert row["ticker"] == "KXSOL15M-26MAY16H12"
 	assert row["series"] == "KXSOL15M"
 	assert row["strategy"] == "strat_34"
 	assert row["side"] == "yes"
 	assert row["intended_size"] == 10
-	assert row["original_intended_size"] == 10  # set = intended_size on INSERT
+	assert row["original_intended_size"] == 10  # set = intended_size by C1
 	assert row["fill_size"] == 0
 	assert row["entry_price_cents"] == 42
 	assert row["stop_loss_distance_cents"] == 8
+	# The load-bearing assertion: kalshi_order_id is BACKFILLED on the C1 row.
 	assert row["kalshi_order_id"] == "ord-kx-malformed-abc"
 	assert row["placed_at_utc"] == _NOW_ISO
-	assert row["rejection_reason"] == "kalshi_malformed_fills"
 
 
-def test_record_pending_networkerror_path_kalshi_id_none(
+def test_record_pending_networkerror_path_kalshi_id_stays_none(
 	store: SQLiteTradeStore, db_path: Path
 ) -> None:
-	"""NetworkError path: kalshi_order_id=None must persist as a NULL column
-	(B's reconciler discriminates on this to fall back to client_order_id)."""
-	kw = _locked_pending_kwargs(
-		client_order_id="strat_34-KXSOL15M-26MAY16H12-pendnone",
-		kalshi_order_id=None,
-	)
+	"""Pure-NetworkError path: ``kalshi_order_id=None`` (no id returned) is a
+	no-op backfill — the C1 row's NULL ``kalshi_order_id`` is left as-is (never
+	null out an id; B's reconciler discriminates on a NULL id to fall back to
+	``client_order_id``). Still exactly one row, still ``pending``."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-pendnone"
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+
+	kw = _locked_pending_kwargs(client_order_id=coid, kalshi_order_id=None)
 	store.record_pending(**kw)
+
 	row = _query_one(
 		db_path,
-		"SELECT kalshi_order_id, status FROM live_trades WHERE client_order_id = ?",
-		(kw["client_order_id"],),
+		"SELECT kalshi_order_id, status FROM live_trades "
+		"WHERE client_order_id = ?",
+		(coid,),
 	)
 	assert row["status"] == "pending"
 	assert row["kalshi_order_id"] is None
+	count = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert count["n"] == 1, "no-op backfill must not mint a second row"
 
 
 # ---------------------------------------------------------------------------
-# #3 — record_rejected writes a real rejected row; reason persisted
+# #3 — record_rejected = CAS pending→rejected of the C1 row (E keystone —
+#      spec §3 supersedes B's CR-4 insert-on-outcome). C6 (E): rewritten
+#      from the superseded B-era "INSERT a rejected row" model.
 # ---------------------------------------------------------------------------
 
 
-def test_record_rejected_writes_real_rejected_row(
+def test_record_rejected_cas_transitions_c1_row_to_rejected(
 	store: SQLiteTradeStore, db_path: Path
 ) -> None:
-	kw = _locked_rejected_kwargs(rejection_reason="absolute_max_exceeded")
+	"""The live ``record_rejected`` is NOT a 2nd insert — it CAS-transitions
+	the C1 ``record_intent`` ``pending`` row (located by ``client_order_id``)
+	to ``rejected`` with the reason persisted. Exactly ONE row for the coid,
+	now ``status='rejected'`` — never a competing second INSERT (spec §3
+	explicitly supersedes B's CR-4 one-row-per-attempt insert model)."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-rej00001"
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+
+	pre = _query_one(
+		db_path,
+		"SELECT status FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert pre["status"] == "pending"
+
+	kw = _locked_rejected_kwargs(
+		client_order_id=coid, rejection_reason="absolute_max_exceeded"
+	)
 	store.record_rejected(**kw)
 
+	count = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert count["n"] == 1, "CAS reject must not mint a second row (§3/§4.2)"
 	row = _query_one(
 		db_path,
 		"SELECT * FROM live_trades WHERE client_order_id = ?",
-		(kw["client_order_id"],),
+		(coid,),
 	)
 	assert row is not None
 	assert row["status"] == "rejected"
@@ -282,91 +366,118 @@ def test_record_rejected_writes_real_rejected_row(
 
 
 # ---------------------------------------------------------------------------
-# #4 — GHOST-REJECT PROPAGATION (the load-bearing test)
+# #4 — record_pending best-effort posture (E keystone — C4). The durable C1
+#      pending row already exists from record_intent, so a post-place
+#      backfill failure / row-not-found is a logged ERROR audit gap, NEVER
+#      fatal and SPECIFICALLY NOT RecordPendingFailed (ghost-reject scope is
+#      funds-at-risk PRE-PLACE INSERTs only — that is C1's record_intent,
+#      tested in tests/test_live_store_lifecycle.py). C6 (F): rewritten from
+#      the superseded B-era "record_pending INSERT propagates
+#      RecordPendingFailed" model — that funds-at-risk-INSERT contract now
+#      lives on record_intent (the pre-place hook), not record_pending.
 # ---------------------------------------------------------------------------
 
 
-def test_record_pending_propagates_record_pending_failed(db_path: Path) -> None:
-	"""THE reason this adapter exists. Point the store at a connection whose
-	live_trades table has been DROPPED → live.state.record_pending's INSERT
-	hits sqlite3.OperationalError → it raises RecordPendingFailed → the
-	adapter MUST let it propagate UNCAUGHT.
+def test_record_pending_backfill_failure_is_best_effort_not_recordpendingfailed(
+	db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""A post-place backfill write failure is NOT fatal: it logs an ERROR
+	audit gap and does NOT raise — and SPECIFICALLY NOT ``RecordPendingFailed``
+	(the durable C1 ``record_intent`` row already exists; B's reconciler owns
+	recovery via ``client_order_id``; raising would needlessly halt the
+	engine). Inverse of C1's ``record_intent`` (FATAL pre-place INSERT)."""
+	import logging
 
-	If the adapter wrapped the delegating call in a try/except that swallowed
-	this, the engine's three `except RecordPendingFailed: raise` ghost-reject
-	clauses (dispatch.process_tick, engine._ws_loop, engine outer reconnect)
-	would be dead code in the live path and a funds-at-risk stranded Kalshi
-	order would go undetected."""
 	store = SQLiteTradeStore(db_path)
 	try:
-		# Sabotage the schema on the store's OWN held connection so the next
-		# INSERT genuinely fails inside live.state.record_pending.
+		coid = "strat_34-KXSOL15M-26MAY16H12-ghost001"
+		store.record_intent(**_intent_kwargs(client_order_id=coid))
+		# Sabotage the schema on the store's OWN held connection so the
+		# backfill UPDATE genuinely fails with a sqlite3.Error.
 		store._conn.execute("DROP TABLE live_trades")
 		store._conn.commit()
 
-		with pytest.raises(RecordPendingFailed):
+		with caplog.at_level(logging.ERROR, logger="edge_catcher.live.store"):
+			# MUST NOT raise (RecordPendingFailed or anything else) — §3.1
+			# best-effort: the durable C1 pending row already exists.
 			store.record_pending(
 				**_locked_pending_kwargs(
-					client_order_id="strat_34-KXSOL15M-26MAY16H12-ghost001"
+					client_order_id=coid, kalshi_order_id="ord-kx-ghost"
 				)
 			)
+		store_errs = [
+			r for r in caplog.records
+			if r.name == "edge_catcher.live.store" and r.levelname == "ERROR"
+		]
+		assert store_errs, (
+			"a post-place backfill failure must be logged at ERROR (audit "
+			"gap), not silently swallowed"
+		)
 	finally:
 		store.close()
 
 
-def test_record_trade_is_failloud_not_synthesizing(
+def test_record_pending_row_not_found_is_audit_gap_no_insert_no_raise(
+	store: SQLiteTradeStore, db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""``record_pending`` with NO preceding ``record_intent`` (the C1 row
+	absent — defense-in-depth): it MUST NOT raise, MUST NOT fabricate a
+	competing INSERT (that would resurrect B's superseded insert-on-outcome
+	model), and MUST emit an ERROR-level audit-gap log. B's reconciler is the
+	backstop via ``client_order_id``."""
+	import logging
+
+	coid = "strat_34-KXSOL15M-26MAY16H12-noC1row"
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.store"):
+		# MUST NOT raise — §3.1 accepted audit gap, not fatal.
+		store.record_pending(
+			**_locked_pending_kwargs(
+				client_order_id=coid, kalshi_order_id="ord-kx-orphan"
+			)
+		)
+	assert any(
+		r.name == "edge_catcher.live.store" and r.levelname == "ERROR"
+		for r in caplog.records
+	), "a row-not-found record_pending must log an ERROR audit gap"
+	# No row was fabricated for that coid.
+	count = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert count["n"] == 0, "row-not-found must NOT be a silent INSERT (§3)"
+
+
+def test_record_pending_is_idempotent_double_call(
 	store: SQLiteTradeStore, db_path: Path
 ) -> None:
-	"""REAL-MONEY DEFECT FIX (was: ``test_record_trade_maps_to_record_open``
-	+ ``..._open_propagates_record_pending_failed``).
-
-	The paper-shaped ``TradeStoreProtocol.record_trade`` signature cannot
-	carry D's real ``OrderResult.order_id`` (→ ``kalshi_order_id``) or
-	``client_order_id``. The pre-fix adapter SYNTHESIZED placeholder ids
-	(``kx-{strategy}-{ts}`` / ``-live``) to satisfy ``record_open``'s
-	NOT-NULL columns, persisting a funds-at-risk ``open`` row that 4.B's
-	reconciler / ``on_fill_event`` / phantom-pending poller can NEVER
-	reconcile (they key off the real Kalshi/client ids).
-
-	``record_trade`` must therefore fail loud exactly like the other
-	paper-path lifecycle methods (``self._live_only``-style
-	``NotImplementedError``), and the message MUST name ``record_open`` and
-	the E/PR-6 wiring obligation per spec §769 / §To-E so the contract is
-	discoverable from the failure alone.
-
-	Fails on 5d0a6b5 (where it synthesized + returned an int trade_id);
-	passes after the fix.
-	"""
-	with pytest.raises(NotImplementedError, match="live-only") as exc:
-		store.record_trade(
-			ticker="KXSOL15M-26MAY16H12",
-			entry_price=42,
-			strategy="strat_34",
-			side="yes",
-			series_ticker="KXSOL15M",
-			intended_size=10,
-			fill_size=10,
-			blended_entry=40,
-			fill_pct=1.0,
-			slippage_cents=0.0,
-			now=_NOW,
-		)
-	msg = str(exc.value)
-	# Names the correct live writer + the E/PR-6 obligation + the spec cite.
-	assert "record_open" in msg, "message must name live.state.record_open"
-	assert "PR 6" in msg, "message must state the E/PR-6 wiring obligation"
-	assert "§769" in msg or "To-E" in msg, "message must cite the spec contract"
-	assert "client_order_id" in msg and "kalshi_order_id" in msg, (
-		"message must explain WHY the paper signature is not live-correct "
-		"(cannot carry the real client_order_id / kalshi_order_id)"
+	"""The executor-pending branch may fire more than once for the same coid
+	(a reconnect re-delivering the same NetworkError outcome). ``record_pending``
+	called twice with the same ``kalshi_order_id`` MUST NOT raise, MUST leave
+	exactly ONE row, still ``status='pending'``, ``kalshi_order_id``
+	unchanged — a re-run is a no-op-equivalent (no corruption, no 2nd row)."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-idem001"
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+	kw = _locked_pending_kwargs(
+		client_order_id=coid, kalshi_order_id="ord-kx-idem"
 	)
-	# It genuinely did NOT write anything (no synthesized open row leaked to
-	# disk on the fail-loud path).
-	leaked = _query_one(
+	store.record_pending(**kw)
+	store.record_pending(**kw)  # second call — idempotent, no raise
+
+	row = _query_one(
 		db_path,
-		"SELECT COUNT(*) AS n FROM live_trades WHERE status = 'open'",
+		"SELECT status, kalshi_order_id FROM live_trades "
+		"WHERE client_order_id = ?",
+		(coid,),
 	)
-	assert leaked["n"] == 0, "fail-loud record_trade must not persist any row"
+	assert row["status"] == "pending"
+	assert row["kalshi_order_id"] == "ord-kx-idem"
+	count = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert count["n"] == 1, "idempotent double-call must not mint a 2nd row"
 
 
 # ---------------------------------------------------------------------------
@@ -395,29 +506,89 @@ def test_record_rejected_insert_failure_does_not_raise(db_path: Path) -> None:
 		store.close()
 
 
-def test_record_rejected_carveout_logs_audit_gap(
+def test_record_rejected_cas_miss_no_pending_row_is_audit_gap_no_insert(
+	store: SQLiteTradeStore, db_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+	"""C6 (E): the pre-place C-gate-reject case. dispatch may call
+	``record_rejected`` with NO preceding ``record_intent`` (the C-gate
+	rejected the order BEFORE C1 inserted a pending row, e.g.
+	``absolute_max_exceeded``). The spec author KNEW this CAS-misses and
+	DELIBERATELY accepted it as a logged ERROR audit gap, NOT fatal (a
+	rejected order holds no position ⇒ not funds-at-risk). It MUST NOT raise,
+	MUST NOT silently INSERT a row (that would resurrect B's superseded
+	insert-on-outcome model), and MUST emit an ERROR-level audit-gap log."""
+	import logging
+
+	coid = "strat_34-KXSOL15M-26MAY16H12-noC1rej"
+	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.store"):
+		# MUST NOT raise — §3.1 accepted audit gap, not fatal.
+		store.record_rejected(
+			**_locked_rejected_kwargs(
+				client_order_id=coid,
+				rejection_reason="absolute_max_exceeded",
+			)
+		)
+	store_errs = [
+		r for r in caplog.records
+		if r.name == "edge_catcher.live.store" and r.levelname == "ERROR"
+	]
+	assert store_errs, (
+		"a CAS-miss (no C1 pending row) must be logged at ERROR (spec §3.1 "
+		"accepted audit gap), not silent"
+	)
+	assert "CAS-miss" in store_errs[-1].getMessage()
+	# No row was fabricated — CAS-miss is NOT a silent INSERT (§3 supersedes
+	# B's insert-on-outcome model).
+	count = _query_one(
+		db_path,
+		"SELECT COUNT(*) AS n FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert count["n"] == 0, "CAS-miss must NOT fabricate a rejected row (§3)"
+
+
+def test_record_rejected_write_failure_is_best_effort_distinct_transient(
 	db_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-	"""The carve-out is operator-visible: a failed audit INSERT emits the
-	`rejected_audit_write_failed` ERROR line (from live.state, via the
-	adapter's pure delegation — the adapter adds no log of its own)."""
+	"""C6 (E): a TRANSIENT DB/disk write failure in the CAS is caller-owned
+	best-effort — log ERROR (the DISTINCT transient "DB/disk fault" wording,
+	NOT the UNEXPECTED/API-drift one), do NOT raise (a rejected order holds no
+	position ⇒ not funds-at-risk; PR#34 ``438d843`` precedent). B's
+	``transition_pending_to_rejected`` owns only a lost-CAS-race WARNING
+	no-op, so the store owns the try/except."""
 	import logging
 
 	store = SQLiteTradeStore(db_path)
 	try:
+		coid = "strat_34-KXSOL15M-26MAY16H12-rejlog00"
+		store.record_intent(**_intent_kwargs(client_order_id=coid))
+		# DROP the table so the CAS SELECT/UPDATE genuinely fails with a
+		# sqlite3.Error (the transient/disk carve-out branch).
 		store._conn.execute("DROP TABLE live_trades")
 		store._conn.commit()
-		with caplog.at_level(logging.ERROR, logger="edge_catcher.live.state"):
+		with caplog.at_level(logging.ERROR, logger="edge_catcher.live.store"):
+			# MUST NOT raise — best-effort per §3.1.
 			store.record_rejected(
-				**_locked_rejected_kwargs(
-					client_order_id="strat_34-KXSOL15M-26MAY16H12-rejlog00"
-				)
+				**_locked_rejected_kwargs(client_order_id=coid)
 			)
 	finally:
 		store.close()
-	assert any(
-		"rejected_audit_write_failed" in rec.message for rec in caplog.records
-	), "carve-out must surface the audit gap at ERROR (operator-visible)"
+	store_errs = [
+		r for r in caplog.records
+		if r.name == "edge_catcher.live.store" and r.levelname == "ERROR"
+	]
+	assert store_errs, (
+		"a write-failure in record_rejected must be logged at ERROR (audit "
+		"gap), not silently swallowed"
+	)
+	msg = store_errs[-1].getMessage()
+	# The DISTINCT transient carve-out wording, NOT the UNEXPECTED one.
+	assert "DB/disk fault" in msg and "transient" in msg, (
+		f"a sqlite3.Error must use the transient DB/disk carve-out — {msg!r}"
+	)
+	assert "UNEXPECTED" not in msg, (
+		f"sqlite3.Error must NOT be the UNEXPECTED/API-drift class — {msg!r}"
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -441,88 +612,166 @@ def test_close_is_idempotent(db_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# #7 — other implemented live-path methods + NotImplementedError stubs
+# #7 — the post-fill live lifecycle methods are IMPLEMENTED (E keystone).
+#
+# C6 (A)+(B): the PR-5→PR-6 forcing-function PAIR
+# (``test_pr6_contract_live_lifecycle_methods_are_failloud_until_e_wires`` +
+# the ``strict=True`` xfail twin
+# ``test_pr6_contract_xfails_when_e_implements_live_lifecycle``) has done its
+# job: C2 (``record_trade`` CAS pending→open) + C5 (``exit_trade`` /
+# ``settle_trade`` / ``get_trade_by_id`` route to B's ``record_close`` /
+# canonical by-id read) implemented the live lifecycle, so E-obligation #1 is
+# MET. Per spec §3.1 / the plan the strict-xfail twin XPASSes once E delivers
+# the end-state and MUST be deleted in the same PR — it is gone. This
+# rewritten green-guard replaces the old ``_LIVE_LIFECYCLE_CALLS`` fail-loud
+# expectation with CONCRETE assertions of the IMPLEMENTED behaviour (mirrors
+# the ``tests/test_live_store_lifecycle.py`` canonical patterns). The
+# strategy-state methods (``save_state`` / ``load_state`` /
+# ``load_all_states``) are resolved by SC-E3b (spec §10 / CR-3) to the
+# spec-intended Phase-1 no-op (live starts FLAT every boot — positions
+# rehydrate from ``live_trades.db`` via B's reconciler, NOT a store-owned
+# ``strategy_state`` table) — positively asserted in
+# ``test_strategy_state_methods_are_phase1_intentional_noop`` (itself the
+# C6-precedent rewrite of the now-removed
+# ``test_strategy_state_methods_remain_fail_loud`` forcing-function guard).
 # ---------------------------------------------------------------------------
 
 
-_LIVE_LIFECYCLE_CALLS = (
-	lambda s: s.record_trade(
+def _seed_intent_then_open(
+	store: SQLiteTradeStore, *, coid: str, kalshi_id: str
+) -> int:
+	"""Drive a realistic OPEN live row through the real C1→C2 path (the same
+	idiom as ``tests/test_live_store_lifecycle.py::_seed_open_live_row``): C1
+	``record_intent`` INSERTs the ``pending`` row; C2 ``record_trade``
+	CAS-transitions it to ``open`` with the authoritative fill recorded.
+	Returns the row id. With ``fill_size=10, blended_entry=42``: C2 books
+	``entry_fee_cents = int(round(STANDARD_FEE.calculate(42,10))) = 18`` and
+	B's ``transition_pending_to_open`` seeds
+	``entry_fee_remaining_cents = 18`` (the remainder ``record_close``
+	consumes)."""
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+	tid = store.record_trade(
 		ticker="KXSOL15M-26MAY16H12",
 		entry_price=42,
 		strategy="strat_34",
 		side="yes",
 		series_ticker="KXSOL15M",
+		intended_size=10,
+		fill_size=10,
+		blended_entry=42,
+		fill_pct=1.0,
+		slippage_cents=0,
 		now=_NOW,
-	),
-	lambda s: s.exit_trade(1, 50, now=_NOW),
-	lambda s: s.get_trade_by_id(1),
-	lambda s: s.settle_trade(1, "yes", now=_NOW),
-)
+		client_order_id=coid,
+		kalshi_order_id=kalshi_id,
+	)
+	return int(tid)
 
 
-def test_pr6_contract_live_lifecycle_methods_are_failloud_until_e_wires(
-	store: SQLiteTradeStore,
+def test_pr6_live_lifecycle_methods_implemented(
+	store: SQLiteTradeStore, db_path: Path
 ) -> None:
-	"""FIX-2 ENFORCEMENT (part 1 of 2 — the always-on regression guard).
+	"""E keystone end-state (was the FIX-2 fail-loud guard +
+	``_LIVE_LIFECYCLE_CALLS``): the four post-fill live lifecycle methods are
+	now IMPLEMENTED, not fail-loud. Concretely asserts the REAL implemented
+	behaviour on a seeded ``live_trades.db`` (no mocks):
 
-	Merged ``engine/dispatch.py`` has NO live-vs-paper branching:
-	``_handle_signal`` sends every exit Signal to ``_handle_exit`` (which
-	calls ``store.exit_trade`` then ``store.get_trade_by_id``) and the
-	filled branch calls the paper-shaped ``store.record_trade`` — all of
-	which MUST be fail-loud on this adapter until E (PR 6) rewires those
-	live arms to B's real ``live.state`` functions (see ``live/store.py``
-	``PR-5 → PR-6 (E) CONTRACT``).
-
-	This is a NORMAL test (green now). It is the unambiguous enforcement:
-	the moment anyone makes ``record_trade`` / ``exit_trade`` /
-	``get_trade_by_id`` / ``settle_trade`` reachable-or-implemented on this
-	adapter WITHOUT also addressing the dispatch live-arm rewire, one of
-	these ``pytest.raises`` stops matching and this test goes RED — a hard,
-	unmissable CI failure that drags the contract back into review.
-	Companion ``..._xfails_when_e_implements_them`` below is the
-	strict-xfail twin that flips specifically when E delivers the
-	end-state, mirroring the 4.C reporting-CLI-gap pattern.
-
-	(Why split: a SINGLE ``strict=True`` xfail asserting "still fail-loud"
-	is logically inverted — its body PASSES today, so strict-xfail would
-	mark it XPASS=fail on the clean baseline. The clean, correct
-	construction is this always-green guard PLUS the separate strict xfail
-	that asserts the desired END state — fails now → XFAIL, passes when E
-	implements → XPASS → strict CI failure.)
+	* ``record_trade`` CAS-transitions the C1 ``pending`` row → ``open``
+	  (exactly one row, ``status='open'``, real ``kalshi_order_id`` set,
+	  entry fee booked via B's canonical convention);
+	* ``get_trade_by_id`` returns the paper-shaped 18-key dict (and ``None``
+	  for an absent id);
+	* ``exit_trade`` closes it via B ``record_close`` (won/lost + pnl +
+	  entry-fee-remainder consumed);
+	* ``settle_trade`` settles a fresh open row (binary 100/0,
+	  ``exit_fee_cents=0``, ``exit_reason='settlement'``).
 	"""
-	for call in _LIVE_LIFECYCLE_CALLS:
-		with pytest.raises(NotImplementedError, match="live-only"):
-			call(store)
+	# --- record_trade: CAS pending → open (NOT a 2nd INSERT). ---
+	coid = "strat_34-KXSOL15M-26MAY16H12-pr6a"
+	tid = _seed_intent_then_open(store, coid=coid, kalshi_id="ord-kx-pr6a")
+	rows = store._conn.execute(
+		"SELECT status, kalshi_order_id FROM live_trades "
+		"WHERE client_order_id = ?",
+		(coid,),
+	).fetchall()
+	assert rows == [("open", "ord-kx-pr6a")], (
+		"record_trade must CAS the C1 row to open with the real "
+		"kalshi_order_id — exactly one row, no competing INSERT"
+	)
+	open_row = _query_one(
+		db_path,
+		"SELECT status, fill_size, blended_entry_cents, entry_fee_cents, "
+		"entry_fee_remaining_cents FROM live_trades WHERE id = ?",
+		(tid,),
+	)
+	assert open_row["status"] == "open"
+	assert open_row["fill_size"] == 10
+	assert open_row["blended_entry_cents"] == 42
+	# B's canonical entry-fee convention int(round(STANDARD_FEE.calc(42,10))).
+	assert open_row["entry_fee_cents"] == 18
+	assert open_row["entry_fee_remaining_cents"] == 18
 
+	# --- get_trade_by_id: paper-shaped 18-key dict; None for absent id. ---
+	d = store.get_trade_by_id(tid)
+	assert d is not None
+	assert d["id"] == tid
+	assert d["ticker"] == "KXSOL15M-26MAY16H12"
+	assert d["entry_price"] == 42  # aliased from entry_price_cents
+	assert d["series_ticker"] == "KXSOL15M"  # aliased from series
+	assert d["blended_entry"] == 42
+	assert d["status"] == "open"
+	assert d["book_depth"] is None  # no book-walk for live IOC fills
+	# Closed-trade keys present (stable 18-key shape) but None on an open row.
+	assert d["exit_price"] is None and d["exit_time"] is None
+	assert d["pnl_cents"] is None
+	assert set(d.keys()) == {
+		"id", "ticker", "entry_price", "strategy", "side", "series_ticker",
+		"entry_fee_cents", "intended_size", "fill_size", "blended_entry",
+		"book_depth", "fill_pct", "slippage_cents", "status", "entry_time",
+		"exit_price", "exit_time", "pnl_cents",
+	}
+	assert store.get_trade_by_id(999_999) is None  # paper-parity: not a raise
 
-@pytest.mark.xfail(
-	strict=True,
-	reason="PR-6/E must rewire dispatch live arms; see live/store.py "
-	"PR-5 → PR-6 (E) CONTRACT. Asserts the desired END state (the four "
-	"live lifecycle methods no longer raise). Fails now (still fail-loud) "
-	"→ XFAIL (green). XPASSes (=> strict CI failure) the day E makes them "
-	"reachable/implemented, forcing this contract back into review.",
-)
-def test_pr6_contract_xfails_when_e_implements_live_lifecycle(
-	store: SQLiteTradeStore,
-) -> None:
-	"""FIX-2 ENFORCEMENT (part 2 of 2 — the strict-xfail forcing function).
+	# --- exit_trade: routes to B record_close (full close). ---
+	# exit_fee = int(round(STANDARD_FEE.calculate(60,10))) = 17;
+	# pnl = 10*(60-42) - 18 (entry_fee_remaining) - 17 = 145; 60 > 42 → won.
+	store.exit_trade(tid, 60, now=_NOW)
+	closed = _query_one(
+		db_path,
+		"SELECT status, exit_price_cents, exit_fee_cents, pnl_cents, "
+		"exit_reason, entry_fee_cents, entry_fee_remaining_cents "
+		"FROM live_trades WHERE id = ?",
+		(tid,),
+	)
+	assert closed["status"] == "won"
+	assert closed["exit_price_cents"] == 60
+	assert closed["exit_fee_cents"] == 17
+	assert closed["pnl_cents"] == 145
+	assert closed["exit_reason"] == "ws_exit_fill"
+	# Entry-fee-remainder CONSUMED by B's record_close (the load-bearing
+	# B-CAS-close behaviour the paper single-UPDATE does NOT have).
+	assert closed["entry_fee_cents"] == 18
+	assert closed["entry_fee_remaining_cents"] == 0
 
-	Asserts the post-E END state: none of the four paper-shaped live
-	lifecycle methods raise ``NotImplementedError`` any more. TODAY they
-	all DO raise, so this body fails → ``strict=True`` xfail records XFAIL
-	(expected; suite stays green). When E (PR 6) rewires dispatch and
-	implements/redirects these so they no longer fail-loud, this body
-	passes → XPASS → ``strict=True`` converts XPASS into a CI FAILURE.
-	That red is the forcing function: the E-obligation is met, so this
-	PR-5→PR-6 contract block (and this pair of tests) must be revisited /
-	retired. "Fixed" == "xpass" == "red", per the task's enforcement spec.
-	"""
-	for call in _LIVE_LIFECYCLE_CALLS:
-		# No pytest.raises: if any still raises NotImplementedError it
-		# propagates, the body fails, and strict-xfail keeps this XFAIL
-		# (green) — i.e. the gap is still open, which is correct today.
-		call(store)
+	# --- settle_trade: routes to B record_close (settlement close). ---
+	coid2 = "strat_34-KXSOL15M-26MAY16H12-pr6s"
+	tid2 = _seed_intent_then_open(store, coid=coid2, kalshi_id="ord-kx-pr6s")
+	# Market resolves YES → settlement_price 100, yes-side wins:
+	# pnl = 10*(100-42) - 18 (entry_fee_remaining) = 562.
+	store.settle_trade(tid2, "yes", now=_NOW)
+	settled = _query_one(
+		db_path,
+		"SELECT status, exit_price_cents, exit_fee_cents, exit_reason, "
+		"pnl_cents, entry_fee_remaining_cents "
+		"FROM live_trades WHERE id = ?",
+		(tid2,),
+	)
+	assert settled["status"] == "won"
+	assert settled["exit_price_cents"] == 100
+	assert settled["exit_fee_cents"] == 0  # Kalshi charges no settlement fee
+	assert settled["exit_reason"] == "settlement"
+	assert settled["pnl_cents"] == 562
+	assert settled["entry_fee_remaining_cents"] == 0
 
 
 def test_get_open_trades_returns_open_rows(
@@ -661,25 +910,71 @@ def test_get_open_trades_for_filters_by_strategy_and_ticker(
 	assert store.get_open_trades_for("strat_34", "KXDOGE-NOPE") == []
 
 
-@pytest.mark.parametrize(
-	"method_call",
-	[
-		lambda s: s.settle_trade(1, "yes", now=_NOW),
-		lambda s: s.exit_trade(1, 50, now=_NOW),
-		lambda s: s.get_trade_by_id(1),
-		lambda s: s.save_state("strat_34", {"k": 1}),
-		lambda s: s.load_state("strat_34"),
-		lambda s: s.load_all_states(),
-	],
-)
-def test_paper_path_methods_raise_not_implemented(
-	store: SQLiteTradeStore, method_call: Any
+def test_strategy_state_methods_are_phase1_intentional_noop(
+	store: SQLiteTradeStore,
 ) -> None:
-	"""Paper-path Protocol methods with no live-money-correct live.state
-	mapping (live close/exit/settle are CAS-guarded WS-handler/reconciliation
-	driven against live_trades.db directly, NOT store.settle_trade-shaped;
-	live state is in live_trades.db, not the store's strategy_state). They
-	raise a clear NotImplementedError rather than silently no-op'ing into a
-	wrong real-money result. E wires the live path so these are unreachable."""
-	with pytest.raises(NotImplementedError, match="live-only"):
-		method_call(store)
+	"""SC-E3b (spec §10 / CR-3) end-state — REWRITTEN from the C6-era
+	forcing-function ``test_strategy_state_methods_remain_fail_loud`` (the
+	same C6-precedent this file's own header at :625 sanctions: a
+	forcing-function test is REWRITTEN — not silently deleted — by the PR that
+	delivers the end-state it guarded the absence of; the OLD test pinned the
+	pre-E3 ``NotImplementedError("live-only")`` state, SC-E3b explicitly
+	resolves those 3 methods to the Phase-1 no-op, so the assertion INVERTS).
+
+	Failure mode prevented: a future edit silently turns a strategy-state
+	method into something OTHER than the spec-intended Phase-1 no-op (e.g.
+	re-raises ``NotImplementedError`` and wedges live boot — ``run_engine``'s
+	``store.load_all_states()`` is on the boot path — OR starts persisting a
+	bogus ``strategy_state`` row that a flat-start restart then mis-rehydrates
+	from). The SC-E3b/CR-3 contract: live starts FLAT every boot (zero
+	inherited positions; the open book rehydrates from ``live_trades.db`` via
+	B's reconciler, NOT a store-owned ``strategy_state`` table). Strategy
+	state is reconstructable ⇒ a restart is a flat start; this is the
+	spec-INTENDED behaviour (the store stays the sole live-vs-paper seam — the
+	§1/§3 keystone — so ``run_engine`` carries NO ``if live:`` strategy-state
+	branch), NOT a regression.
+
+	(Asserts the no-op is INTENTIONAL: ``load_all_states`` → ``{}``,
+	``save_state`` → ``None`` AND writes NO ``strategy_state`` row,
+	``load_state`` → the empty-state default ``{}`` — matching the paper
+	``TradeStore.load_state`` "no state" contract + the
+	``TradeStoreProtocol`` ``dict[str, Any]`` return. The C5 money path —
+	``record_*`` / ``exit_trade`` / ``settle_trade`` / ``get_*`` — is
+	UNTOUCHED by SC-E3b and stays positively asserted by
+	``test_pr6_live_lifecycle_methods_implemented`` + the
+	``tests/test_live_store_lifecycle.py`` C5 suite.)"""
+	# load_all_states → {} (seeds run_engine's `all_states.get(name, {})` flat)
+	assert store.load_all_states() == {}, (
+		"SC-E3b: load_all_states must return {} (Phase-1 flat start — live "
+		"rehydrates from live_trades.db via B's reconciler, not a "
+		"strategy_state table)"
+	)
+
+	# save_state → no-op returning None, persisting NOTHING (no strategy_state
+	# row — a flat-start restart must NOT mis-rehydrate a stale strategy row).
+	assert store.save_state("strat_34", {"k": 1}) is None, (
+		"SC-E3b: save_state is a Phase-1 no-op returning None"
+	)
+	tables = {
+		r[0]
+		for r in store._conn.execute(
+			"SELECT name FROM sqlite_master WHERE type='table'"
+		).fetchall()
+	}
+	assert "strategy_state" not in tables, (
+		"SC-E3b: save_state must write NO strategy_state row/table (Phase-1 "
+		"no-op — live has no store-owned strategy-state persistence)"
+	)
+
+	# load_state → the empty-state default {} (paper TradeStore.load_state "no
+	# state" contract + the TradeStoreProtocol dict[str, Any] return type).
+	assert store.load_state("strat_34") == {}, (
+		"SC-E3b: load_state must return the empty-state default {} (Phase-1 "
+		"flat start), matching paper TradeStore.load_state's no-state return"
+	)
+	# Even after a save_state call it stays {} (the no-op persisted nothing).
+	store.save_state("strat_34", {"k": 1})
+	assert store.load_state("strat_34") == {}, (
+		"SC-E3b: load_state stays {} after save_state — the Phase-1 no-op "
+		"round-trip persists nothing (intentional flat-start, not a bug)"
+	)

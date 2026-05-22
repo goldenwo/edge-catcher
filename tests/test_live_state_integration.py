@@ -43,6 +43,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from edge_catcher.engine.dispatch import _handle_enter
+from edge_catcher.engine.execution import _make_client_order_id
 from edge_catcher.engine.executor import OrderResult
 from edge_catcher.engine.strategy_base import Signal
 from edge_catcher.live.state import (
@@ -153,14 +154,27 @@ def _ctx() -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
-	live_db_path: Path, mock_kalshi_ws: MockKalshiWS
+	live_db_path: Path, mock_kalshi_ws: MockKalshiWS, monkeypatch
 ) -> None:
 	"""End-to-end through the REAL merged machine + the REAL
-	``SQLiteTradeStore`` adapter (spec §922 flow verbatim):
+	``SQLiteTradeStore`` adapter (spec §922 flow), updated to the E keystone
+	insert-pending-then-CAS model. POST-D1 (commit ``1802920``) dispatch's
+	``_handle_enter`` ITSELF performs the unconditional pre-place
+	``record_intent`` INSERT — the test no longer seeds it manually; it
+	asserts dispatch's own behavior:
 
-	1. D returns ``pending`` (NetworkError) → dispatch ``_handle_enter``
-	   calls the real ``SQLiteTradeStore.record_pending`` (→ pure delegation
-	   to ``live.state.record_pending``) → a real ``pending`` row.
+	1. dispatch ``_handle_enter`` UNCONDITIONALLY calls the real
+	   ``SQLiteTradeStore.record_intent`` BEFORE ``place()`` (D1 / spec §3
+	   keystone), durably INSERTing the ``pending`` row keyed by
+	   ``client_order_id``. D then returns ``pending`` (NetworkError) →
+	   dispatch calls the real ``SQLiteTradeStore.record_pending``, which
+	   under the E keystone is an idempotent ``kalshi_order_id`` BACKFILL of
+	   the row dispatch's own ``record_intent`` just inserted (NOT a 2nd
+	   INSERT) — ``status`` STAYS ``pending`` (fill state still unknown;
+	   ``order_id=None`` ⇒ nothing to backfill here). ``uuid4`` is stubbed so
+	   the coid is deterministic (exactly as ``_make_client_order_id``'s
+	   docstring sanctions for tests), letting the test assert the
+	   dispatch-created row is keyed by the EXACT coid dispatch generates.
 	2. Kalshi WS ``fill`` for that client_order_id → real ``on_fill_event``
 	   → real ``transition_pending_to_open`` (carrying the real
 	   ``kalshi_order_id`` FROM the WS event, NOT synthesized) → row ``open``.
@@ -169,10 +183,32 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 	   ``won``/``lost`` with P&L.
 
 	No fail-loud adapter method is reached: the pending OrderResult routes
-	dispatch to ``store.record_pending`` (live-correct on this adapter); the
-	open/close transitions go through ``live.state`` via the WS handlers,
-	never ``store.record_trade`` / ``store.exit_trade``.
+	dispatch to ``store.record_pending`` (live-correct backfill on this
+	adapter); the open/close transitions go through ``live.state`` via the WS
+	handlers, never ``store.record_trade`` / ``store.exit_trade``.
 	"""
+	import uuid as _uuid
+
+	# Deterministic client_order_id: stub uuid4 so the coid dispatch's
+	# _make_client_order_id generates is known up-front (its docstring
+	# explicitly sanctions mocking uuid.uuid4 for tests that need a
+	# deterministic id). POST-D1 dispatch's _handle_enter owns the pre-place
+	# record_intent INSERT; this lets the test assert the dispatch-created
+	# pending row is keyed by the EXACT coid dispatch generates + then
+	# backfills via record_pending.
+	class _FixedUUID:
+		hex = "deadbeefcafef00d"
+
+	monkeypatch.setattr(_uuid, "uuid4", lambda: _FixedUUID())
+	# Derive the expected coid from the PRODUCTION function under the same
+	# uuid4 stub, with the exact args dispatch's ``_handle_enter`` passes it
+	# (``_make_client_order_id(signal.strategy, signal.ticker, now)`` —
+	# sourced from ``_entry_signal()`` so a strategy/ticker rename or a
+	# benign format change tracks automatically instead of breaking a
+	# behaviour-correct test).
+	_sig = _entry_signal()
+	expected_coid = _make_client_order_id(_sig.strategy, _sig.ticker, _NOW)
+
 	store = SQLiteTradeStore(live_db_path)
 	try:
 		conn = store._conn  # the store's own held connection (E-shaped: the
@@ -186,9 +222,14 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 			on_settlement=on_settlement_event,
 		)
 
-		# --- 1. Dispatch the entry; D's executor returns pending
-		# (NetworkError: order_id=None) so dispatch takes the real
-		# ``SQLiteTradeStore.record_pending`` path (→ live.state.record_pending).
+		# --- 1. Dispatch the entry. POST-D1 ``_handle_enter`` ITSELF makes the
+		# unconditional pre-place ``record_intent`` INSERT (D1 / spec §3
+		# keystone) BEFORE calling ``place()``; D's executor then returns
+		# pending (NetworkError: order_id=None) so dispatch takes the real
+		# ``SQLiteTradeStore.record_pending`` path — an idempotent backfill of
+		# the row dispatch's own ``record_intent`` just inserted (order_id=None
+		# ⇒ nothing to backfill, stays pending). No manual seed: the test
+		# asserts dispatch's own pre-place behavior, not a hand-inserted row.
 		executor = MagicMock()
 		executor.place = AsyncMock(
 			return_value=OrderResult(
@@ -207,9 +248,17 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 			executor, now=_NOW,
 		)
 
-		# ``SQLiteTradeStore.record_pending`` returns None (pure delegation);
-		# resolve the persisted row from the DB. ``_handle_enter`` inserts
-		# exactly one row, so the single pending row IS dispatch's write.
+		# dispatch's pre-place ``record_intent`` INSERT + its post-place
+		# ``record_pending`` BACKFILL operated on ONE row, NOT two INSERTs:
+		# exactly ONE row, created BY dispatch, still pending, kalshi_order_id
+		# still NULL (NetworkError returned no order_id).
+		assert (
+			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			== 1
+		), (
+			"dispatch's record_intent INSERT + record_pending BACKFILL must "
+			"operate on ONE row, not mint a 2nd (D1 / §3/§4.2)"
+		)
 		pending_id = conn.execute(
 			"SELECT id FROM live_trades WHERE status='pending'"
 		).fetchone()[0]
@@ -217,7 +266,10 @@ async def test_26_dispatch_pending_then_ws_fill_then_exit_close(
 		assert pending_row["status"] == "pending"
 		assert pending_row["kalshi_order_id"] is None
 		coid = str(pending_row["client_order_id"])
-		assert coid, "dispatch must have generated a client_order_id"
+		assert coid == expected_coid, (
+			"the single pending row must be the one dispatch's pre-place "
+			"record_intent (D1) created, keyed by the coid dispatch generates"
+		)
 
 		# --- 2. Kalshi confirms the entry via a WS fill → real on_fill_event
 		# → real transition_pending_to_open (kalshi_order_id is the WS event's
@@ -269,28 +321,27 @@ async def test_26_filled_entry_then_settlement_close(
 	PR-6 wiring will drive it (spec §"To E" / ``store.py``'s
 	``PR-5 → PR-6 (E) CONTRACT``), through the REAL ``SQLiteTradeStore``.
 
-	D returns ``filled`` for a Kalshi IOC entry. The merged
-	``engine/dispatch.py`` filled branch calls the paper-shaped
-	``store.record_trade(...)``, which the real ``SQLiteTradeStore``
-	**deliberately fails loud on** (``NotImplementedError``) — the
-	paper-shaped Protocol method structurally cannot carry D's real
-	``OrderResult.order_id`` (→ ``kalshi_order_id``) / ``client_order_id``,
-	and persisting a *synthesized* id would mint a funds-at-risk ``open``
-	row 4.B's reconciler can never reconcile. Wiring dispatch's filled
-	branch to ``live.state.record_open`` with D's real values is **E's job
-	(PR 6)**; PR 5's dispatch has no live-vs-paper branching.
+	D returns ``filled`` for a Kalshi IOC entry. Under the E keystone the
+	filled-entry write is a CAS ``pending → open`` TRANSITION of the C1
+	``record_intent`` row (located by ``client_order_id``), via
+	``live.state.transition_pending_to_open`` — NOT a synthesizing insert and
+	NOT fail-loud. C6 rewrite (D): the prior
+	``pytest.raises(NotImplementedError, match="record_trade")`` truth-test
+	pinned the SUPERSEDED B-era fail-loud model; C2 implemented the real CAS,
+	so this now drives + asserts the IMPLEMENTED ``store.record_trade`` CAS
+	path with D's real ``OrderResult.order_id`` / ``client_order_id`` (the
+	exact call E's filled-branch wiring will make — PR-5 dispatch does not yet
+	pass the additive identity kwargs, so the test makes the store call
+	directly, the same idiom as
+	``tests/test_live_store_lifecycle.py::_seed_open_live_row``), then drives
+	the genuine filled→settlement lifecycle:
 
-	So this test:
-
-	* asserts the fail-loud guard is real — dispatching a ``filled``
-	  ``OrderResult`` against the live adapter raises ``NotImplementedError``
-	  (proving the test is NOT secretly relying on a paper-shaped write that
-	  the live architecture forbids — the whole point of the truth-test);
-	* then drives the genuine E-shaped filled→settlement lifecycle:
-	  ``live.state.record_open`` with D's real ``OrderResult.order_id`` /
-	  ``client_order_id`` (the exact call E will wire — same idiom as
-	  ``tests/test_live_store.py::_seed_open_row``) → real
-	  ``on_settlement_event`` → real ``record_close`` at the binary price.
+	1. C1 ``record_intent`` durably INSERTs the ``pending`` row.
+	2. ``store.record_trade(...)`` with D's real ids CAS-transitions that row
+	   ``pending → open`` (exactly one row, no competing INSERT).
+	3. Market settles YES → real ``on_settlement_event`` → real
+	   ``record_close`` at the binary price (the genuine settlement body,
+	   preserved verbatim).
 	"""
 	store = SQLiteTradeStore(live_db_path)
 	try:
@@ -312,53 +363,67 @@ async def test_26_filled_entry_then_settlement_close(
 			slippage_cents=0,
 			order_id="kx-entry-26b",
 		)
-		executor = MagicMock()
-		executor.place = AsyncMock(return_value=filled)
-
-		# --- Truth-test: PR-5 dispatch's filled branch hits the paper-shaped
-		# store.record_trade, which the live adapter fails loud on. We do NOT
-		# work around this with a synthesizing shim or by catching it as a
-		# pass — reaching it is the SIGNAL that the filled-entry write is
-		# E's-to-wire (live.state.record_open), not a store.record_trade call.
-		with pytest.raises(NotImplementedError, match="record_trade"):
-			await _handle_enter(
-				_entry_signal(), _ctx(), store, {"_metrics": MagicMock()},
-				executor, now=_NOW,
-			)
-		# The fail-loud guard wrote nothing: no half-persisted row.
-		assert (
-			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
-			== 0
-		)
-
-		# --- Genuine E-shaped filled-entry persistence: live.state.record_open
-		# with D's REAL OrderResult.order_id (→ kalshi_order_id) +
-		# client_order_id (NOT synthesized) — the exact call E's PR-6 wiring
-		# will make for the filled branch.
 		signal = _entry_signal()
-		open_id = record_open(
-			conn,
+		coid = "strat_34-KXSOL15M-26MAY16H12-itg26b"
+
+		# --- 1. C1 pre-place durability hook: record_intent INSERTs the
+		# pending row keyed by client_order_id (the row record_trade's CAS
+		# transitions). PR-5 dispatch doesn't wire the pre-place hook yet, so
+		# the test performs the C1 step explicitly.
+		store.record_intent(
 			ticker=signal.ticker,
 			series=signal.series,
 			strategy=signal.strategy,
 			side=signal.side,
 			intended_size=filled.intended_size,
-			fill_size=filled.filled_size,
-			entry_price_cents=signal.entry_price_cents or 0,
-			blended_entry_cents=filled.blended_entry_cents,
-			slippage_cents=filled.slippage_cents,
-			fill_pct=filled.fill_pct,
-			stop_loss_distance_cents=signal.stop_loss_distance_cents or 0,
-			client_order_id="strat_34-KXSOL15M-26MAY16H12-itg26b",
-			kalshi_order_id=filled.order_id or "",  # D's REAL Kalshi order id
+			entry_price_cents=signal.entry_price_cents,
+			stop_loss_distance_cents=signal.stop_loss_distance_cents,
+			client_order_id=coid,
 			placed_at_utc=_NOW_ISO,
-			entry_time=_NOW_ISO,
-			entry_fee_cents=0,
 		)
-		assert _row(conn, open_id)["status"] == "open"
+		assert (
+			conn.execute(
+				"SELECT status FROM live_trades WHERE client_order_id=?",
+				(coid,),
+			).fetchone()[0]
+			== "pending"
+		)
 
-		# Market settles YES (100¢) — yes-side row wins, via the real
-		# on_settlement_event → real record_close.
+		# --- 2. The IMPLEMENTED E-keystone filled-entry write: the live
+		# store.record_trade CAS-transitions the C1 pending row → open with
+		# D's REAL OrderResult.order_id (→ kalshi_order_id) + client_order_id
+		# (NOT synthesized) — the exact call E's PR-6 filled-branch wiring
+		# will make. NOT a competing insert, NOT fail-loud (C2).
+		open_id = store.record_trade(
+			ticker=signal.ticker,
+			entry_price=signal.entry_price_cents or 0,
+			strategy=signal.strategy,
+			side=signal.side,
+			series_ticker=signal.series,
+			intended_size=filled.intended_size,
+			fill_size=filled.filled_size,
+			blended_entry=filled.blended_entry_cents,
+			fill_pct=filled.fill_pct,
+			slippage_cents=filled.slippage_cents,
+			now=_NOW,
+			client_order_id=coid,
+			kalshi_order_id=filled.order_id,  # D's REAL Kalshi order id
+		)
+		# CAS transition, NOT a 2nd INSERT: exactly one row, now open, with
+		# D's real kalshi_order_id, the same row id record_intent created.
+		assert (
+			conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0]
+			== 1
+		), "record_trade must CAS the C1 row, not mint a 2nd (§3/§4.2)"
+		opened = _row(conn, open_id)
+		assert opened["status"] == "open"
+		assert opened["kalshi_order_id"] == "kx-entry-26b"
+		assert opened["fill_size"] == 10
+		assert opened["blended_entry_cents"] == 42
+
+		# --- 3. Market settles YES (100¢) — yes-side row wins, via the real
+		# on_settlement_event → real record_close (genuine settlement body,
+		# preserved verbatim from the original test).
 		await mock_kalshi_ws.emit_settlement(
 			ticker="KXSOL15M-26MAY16H12", settlement_price_cents=100
 		)
@@ -543,43 +608,17 @@ def test_27_live_schema_readable_read_only(
 		ro.close()
 
 
-@pytest.mark.xfail(
-	reason=(
-		"ORCHESTRATOR FINDING (not a 4.C defect): the merged reporting CLI "
-		"(edge_catcher/reporting/__init__.py) hard-queries `FROM paper_trades` "
-		"with `entry_price`/`series_ticker`; the 0003 migration created table "
-		"`live_trades` with `entry_price_cents`/`series`, so the CLI raises "
-		"`no such table: paper_trades` against a live_trades.db. It also opens "
-		"plain sqlite3.connect, not the spec-mandated ?mode=ro URI. Spec §186 "
-		"'mirror paper schema = single --db flip works unmodified' is false vs "
-		"merged code. The reporting CLI is out of 4.C scope (spec §32/§45, "
-		"git-tracked, own paper_trades test suite). xfail documents the gap "
-		"for the orchestrator rather than silently skipping the spec item."
-	),
-	strict=True,
-)
-def test_27_reporting_cli_db_flag_against_live_schema(
-	conn: sqlite3.Connection, live_db_path: Path
-) -> None:
-	"""Spec #27 as literally written: run the reporting CLI against a
-	live_trades.db and expect a clean report. Currently xfails because the
-	merged CLI queries `paper_trades` (see the module SCOPE NOTE). When the
-	orchestrator resolves the reporting↔live-schema gap (a compatibility
-	view, a `--table`/`--schema` flag, or a live-aware reporting path), flip
-	this to a passing assertion."""
-	_seed_closed_rows(conn)
-	result = subprocess.run(
-		[sys.executable, "-m", "edge_catcher.reporting",
-		 "--db", str(live_db_path)],
-		capture_output=True,
-		text=True,
-		timeout=60,
-		cwd=str(Path(__file__).resolve().parents[1]),
-	)
-	# Spec intent: a clean exit-0 report against the live schema.
-	assert result.returncode == 0, (
-		f"reporting CLI failed against live schema: {result.stderr}"
-	)
+# NOTE: the thin spec-#27 reporting-CLI-against-live-schema test
+# (`test_27_reporting_cli_db_flag_against_live_schema`, returncode-only) was
+# REMOVED in Phase H4 — it is STRICTLY SUBSUMED by
+# `tests/test_reporting_live_view.py::test_reporting_cli_against_live_db`,
+# which runs the SAME `python -m edge_catcher.reporting --db <live.db>`
+# subprocess invocation against a freshly-migrated, representatively-SEEDED
+# live_trades.db (every status the H1 paper_trades VIEW handles) and asserts
+# BOTH `returncode == 0` AND value-sane report numbers. C6/H1 retired the
+# obligation-#2 strict-xfail forcing-function and added the H1 compat VIEW, so
+# the reporting↔live-schema gap this test documented is closed and the single
+# positive live-DB reporting test now lives with the Phase-H VIEW coverage.
 
 
 # ===========================================================================

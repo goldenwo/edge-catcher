@@ -82,6 +82,104 @@ log = logging.getLogger(__name__)
 _gate_unwired_warning_logged = False
 
 
+# ===========================================================================
+# Sub-project E / §4.2 L2 + §4.3 — money-safe SIGTERM drain primitives.
+#
+# Two engine-scoped objects the §4.3 graceful-shutdown drain (in
+# ``run_engine``'s ``finally:``) depends on:
+#
+#  1. ``_INFLIGHT_SECTIONS`` — the in-flight-section registry. ``_handle_enter``
+#     wraps EXACTLY the place→persist critical region (one IOC round-trip + one
+#     local sync write) in an ``asyncio.shield`` whose underlying task is
+#     registered here on entry and removed on completion (INCLUDING on
+#     exception). The §4.3 drain step (3) explicitly AWAITS every registered
+#     section to completion *before* ``store.close()`` — a SIGTERM landing
+#     EXACTLY between ``executor.place()`` returning ``filled`` and the local
+#     ``record_trade`` persist therefore cannot orphan a real-money position
+#     (the shielded task finishes the persist; the drain waits for it). Naive
+#     ``await asyncio.shield(x)`` is FORBIDDEN by the spec (it does NOT
+#     guarantee completion if the awaiting task is cancelled) — the DRAIN owns
+#     the await, via :func:`drain_inflight_sections`.
+#
+#  2. ``_OPERATOR_KILL`` — the engine-scoped operator-kill flag. §4.3 drain
+#     step (1) sets it FIRST (before awaiting the in-flight registry) so the
+#     risk gate rejects any NEW entry via ``KILL_OPERATOR`` and no new section
+#     enters the registry mid-drain. This is the concrete realization of the
+#     B/C→E ``RiskContext.operator_kill_active`` contract (risk.py:683): the
+#     value the per-call ``RiskContext`` reads is sourced from this flag. (The
+#     dispatch-side ``gate_entry`` call is deferred past E by design — see
+#     ``_handle_signal``'s docstring — so the load-bearing F2 guarantee that
+#     actually prevents new registry entries during the drain is step (1) here
+#     + step (2) stop-intake; the flag is wired so the gate is correct the
+#     moment that deferred call lands, with zero further change.)
+#
+# §9 G-parity: PAPER replay/backtest/CI never SIGTERM and ``PaperExecutor.place``
+# is synchronous, so the shield over an already-resolving sync path adds no
+# observable behavior (the section registers and immediately deregisters within
+# the one ``_handle_enter`` call with no suspension the paper path exercises),
+# and the operator-kill flag is only ever set by the signal-driven drain. The
+# non-signal path is byte-identical.
+# ===========================================================================
+
+# The currently-shielded place→persist section tasks. A set keyed by task
+# identity; ``_handle_enter`` add()s its shielded task on entry and discard()s
+# it on completion (incl. exception). The §4.3 drain awaits these.
+_INFLIGHT_SECTIONS: set[asyncio.Task[Any]] = set()
+
+
+class _OperatorKill:
+	"""Engine-scoped operator-kill flag (the §4.3 step-1 / B-C→E
+	``RiskContext.operator_kill_active`` source of truth).
+
+	One process-lifetime instance (``_OPERATOR_KILL``). ``activate()`` is
+	called by the §4.3 drain as its FIRST step; once active it stays active
+	(tripped-kill ≠ process exit is F3's scope — F2 only SETS it). The
+	per-gate-call ``RiskContext`` reads :attr:`active` so a NEW entry during
+	the drain is rejected with ``KILL_OPERATOR``.
+	"""
+
+	__slots__ = ("active",)
+
+	def __init__(self) -> None:
+		self.active: bool = False
+
+	def activate(self) -> None:
+		"""Idempotently mark operator-kill active (§4.3 drain step 1)."""
+		self.active = True
+
+
+# Process-lifetime singleton. Module-scoped (NOT engine-instance-scoped):
+# there is exactly one engine per process (one ``asyncio.run`` root), and the
+# future ``RiskContext`` construction reads it without threading a new param
+# through every handler — same rationale as ``_gate_unwired_warning_logged``.
+_OPERATOR_KILL = _OperatorKill()
+
+
+async def drain_inflight_sections() -> None:
+	"""Await EVERY registered in-flight place→persist section to completion.
+
+	The §4.3 drain step (3): the DRAIN owns the await (NOT a naive
+	``await asyncio.shield(...)`` inside ``_handle_enter`` — that does not
+	guarantee completion when the awaiting task is cancelled). Each section is
+	an ``asyncio.shield``-protected task that finishes its one IOC round-trip +
+	one local write regardless of the cancel; this gathers them so the durable
+	persist has happened BEFORE ``store.close()`` (step 6). ``return_exceptions``
+	keeps a single section's failure from masking the rest of the drain (the
+	failed section's own row-state is the reconciler's concern, not the drain's).
+	Snapshot the set first — a section deregisters itself as it completes, which
+	would mutate the set during iteration.
+	"""
+	sections = list(_INFLIGHT_SECTIONS)
+	if not sections:
+		return
+	log.info(
+		"shutdown drain: awaiting %d in-flight place→persist section(s) to "
+		"completion before store.close() (§4.3 step 3)",
+		len(sections),
+	)
+	await asyncio.gather(*sections, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers (relocated from engine.py verbatim)
 # ---------------------------------------------------------------------------
@@ -111,8 +209,17 @@ def _format_enter_message(
 	entry_price: int,
 	trade_id: int,
 	bullet: str,
+	mode_label: str = "PAPER",
 ) -> tuple[str, str]:
-	"""Format an ENTER event for log + Discord."""
+	"""Format an ENTER event for log + Discord.
+
+	``mode_label`` is the operator-facing mode of record ("PAPER"/"LIVE"),
+	a pure presentation token resolved by the caller from ``config`` (the
+	G1-blessed mode-of-record lookup — NOT a trade-path mode branch). It
+	defaults to ``"PAPER"`` so a caller that omits it can never accidentally
+	emit a LIVE alert (money-safe fail-safe); the production dispatch call
+	site always passes it explicitly.
+	"""
 	side_label = "YES" if side == "yes" else "NO"
 	tag = f"{strategy} | {series}"
 	cost = fill_size * entry_price
@@ -121,7 +228,7 @@ def _format_enter_message(
 		f"cost={cost}c [id={trade_id}]"
 	)
 	notify_line = (
-		f"{bullet} **[{tag}] PAPER BUY {side_label}** — "
+		f"{bullet} **[{tag}] {mode_label} BUY {side_label}** — "
 		f"`{ticker}` {fill_size} @ {entry_price}¢ ({cost}¢ cost)"
 	)
 	return log_line, notify_line
@@ -303,7 +410,18 @@ async def _handle_signal(
 				_gate_unwired_warning_logged = True
 		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
 	elif signal.action == "exit":
-		_handle_exit(signal, ctx, store, bullet, now=now)
+		# SC-D3 (E3): _handle_exit is now async (it awaits executor.place for
+		# the exit order — the §1 seam: PaperExecutor resolves synchronously /
+		# LiveExecutor places a real IOC + B's async path owns the close) and
+		# receives executor/config UNCONDITIONALLY (no mode branch — the
+		# executor absorbs the live-vs-paper difference; paper close stays
+		# byte-EXACT via the unconditional store.exit_trade). `risk` is NOT
+		# threaded: exits bypass the entry gate (kills cap NEW exposure; they
+		# never trap existing exposure — see this function's docstring).
+		await _handle_exit(
+			signal, ctx, store, bullet, now=now,
+			executor=executor, config=config,
+		)
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
@@ -353,6 +471,44 @@ async def _handle_enter(
 		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
 	)
 
+	# Pre-place durability hook (sub-project E / L1; spec §3 keystone + §3.1).
+	# Called UNCONDITIONALLY — no mode branch. The TradeStoreProtocol absorbs
+	# the paper/live difference: paper + InMemory record_intent is a strict
+	# no-op (return None — byte-exact-invisible to the parity sweep, §9), the
+	# live store durably INSERTs a `pending` row keyed by client_order_id
+	# BEFORE any order is sent. That makes a severed place→persist recoverable
+	# by B's reconciler via client_order_id — "no untracked real-money
+	# position" holds even if async code downstream is imperfect.
+	#
+	# 🚨 §3.1 FATAL: a live record_intent INSERT failure raises
+	# RecordPendingFailed. There is intentionally NO try/except here — it
+	# propagates UNCAUGHT so the entry ABORTS BEFORE `await executor.place`
+	# (nothing was sent ⇒ nothing at risk ⇒ a hard engine stop strands
+	# nothing — STRONGER than the post-place ghost-reject). It reaches
+	# process_tick's `except RecordPendingFailed: raise` (mirroring
+	# KillSwitchTripFailed) which halts the engine rather than re-entering
+	# the gate against unchanged DB state. intended_size is the pre-sizing
+	# PLACEHOLDER: req.size_contracts is 0 here (dispatch defers sizing to
+	# the executor pipeline; the sizing refactor lands later) — identical
+	# sizing-deferred convention as the engine-timeout pending row below;
+	# B's reconciler resolves the true size from Kalshi by client_order_id.
+	# entry_price_cents is the ORIGINAL Signal intent (NOT D's slippage-
+	# adjusted limit), matching the post-place record_pending contract.
+	# `now` is the threaded tick clock (module invariant L14-L18: handlers
+	# never read datetime.now()) so replay produces a byte-identical
+	# placed_at_utc to the original live execution.
+	store.record_intent(
+		ticker=signal.ticker,
+		series=signal.series,
+		strategy=signal.strategy,
+		side=signal.side,
+		intended_size=req.size_contracts,
+		entry_price_cents=signal.entry_price_cents,
+		stop_loss_distance_cents=signal.stop_loss_distance_cents,
+		client_order_id=req.client_order_id,
+		placed_at_utc=now.isoformat(),
+	)
+
 	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to
 	# never raise (every error path returns a defined OrderResult), but a
 	# bug in ``KalshiOrderClient``'s retry loop (infinite retry on a
@@ -364,69 +520,214 @@ async def _handle_enter(
 	# capping infinite-retry pathology. On timeout: synthesize a pending+None
 	# OrderResult (Kalshi may still have received the POST; we don't know
 	# the truth, so we don't lie) and let B's reconciler resolve it.
-	try:
-		result = await asyncio.wait_for(executor.place(req), timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS)
-	except asyncio.TimeoutError:
-		# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
-		# sizing to the executor pipeline; the real sizing refactor lands in
-		# PR 5/E). So the synthesized pending row carries intended_size=0.
-		# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
-		# reconciler MUST treat an engine_timeout pending row's
-		# intended_size=0 as "unknown — resolve the true size from Kalshi by
-		# client_order_id", same as the NetworkError-pending path. Flagged by
-		# the PR #38 pass-3 review (G2); the clean fix is gated on the
-		# deferred sizing refactor, so we surface it loudly instead.
-		log.warning(
-			"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
-			"synthesizing pending+None (intended_size=0, sizing-deferred "
-			"placeholder) for B's reconciler to resolve via client_order_id",
-			_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
-			req.client_order_id,
-		)
-		result = OrderResult(
-			status="pending",
-			intended_size=req.size_contracts,
-			filled_size=0,
-			blended_entry_cents=0,
-			fill_pct=0.0,
-			slippage_cents=0,
-			rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
-			order_id=None,
-		)
+	#
+	# ┌─ §4.2 L2 — the place→persist in-flight SHIELD (money-safety, maximal) ─┐
+	# The single worst-case for live funds: a SIGTERM landing EXACTLY between
+	# ``place()`` returning ``filled`` and the ``record_trade`` persist would
+	# orphan a real-money Kalshi position (C1 ``pending`` row never CAS'd to
+	# ``open``). L1's pre-place ``record_intent`` (above) already makes that
+	# RECOVERABLE by B's reconciler; L2 is the common-case optimization that
+	# AVOIDS the orphan window entirely: wrap EXACTLY the place→persist critical
+	# region (one IOC round-trip already bounded by ``_ENTRY_PLACEMENT_TIMEOUT_
+	# SECONDS`` + one local sync write — and NOTHING more) in an
+	# ``asyncio.shield``-protected task registered in ``_INFLIGHT_SECTIONS``.
+	# The §4.3 drain (run_engine's finally, step 3) explicitly AWAITS that
+	# registry to completion BEFORE ``store.close()`` — so even though THIS
+	# awaiting frame may be cancelled by the SIGTERM, the shielded task still
+	# finishes the persist and the drain waits for it. The DRAIN owns the await
+	# (``drain_inflight_sections``); a naive ``await asyncio.shield(x)`` HERE is
+	# forbidden by the spec (it does NOT guarantee completion when this frame is
+	# cancelled). §9 G-parity: ``PaperExecutor.place`` resolves synchronously,
+	# so the shielded task runs to completion before the very next loop tick —
+	# the section registers and immediately deregisters within this one
+	# ``_handle_enter`` call with no suspension the paper path observes; the
+	# shield is a no-op-equivalent and paper behaviour is byte-identical.
+
+	async def _place_and_persist() -> tuple[OrderResult, int | None]:
+		"""The §4.2-L2 critical region: ONE IOC round-trip + (if filled) the
+		ONE immediate local persist. Bounded above by the existing
+		``_ENTRY_PLACEMENT_TIMEOUT_SECONDS`` cap on ``place()``. Returns
+		``(result, trade_id_or_None)`` so the (non-money) post-persist
+		notify/lost-CAS observability stays OUTSIDE the shield, keeping the
+		shielded span EXACTLY place+persist (spec: do not shield more)."""
+		try:
+			_result = await asyncio.wait_for(
+				executor.place(req),
+				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
+			)
+		except asyncio.TimeoutError:
+			# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
+			# sizing to the executor pipeline; the real sizing refactor lands in
+			# PR 5/E). So the synthesized pending row carries intended_size=0.
+			# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
+			# reconciler MUST treat an engine_timeout pending row's
+			# intended_size=0 as "unknown — resolve the true size from Kalshi by
+			# client_order_id", same as the NetworkError-pending path. Flagged by
+			# the PR #38 pass-3 review (G2); the clean fix is gated on the
+			# deferred sizing refactor, so we surface it loudly instead.
+			log.warning(
+				"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
+				"synthesizing pending+None (intended_size=0, sizing-deferred "
+				"placeholder) for B's reconciler to resolve via client_order_id",
+				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
+				req.client_order_id,
+			)
+			_result = OrderResult(
+				status="pending",
+				intended_size=req.size_contracts,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
+				order_id=None,
+			)
+
+		_trade_id: int | None = None
+		if _result.status == "filled":
+			# Field-by-field match to the pre-G record_trade call shape — byte-exact
+			# preservation is the parity-sweep success criterion. Called
+			# UNCONDITIONALLY — NO mode branch (spec §1 keystone). The two identity
+			# keys are ADDITIVE keyword-only args: paper + InMemory record_trade
+			# accept-and-IGNORE them (byte-exact-invisible to the parity sweep,
+			# §9 / C2); the live store CONSUMES them to CAS-transition the C1
+			# pending row pending→open located by client_order_id, recording the
+			# Kalshi order id (spec §3 `:400 filled` row / §4.2). kalshi_order_id
+			# is result.order_id — the same field the pending arm threads at the
+			# record_pending call below (executor.py `OrderResult.order_id`).
+			_trade_id = store.record_trade(
+				ticker=signal.ticker,
+				entry_price=entry_price,
+				strategy=signal.strategy,
+				side=signal.side,
+				series_ticker=signal.series,
+				intended_size=_result.intended_size,
+				fill_size=_result.filled_size,
+				blended_entry=_result.blended_entry_cents,
+				book_depth=_result.book_depth,
+				fill_pct=_result.fill_pct,
+				slippage_cents=_result.slippage_cents,
+				book_snapshot=_result.book_snapshot,
+				now=now,
+				client_order_id=req.client_order_id,
+				kalshi_order_id=_result.order_id,
+			)
+		return _result, _trade_id
+
+	# Register the shielded place→persist task in the in-flight registry the
+	# §4.3 drain awaits, then await it via ``asyncio.shield``. If a SIGTERM
+	# cancels THIS frame mid-region, the shield keeps ``_section`` running and
+	# the drain (``drain_inflight_sections``) awaits it to completion before
+	# close — the persist is NEVER skipped.
+	#
+	# Deregistration is bound to the SECTION's OWN completion via
+	# ``add_done_callback`` — NOT a ``try/finally`` around this ``await``. That
+	# distinction is load-bearing: when THIS frame is cancelled the section is
+	# still running; a ``finally: discard`` here would yank it out of the
+	# registry the drain awaits and reopen the orphan window. The done-callback
+	# fires only when ``_section`` ITSELF finishes (normally OR with an
+	# exception, INCLUDING if the section task itself is cancelled), so the
+	# registry holds the section exactly until its persist is durable and never
+	# leaks a completed task.
+	_section: asyncio.Task[tuple[OrderResult, int | None]] = asyncio.ensure_future(
+		_place_and_persist()
+	)
+	_INFLIGHT_SECTIONS.add(_section)
+	_section.add_done_callback(_INFLIGHT_SECTIONS.discard)
+	result, trade_id = await asyncio.shield(_section)
 
 	if result.status == "filled":
-		# Field-by-field match to the pre-G record_trade call shape — byte-exact
-		# preservation is the parity-sweep success criterion.
-		trade_id = store.record_trade(
-			ticker=signal.ticker,
-			entry_price=entry_price,
-			strategy=signal.strategy,
-			side=signal.side,
-			series_ticker=signal.series,
-			intended_size=result.intended_size,
-			fill_size=result.filled_size,
-			blended_entry=result.blended_entry_cents,
-			book_depth=result.book_depth,
-			fill_pct=result.fill_pct,
-			slippage_cents=result.slippage_cents,
-			book_snapshot=result.book_snapshot,
-			now=now,
-		)
 		metrics.inc("entries_filled")
 
-		display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
-		log_line, notify_line = _format_enter_message(
-			strategy=signal.strategy,
-			series=signal.series,
-			ticker=signal.ticker,
-			side=signal.side,
-			fill_size=result.filled_size,
-			entry_price=display_price,
-			trade_id=trade_id,
-			bullet=bullet,
-		)
-		log.info(log_line)
-		notify(notify_line)
+		# Type-narrow the documented invariant: a `filled` result ALWAYS carries
+		# a persisted trade_id — `_place_and_persist` only returns a non-None
+		# trade_id on the filled path (paper/InMemory record_trade INSERTs and
+		# returns the rowid; live transition_pending_to_open CAS returns the
+		# located row_id even on a lost race). NEVER fires for paper/replay, so
+		# byte-exact (K2). Codifies the invariant for mypy + as a money-path
+		# tripwire (durable_status below MAY still be None — get_trade_by_id can
+		# find no row — and that is handled gracefully; trade_id itself is not).
+		assert trade_id is not None, "filled result must carry a persisted trade_id"
+
+		# Notify/log the ACTUAL DURABLE PERSISTED status, not the optimistic
+		# IOC `filled` result — and do it MODE-AGNOSTICALLY (the §1 keystone:
+		# branch on persisted truth, never on paper-vs-live / isinstance).
+		#
+		# §4.2 lost-CAS race: B's reconciler can transition the C1 row
+		# pending→rejected_post_hoc (Kalshi-truth: TTL elapsed, list_orders
+		# found no order) BEFORE this filled branch runs. The live
+		# record_trade→transition_pending_to_open is a CAS on
+		# `WHERE status='pending'`, so it correctly NO-OPs (B's _cas_update
+		# never clobbers a non-pending/terminal row — the durable money state
+		# is authoritative & untouched, exactly one row) but record_trade still
+		# returns the located row_id. Firing the celebratory "filled" notify
+		# here would be a FALSE operator alert for a row the durable record
+		# holds as rejected. This is NOT a fund-loss (B's Kalshi-truth
+		# reconciler owns the authoritative lifecycle — §4.2 is LOCKED; D2
+		# does NOT change the money logic) — it is an operator-TRUST defect, so
+		# this is NOT fatal (§3.1): NEVER raise, just notify/log distinctly.
+		#
+		# get_trade_by_id is mode-agnostic: paper + InMemory ALWAYS yield an
+		# 'open' row for a just-record_trade'd id (paper INSERTs literal
+		# 'open'), so the celebratory branch fires byte-identically for
+		# paper/replay (mandatory K2 11/11 byte-exact). A non-'open' durable
+		# status is only ever reachable in LIVE on a genuine lost-CAS race.
+		durable = store.get_trade_by_id(trade_id)
+		durable_status = durable.get("status") if durable is not None else None
+		# Only a CONFIRMED non-'open' terminal status suppresses the
+		# celebratory alert. 'open' (the normal case — CAS landed; paper
+		# always) and the can't-happen-here None (record_trade located the row
+		# by this id ⇒ get_trade_by_id finds it) preserve the pre-D2 behavior
+		# byte-exactly.
+		if durable_status is None or durable_status == "open":
+			display_price = result.blended_entry_cents if result.blended_entry_cents else entry_price
+			# Presentation-only mode-of-record lookup (the G1-blessed pattern
+			# — reading config["executor"] for a display label is NOT a §1
+			# keystone trade-path branch). config is already threaded here.
+			mode_label = "LIVE" if config.get("executor") == "live" else "PAPER"
+			log_line, notify_line = _format_enter_message(
+				strategy=signal.strategy,
+				series=signal.series,
+				ticker=signal.ticker,
+				side=signal.side,
+				fill_size=result.filled_size,
+				entry_price=display_price,
+				trade_id=trade_id,
+				bullet=bullet,
+				mode_label=mode_label,
+			)
+			log.info(log_line)
+			notify(notify_line)
+		else:
+			# Live lost-CAS race: B's Kalshi-truth reconciler already resolved
+			# the C1 row to a terminal status. DO NOT fire the celebratory
+			# "filled" notify; emit a DISTINCT non-celebratory record instead.
+			# Uniform with the C3/C4/C5 lost-CAS observability taxonomy in
+			# live/store.py (coid + actual status + §-cite + best-effort/not
+			# fatal rationale). NEVER raise — the money state is already
+			# authoritative & untouched (§4.2); this only corrects the alert.
+			metrics.inc("entries_filled_lost_cas")
+			lost_cas_msg = (
+				"dispatch._handle_enter: IOC returned 'filled' but the durable "
+				"row for client_order_id=%r is %r (kalshi_order_id=%r) — B's "
+				"reconciler / Kalshi-truth is authoritative (spec §4.2); NOT "
+				"recording as a live fill, NOT firing the 'filled' alert. "
+				"§3.1 best-effort, not fatal (the durable money state is "
+				"authoritative & untouched — exactly one row, owned by B)."
+			)
+			log.error(
+				lost_cas_msg,
+				req.client_order_id,
+				durable_status,
+				result.order_id,
+			)
+			notify(
+				f"⚠️ **[{signal.strategy} | {signal.series}] LOST-CAS / "
+				f"NOT FILLED** — `{signal.ticker}` IOC returned filled but the "
+				f"durable order (`{req.client_order_id}`, kalshi=`{result.order_id}`) "
+				f"is `{durable_status}` (B reconciler / Kalshi-truth authoritative, "
+				f"§4.2); not recorded as a live fill"
+			)
 	elif result.status == "rejected":
 		if result.rejection_reason == "stale_book":
 			metrics.inc("entries_skipped_stale")
@@ -512,15 +813,42 @@ async def _handle_enter(
 		metrics.inc("entries_unhandled_status")
 
 
-def _handle_exit(
+async def _handle_exit(
 	signal: Signal,
 	ctx: TickContext,
 	store: TradeStoreProtocol,
 	bullet: str = "🔵",
 	*,
 	now: datetime,
+	executor: Executor,
+	config: dict,
 ) -> None:
-	"""Process an exit signal: compute exit price, close trade."""
+	"""Process an exit signal: place the exit via the executor, then close.
+
+	SC-D3 (spec §10 / §3 `:534/:537` / §1 keystone — E3's deliverable, the
+	controller-adjudicated R1 deferral from D3): the exit Signal is placed via
+	``executor.place(exit_req)`` UNCONDITIONALLY (no mode branch — the executor
+	IS the live-vs-paper seam, never a per-call ``isinstance``/mode test).
+
+	* PAPER: ``PaperExecutor.place`` resolves the sell synchronously as a
+	  deterministic exit-ACK (its fill fields are NOT consumed here); the
+	  AUTHORITATIVE paper close remains the SAME synchronous
+	  ``store.exit_trade(trade_id, ctx_bid)`` call dispatch has always made —
+	  byte-EXACT vs pre-E3 (mandatory K2 11/11 G-parity; the paper store does
+	  the won/lost/scratch + pnl arithmetic exactly as before).
+	* LIVE: ``LiveExecutor.place`` places a real IOC sell on Kalshi; the
+	  AUTHORITATIVE close is owned by B's async ``on_fill_event`` / reconciler
+	  (started by E3's composition root in live mode). The unconditional
+	  ``store.exit_trade`` below is then C5's IDEMPOTENT, NON-authoritative
+	  backstop: live ``store.exit_trade`` → ``live.state.record_close`` CAS
+	  (``exit_reason='ws_exit_fill'``) whose precondition
+	  ``status IN ('open','exit_pending')`` makes it race SAFELY with B's
+	  async path — whichever lands the CAS first wins, the other is a logged
+	  no-op that NEVER raises (the §4.2-adjudicated C5/D2 benign-lost-CAS
+	  property; B/Kalshi-truth is the authority + reconciler is the L3
+	  backstop). The store/Protocol absorbs the live-vs-paper difference; this
+	  function is mode-AGNOSTIC (§1).
+	"""
 	if signal.trade_id is None:
 		log.warning(
 			"Exit signal from %s for %s has no trade_id — skipping",
@@ -531,6 +859,76 @@ def _handle_exit(
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
 
+	# Resolve the open position's size BEFORE the close (the close transitions
+	# the row out of 'open'; reading after would see fill_size on a closed
+	# row / miss it). get_trade_by_id is the mode-agnostic by-id read every
+	# store implements (paper TradeStore / replay InMemory / live
+	# SQLiteTradeStore) — NOT a mode branch. A missing/closed row ⇒ no
+	# position to place an exit for; fall through to the (idempotent)
+	# store.exit_trade which handles row-not-found / already-closed safely.
+	pos_row = store.get_trade_by_id(signal.trade_id)
+	exit_size = int((pos_row or {}).get("fill_size") or 0)
+
+	if exit_size > 0:
+		# Build the exit OrderRequest for the open position (action="sell";
+		# limit = the bid we sell into, the same price the paper close books
+		# at — so paper's executor-ACK and its store.exit_trade agree, and the
+		# live IOC sells at the strategy's exit price). client_order_id is a
+		# FRESH idempotency key (an EXIT order's coid intentionally matches NO
+		# pending row — B's on_fill_event keys exit fills by ticker+side, not
+		# coid; see ws_handlers._find_active_parent_for_exit). Constructed
+		# directly (NOT execution.build_exit_order, which couples to ExecCfg +
+		# strategy-populated target_price/exit_kind fields a bare TP/SL exit
+		# Signal need not carry; the exit price here is the live book bid,
+		# already the correct taker price). `config` is threaded for parity
+		# with the entry path / future exit-policy use; the exit limit is the
+		# bid (no slippage walk — selling into the resting bid is immediate).
+		exit_req = OrderRequest(
+			ticker=signal.ticker,
+			series=signal.series,
+			side=cast(Literal["yes", "no"], signal.side),
+			size_contracts=exit_size,
+			limit_price_cents=exit_price,
+			strategy=signal.strategy,
+			client_order_id=_make_client_order_id(
+				signal.strategy, signal.ticker, now
+			),
+			action="sell",
+		)
+		# Place the exit UNCONDITIONALLY through the executor (the §1 seam).
+		# PaperExecutor → synchronous deterministic ACK (not consumed here —
+		# the paper close is store.exit_trade below, byte-exact). LiveExecutor
+		# → real IOC sell; B's async on_fill_event/reconciler owns the
+		# authoritative close. Hard-capped exactly like the entry place() so a
+		# pathological client retry-loop cannot wedge the WS message loop.
+		try:
+			await asyncio.wait_for(
+				executor.place(exit_req),
+				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
+			)
+		except asyncio.TimeoutError:
+			# The exit POST may still have reached Kalshi (live) — we don't
+			# know, so we don't lie. B's reconciler resolves an in-flight
+			# exit by client_order_id / the exit_pending TTL path; the
+			# idempotent store.exit_trade backstop below still runs. Paper's
+			# PaperExecutor.place cannot time out (pure CPU) so this is a
+			# live-only safety net, not a paper-visible path (G-parity safe).
+			log.warning(
+				"exit executor.place exceeded %ds for %s %s (coid=%s) — "
+				"B's reconciler / exit_pending TTL owns recovery; the "
+				"idempotent store.exit_trade backstop still applies",
+				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy,
+				signal.ticker, exit_req.client_order_id,
+			)
+
+	# Mode-agnostic close (§1). PAPER: this IS the authoritative close
+	# (byte-EXACT vs pre-E3 — paper TradeStore.exit_trade does the
+	# won/lost/scratch + pnl + fee arithmetic synchronously, idempotent on
+	# WHERE status='open'). LIVE: C5's IDEMPOTENT non-authoritative backstop
+	# (store.exit_trade → record_close CAS; B's async on_fill_event /
+	# reconciler is the authority — whichever lands the CAS first wins, the
+	# other no-ops, NEVER raises — the §4.2-sound benign-lost-CAS property).
+	# dispatch does NOT branch on mode — the store/Protocol absorbs it.
 	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)

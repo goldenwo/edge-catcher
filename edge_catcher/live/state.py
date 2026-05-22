@@ -72,6 +72,7 @@ def connect_live_trades_db(db_path: Path) -> sqlite3.Connection:
 	db_path.parent.mkdir(parents=True, exist_ok=True)
 	conn = sqlite3.connect(str(db_path), check_same_thread=False)
 	conn.execute("PRAGMA journal_mode=WAL")
+	conn.execute("PRAGMA busy_timeout=5000")
 	apply_migrations(conn)
 	return conn
 
