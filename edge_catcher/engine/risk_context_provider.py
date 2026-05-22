@@ -31,12 +31,6 @@ class _SupportsActive(Protocol):
 	active: bool
 
 
-class _HasMarketState(Protocol):
-	"""Structural contract for the market tick object."""
-
-	market_state: MarketState
-
-
 def _env_kill_active() -> bool:
 	"""Operator full-stop via the KILL_SWITCH env var (spec §6)."""
 	return os.environ.get("KILL_SWITCH", "").strip() not in ("", "0", "false", "False")
@@ -46,8 +40,11 @@ class RiskContextProvider:
 	"""Builds one RiskContext per signal (live only).
 
 	Holds a direct reference to the same live db_conn B's writers use (single
-	shared connection, sync-in-async — spec §3 / §11.3) plus the engine-scoped
-	operator-kill flag.
+	shared connection, sync-in-async — spec §3 / §11.3), the engine-scoped
+	operator-kill flag, and the engine's ``MarketState`` instance (the single
+	mutable object created at engine startup and updated in place by the WS
+	loop).  Holding the reference means ``build`` always sees current orderbook
+	state without any per-tick plumbing.
 
 	``open_count`` is sourced from ``read_open_count`` (open+pending+exit_pending
 	— pending DELIBERATELY counts toward MAX_OPEN so an in-flight entry holds
@@ -56,28 +53,34 @@ class RiskContextProvider:
 	pending rows exist (spec §3).
 	"""
 
-	__slots__ = ("_conn", "_operator_kill")
+	__slots__ = ("_conn", "_operator_kill", "_market_state")
 
-	def __init__(self, conn: sqlite3.Connection, operator_kill: _SupportsActive) -> None:
+	def __init__(
+		self,
+		conn: sqlite3.Connection,
+		operator_kill: _SupportsActive,
+		market_state: MarketState,
+	) -> None:
 		self._conn = conn
 		self._operator_kill = operator_kill  # the _OperatorKill singleton (has .active)
+		self._market_state = market_state    # engine-scoped ref; mutated in place by WS loop
 
-	def build(self, signal: object, tick: _HasMarketState, now: datetime) -> RiskContext:
+	def build(self, signal: object, now: datetime) -> RiskContext:
 		"""Build a fresh RiskContext for a single gate evaluation.
 
 		Args:
 			signal: The entry/exit Signal (not inspected here; passed through for
 				future extensibility and for callers that need the full context).
-			tick: The current market tick; ``tick.market_state`` is forwarded into
-				the context so the gate can inspect orderbook state.
 			now: The current UTC datetime (caller-supplied for testability).
 
 		Returns:
 			A frozen RiskContext capturing the current DB state + kill flags.
+			``market_state`` is the engine's held reference (current orderbook
+			state for equity MTM), not derived from any tick.
 		"""
 		return RiskContext(
 			now_utc=now,
-			market_state=tick.market_state,
+			market_state=self._market_state,
 			open_positions=read_open_positions(self._conn),       # status='open' ONLY — equity MTM
 			open_count=read_open_count(self._conn),               # open+pending+exit_pending — MAX_OPEN
 			daily_pnl_cents=read_daily_pnl_cents(self._conn, now.date()),

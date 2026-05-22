@@ -10,12 +10,12 @@ Proves:
 from __future__ import annotations
 
 import sqlite3
-import types
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.risk_context_provider import RiskContextProvider
 
 
@@ -89,34 +89,30 @@ def _sig() -> object:
 	return _Sig()
 
 
-def _tick(market_state: object) -> types.SimpleNamespace:
-	"""Minimal tick stub exposing .market_state."""
-	return types.SimpleNamespace(market_state=market_state)
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 def test_build_sources_open_count_from_read_open_count(live_conn: sqlite3.Connection) -> None:
 	"""open_count == 2 (pending rows count); open_positions == [] (open-only)."""
-	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=False))
+	ms = MarketState(limit=10)
+	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=False), market_state=ms)
 	now = datetime(2026, 5, 22, tzinfo=timezone.utc)
-	ctx = provider.build(signal=_sig(), tick=_tick(market_state="MS"), now=now)
+	ctx = provider.build(signal=_sig(), now=now)
 
 	assert ctx.open_count == 2           # pending rows count toward MAX_OPEN
 	assert len(ctx.open_positions) == 0  # MTM list is status='open' ONLY
 	assert ctx.now_utc == now
-	assert ctx.market_state == "MS"
+	assert ctx.market_state is ms        # held ref forwarded — identity check
 	assert ctx.operator_kill_active is False
 
 
 def test_build_reflects_operator_kill_flag(live_conn: sqlite3.Connection) -> None:
 	"""operator_kill_active mirrors _OperatorKill.active when env var unset."""
-	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=True))
+	ms = MarketState(limit=10)
+	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=True), market_state=ms)
 	ctx = provider.build(
 		signal=_sig(),
-		tick=_tick("MS"),
 		now=datetime.now(timezone.utc),
 	)
 	assert ctx.operator_kill_active is True
@@ -128,10 +124,10 @@ def test_build_env_kill_switch_overrides_false_active(
 ) -> None:
 	"""KILL_SWITCH=1 env var forces operator_kill_active True even if .active is False."""
 	monkeypatch.setenv("KILL_SWITCH", "1")
-	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=False))
+	ms = MarketState(limit=10)
+	provider = RiskContextProvider(conn=live_conn, operator_kill=_FakeKill(active=False), market_state=ms)
 	ctx = provider.build(
 		signal=_sig(),
-		tick=_tick("MS"),
 		now=datetime.now(timezone.utc),
 	)
 	assert ctx.operator_kill_active is True

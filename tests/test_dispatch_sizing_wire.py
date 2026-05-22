@@ -343,10 +343,10 @@ class _FakeRiskContextProvider:
 
 	def __init__(self, ctx: RiskContext | None = None) -> None:
 		self._ctx = ctx or _fake_risk_context()
-		self.build_calls: list[tuple[Any, Any, Any]] = []
+		self.build_calls: list[tuple[Any, Any]] = []
 
-	def build(self, signal: Any, tick: Any, now: Any) -> RiskContext:
-		self.build_calls.append((signal, tick, now))
+	def build(self, signal: Any, now: Any) -> RiskContext:
+		self.build_calls.append((signal, now))
 		return self._ctx
 
 

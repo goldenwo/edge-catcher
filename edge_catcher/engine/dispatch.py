@@ -452,7 +452,13 @@ async def _handle_signal(
 	# gate the action routes to. Paper/replay never builds one (risk is None) —
 	# G-parity: the paper path is BYTE-IDENTICAL; no RiskContext construction,
 	# no gate call, no conditional divergence on this path.
-	rctx = risk_ctx_provider.build(signal, ctx, now) if risk is not None else None
+	rctx = None
+	if risk is not None:
+		# risk and risk_ctx_provider are wired together at composition (G1) —
+		# both set in live, both None in paper/replay. Assert the pairing so a
+		# mis-wire fails loudly rather than NoneType.build at the first signal.
+		assert risk_ctx_provider is not None
+		rctx = risk_ctx_provider.build(signal, now)
 
 	if signal.action == "enter":
 		# Entry gate — live path only (spec §2.1). Paper/replay (risk is None)
