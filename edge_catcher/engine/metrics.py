@@ -26,8 +26,9 @@ _COUNTER_KEYS = (
 	"risk_gate_rejected_drawdown", # reason=KILL_AUTO_DRAWDOWN
 	"risk_gate_rejected_daily",    # reason=KILL_AUTO_DAILY
 	"risk_gate_rejected_invalid",  # reason=INVALID_SIGNAL
-	"risk_gate_rejected_max_open", # reason=MAX_OPEN
-	"risk_gate_rejected_min_fill", # reason=BELOW_MIN_FILL
+	"risk_gate_rejected_max_open",         # reason=MAX_OPEN
+	"risk_gate_rejected_min_fill",         # reason=BELOW_MIN_FILL
+	"risk_gate_rejected_stale_bankroll",   # reason=STALE_BANKROLL
 	# Bankroll cache refresh failure counter.
 	"risk_bankroll_refresh_failures_total",
 )
@@ -55,6 +56,7 @@ _GATE_REJECT_COUNTER: dict[str, str] = {
 	"INVALID_SIGNAL": "risk_gate_rejected_invalid",
 	"MAX_OPEN": "risk_gate_rejected_max_open",
 	"BELOW_MIN_FILL": "risk_gate_rejected_min_fill",
+	"STALE_BANKROLL": "risk_gate_rejected_stale_bankroll",
 }
 
 

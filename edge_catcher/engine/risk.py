@@ -65,6 +65,7 @@ GateRejectReason = Literal[
 	"INVALID_SIGNAL",       # signal has unusable entry_price or stop_loss
 	"MAX_OPEN",             # open_count ≥ max_open
 	"BELOW_MIN_FILL",       # size < min_fill_contracts
+	"STALE_BANKROLL",       # bankroll cache too stale to trust for sizing
 ]
 
 
