@@ -56,7 +56,7 @@ from edge_catcher.engine.recovery import (
 	run_recovery,
 )
 from edge_catcher.engine.strategy_base import Strategy
-from edge_catcher.engine.trade_store import TradeStore
+from edge_catcher.engine.trade_store import TradeStore, TradeStoreProtocol
 
 # KillSwitchTripFailed must propagate out of run_engine when raised — it's the
 # C-spec L214 ghost-reject defense. process_tick re-raises it past _handle_signal's
@@ -596,7 +596,7 @@ def _resolve_notify_channels(config: dict) -> list:
 # ---------------------------------------------------------------------------
 
 async def _settlement_poller(
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	client: httpx.AsyncClient,
 	strategies: list[Strategy],
 	pending_states: dict[str, dict],
@@ -705,7 +705,7 @@ async def _settlement_poller(
 
 
 async def _summary_logger(
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	metrics: Metrics | None = None,
 	interval: int = 300,
 ) -> None:
@@ -741,7 +741,7 @@ async def _summary_logger(
 
 
 async def _state_flusher(
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	strategies: list[Strategy],
 	pending_states: dict[str, dict],
 	dirty: set[str],
@@ -1031,7 +1031,7 @@ async def _compose_live(
 	db_path: Path,
 	market_state: MarketState,
 	injected_executor: Executor | None,
-):
+) -> tuple[TradeStoreProtocol, Executor, _LiveRuntime]:
 	"""§6 boot step 3 — construct the LIVE composition.
 
 	Returns ``(store, executor, live_runtime)``:
@@ -1576,7 +1576,7 @@ async def run_engine(
 async def _ws_loop(
 	config: dict,
 	market_state: MarketState,
-	store: TradeStore,
+	store: TradeStoreProtocol,
 	strategies: list[Strategy],
 	strat_by_series: dict[str, list[Strategy]],
 	pending_states: dict[str, dict],
