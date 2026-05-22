@@ -25,7 +25,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from edge_catcher.engine.execution import _make_client_order_id
+from edge_catcher.engine.execution import _make_client_order_id, build_entry_order
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
 	MarketState,
@@ -455,6 +455,7 @@ async def _handle_enter(
 	bullet: str = "🔵",
 	*,
 	now: datetime,
+	allowed_size: int | None = None,
 ) -> None:
 	"""Process an entry signal: build OrderRequest, call executor, route by status."""
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
@@ -472,24 +473,36 @@ async def _handle_enter(
 		metrics = Metrics()
 	metrics.inc("entries_attempted")
 
-	# Build typed request. PaperExecutor's resolve_fill computes the actual
-	# size_contracts from config["sizing"]["risk_per_trade_cents"] / entry_price;
-	# G threads the request shape through but defers sizing to the executor's
-	# internal pipeline (D will refactor sizing into a pre-executor step).
+	# Build typed request — EXACTLY ONCE (spec §2.2 single-build invariant).
+	# Both consumers below (record_intent, executor.place via _place_and_persist)
+	# share the ONE req object so client_order_id is identical across both calls.
+	#
+	# LIVE path (allowed_size is not None): build_entry_order applies taker-with-
+	# cap slippage and generates a fresh uuid4-suffixed client_order_id internally.
+	# Calling it twice would produce two DIFFERENT ids — DO NOT call it again.
+	#
+	# PAPER/replay path (allowed_size is None): byte-exact unchanged construction.
+	# PaperExecutor's resolve_fill computes the actual size_contracts from
+	# config["sizing"]["risk_per_trade_cents"] / entry_price; dispatch defers
+	# sizing to the executor's internal pipeline on this path.
 	#
 	# Signal.side is typed as plain `str` for strategy-author ergonomics
 	# (strategies build sides from data); OrderRequest.side narrows to
 	# Literal["yes", "no"]. Cast at the boundary — pre-G dispatch did no
 	# runtime validation here, so neither do we (byte-exact preservation).
-	req = OrderRequest(
-		ticker=signal.ticker,
-		series=signal.series,
-		side=cast(Literal["yes", "no"], signal.side),
-		size_contracts=0,
-		limit_price_cents=entry_price,
-		strategy=signal.strategy,
-		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
-	)
+	if allowed_size is not None:  # LIVE — sized pre-executor build (spec §2.2)
+		exec_cfg = config["_exec_cfg"]
+		req = build_entry_order(signal, allowed_size, exec_cfg, now)
+	else:  # PAPER/replay — byte-exact unchanged; executor sizes internally
+		req = OrderRequest(
+			ticker=signal.ticker,
+			series=signal.series,
+			side=cast(Literal["yes", "no"], signal.side),
+			size_contracts=0,
+			limit_price_cents=entry_price,
+			strategy=signal.strategy,
+			client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
+		)
 
 	# Pre-place durability hook (sub-project E / L1; spec §3 keystone + §3.1).
 	# Called UNCONDITIONALLY — no mode branch. The TradeStoreProtocol absorbs
