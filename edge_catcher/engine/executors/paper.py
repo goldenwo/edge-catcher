@@ -349,7 +349,38 @@ class PaperExecutor:
 		# the orderbook walk is pure CPU with no I/O, but we adopt `async def`
 		# so dispatch can `await executor.place(...)` uniformly across paper
 		# and live executors. No `await` is needed in this body.
-		#
+
+		# --- SC-D3 sell/exit path (spec §10 / §3 `:534`). dispatch's
+		# `_handle_exit` routes EVERY exit Signal through `executor.place(...)`
+		# UNCONDITIONALLY (the §1 keystone — the executor is the live-vs-paper
+		# seam, never a per-call mode branch). For PAPER the authoritative
+		# close is the SAME synchronous `store.exit_trade(trade_id, ctx_bid)`
+		# dispatch has always called (byte-exact, mandatory K2 11/11 G-parity);
+		# this method must therefore SHORT-CIRCUIT before the entries-only
+		# `resolve_fill` book-walk below — running entry-sizing on a paper exit
+		# would be a G-parity-BLOCKING paper behaviour change. The returned
+		# OrderResult is a deterministic paper-exit ACK whose fill fields
+		# dispatch does NOT consume on the exit path (the close is owned by
+		# `store.exit_trade`, NOT this result): a `filled` result with the
+		# request's own size + limit so it can never be misrouted into the
+		# entry `record_trade`/`record_pending` arms (those are reached only
+		# from `_handle_enter`, never `_handle_exit`). For LIVE, LiveExecutor
+		# (a different class — §1) instead places a real IOC sell and B's
+		# async on_fill_event/reconciler owns the authoritative close; this
+		# branch is paper-only by construction (PaperExecutor is wired only in
+		# paper mode at the composition root).
+		if req.action == "sell":
+			return OrderResult(
+				status="filled",
+				intended_size=req.size_contracts,
+				filled_size=req.size_contracts,
+				blended_entry_cents=req.limit_price_cents,
+				fill_pct=1.0,
+				slippage_cents=0,
+				book_depth=None,
+				book_snapshot=None,
+			)
+
 		# MarketState.get_orderbook returns Optional; the dispatch path defaults
 		# to an empty OrderbookSnapshot for unseeded tickers (see
 		# engine/dispatch.py:465), and resolve_fill treats empty books as a

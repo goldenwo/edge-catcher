@@ -37,6 +37,7 @@ import yaml
 
 from edge_catcher.engine.discovery import get_enabled_strategies
 from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 from edge_catcher.engine.replay.loader import read_jsonl_window
@@ -82,6 +83,7 @@ async def replay_capture(
 	config: Optional[dict] = None,
 	ticker_filter: Optional[set[str]] = None,
 	prior_bundle: Optional[Path | str] = None,
+	executor: Executor | None = None,
 ) -> ReplayResult:
 	"""Run the replay backtester against a captured bundle.
 
@@ -100,6 +102,9 @@ async def replay_capture(
 		               market_state / open_trades seeding. If None, the
 		               sibling directory (``bundle_path.parent / <date-1>``)
 		               is used; if that doesn't exist, seeding is skipped.
+		executor:      Optional executor override; default None ⇒ PaperExecutor
+		               (replay's paper-fidelity default). I2/CR-5 injects
+		               LiveExecutor+MockKalshiServer.
 	"""
 	bundle = Path(bundle_path)
 	t0 = time.monotonic()
@@ -137,10 +142,10 @@ async def replay_capture(
 	market_state = MarketState()
 	_seed_market_state(market_state, bundle, prior_bundle)
 
-	# 5a. Construct the PaperExecutor — replay uses paper semantics
-	# (orderbook walk against the captured book). Live executor never appears
-	# in the replay path — replay is paper-only by design.
-	executor = PaperExecutor(market_state=market_state, config=config)
+	# 5a. Resolve the executor — paper by default (orderbook walk against the
+	# captured book; replay's paper-fidelity default). CR-5 (I2) injects
+	# LiveExecutor against MockKalshiServer — never prod; spec §10.2.
+	executor = executor or PaperExecutor(market_state=market_state, config=config)
 
 	# 6. Construct InMemoryTradeStore and seed from PRIOR day's open_trades
 	#    and strategy_state snapshot.

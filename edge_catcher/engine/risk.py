@@ -706,6 +706,27 @@ class Gate:
 		# Equity — recomputed fresh each gate call
 		equity_cents = self._compute_equity(ctx)
 
+		# §4.3 NORMATIVE — tripped-kill ≠ process exit. The three first-trip
+		# branches below call ``self._emit_trip(...)`` then ``return Reject``.
+		# On a SUCCESSFUL trip ``_emit_trip`` returns normally (the kill row is
+		# persisted) — NO exception propagates, so ``process_tick`` /
+		# ``_handle_signal`` / the WS loop / the reconnect block all CONTINUE
+		# and the engine keeps RUNNING. From here on the steady-state path
+		# (``active_auto_kill`` at branch 2) returns ``Reject`` so every NEW
+		# entry is blocked, while ``gate_exit`` still allows exits (only an
+		# operator kill blocks exits). The process stops ONLY on a crash or
+		# ``systemctl stop`` (SIGTERM → F1 bridge → the §4.3 F2 drain). This is
+		# what makes the live unit's ``Restart=always`` safe: a tripped
+		# auto-kill never reaches systemd, so a restart can never clear the
+		# KILL state and let previously-blocked trades flow.
+		#
+		# DISTINCT — ``KillSwitchTripFailed``: if ``_emit_trip``'s DB INSERT
+		# FAILS it raises ``KillSwitchTripFailed`` (NOT caught here) which
+		# propagates out of ``run_engine`` and STOPS the process (C-spec L214
+		# ghost-reject defense — a ghost reject with no persisted row would
+		# double-trip next tick). A FAILED kill-WRITE must halt; a SUCCESSFUL
+		# kill must NOT. These are deliberately opposite and must stay so.
+
 		# 3. Absolute panic floor — first-trip branch
 		if equity_cents <= self._cfg.absolute_panic_floor_cents:
 			detail = (

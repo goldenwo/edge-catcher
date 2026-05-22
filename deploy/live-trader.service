@@ -1,0 +1,50 @@
+[Unit]
+Description=Edge Catcher — Live Trader (real-money)
+Documentation=https://github.com/goldenwo/edge-catcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edge-catcher
+Group=edge-catcher
+WorkingDirectory=/opt/edge-catcher
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/edge-catcher/.env
+ExecStart=/opt/edge-catcher/.venv/bin/python -m edge_catcher live-trade --config config.local/live-trader.yaml
+StandardOutput=append:/var/log/edge-catcher/live-trader.log
+StandardError=append:/var/log/edge-catcher/live-trader.log
+
+# Restart always — the live trader is a long-running loop. NOTE (§4.3
+# tripped-kill ≠ process exit): a C auto-kill (panic / drawdown / daily-loss
+# KillSwitch trip) does NOT exit the process — the gate stays in KILL state
+# (rejects new entries, still allows exits) and the engine keeps running. Only
+# a crash or `systemctl stop` stops it. This is what makes Restart=always safe:
+# a tripped auto-kill never reaches systemd, so a restart can never clear
+# operator intent and let previously-blocked trades flow.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Graceful-shutdown budget. `systemctl stop` sends KillSignal (SIGTERM); the
+# entrypoint's POSIX bridge (F1) turns that into a task cancel and run_engine's
+# §4.3 7-step money-safe drain (F2) runs: operator-kill → stop intake → await
+# the in-flight place→persist registry → cancel B's loops → gather →
+# store.close() once → final alert. TimeoutStopSec is set EXPLICITLY to 30s
+# (NOT systemd's 90s default) — the bounded drain budget; if the drain somehow
+# exceeds it systemd escalates to SIGKILL. KillSignal=SIGTERM is the systemd
+# default but stated explicitly now that F1/F2 handle it gracefully (a money
+# daemon must never be SIGKILL'd while a shielded place→persist is mid-write).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Resource limits — the live trader is a steady-state daemon, not a batch job.
+# Defaults sized for a small VPS or SBC (e.g. Raspberry Pi 4/5 8GB). Adjust
+# upward if you run many strategies, large orderbook windows, or extra series.
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
