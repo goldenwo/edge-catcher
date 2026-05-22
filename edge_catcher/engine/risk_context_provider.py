@@ -14,13 +14,27 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime
+from typing import Protocol
 
 from edge_catcher.engine.live_db import (
 	read_daily_pnl_cents,
 	read_open_count,
 	read_open_positions,
 )
+from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.risk import RiskContext
+
+
+class _SupportsActive(Protocol):
+	"""Structural contract for the operator-kill flag object."""
+
+	active: bool
+
+
+class _HasMarketState(Protocol):
+	"""Structural contract for the market tick object."""
+
+	market_state: MarketState
 
 
 def _env_kill_active() -> bool:
@@ -44,11 +58,11 @@ class RiskContextProvider:
 
 	__slots__ = ("_conn", "_operator_kill")
 
-	def __init__(self, conn: sqlite3.Connection, operator_kill: object) -> None:
+	def __init__(self, conn: sqlite3.Connection, operator_kill: _SupportsActive) -> None:
 		self._conn = conn
 		self._operator_kill = operator_kill  # the _OperatorKill singleton (has .active)
 
-	def build(self, signal: object, tick: object, now: datetime) -> RiskContext:
+	def build(self, signal: object, tick: _HasMarketState, now: datetime) -> RiskContext:
 		"""Build a fresh RiskContext for a single gate evaluation.
 
 		Args:
@@ -63,9 +77,9 @@ class RiskContextProvider:
 		"""
 		return RiskContext(
 			now_utc=now,
-			market_state=tick.market_state,  # type: ignore[union-attr]
+			market_state=tick.market_state,
 			open_positions=read_open_positions(self._conn),       # status='open' ONLY — equity MTM
 			open_count=read_open_count(self._conn),               # open+pending+exit_pending — MAX_OPEN
 			daily_pnl_cents=read_daily_pnl_cents(self._conn, now.date()),
-			operator_kill_active=self._operator_kill.active or _env_kill_active(),  # type: ignore[union-attr]
+			operator_kill_active=self._operator_kill.active or _env_kill_active(),
 		)

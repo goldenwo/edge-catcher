@@ -10,6 +10,7 @@ Proves:
 from __future__ import annotations
 
 import sqlite3
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,15 +89,9 @@ def _sig() -> object:
 	return _Sig()
 
 
-def _tick(market_state: object) -> object:
+def _tick(market_state: object) -> types.SimpleNamespace:
 	"""Minimal tick stub exposing .market_state."""
-
-	class _Tick:
-		pass
-
-	t = _Tick()
-	t.market_state = market_state  # type: ignore[attr-defined]
-	return t
+	return types.SimpleNamespace(market_state=market_state)
 
 
 # ---------------------------------------------------------------------------
