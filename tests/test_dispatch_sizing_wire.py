@@ -14,15 +14,22 @@ import typing
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from edge_catcher.engine.dispatch import _handle_enter, _inc_gate_metric
+from edge_catcher.engine.dispatch import _handle_enter, _handle_signal, _inc_gate_metric
 from edge_catcher.engine.execution import ExecCfg
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.engine.metrics import Metrics
-from edge_catcher.engine.risk import Allow, Reject, GateRejectReason, SizingBreakdown
+from edge_catcher.engine.risk import (
+	Allow,
+	GateRejectReason,
+	KillSwitchTripFailed,
+	Reject,
+	RiskContext,
+	SizingBreakdown,
+)
 from edge_catcher.engine.strategy_base import Signal
 
 
@@ -261,21 +268,6 @@ async def test_handle_enter_paper_unchanged_size_zero() -> None:
 #   4. risk=None (paper/replay) → no gate call; _handle_enter reached with
 #      allowed_size=None (paper byte-exact path unchanged)
 # ---------------------------------------------------------------------------
-
-import sqlite3
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-from edge_catcher.engine.dispatch import _handle_signal, process_tick
-from edge_catcher.engine.risk import (
-	Allow,
-	Reject,
-	KillSwitchTripFailed,
-	RiskContext,
-	SizingBreakdown,
-)
-from edge_catcher.engine.risk_context_provider import RiskContextProvider
-
 
 _NOW_C3 = datetime(2026, 5, 22, 14, 0, 0, tzinfo=timezone.utc)
 _TICKER_C3 = "KXSOL15M-26MAY22H14"
@@ -572,8 +564,8 @@ async def test_paper_mode_risk_none_no_gate() -> None:
 		config,
 		executor,
 		now=_NOW_C3,
-		risk=None,           # paper/replay path
-		risk_ctx_provider=None,  # must also be None on paper path
+		risk=None,                        # paper/replay path — gate is a no-op
+		risk_ctx_provider=fake_provider,  # provider present but must NOT be called
 	)
 
 	# Provider.build() must NOT have been called.

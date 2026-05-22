@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 	# Gate lives in engine/risk.py (Agent A's scope, PR 3/6).
 	# Import only for type-checking so dispatch doesn't fail to import when
 	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
-	from edge_catcher.engine.risk import Gate
+	from edge_catcher.engine.risk import Gate, RiskContext
 	# RiskContextProvider builds one RiskContext per signal (live only; C3).
 	# TYPE_CHECKING-only import: same rationale as Gate — paper/replay paths
 	# never instantiate this and must not fail when risk_context_provider.py
@@ -345,6 +345,9 @@ async def process_tick(
 	paper-trader and replay paths. When None, the gate is a no-op: every signal
 	proceeds to executor.place without a gate check. Construction of Gate is
 	gated on `executor_kind == "live"` in engine.py (E's wiring point).
+
+	`risk_ctx_provider` builds one `RiskContext` per signal (live only; C3).
+	Paired with `risk`: both set in live, both None in paper/replay.
 	"""
 	for strategy in strategies:
 		try:
@@ -355,7 +358,10 @@ async def process_tick(
 
 		for signal in signals:
 			try:
-				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk, risk_ctx_provider=risk_ctx_provider)
+				await _handle_signal(
+					signal, ctx, store, config, executor, strategy.emoji,
+					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+				)
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
 				# means the kill is NOT persisted (funds-at-risk). The engine
@@ -385,7 +391,7 @@ async def process_tick(
 def _consult_entry_gate(
 	risk: Gate,
 	signal: Signal,
-	rctx: Any,
+	rctx: "RiskContext",
 	metrics: Metrics,
 ) -> tuple[int | None, bool]:
 	"""Call gate_entry and translate the GateDecision into dispatch primitives.
@@ -433,20 +439,24 @@ async def _handle_signal(
 	stays sync (no I/O — pure store mutation + log). Calling a sync function
 	from this async dispatcher is intentional and idiomatic.
 
-	Gate consultation (Sub-project C):
+	Gate consultation (Sub-project C, wired by C3):
 	  Entry signals are gated BEFORE building/placing the order. `risk` is the
 	  Gate instance constructed by E when `executor_kind == "live"`; for paper-
 	  trader and replay paths, `risk` is None and the gate is a no-op.
 
-	  On Reject: log the reason + return (no order placed). Audit + Discord
-	  notify routing is E's responsibility via the RiskEvent contract (CR-1).
-	  On Allow: proceed with build_order(sig, decision.size_contracts) then
-	  executor.place (sizing is wired by D in PR 4).
+	  Live path: `_consult_entry_gate` calls `gate_entry(signal, rctx)`. On
+	  Allow, `_handle_enter` is called with `allowed_size=decision.size_contracts`,
+	  which builds the sized order via `build_entry_order` internally. On Reject,
+	  log at INFO and return — no order placed, no notify (spec §4.1: routine
+	  rejects are silent; audit/Discord routing is E's RiskEvent contract, CR-1).
+
+	  Paper/replay (`risk is None`): `_handle_enter` is called with
+	  `allowed_size=None` — the ungated paper path; `PaperExecutor` sizes
+	  internally. Byte-identical to pre-C3 behaviour.
 
 	  Exit signals bypass the entry gate — exits are always allowed even when
 	  auto-kills are active (kills cap new exposure; they don't trap existing
-	  exposure). The gate_exit check (operator-kill only) is E's responsibility
-	  to call from the WS-close handler path where it has a RiskContext.
+	  exposure).
 	"""
 	# LIVE only: build one RiskContext per signal (spec §3), reused by whichever
 	# gate the action routes to. Paper/replay never builds one (risk is None) —
@@ -476,6 +486,7 @@ async def _handle_signal(
 			# _consult_entry_gate holds the isinstance(Reject) check so this
 			# function stays free of it (structural AST guard in test suite).
 			# KillSwitchTripFailed propagates untouched — do NOT catch here.
+			assert rctx is not None  # invariant: set above whenever risk is not None
 			allowed_size, rejected = _consult_entry_gate(
 				risk, signal, rctx, config.get("_metrics") or Metrics(),
 			)
