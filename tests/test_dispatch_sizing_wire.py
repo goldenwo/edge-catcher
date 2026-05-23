@@ -731,9 +731,9 @@ async def test_exit_blocked_by_operator_kill(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_exit_allowed_under_auto_kill(monkeypatch: Any) -> None:
-	"""gate_exit returns Allow when operator_kill_active=False (auto-kills do NOT
-	block exits — spec §6: only operator kill is a full-stop).
+async def test_exit_allowed_when_operator_kill_inactive(monkeypatch: Any) -> None:
+	"""gate_exit returns Allow when operator_kill_active=False (spec §6: only the
+	operator kill is a full-stop; auto-tripped caps never block exits).
 
 	Asserts:
 	- _handle_exit IS called (exit proceeds).

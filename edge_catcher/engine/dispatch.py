@@ -442,8 +442,8 @@ def _consult_exit_gate(
 	decision = risk.gate_exit(signal, rctx)
 	if isinstance(decision, Reject):  # KILL_OPERATOR only (spec §6)
 		log.info(
-			"Gate REJECT exit %s %s: %s",
-			signal.strategy, signal.ticker, decision.reason,
+			"Gate REJECT exit %s %s: %s (%s)",
+			signal.strategy, signal.ticker, decision.reason, decision.detail,
 		)
 		return True
 	return False
@@ -484,7 +484,10 @@ async def _handle_signal(
 
 	  Exit signals bypass the entry gate — exits are always allowed even when
 	  auto-kills are active (kills cap new exposure; they don't trap existing
-	  exposure).
+	  exposure).  However, exits ARE subject to the operator-kill full-stop
+	  (spec §6), wired via ``_consult_exit_gate``: the operator kill halts
+	  BOTH new entries and exits, whereas auto-tripped caps (drawdown/daily/
+	  panic) only ever block entries.
 	"""
 	# LIVE only: build one RiskContext per signal (spec §3), reused by whichever
 	# gate the action routes to. Paper/replay never builds one (risk is None) —
