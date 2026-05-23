@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import logging
 import threading
@@ -133,6 +134,38 @@ log = logging.getLogger(__name__)
 # (the paper analog is "never bound" — paper has no risk surface). NEVER
 # re-resolved per trip (mirrors the §1 keystone: wired at boot, not per-call).
 _risk_channels: list = []
+
+# F1 (§5.1 drain-then-crash supervisor) — holds the BaseException a bankroll
+# refresh raised (a KillSwitchTripFailed: the auto-panic trip's kill-WRITE
+# itself failed). asyncio ISOLATES a task's exception, so without this the
+# refresh task would die silently and the engine would keep trading ungated
+# against an untrusted balance (the C-spec L214 ghost-reject hazard). The
+# done-callback stashes it here and cancels the root task; run_engine's finally
+# turns that cancel into a fail-loud crash AFTER the money-safe drain ran.
+# module-scoped (one engine per process — reset in test fixtures).
+_REFRESH_FATAL: BaseException | None = None
+
+
+def _refresh_done_cb(
+	task: "asyncio.Task[Any]", *, root_task: "asyncio.Task[Any]"
+) -> None:
+	"""Done-callback on the §5.1 bankroll-refresh task (F1).
+
+	asyncio swallows a task's exception unless something retrieves it. This
+	callback retrieves it: a CLEAN drain cancel (``task.cancelled()``) is NOT
+	fatal and is ignored; ANY other exception (the loop's
+	``KillSwitchTripFailed`` — kill-WRITE failed) is stashed in the module
+	holder and the engine root task is cancelled. The cancel propagates the
+	usual CancelledError into ``_ws_loop`` so ``run_engine``'s finally drains
+	the in-flight place→persist sections (money-safe) and THEN re-raises the
+	stashed exception fail-loud."""
+	global _REFRESH_FATAL
+	if task.cancelled():
+		return  # clean drain cancel — not fatal
+	exc = task.exception()
+	if exc is not None:
+		_REFRESH_FATAL = exc
+		root_task.cancel()  # interrupt the engine; the finally turns this into a fail-loud crash
 
 
 def _configure_risk_channel(channels: list) -> None:
@@ -1500,6 +1533,25 @@ async def run_engine(
 				name="bankroll_refresh",
 			)
 			tasks.append(refresh_task)
+			# F1 — drain-then-crash supervisor. asyncio isolates a task's
+			# exception; without this done-callback a refresh KillSwitchTripFailed
+			# (the auto-panic trip's kill-WRITE failed) would be silently lost and
+			# the engine would keep trading ungated against an untrusted balance.
+			# The callback stashes the exception + cancels THIS run_engine root
+			# task; the finally's fatal guard re-raises it fail-loud after the
+			# money-safe drain. `asyncio.current_task()` here = the run_engine root
+			# task the cli `await`s — cancelling it triggers run_engine's finally.
+			# It is never None inside a running coroutine (defensive narrow for
+			# mypy + a fail-loud guard if that invariant were ever broken).
+			_root_task = asyncio.current_task()
+			if _root_task is None:  # pragma: no cover - unreachable inside run_engine
+				raise RuntimeError(
+					"F1: asyncio.current_task() is None inside run_engine — cannot "
+					"wire the bankroll-refresh fatal supervisor"
+				)
+			refresh_task.add_done_callback(
+				functools.partial(_refresh_done_cb, root_task=_root_task)
+			)
 
 		# Build strategy lookup by series
 		strat_by_series: dict[str, list[Strategy]] = {}
@@ -1675,6 +1727,35 @@ async def run_engine(
 			# (6) store.close() exactly once — STRICTLY AFTER step (3).
 			store.close()
 			capture_writer.close()
+
+			# F1 fatal guard — AFTER the money-safe drain (steps 1-6 ran), BEFORE
+			# the clean SIGTERM alert. A bankroll-refresh KillSwitchTripFailed
+			# means the auto-panic trip's kill-WRITE itself failed, so NO RiskEvent
+			# fired (the §6 risk-event slot is reached only on a SUCCESSFUL trip) —
+			# this is the operator's ONLY signal. Emit it best-effort, then re-raise
+			# the stashed exception so the process STOPS fail-loud (NOT a clean exit
+			# the cli swallows as 0) and the clean "drain complete" alert is SKIPPED.
+			if _REFRESH_FATAL is not None:
+				try:
+					from edge_catcher.notifications import (  # noqa: PLC0415
+						Notification,
+						send,
+					)
+					send(
+						Notification(
+							title="edge-catcher RISK: FATAL — bankroll refresh kill-write failed",
+							body=(
+								f"Engine STOPPING fail-loud: bankroll-refresh trip's "
+								f"kill-write failed. "
+								f"{type(_REFRESH_FATAL).__name__}: {_REFRESH_FATAL}"
+							),
+							severity="error",
+						),
+						_risk_channels,
+					)
+				except Exception:
+					log.exception("FATAL alert send failed (proceeding to raise)")
+				raise _REFRESH_FATAL  # money-safe fail-loud — skips the clean alert below
 
 			# (7) final "shutting down" alert — LAST, signal/cancel only
 			# (paper byte-exact: the non-signal path emits no new notify).

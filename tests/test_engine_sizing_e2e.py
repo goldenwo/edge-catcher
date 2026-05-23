@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -29,6 +30,13 @@ from edge_catcher.engine.engine import bankroll_refresh_loop, _ws_loop
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.strategy_base import Signal, Strategy, TickContext
 from edge_catcher.engine.trade_store import InMemoryTradeStore
+
+# F1 fatal-supervisor test reuses E2's fully-coherent LIVE cfg builder so the
+# REAL run_engine boots through the §2 coherence gate to the live task block
+# (where the bankroll-refresh task + F1 done-callback are wired). The same
+# cross-test idiom test_live_composition_root.py / test_live_daemon_shutdown.py
+# use.
+from tests.test_live_engine_mode_invariant import make_live_cfg, _write_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +97,17 @@ def restore_risk_channels() -> Any:
 	original = engine_module._risk_channels
 	yield
 	engine_module._risk_channels = original
+
+
+@pytest.fixture(autouse=True)
+def reset_refresh_fatal() -> Any:
+	"""Reset engine._REFRESH_FATAL to None around every test (setup AND
+	teardown). It is a module global (one engine per process); a leak from the
+	F1 fatal-supervisor test would make a later test's clean shutdown re-raise
+	a stale exception. Mirrors the _OPERATOR_KILL-style per-test reset."""
+	engine_module._REFRESH_FATAL = None
+	yield
+	engine_module._REFRESH_FATAL = None
 
 
 # ---------------------------------------------------------------------------
@@ -464,4 +483,219 @@ async def test_live_ws_path_reaches_gate_entry(monkeypatch: pytest.MonkeyPatch) 
 	assert provider.build_calls == 1, (
 		"the provider must be threaded through _ws_loop and used to build the "
 		f"RiskContext for the gated signal; got {provider.build_calls} build calls"
+	)
+
+
+# ===========================================================================
+# F1 — drain-then-crash fatal supervisor (THE most safety-critical task)
+#
+# G1 starts bankroll_refresh_loop. If refresh() raises KillSwitchTripFailed
+# (the auto-panic trip's kill-WRITE itself failed), asyncio ISOLATES that task
+# exception — without F1 it is silently lost and the engine keeps trading
+# ungated against an untrusted balance (C-spec L214 ghost-reject hazard). F1's
+# done-callback stashes the exception + cancels the root task; run_engine's
+# finally drains the in-flight place→persist sections (money-safe) and THEN
+# re-raises fail-loud with a FATAL operator alert — it must NOT masquerade as a
+# clean SIGTERM drain (which the cli entrypoint swallows as exit 0).
+# ===========================================================================
+
+
+class _FailingBankroll:
+	"""BankrollCache stand-in whose refresh() raises KillSwitchTripFailed —
+	models the auto-panic trip's kill-WRITE failing (the ghost-reject hazard).
+
+	bankroll_refresh_loop reads ``_consecutive_failures`` AFTER awaiting
+	refresh(); refresh() raises first, so that read never happens — but the
+	attribute exists so the loop body is structurally satisfiable."""
+
+	def __init__(self) -> None:
+		self._consecutive_failures = 0
+		self.refresh_calls = 0
+
+	async def refresh(self) -> None:
+		from edge_catcher.engine.risk import KillSwitchTripFailed
+
+		self.refresh_calls += 1
+		# The kill-WRITE failed (not a recoverable network blip): the trip
+		# itself could not be persisted, so the loop's exception MUST propagate.
+		raise KillSwitchTripFailed(
+			"kill_switch INSERT failed for reason='KILL_AUTO_PANIC': simulated DB failure"
+		)
+
+
+class _FakeGateWithBankroll:
+	"""Minimal Gate stand-in carrying a ._bankroll the live block reads."""
+
+	def __init__(self, bankroll: Any) -> None:
+		self._bankroll = bankroll
+
+
+@pytest.mark.asyncio
+async def test_refresh_killwrite_failure_crashes_fail_loud(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""Failure mode prevented (FUNDS-AT-RISK, the C-spec L214 ghost-reject
+	hazard): a bankroll-refresh KillSwitchTripFailed is isolated by asyncio and
+	silently lost, so the engine keeps trading ungated against an untrusted
+	balance — OR it crashes but masquerades as a clean SIGTERM drain the cli
+	swallows as exit 0 (systemd would not restart / alert).
+
+	Drives the REAL ``run_engine`` (LIVE, coherent cfg) through composition to
+	the live task block, where the REAL ``bankroll_refresh_loop`` + the REAL F1
+	done-callback are wired. The refresh raises ``KillSwitchTripFailed`` on its
+	first tick; F1's done-callback stashes it + cancels the root task; the
+	finally drains (money-safe) and re-raises fail-loud.
+
+	Asserts:
+	  * ``run_engine`` RAISES ``KillSwitchTripFailed`` (does NOT return / drain
+	    cleanly).
+	  * the in-flight drain still completed — ``store.close()`` was called
+	    exactly once (close-once contract; the drain ran BEFORE the re-raise).
+	  * a FATAL (severity="error") risk-channel alert WAS emitted via the
+	    notifications ``send`` path AND the clean ``notify`` "drain complete"
+	    alert was NOT emitted (the fatal raise skips it).
+	"""
+	from edge_catcher.engine.risk import KillSwitchTripFailed
+
+	# A fully-coherent LIVE cfg with a SHORT bankroll_ttl so the refresh loop
+	# fires fast (interval = ttl/2). Phase-1 caps + creds + channels are all set
+	# up by make_live_cfg; we only shrink the TTL for a deterministic-but-quick
+	# first refresh tick.
+	cfg = make_live_cfg(tmp_path, monkeypatch)
+	cfg["risk"]["bankroll_ttl_seconds"] = 0.02   # interval = 0.01s
+	cfg["risk"]["bankroll_failures_until_kill"] = 1
+	# A coherent sizing: block + the enabled stub let step-2 strategy discovery
+	# (validate_sizing_config + a non-empty enabled set) pass so the boot reaches
+	# the live task block (mirrors test_live_daemon_shutdown._paper_cfg_path).
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg["strategies"] = {
+		_AlwaysEnterStrategy.name: {"enabled": True, "series": [_G1_SERIES]},
+	}
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	failing_bankroll = _FailingBankroll()
+
+	# Spy the store-close drain effect + use the paper TradeStore so the REAL
+	# finally drain (store.close()) runs and is observable. We stub _compose_live
+	# (the heavy live composition: SQLiteTradeStore + KalshiOrderClient + a real
+	# Gate over the live DB) to return a paper store + an inert executor + a
+	# _LiveRuntime whose gate._bankroll.refresh() raises — the cleanest seam that
+	# still exercises the REAL bankroll_refresh_loop + REAL F1 done-callback +
+	# REAL finally guard end-to-end.
+	store_close_calls = {"n": 0}
+	_orig_ts_close = engine_module.TradeStore.close
+
+	def _spy_ts_close(self):  # type: ignore[no-untyped-def]
+		store_close_calls["n"] += 1
+		return _orig_ts_close(self)
+
+	monkeypatch.setattr(engine_module.TradeStore, "close", _spy_ts_close)
+
+	class _InertExecutor:
+		"""Executor stub — never reached (refresh crashes before any tick)."""
+
+		async def place(self, *_a: Any, **_kw: Any) -> Any:
+			raise AssertionError("executor.place must not be reached in this test")
+
+	async def _fake_compose_live(config, config_path, db_path, market_state, injected_executor):  # type: ignore[no-untyped-def]
+		store = engine_module.TradeStore(db_path)
+		runtime = engine_module._LiveRuntime(
+			gate=_FakeGateWithBankroll(failing_bankroll),
+			kalshi_client=None,
+			db_conn=None,  # never used: _ws_loop is blocked, provider.build never runs
+		)
+		return store, _InertExecutor(), runtime
+
+	monkeypatch.setattr(engine_module, "_compose_live", _fake_compose_live)
+
+	# run_recovery precedes the task block — harmless no-op (no real REST).
+	async def _noop_recovery(*_a: Any, **_kw: Any) -> None:
+		return None
+
+	monkeypatch.setattr(engine_module, "run_recovery", _noop_recovery)
+
+	# §6 step-4/5 live helpers are lazy-imported from edge_catcher.live
+	# .reconciliation at call time — no-op-stub them THERE so no real Kalshi /
+	# DB reconciliation runs (the F1 path under test is the refresh supervisor).
+	import edge_catcher.live.reconciliation as _reconmod
+
+	async def _noop_startup_reconcile(*_a: Any, **_kw: Any) -> None:
+		return None
+
+	async def _noop_poll_pending_rows_loop(*_a: Any, **_kw: Any) -> None:
+		return None
+
+	monkeypatch.setattr(_reconmod, "startup_reconcile", _noop_startup_reconcile)
+	monkeypatch.setattr(_reconmod, "poll_pending_rows_loop", _noop_poll_pending_rows_loop)
+
+	# Step-2 strategy discovery → the inert always-enter stub so the enabled set
+	# is non-empty and the boot proceeds to the live task block. It never trades
+	# (the refresh crashes the engine before any WS tick — _ws_loop blocks).
+	monkeypatch.setattr(
+		engine_module, "discover_strategies", lambda: [_AlwaysEnterStrategy()]
+	)
+
+	# _ws_loop blocks forever so the root task is parked INSIDE the awaited
+	# _ws_loop (all background tasks — incl. the refresh task — already created)
+	# when the refresh raises. That is the live steady-state F1 must interrupt.
+	# The done-callback cancels the root task; the cancel propagates through this
+	# blocked await into run_engine's finally (the money-safe drain) — exactly
+	# like a SIGTERM, except _REFRESH_FATAL is set so the finally re-raises.
+	async def _blocking_ws_loop(*_a: Any, **_kw: Any) -> None:
+		await asyncio.Event().wait()
+
+	monkeypatch.setattr(engine_module, "_ws_loop", _blocking_ws_loop)
+
+	# Spy BOTH alert paths:
+	#   * the FATAL alert uses notifications.send (severity="error") — must fire.
+	#   * the clean "drain complete" alert uses engine.notify — must NOT fire.
+	send_calls: list[Any] = []
+
+	def _spy_send(notification: Any, channels: Any) -> dict:
+		send_calls.append(notification)
+		return {}
+
+	monkeypatch.setattr("edge_catcher.notifications.send", _spy_send)
+
+	notify_calls: list[str] = []
+	monkeypatch.setattr(engine_module, "notify", lambda text: notify_calls.append(text))
+
+	# Act: the REAL run_engine. It must RAISE KillSwitchTripFailed (NOT return).
+	with pytest.raises(KillSwitchTripFailed):
+		await asyncio.wait_for(
+			engine_module.run_engine(config_path=cfg_path), timeout=10.0
+		)
+
+	# The refresh task actually fired (the loop awaited refresh once).
+	assert failing_bankroll.refresh_calls >= 1, (
+		"the REAL bankroll_refresh_loop must have called refresh() (the crash "
+		f"trigger); got {failing_bankroll.refresh_calls} calls"
+	)
+
+	# The money-safe drain ran BEFORE the fail-loud re-raise: store.close()
+	# exactly once (close-once contract — the drain completed, not skipped).
+	assert store_close_calls["n"] == 1, (
+		"run_engine's finally must drain (store.close() exactly once) BEFORE "
+		f"re-raising the fatal — got {store_close_calls['n']} close calls"
+	)
+
+	# A FATAL (severity error) risk-channel alert WAS emitted via send().
+	fatal_alerts = [
+		n for n in send_calls
+		if getattr(n, "severity", None) == "error"
+		and "FATAL" in getattr(n, "title", "")
+	]
+	assert len(fatal_alerts) == 1, (
+		"exactly one FATAL severity=error risk alert must be emitted via the "
+		f"notifications.send path (the operator's ONLY signal — no RiskEvent "
+		f"fired because the kill-WRITE failed); got titles={[getattr(n, 'title', None) for n in send_calls]!r}"
+	)
+
+	# The clean "SIGTERM drain complete" notify alert was NOT emitted (the fatal
+	# raise skips step 7) — a fatal crash must never masquerade as a clean drain.
+	assert not any("drain complete" in t for t in notify_calls), (
+		"the clean 'SIGTERM drain complete' alert must be SKIPPED on a fatal "
+		f"refresh crash (it would masquerade the crash as a clean exit); got {notify_calls!r}"
 	)
