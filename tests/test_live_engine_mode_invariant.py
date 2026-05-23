@@ -653,7 +653,7 @@ def test_live_boot_wires_provider_exec_cfg_refresh_task(
 	ttl = float(risk_cfg.get("bankroll_ttl_seconds", 300))
 	failures_until_kill = int(risk_cfg.get("bankroll_failures_until_kill", 2))
 	expected_interval = ttl / 2
-	expected_warn_after = max(1, failures_until_kill - 1)
+	expected_warn_after = failures_until_kill - 1
 
 	refresh_call = _g1_boot_spies["refresh_loop_call"]
 	assert refresh_call is not None, (
@@ -664,7 +664,7 @@ def test_live_boot_wires_provider_exec_cfg_refresh_task(
 		f"got {refresh_call['interval']!r}"
 	)
 	assert refresh_call["warn_after"] == expected_warn_after, (
-		f"bankroll_refresh_loop warn_after must be max(1, failures_until_kill-1)="
+		f"bankroll_refresh_loop warn_after must be failures_until_kill-1="
 		f"{expected_warn_after!r}; got {refresh_call['warn_after']!r}"
 	)
 
