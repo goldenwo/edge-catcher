@@ -475,6 +475,8 @@ def _g1_boot_spies(monkeypatch: pytest.MonkeyPatch):
 	captured: dict = {
 		"ws_loop_kwargs": None,
 		"task_names": [],
+		"refresh_loop_call": None,  # {bankroll, interval, warn_after} once started
+		"built_gate": None,         # gate returned by _fake_build_risk (for identity)
 	}
 
 	import edge_catcher.engine.engine as engmod
@@ -524,6 +526,7 @@ def _g1_boot_spies(monkeypatch: pytest.MonkeyPatch):
 
 		gate = MagicMock(name="Gate")
 		gate._bankroll = MagicMock(name="BankrollCache")
+		captured["built_gate"] = gate
 		return gate
 
 	monkeypatch.setattr(_riskmod, "build_risk_module", _fake_build_risk)
@@ -538,11 +541,23 @@ def _g1_boot_spies(monkeypatch: pytest.MonkeyPatch):
 	monkeypatch.setattr(_clientmod, "KalshiOrderClient", _FakeKalshiClient)
 
 	# bankroll_refresh_loop must not actually sleep/refresh — replace with an
-	# inert coroutine so the started task name is observable without I/O.
-	async def _noop_refresh_loop(*_a, **_kw):
-		return None
+	# inert coroutine factory so the started task name is observable without I/O.
+	# Args are captured by the factory wrapper (called synchronously before
+	# create_task schedules the coro) so the live-boot assertion can verify
+	# interval=ttl/2 and warn_after derivation without wall-clock waits.
+	def _capturing_refresh_loop(bankroll, *, interval, warn_after):
+		captured["refresh_loop_call"] = {
+			"bankroll": bankroll,
+			"interval": interval,
+			"warn_after": warn_after,
+		}
 
-	monkeypatch.setattr(engmod, "bankroll_refresh_loop", _noop_refresh_loop)
+		async def _noop() -> None:
+			return None
+
+		return _noop()
+
+	monkeypatch.setattr(engmod, "bankroll_refresh_loop", _capturing_refresh_loop)
 
 	# Spy create_task to record every started task name.
 	_orig_create_task = asyncio.create_task
@@ -624,11 +639,43 @@ def test_live_boot_wires_provider_exec_cfg_refresh_task(
 		f"so the gate sees per-signal context; got {kw.get('risk_ctx_provider')!r}"
 	)
 
-	# (3) The bankroll refresh task is running (live-only).
+	# (3) The bankroll refresh task is running (live-only) AND its wiring args
+	# are correct.  A broken interval=ttl/2 derivation or wrong warn_after would
+	# leave the gate's bankroll perpetually stale (STALE_BANKROLL trips every
+	# entry) or warn too late (after the kill threshold).
 	names = [n for n in _g1_boot_spies["task_names"] if n]
 	assert "bankroll_refresh" in names, (
 		"live boot must start the 'bankroll_refresh' task (E1 loop) so the "
 		f"bankroll cache stays fresh; started tasks={names!r}"
+	)
+
+	risk_cfg = cfg.get("risk", {})
+	ttl = float(risk_cfg.get("bankroll_ttl_seconds", 300))
+	failures_until_kill = int(risk_cfg.get("bankroll_failures_until_kill", 2))
+	expected_interval = ttl / 2
+	expected_warn_after = max(1, failures_until_kill - 1)
+
+	refresh_call = _g1_boot_spies["refresh_loop_call"]
+	assert refresh_call is not None, (
+		"bankroll_refresh_loop must have been called (task started) during live boot"
+	)
+	assert refresh_call["interval"] == expected_interval, (
+		f"bankroll_refresh_loop interval must be ttl/2={expected_interval!r}; "
+		f"got {refresh_call['interval']!r}"
+	)
+	assert refresh_call["warn_after"] == expected_warn_after, (
+		f"bankroll_refresh_loop warn_after must be max(1, failures_until_kill-1)="
+		f"{expected_warn_after!r}; got {refresh_call['warn_after']!r}"
+	)
+
+	# Identity check: refresh loop must receive the gate's own bankroll cache,
+	# not a copy or a different object.
+	gate = _g1_boot_spies["built_gate"]
+	assert gate is not None, "_fake_build_risk must have been called during live boot"
+	assert refresh_call["bankroll"] is gate._bankroll, (
+		"bankroll_refresh_loop must be started with the gate's own _bankroll "
+		"cache (identity check); a different object would leave a stale backup "
+		"while the gate reads a different (never-refreshed) one"
 	)
 
 

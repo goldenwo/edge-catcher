@@ -1161,8 +1161,9 @@ async def _compose_live(
 	# OrderRequest via build_entry_order without re-parsing the YAML or
 	# growing a new per-handler parameter. Paper never reaches here, so its
 	# config carries NO _exec_cfg ⇒ _handle_enter stays on the byte-exact
-	# allowed_size=None paper path (§9 G-parity). The exit path still builds
-	# its OrderRequest directly from this same cfg (see dispatch._handle_exit).
+	# allowed_size=None paper path (§9 G-parity). _exec_cfg is consumed ONLY
+	# by _handle_enter's live sizing branch; the exit path builds its
+	# OrderRequest directly WITHOUT _exec_cfg (see dispatch._handle_exit).
 	exec_cfg = validate_exec_cfg(config.get("execution", {}))
 	config["_exec_cfg"] = exec_cfg
 
