@@ -25,7 +25,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from edge_catcher.engine.execution import _make_client_order_id
+from edge_catcher.engine.execution import _make_client_order_id, build_entry_order
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
 	MarketState,
@@ -34,7 +34,7 @@ from edge_catcher.engine.market_state import (
 	_is_tradeable_cents,
 	derive_event_ticker,
 )
-from edge_catcher.engine.metrics import Metrics
+from edge_catcher.engine.metrics import Metrics, _GATE_REJECT_COUNTER
 from edge_catcher.engine.notifications import notify
 from edge_catcher.engine.strategy_base import Signal, Strategy
 from edge_catcher.engine.trade_store import TradeStoreProtocol
@@ -43,7 +43,14 @@ if TYPE_CHECKING:
 	# Gate lives in engine/risk.py (Agent A's scope, PR 3/6).
 	# Import only for type-checking so dispatch doesn't fail to import when
 	# risk.py is absent (e.g. paper-trader, replay, tests that run without it).
-	from edge_catcher.engine.risk import Gate
+	from edge_catcher.engine.risk import Gate, RiskContext
+	# RiskContextProvider builds one RiskContext per signal (live only; C3).
+	# TYPE_CHECKING-only import: same rationale as Gate — paper/replay paths
+	# never instantiate this and must not fail when risk_context_provider.py
+	# is absent. The param is annotated as the class name; mypy resolves it
+	# from this block; at runtime the annotation is a string (from __future__
+	# import annotations at the top of the file).
+	from edge_catcher.engine.risk_context_provider import RiskContextProvider
 
 
 # Hard ceiling on a single ``await executor.place(req)`` call. Set to
@@ -74,12 +81,18 @@ except ImportError:
 	class RecordPendingFailed(Exception):  # type: ignore[no-redef]
 		pass
 
-log = logging.getLogger(__name__)
+# Allow / Reject / GateDecision are needed at runtime by _inc_gate_metric
+# (dispatch-side counter translation, spec §4.2). Same try/except pattern so
+# dispatch still imports cleanly on the paper/replay path where risk.py is
+# absent (though _inc_gate_metric is only called from the live gate path).
+try:
+	from edge_catcher.engine.risk import Allow, GateDecision, Reject  # noqa: PLC0415
+except ImportError:
+	Allow = None  # type: ignore[assignment,misc]
+	Reject = None  # type: ignore[assignment,misc]
+	GateDecision = None  # type: ignore[assignment,misc]
 
-# Module-level flag to ensure the "Gate constructed but dispatch wiring deferred"
-# warning fires only once per process, not per signal (would be noisy in tests
-# that exercise many signals against a constructed Gate).
-_gate_unwired_warning_logged = False
+log = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -150,8 +163,9 @@ class _OperatorKill:
 
 # Process-lifetime singleton. Module-scoped (NOT engine-instance-scoped):
 # there is exactly one engine per process (one ``asyncio.run`` root), and the
-# future ``RiskContext`` construction reads it without threading a new param
-# through every handler — same rationale as ``_gate_unwired_warning_logged``.
+# ``RiskContext`` construction reads it without threading a new param through
+# every handler — the same module-global, wired-at-boot convention as
+# ``_INFLIGHT_SECTIONS`` (no per-call parameter threading required).
 _OPERATOR_KILL = _OperatorKill()
 
 
@@ -197,6 +211,15 @@ def _pnl_label(pnl: int | None) -> tuple[str, str]:
 	if pnl < 0:
 		return "LOSS", f"{pnl:+d}¢"
 	return "SCRATCH", "0¢"
+
+
+def _inc_gate_metric(metrics: Metrics, decision: "GateDecision") -> None:
+	"""Increment the per-decision risk-gate counter (dispatch-side; the gate
+	holds no Metrics handle — spec §4.2). Entry-gate only."""
+	if isinstance(decision, Allow):
+		metrics.inc("risk_gate_allowed")
+	else:  # Reject
+		metrics.inc(_GATE_REJECT_COUNTER[decision.reason])
 
 
 def _format_enter_message(
@@ -293,6 +316,7 @@ async def process_tick(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Run every enabled strategy against the current tick context.
 
@@ -317,6 +341,9 @@ async def process_tick(
 	paper-trader and replay paths. When None, the gate is a no-op: every signal
 	proceeds to executor.place without a gate check. Construction of Gate is
 	gated on `executor_kind == "live"` in engine.py (E's wiring point).
+
+	`risk_ctx_provider` builds one `RiskContext` per signal (live only; C3).
+	Paired with `risk`: both set in live, both None in paper/replay.
 	"""
 	for strategy in strategies:
 		try:
@@ -327,7 +354,10 @@ async def process_tick(
 
 		for signal in signals:
 			try:
-				await _handle_signal(signal, ctx, store, config, executor, strategy.emoji, now=now, risk=risk)
+				await _handle_signal(
+					signal, ctx, store, config, executor, strategy.emoji,
+					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+				)
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
 				# means the kill is NOT persisted (funds-at-risk). The engine
@@ -354,6 +384,67 @@ async def process_tick(
 				)
 
 
+def _consult_entry_gate(
+	risk: Gate,
+	signal: Signal,
+	rctx: "RiskContext",
+	metrics: Metrics,
+) -> tuple[int | None, bool]:
+	"""Call gate_entry and translate the GateDecision into dispatch primitives.
+
+	Extracted from ``_handle_signal`` so the ``isinstance`` check lives here, not
+	inside ``_handle_signal`` (an AST-level structural guard in
+	``test_live_exit_settlement_routing.py`` forbids ``isinstance`` in
+	``_handle_signal`` because it serves as a proxy for mode-discriminator
+	branches — any ``isinstance`` in that function would trip the assertion).
+
+	Returns:
+		``(allowed_size, rejected)`` where ``allowed_size`` is the contract count
+		from ``Allow.size_contracts`` (or ``None`` on paper path — never reached
+		from this function) and ``rejected`` is ``True`` when ``gate_entry``
+		returned a ``Reject`` (caller must return immediately without placing).
+
+	May raise ``KillSwitchTripFailed`` — callers must NOT catch it.
+	"""
+	decision = risk.gate_entry(signal, rctx)  # may raise KillSwitchTripFailed — do NOT catch
+	_inc_gate_metric(metrics, decision)
+	if isinstance(decision, Reject):
+		log.info(
+			"Gate REJECT enter %s %s: %s (%s)",
+			signal.strategy, signal.ticker, decision.reason, decision.detail,
+		)
+		return None, True
+	return decision.size_contracts, False
+
+
+def _consult_exit_gate(
+	risk: Gate,
+	signal: Signal,
+	rctx: "RiskContext",
+) -> bool:
+	"""Consult gate_exit (operator-kill full-stop, spec §6). Returns True when the
+	exit is BLOCKED (operator kill active) and the caller must return without exiting.
+
+	Extracted from ``_handle_signal`` so the ``isinstance(Reject)`` check lives here,
+	not inside ``_handle_signal`` (an AST-level structural guard in
+	``test_live_exit_settlement_routing.py`` forbids ``isinstance`` in
+	``_handle_signal`` because it serves as a proxy for mode-discriminator branches —
+	any ``isinstance`` in that function would trip the assertion).
+
+	gate_exit is pure and never raises; ``Allow.size_contracts`` is a proxy size and
+	is intentionally discarded — the real exit size comes from the trade row inside
+	``_handle_exit``.
+	"""
+	decision = risk.gate_exit(signal, rctx)
+	if isinstance(decision, Reject):  # KILL_OPERATOR only (spec §6)
+		log.info(
+			"Gate REJECT exit %s %s: %s (%s)",
+			signal.strategy, signal.ticker, decision.reason, decision.detail,
+		)
+		return True
+	return False
+
+
 async def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
@@ -364,6 +455,7 @@ async def _handle_signal(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
@@ -371,53 +463,83 @@ async def _handle_signal(
 	stays sync (no I/O — pure store mutation + log). Calling a sync function
 	from this async dispatcher is intentional and idiomatic.
 
-	Gate consultation (Sub-project C):
+	Gate consultation (Sub-project C, wired by C3):
 	  Entry signals are gated BEFORE building/placing the order. `risk` is the
 	  Gate instance constructed by E when `executor_kind == "live"`; for paper-
 	  trader and replay paths, `risk` is None and the gate is a no-op.
 
-	  On Reject: log the reason + return (no order placed). Audit + Discord
-	  notify routing is E's responsibility via the RiskEvent contract (CR-1).
-	  On Allow: proceed with build_order(sig, decision.size_contracts) then
-	  executor.place (sizing is wired by D in PR 4).
+	  Live path: `_consult_entry_gate` calls `gate_entry(signal, rctx)`. On
+	  Allow, `_handle_enter` is called with `allowed_size=decision.size_contracts`,
+	  which builds the sized order via `build_entry_order` internally. On Reject,
+	  log at INFO and return — no order placed, no notify (spec §4.1: routine
+	  rejects are silent; audit/Discord routing is E's RiskEvent contract, CR-1).
+
+	  Paper/replay (`risk is None`): `_handle_enter` is called with
+	  `allowed_size=None` — the ungated paper path; `PaperExecutor` sizes
+	  internally. Byte-identical to pre-C3 behaviour.
 
 	  Exit signals bypass the entry gate — exits are always allowed even when
 	  auto-kills are active (kills cap new exposure; they don't trap existing
-	  exposure). The gate_exit check (operator-kill only) is E's responsibility
-	  to call from the WS-close handler path where it has a RiskContext.
+	  exposure).  However, exits ARE subject to the operator-kill full-stop
+	  (spec §6), wired via ``_consult_exit_gate``: the operator kill halts
+	  BOTH new entries and exits, whereas auto-tripped caps (drawdown/daily/
+	  panic) only ever block entries.
 	"""
+	# LIVE only: build one RiskContext per signal (spec §3), reused by whichever
+	# gate the action routes to. Paper/replay never builds one (risk is None) —
+	# G-parity: the paper path is BYTE-IDENTICAL; no RiskContext construction,
+	# no gate call, no conditional divergence on this path.
+	rctx = None
+	if risk is not None:
+		# risk and risk_ctx_provider are wired together at composition (G1) —
+		# both set in live, both None in paper/replay. Assert the pairing so a
+		# mis-wire fails loudly rather than NoneType.build at the first signal.
+		assert risk_ctx_provider is not None
+		rctx = risk_ctx_provider.build(signal, now)
+
 	if signal.action == "enter":
-		# Gate consultation surface — live path only. PR 3 (C) ships the
-		# Gate building blocks (engine/risk.py); E's PR wires the actual
-		# invocation here. E owns:
-		#   1. constructing the RiskContext from engine state (sqlite conn,
-		#      bankroll cache, open-positions reader from engine/live_db.py),
-		#   2. adding the `risk.gate_entry(signal, ctx)` call here,
-		#   3. handling Reject (log + return) and propagating exceptions
-		#      from `_emit_trip` so the engine STOPS on kill-switch DB
-		#      failure (C-spec §Risks #4 ghost-reject defense — do NOT
-		#      catch broadly here; infrastructure exceptions are fatal).
-		# Until E lands, dispatch passes through ungated. If a Gate is
-		# constructed before E (e.g. in tests), warn so the gap is visible
-		# rather than silently allowing trades.
+		# Entry gate — live path only (spec §2.1). Paper/replay (risk is None)
+		# short-circuits to allowed_size=None and calls _handle_enter ungated,
+		# preserving the byte-exact paper path.
+		#
+		# On Allow: proceed with allowed_size = decision.size_contracts.
+		# On Reject: log at INFO and return — NO notify() (spec §4.1: routine
+		#   rejects are silent; audit/Discord routing is E's RiskEvent contract).
+		# KillSwitchTripFailed: do NOT catch — let it propagate so the engine
+		#   STOPS rather than re-entering ungated (C-spec L214 ghost-reject
+		#   defense). process_tick already re-raises it past the broad except.
+		allowed_size: int | None = None  # paper sentinel — None = ungated paper path
 		if risk is not None:
-			global _gate_unwired_warning_logged
-			if not _gate_unwired_warning_logged:
-				log.warning(
-					"Risk gate constructed but dispatch wiring deferred to E; "
-					"all signals pass through ungated until E's PR lands."
-				)
-				_gate_unwired_warning_logged = True
-		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now)
+			# _consult_entry_gate holds the isinstance(Reject) check so this
+			# function stays free of it (structural AST guard in test suite).
+			# KillSwitchTripFailed propagates untouched — do NOT catch here.
+			assert rctx is not None  # invariant: set above whenever risk is not None
+			allowed_size, rejected = _consult_entry_gate(
+				risk, signal, rctx, config.get("_metrics") or Metrics(),
+			)
+			if rejected:
+				return
+		await _handle_enter(signal, ctx, store, config, executor, bullet, now=now, allowed_size=allowed_size)
 	elif signal.action == "exit":
 		# SC-D3 (E3): _handle_exit is now async (it awaits executor.place for
 		# the exit order — the §1 seam: PaperExecutor resolves synchronously /
 		# LiveExecutor places a real IOC + B's async path owns the close) and
 		# receives executor/config UNCONDITIONALLY (no mode branch — the
 		# executor absorbs the live-vs-paper difference; paper close stays
-		# byte-EXACT via the unconditional store.exit_trade). `risk` is NOT
-		# threaded: exits bypass the entry gate (kills cap NEW exposure; they
-		# never trap existing exposure — see this function's docstring).
+		# byte-EXACT via the unconditional store.exit_trade).
+		#
+		# D1 (spec §6): gate_exit is now wired here for live mode. ONLY the
+		# operator kill (KILL_SWITCH env or SIGTERM-driven _OperatorKill) blocks
+		# exits — it is a true full-stop that halts BOTH new entries AND exits.
+		# Auto-tripped caps (drawdown/daily/panic) do NOT block exits because
+		# exits REDUCE risk; trapping existing exposure would be worse. The
+		# isinstance(Reject) check lives in _consult_exit_gate (not here) to
+		# keep _handle_signal free of isinstance (AST structural guard).
+		# Paper/replay (risk is None): unconditional _handle_exit — G-parity.
+		if risk is not None:
+			assert rctx is not None  # invariant: set above whenever risk is not None
+			if _consult_exit_gate(risk, signal, rctx):
+				return  # operator-kill full-stop (spec §6): exit blocked
 		await _handle_exit(
 			signal, ctx, store, bullet, now=now,
 			executor=executor, config=config,
@@ -435,6 +557,7 @@ async def _handle_enter(
 	bullet: str = "🔵",
 	*,
 	now: datetime,
+	allowed_size: int | None = None,
 ) -> None:
 	"""Process an entry signal: build OrderRequest, call executor, route by status."""
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
@@ -452,24 +575,36 @@ async def _handle_enter(
 		metrics = Metrics()
 	metrics.inc("entries_attempted")
 
-	# Build typed request. PaperExecutor's resolve_fill computes the actual
-	# size_contracts from config["sizing"]["risk_per_trade_cents"] / entry_price;
-	# G threads the request shape through but defers sizing to the executor's
-	# internal pipeline (D will refactor sizing into a pre-executor step).
+	# Build typed request — EXACTLY ONCE (spec §2.2 single-build invariant).
+	# Both consumers below (record_intent, executor.place via _place_and_persist)
+	# share the ONE req object so client_order_id is identical across both calls.
+	#
+	# LIVE path (allowed_size is not None): build_entry_order applies taker-with-
+	# cap slippage and generates a fresh uuid4-suffixed client_order_id internally.
+	# Calling it twice would produce two DIFFERENT ids — DO NOT call it again.
+	#
+	# PAPER/replay path (allowed_size is None): byte-exact unchanged construction.
+	# PaperExecutor's resolve_fill computes the actual size_contracts from
+	# config["sizing"]["risk_per_trade_cents"] / entry_price; dispatch defers
+	# sizing to the executor's internal pipeline on this path.
 	#
 	# Signal.side is typed as plain `str` for strategy-author ergonomics
 	# (strategies build sides from data); OrderRequest.side narrows to
 	# Literal["yes", "no"]. Cast at the boundary — pre-G dispatch did no
 	# runtime validation here, so neither do we (byte-exact preservation).
-	req = OrderRequest(
-		ticker=signal.ticker,
-		series=signal.series,
-		side=cast(Literal["yes", "no"], signal.side),
-		size_contracts=0,
-		limit_price_cents=entry_price,
-		strategy=signal.strategy,
-		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
-	)
+	if allowed_size is not None:  # LIVE — sized pre-executor build (spec §2.2)
+		exec_cfg = config["_exec_cfg"]
+		req = build_entry_order(signal, allowed_size, exec_cfg, now)
+	else:  # PAPER/replay — byte-exact unchanged; executor sizes internally
+		req = OrderRequest(
+			ticker=signal.ticker,
+			series=signal.series,
+			side=cast(Literal["yes", "no"], signal.side),
+			size_contracts=0,
+			limit_price_cents=entry_price,
+			strategy=signal.strategy,
+			client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
+		)
 
 	# Pre-place durability hook (sub-project E / L1; spec §3 keystone + §3.1).
 	# Called UNCONDITIONALLY — no mode branch. The TradeStoreProtocol absorbs
@@ -487,11 +622,11 @@ async def _handle_enter(
 	# nothing — STRONGER than the post-place ghost-reject). It reaches
 	# process_tick's `except RecordPendingFailed: raise` (mirroring
 	# KillSwitchTripFailed) which halts the engine rather than re-entering
-	# the gate against unchanged DB state. intended_size is the pre-sizing
-	# PLACEHOLDER: req.size_contracts is 0 here (dispatch defers sizing to
-	# the executor pipeline; the sizing refactor lands later) — identical
-	# sizing-deferred convention as the engine-timeout pending row below;
-	# B's reconciler resolves the true size from Kalshi by client_order_id.
+	# the gate against unchanged DB state. intended_size reflects
+	# req.size_contracts, which is the real sized count on the LIVE path and
+	# 0 on the PAPER/replay path (where the executor sizes internally) —
+	# same convention as the engine-timeout pending row below;
+	# B's reconciler resolves the true filled size from Kalshi by client_order_id.
 	# entry_price_cents is the ORIGINAL Signal intent (NOT D's slippage-
 	# adjusted limit), matching the post-place record_pending contract.
 	# `now` is the threaded tick clock (module invariant L14-L18: handlers
@@ -556,21 +691,20 @@ async def _handle_enter(
 				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
 			)
 		except asyncio.TimeoutError:
-			# NOTE: req.size_contracts is 0 here (pre-sizing — dispatch defers
-			# sizing to the executor pipeline; the real sizing refactor lands in
-			# PR 5/E). So the synthesized pending row carries intended_size=0.
-			# This is a sizing-deferred PLACEHOLDER, not a data bug: B's
-			# reconciler MUST treat an engine_timeout pending row's
-			# intended_size=0 as "unknown — resolve the true size from Kalshi by
-			# client_order_id", same as the NetworkError-pending path. Flagged by
-			# the PR #38 pass-3 review (G2); the clean fix is gated on the
-			# deferred sizing refactor, so we surface it loudly instead.
+			# NOTE: req.size_contracts is the real sized count on the LIVE path
+			# and 0 on the PAPER/replay path (where the executor sizes
+			# internally), so the synthesized pending row carries
+			# intended_size=req.size_contracts accordingly. B's reconciler MUST
+			# treat an engine_timeout pending row as "unknown — resolve the true
+			# filled size from Kalshi by client_order_id", same as the
+			# NetworkError-pending path. Flagged by the PR #38 pass-3 review
+			# (G2); surfaced loudly so the reconciler never silently drops it.
 			log.warning(
-				"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
-				"synthesizing pending+None (intended_size=0, sizing-deferred "
-				"placeholder) for B's reconciler to resolve via client_order_id",
+				"executor.place exceeded %ds for %s %s (client_order_id=%s, "
+				"intended_size=%d) — synthesizing pending+None for B's reconciler "
+				"to resolve via client_order_id",
 				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
-				req.client_order_id,
+				req.client_order_id, req.size_contracts,
 			)
 			_result = OrderResult(
 				status="pending",
@@ -1048,6 +1182,7 @@ async def _handle_ticker_msg(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Handle a ticker (price update) WS message."""
 	data = msg.get("msg", {})
@@ -1112,7 +1247,10 @@ async def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
+			await process_tick(
+				ctx, [strat], store, config, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+			)
 			dirty.add(strat.name)
 
 
@@ -1129,6 +1267,7 @@ async def _handle_trade_msg(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Handle a trade WS message — routes to flow-sensitive strategies."""
 	data = msg.get("msg", {})
@@ -1200,7 +1339,10 @@ async def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
+			await process_tick(
+				ctx, [strat], store, config, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+			)
 			dirty.add(strat.name)
 
 
@@ -1310,6 +1452,7 @@ async def dispatch_message(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Route one parsed event to its handler.
 
@@ -1346,12 +1489,14 @@ async def dispatch_message(
 		elif msg_type == "ticker":
 			await _handle_ticker_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
+				strat_by_series, pending_states, dirty, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 			)
 		elif msg_type == "trade":
 			await _handle_trade_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
+				strat_by_series, pending_states, dirty, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 			)
 		else:
 			log.debug("dispatch_message: unknown msg_type %r", msg_type)
