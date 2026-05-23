@@ -31,6 +31,11 @@ _COUNTER_KEYS = (
 	"risk_gate_rejected_stale_bankroll",   # reason=STALE_BANKROLL
 	# Bankroll cache refresh failure counter.
 	"risk_bankroll_refresh_failures_total",
+	# Pending + unhandled-status counters for the dispatch pending branch.
+	"entries_pending",          # executor returned pending (NetworkError / timeout / malformed-fills)
+	"entries_unhandled_status", # defensive: OrderResult.status outside the known Literal set
+	# Lost-CAS fill counter (filled IOC but durable row already left pending).
+	"entries_filled_lost_cas",
 )
 _GAUGE_KEYS = (
 	"entries_skipped_unsupported",
