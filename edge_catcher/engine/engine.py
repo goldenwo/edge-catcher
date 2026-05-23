@@ -9,7 +9,10 @@ import logging
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+
+if TYPE_CHECKING:
+	from edge_catcher.engine.risk import BankrollCache
 
 import httpx
 import websockets
@@ -594,6 +597,58 @@ def _resolve_notify_channels(config: dict) -> list:
 # now contains only the async lifecycle: WS loop, settlement poller, ticker
 # refresh, and run_engine bootstrap.
 # ---------------------------------------------------------------------------
+
+
+async def bankroll_refresh_loop(
+	bankroll: BankrollCache,
+	*,
+	interval: float,
+	warn_after: int,
+) -> None:
+	"""Periodic bankroll refresh (spec §5.1).
+
+	Awaits ``bankroll.refresh()`` every ``interval`` seconds (caller passes
+	``bankroll_ttl_seconds / 2``).  When ``bankroll._consecutive_failures``
+	reaches ``warn_after`` (< ``bankroll_failures_until_kill``) a ONE-TIME
+	WARNING is sent to the dedicated risk channel; the latch resets on the
+	next successful refresh so a fresh failure streak would warn again.
+
+	**LIVE-ONLY** — started only inside the live task block (Task G1 wires the
+	``create_task`` call).  Paper / replay paths never call this function;
+	G-parity is unaffected.
+
+	Propagation contract:
+	  - ``CancelledError`` propagates — clean drain on engine shutdown.
+	  - ``KillSwitchTripFailed`` propagates — F1's done-callback surfaces it
+	    as a fail-loud crash.  NOT caught here.
+	"""
+	warned = False
+	while True:
+		await asyncio.sleep(interval)
+		await bankroll.refresh()  # KillSwitchTripFailed propagates — F1 surfaces it
+		failures = bankroll._consecutive_failures
+		if failures == 0:
+			warned = False
+		elif failures >= warn_after and not warned:
+			warned = True
+			from edge_catcher.notifications import Notification, send  # noqa: PLC0415
+			send(
+				Notification(
+					title="edge-catcher RISK: bankroll refresh failing",
+					body=(
+						f"Bankroll refresh failing ({failures} consecutive) — "
+						f"entries gated STALE_BANKROLL until it recovers."
+					),
+					severity="warn",
+				),
+				_risk_channels,
+			)
+			log.warning(
+				"Bankroll refresh sustained failure: %d consecutive — "
+				"WARNING sent to risk channel (warn_after=%d)",
+				failures, warn_after,
+			)
+
 
 async def _settlement_poller(
 	store: TradeStoreProtocol,
