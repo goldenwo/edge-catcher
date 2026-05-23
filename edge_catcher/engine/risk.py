@@ -308,6 +308,12 @@ class BankrollCache:
 	# Injected by Gate after construction so BankrollCache can trip the kill
 	# switch without holding a direct reference to KillSwitch.
 	_emit_trip_fn: Any = field(default=None, init=False)
+	# Latches True after the first KILL_AUTO_PANIC trip of a failure streak;
+	# reset on the next successful refresh. Without it a sustained outage would
+	# re-trip every refresh interval — each trip stamps a fresh tripped_at, so
+	# the UNIQUE(reason, tripped_at) guard does not dedup them and kill_switch
+	# rows + risk-channel alerts would accumulate for the whole outage.
+	_panic_tripped: bool = field(default=False, init=False)
 
 	def cash_cents(self) -> int:
 		"""Sync read — returns the last cached balance.
@@ -359,6 +365,7 @@ class BankrollCache:
 			self._cash_cents = await self._source.balance_cents()
 			self._last_refresh_ts = time.monotonic()
 			self._consecutive_failures = 0
+			self._panic_tripped = False  # recovered — re-arm the trip latch
 			log.debug("Bankroll cache refreshed: %d cents", self._cash_cents)
 		except (NetworkError, KalshiAPIError, Exception) as exc:
 			self._consecutive_failures += 1
@@ -369,7 +376,9 @@ class BankrollCache:
 			if (
 				self._consecutive_failures >= self._cfg.bankroll_failures_until_kill
 				and self._emit_trip_fn is not None
+				and not self._panic_tripped
 			):
+				self._panic_tripped = True  # latch — trip once per failure streak
 				detail = (
 					f"bankroll cache stale: {self._consecutive_failures} "
 					f"consecutive refresh failures"
@@ -979,10 +988,13 @@ async def build_risk_module(
 	first ``Gate.gate_entry`` call sees real cash rather than the 0-default.
 	Without the pre-refresh, equity = cash + mtm = 0 + 0 ≤ absolute_panic_
 	floor_cents (3000) on the very first signal, tripping KILL_AUTO_PANIC
-	on every clean startup. With it, a failed pre-refresh still leaves the
-	cache at 0 (the existing failure semantics) and the same trip fires —
-	which is the correct behaviour for the rare "Kalshi unreachable at
-	boot" case.
+	on every clean startup. If the pre-refresh FAILS (the rare "Kalshi
+	unreachable at boot" case), ``_last_refresh_ts`` stays at its 0.0 default,
+	so ``is_stale()`` is True and the first ``gate_entry`` returns the soft,
+	non-persisted ``STALE_BANKROLL`` reject — entries are gated before the
+	equity/panic branch is reached, no order placed. A persisted
+	KILL_AUTO_PANIC still escalates later via the periodic refresh-failure
+	path once ``bankroll_failures_until_kill`` consecutive failures accrue.
 
 	Args:
 		config: The full live-trader.yaml parsed dict.  Must contain a

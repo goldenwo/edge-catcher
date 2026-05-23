@@ -318,6 +318,57 @@ async def test_sustained_failure_emits_one_time_warning() -> None:
 	)
 
 
+@pytest.mark.asyncio
+async def test_floor_config_suppresses_pre_kill_warning() -> None:
+	"""bug_002: at the failures_until_kill==1 floor (warn_after=0) NO warning fires.
+
+	There is no refresh before the kill (it trips on the first failure), and a
+	coincident "entries gated STALE_BANKROLL until it recovers" warning would
+	misdescribe the manual-clear-only KILL_AUTO_PANIC as a transient gate. The
+	loop's ``warn_after >= 1`` guard suppresses it. Driven via the same
+	Event-gated pattern as the warning tests (no wall-clock sleeps).
+	"""
+	send_calls: list[Any] = []
+	sentinel_channel = object()
+	engine_module._risk_channels = [sentinel_channel]  # type: ignore[assignment]
+	done = asyncio.Event()
+
+	class _FailingCache:
+		def __init__(self) -> None:
+			self.calls: int = 0
+			self._consecutive_failures: int = 0
+
+		async def refresh(self) -> None:
+			self.calls += 1
+			self._consecutive_failures += 1
+			if self.calls >= 4:
+				done.set()
+
+	cache = _FailingCache()
+
+	def fake_send(notification: Any, channels: Any) -> dict:
+		send_calls.append((notification, channels))
+		return {}
+
+	with patch("edge_catcher.notifications.send", side_effect=fake_send):
+		# warn_after=0 mirrors the boot-site value when
+		# bankroll_failures_until_kill == 1.
+		task = asyncio.create_task(
+			bankroll_refresh_loop(cache, interval=0.001, warn_after=0)
+		)
+		try:
+			await asyncio.wait_for(done.wait(), timeout=5.0)
+		finally:
+			task.cancel()
+			with contextlib.suppress(asyncio.CancelledError):
+				await task
+
+	assert cache.calls >= 4, f"expected >= 4 refresh calls, got {cache.calls}"
+	assert len(send_calls) == 0, (
+		f"floor config (warn_after=0) must emit no pre-kill warning, got {len(send_calls)}"
+	)
+
+
 # ===========================================================================
 # G1 — no-op-gate REGRESSION GUARD (THE point of the sizing-wire PR)
 #

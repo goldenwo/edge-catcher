@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from edge_catcher.engine.market_state import MarketState
-from edge_catcher.engine.risk_context_provider import RiskContextProvider
+from edge_catcher.engine.risk_context_provider import RiskContextProvider, _env_kill_active
 
 
 # ---------------------------------------------------------------------------
@@ -131,3 +131,38 @@ def test_build_env_kill_switch_overrides_false_active(
 		now=datetime.now(timezone.utc),
 	)
 	assert ctx.operator_kill_active is True
+
+
+@pytest.mark.parametrize(
+	"value, expected_active",
+	[
+		# Disable intents must NOT activate the kill — any casing, plus no/off.
+		("", False),
+		("0", False),
+		("false", False),
+		("False", False),
+		("FALSE", False),
+		("  false  ", False),
+		("no", False),
+		("off", False),
+		("OFF", False),
+		# Activate contract + any unrecognized value — fail-safe toward halting.
+		("1", True),
+		("true", True),
+		("yes", True),
+		("garbage", True),
+	],
+)
+def test_env_kill_active_parses_case_insensitively(
+	value: str,
+	expected_active: bool,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""bug_008: KILL_SWITCH falsy parsing is case-insensitive and covers no/off.
+
+	Deny-list semantics are preserved (any unrecognized value errs toward
+	halting — fail-safe), but common disable tokens (FALSE/no/off in any
+	casing) must NOT flip the operator full-stop ON.
+	"""
+	monkeypatch.setenv("KILL_SWITCH", value)
+	assert _env_kill_active() is expected_active

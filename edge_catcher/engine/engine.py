@@ -643,9 +643,13 @@ async def bankroll_refresh_loop(
 
 	Awaits ``bankroll.refresh()`` every ``interval`` seconds (caller passes
 	``bankroll_ttl_seconds / 2``).  When ``bankroll._consecutive_failures``
-	reaches ``warn_after`` (< ``bankroll_failures_until_kill``) a ONE-TIME
-	WARNING is sent to the dedicated risk channel; the latch resets on the
-	next successful refresh so a fresh failure streak would warn again.
+	reaches ``warn_after`` (= ``bankroll_failures_until_kill - 1``, the refresh
+	BEFORE the kill) a ONE-TIME WARNING is sent to the dedicated risk channel;
+	the latch resets on the next successful refresh so a fresh failure streak
+	would warn again.  ``warn_after < 1`` disables the pre-kill warning — at the
+	``bankroll_failures_until_kill == 1`` floor the kill trips on the first
+	failure, so there is no earlier cycle to warn on (a coincident warning would
+	misdescribe the manual-clear-only KILL_AUTO_PANIC as a transient gate).
 
 	**LIVE-ONLY** — started only inside the live task block (Task G1 wires the
 	``create_task`` call).  Paper / replay paths never call this function;
@@ -663,7 +667,7 @@ async def bankroll_refresh_loop(
 		failures = bankroll._consecutive_failures
 		if failures == 0:
 			warned = False
-		elif failures >= warn_after and not warned:
+		elif warn_after >= 1 and failures >= warn_after and not warned:
 			warned = True
 			from edge_catcher.notifications import Notification, send  # noqa: PLC0415
 			send(
@@ -1522,9 +1526,11 @@ async def run_engine(
 			failures_until_kill = int(
 				risk_cfg.get("bankroll_failures_until_kill", 2)
 			)
-			# warn_after must be < failures_until_kill (a one-time WARNING fires
-			# strictly BEFORE the KILL_AUTO_PANIC trip); floor at 1.
-			warn_after = max(1, failures_until_kill - 1)
+			# One-time WARNING fires the refresh BEFORE the kill. At the
+			# failures_until_kill == 1 floor this is 0 — the loop's
+			# `warn_after >= 1` guard then disables the (impossible) pre-kill
+			# warning, since the kill trips on the very first failure.
+			warn_after = failures_until_kill - 1
 			refresh_task = asyncio.create_task(
 				bankroll_refresh_loop(
 					live_runtime.gate._bankroll,

@@ -398,6 +398,42 @@ class TestBankrollCache:
 		assert "consecutive refresh failures" in trips[0][1]
 
 	@pytest.mark.asyncio
+	async def test_sustained_failure_trips_panic_once_then_rearms(self) -> None:
+		"""A sustained outage trips KILL_AUTO_PANIC exactly once per streak.
+
+		bug_001 regression: refresh() runs every TTL/2; without a latch it
+		re-fires the trip on every failed interval past the threshold. Because
+		each trip stamps a fresh datetime.now() timestamp, the
+		UNIQUE(reason, tripped_at) guard does NOT dedup them — kill_switch rows
+		and risk-channel alerts would accumulate for the whole outage. The trip
+		must latch on the first crossing and re-arm only after a successful
+		refresh (so a genuinely new outage can trip again).
+		"""
+		cfg = _phase1_cfg(bankroll_failures_until_kill=2)
+		source = MagicMock()
+		source.balance_cents = AsyncMock(side_effect=Exception("network error"))
+		cache = BankrollCache(_source=source, _cfg=cfg)
+		trips: list[tuple] = []
+		cache._emit_trip_fn = lambda reason, detail, now: trips.append((reason, detail))
+
+		# Sustained outage — 5 consecutive failed refreshes.
+		for _ in range(5):
+			await cache.refresh()
+		assert len(trips) == 1, "panic must trip once across a sustained outage"
+		assert cache._consecutive_failures == 5
+
+		# Kalshi recovers — a successful refresh resets the counter and re-arms.
+		source.balance_cents = AsyncMock(return_value=20_000)
+		await cache.refresh()
+		assert cache._consecutive_failures == 0
+
+		# A fresh outage streak trips exactly once more.
+		source.balance_cents = AsyncMock(side_effect=Exception("down again"))
+		await cache.refresh()  # failure 1 — below threshold
+		await cache.refresh()  # failure 2 — threshold, trips again
+		assert len(trips) == 2, "a new streak after recovery re-trips once"
+
+	@pytest.mark.asyncio
 	async def test_on_fill_calls_refresh(self) -> None:
 		cfg = _phase1_cfg()
 		source = _make_balance_source(cents=18_000)

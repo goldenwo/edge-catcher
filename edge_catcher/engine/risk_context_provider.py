@@ -32,8 +32,20 @@ class _SupportsActive(Protocol):
 
 
 def _env_kill_active() -> bool:
-	"""Operator full-stop via the KILL_SWITCH env var (spec §6)."""
-	return os.environ.get("KILL_SWITCH", "").strip() not in ("", "0", "false", "False")
+	"""Operator full-stop via the KILL_SWITCH env var (spec §6).
+
+	Deny-list semantics: any value that is NOT a recognized falsy token
+	activates the kill (fail-safe — an ambiguous value errs toward halting).
+	Normalized case-insensitively so common disable intents (FALSE/no/off in
+	any casing) do not accidentally flip the full-stop ON.
+	"""
+	return os.environ.get("KILL_SWITCH", "").strip().lower() not in (
+		"",
+		"0",
+		"false",
+		"no",
+		"off",
+	)
 
 
 class RiskContextProvider:
