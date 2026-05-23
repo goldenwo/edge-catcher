@@ -1186,6 +1186,7 @@ async def _handle_ticker_msg(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Handle a ticker (price update) WS message."""
 	data = msg.get("msg", {})
@@ -1250,7 +1251,10 @@ async def _handle_ticker_msg(
 				series=series,
 				is_first_observation=is_first,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
+			await process_tick(
+				ctx, [strat], store, config, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+			)
 			dirty.add(strat.name)
 
 
@@ -1267,6 +1271,7 @@ async def _handle_trade_msg(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Handle a trade WS message — routes to flow-sensitive strategies."""
 	data = msg.get("msg", {})
@@ -1338,7 +1343,10 @@ async def _handle_trade_msg(
 				taker_side=taker_side,
 				trade_count=trade_count,
 			)
-			await process_tick(ctx, [strat], store, config, executor, now=now, risk=risk)
+			await process_tick(
+				ctx, [strat], store, config, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+			)
 			dirty.add(strat.name)
 
 
@@ -1448,6 +1456,7 @@ async def dispatch_message(
 	*,
 	now: datetime,
 	risk: Gate | None = None,
+	risk_ctx_provider: RiskContextProvider | None = None,
 ) -> None:
 	"""Route one parsed event to its handler.
 
@@ -1484,12 +1493,14 @@ async def dispatch_message(
 		elif msg_type == "ticker":
 			await _handle_ticker_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
+				strat_by_series, pending_states, dirty, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 			)
 		elif msg_type == "trade":
 			await _handle_trade_msg(
 				msg, config, market_state, store, strategies,
-				strat_by_series, pending_states, dirty, executor, now=now, risk=risk,
+				strat_by_series, pending_states, dirty, executor,
+				now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 			)
 		else:
 			log.debug("dispatch_message: unknown msg_type %r", msg_type)

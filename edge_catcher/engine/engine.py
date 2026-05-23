@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 if TYPE_CHECKING:
-	from edge_catcher.engine.risk import BankrollCache
+	from edge_catcher.engine.risk import BankrollCache, Gate
+	from edge_catcher.engine.risk_context_provider import RiskContextProvider
 
 import httpx
 import websockets
@@ -1103,11 +1104,14 @@ async def _compose_live(
 	  ``gate_entry`` sees real cash) + the client + the conn, for steps 4/5.
 
 	``validate_exec_cfg(config["execution"])`` is also CALLED here at T0
-	(§2.5/§6) purely for its fail-fast side-effect — a malformed ``execution:``
-	block aborts at boot, not at first exit. Its typed result is intentionally
-	NOT returned/stashed: there is no consumer (the exit path builds its
-	``OrderRequest`` directly — see ``dispatch._handle_exit``), so binding it
-	would be YAGNI dead state (reviewer-prescribed).
+	(§2.5/§6) for its fail-fast side-effect — a malformed ``execution:`` block
+	aborts at boot, not at first exit — AND its typed ``ExecCfg`` result is
+	stashed in ``config["_exec_cfg"]`` (LIVE-ONLY, since this is the live
+	composition branch) so dispatch's live entry path (``_handle_enter`` with
+	``allowed_size is not None``) can build the sized ``OrderRequest`` via
+	``build_entry_order``. Paper never reaches here, so paper's config carries
+	no ``_exec_cfg`` and ``_handle_enter`` stays on the byte-exact
+	``allowed_size=None`` path (§9 G-parity).
 
 	The §6-step-3 ``_handle_risk_event`` slot is registered into the Gate's
 	callback list HERE (before any gate evaluation — reconcile in step 4,
@@ -1151,9 +1155,16 @@ async def _compose_live(
 	)
 
 	# §2.5/§6: validate execution: at T0 — a malformed block fails at boot,
-	# not at first exit. Result intentionally not bound/returned (no consumer;
-	# the exit path builds its OrderRequest directly — see dispatch._handle_exit).
-	validate_exec_cfg(config.get("execution", {}))
+	# not at first exit. The typed result is stashed in config["_exec_cfg"]
+	# (LIVE-ONLY — this is the live composition branch) so dispatch's live
+	# entry path (_handle_enter, allowed_size is not None) can build the sized
+	# OrderRequest via build_entry_order without re-parsing the YAML or
+	# growing a new per-handler parameter. Paper never reaches here, so its
+	# config carries NO _exec_cfg ⇒ _handle_enter stays on the byte-exact
+	# allowed_size=None paper path (§9 G-parity). The exit path still builds
+	# its OrderRequest directly from this same cfg (see dispatch._handle_exit).
+	exec_cfg = validate_exec_cfg(config.get("execution", {}))
+	config["_exec_cfg"] = exec_cfg
 
 	# §6 step 3 — wire the risk module (pre-refreshes the bankroll cache so
 	# the first gate_entry sees real cash; a Kalshi-unreachable boot leaves
@@ -1431,6 +1442,11 @@ async def run_engine(
 		# the live lifecycle correct without it. CancelledError-safe by B's
 		# own contract (reconciliation.py:874). Paper starts NONE of this
 		# (byte-exact today — §1/§9 G-parity).
+		# G1: the risk gate + its per-signal context provider threaded into the
+		# WS loop (LIVE only). Paper/replay leave both None ⇒ the dispatch gate
+		# short-circuits and the WS path stays byte-identical (§9 G-parity).
+		risk: "Gate | None" = None
+		risk_ctx_provider: "RiskContextProvider | None" = None
 		if live_runtime is not None:
 			from edge_catcher.live.reconciliation import (  # noqa: PLC0415
 				poll_pending_rows_loop,
@@ -1443,6 +1459,46 @@ async def run_engine(
 					name="live_reconciler_poll_pending",
 				)
 			)
+
+			# G1 — close the no-op-gate gap. The gate (build_risk_module) + a
+			# RiskContextProvider over the SAME live db_conn B's writers use and
+			# the engine's single MarketState (mutated in place by the WS loop)
+			# are threaded into `_ws_loop` → `dispatch_message` → `process_tick`
+			# → `_handle_signal` so EVERY live entry is gated on the real WS
+			# feed. Without this the live engine sized every entry 0 and
+			# LiveExecutor rejected it (a silent no-op — zero real orders).
+			from edge_catcher.engine.risk_context_provider import (  # noqa: PLC0415
+				RiskContextProvider,
+			)
+			risk = live_runtime.gate
+			risk_ctx_provider = RiskContextProvider(
+				conn=live_runtime.db_conn,
+				operator_kill=_OPERATOR_KILL,
+				market_state=market_state,
+			)
+
+			# §5.1 bankroll refresh (LIVE only). Keeps the gate's bankroll cache
+			# fresh on a period of bankroll_ttl_seconds/2 so STALE_BANKROLL never
+			# trips in steady state. The fatal supervisor (done-callback +
+			# drain-then-crash on a refresh KillSwitchTripFailed) is wired in F1;
+			# here we only START the task so it runs.
+			risk_cfg = config.get("risk", {})
+			ttl = float(risk_cfg.get("bankroll_ttl_seconds", 300))
+			failures_until_kill = int(
+				risk_cfg.get("bankroll_failures_until_kill", 2)
+			)
+			# warn_after must be < failures_until_kill (a one-time WARNING fires
+			# strictly BEFORE the KILL_AUTO_PANIC trip); floor at 1.
+			warn_after = max(1, failures_until_kill - 1)
+			refresh_task = asyncio.create_task(
+				bankroll_refresh_loop(
+					live_runtime.gate._bankroll,
+					interval=ttl / 2,
+					warn_after=warn_after,
+				),
+				name="bankroll_refresh",
+			)
+			tasks.append(refresh_task)
 
 		# Build strategy lookup by series
 		strat_by_series: dict[str, list[Strategy]] = {}
@@ -1473,6 +1529,7 @@ async def run_engine(
 						client, ws_ref, dirty_strategies,
 						executor,
 						capture_writer=capture_writer,
+						risk=risk, risk_ctx_provider=risk_ctx_provider,
 					)
 				except asyncio.CancelledError:
 					# Cooperative cancellation (SIGTERM, parent task cancel). Re-raise
@@ -1641,8 +1698,19 @@ async def _ws_loop(
 	dirty: set[str],
 	executor: Executor,
 	capture_writer: RawFrameWriter | None = None,
+	*,
+	risk: "Gate | None" = None,
+	risk_ctx_provider: "RiskContextProvider | None" = None,
 ) -> None:
-	"""Single WS connection lifecycle — connect, subscribe, process messages."""
+	"""Single WS connection lifecycle — connect, subscribe, process messages.
+
+	``risk`` + ``risk_ctx_provider`` are the live risk gate + its per-signal
+	context provider, threaded down to ``dispatch_message`` so the gate is
+	consulted on the REAL WS feed (G1 — closes the no-op-gate gap where the
+	live WS path bypassed the gate entirely). Both default ``None`` and are
+	passed ``None`` by paper/replay ⇒ the dispatch gate short-circuits and the
+	paper path stays byte-identical (§9 G-parity).
+	"""
 	headers = make_auth_headers()
 
 	# Use tickers already registered in market_state (seeded by recovery)
@@ -1699,7 +1767,7 @@ async def _ws_loop(
 					config, market_state, store,
 					strategies, strat_by_series, pending_states, dirty,
 					executor,
-					now=now,
+					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 				)
 			except asyncio.CancelledError:
 				# Cooperative cancellation must propagate so the outer reconnect
