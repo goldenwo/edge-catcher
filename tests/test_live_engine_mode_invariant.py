@@ -445,3 +445,291 @@ def test_unknown_executor_value_is_rejected(tmp_path: Path) -> None:
 	cfg["executor"] = "wat"
 	with pytest.raises(RuntimeError, match="coherence"):
 		_assert_mode_coherence(cfg)
+
+
+# ===========================================================================
+# G1 — live boot wires the provider + exec_cfg + bankroll refresh task
+#
+# These extend the §2 coherence harness to the §6 composition: a coherent live
+# boot must (1) stash a typed ExecCfg in config["_exec_cfg"] (the live
+# _handle_enter consumer reads it), (2) thread a RiskContextProvider into
+# _ws_loop alongside the gate, and (3) start a "bankroll_refresh" task. Paper
+# must do NONE of this (G-parity — risk=None, risk_ctx_provider=None reach
+# _ws_loop, no _exec_cfg, no refresh task).
+# ===========================================================================
+
+
+@pytest.fixture
+def _g1_boot_spies(monkeypatch: pytest.MonkeyPatch):
+	"""Drive ``run_engine`` to the post-composition ``_ws_loop`` seam and
+	capture what G1 wires: the ``_ws_loop`` ``risk``/``risk_ctx_provider``
+	kwargs, every ``create_task`` name, and (after boot) ``config['_exec_cfg']``.
+
+	Mirrors ``test_live_composition_root._compose_spies``: ``run_recovery`` is a
+	no-op; the live-only B helpers are no-op-stubbed at their lazy-import source;
+	``build_risk_module`` / ``KalshiOrderClient`` are faked (no Kalshi);
+	``discover_strategies`` returns an inert stub so step-2 passes. ``_ws_loop``
+	is stubbed to RECORD its kwargs then raise a ``BaseException`` sentinel
+	(escapes the ``while True`` ``except Exception`` reconnect-forever catch).
+	"""
+	captured: dict = {
+		"ws_loop_kwargs": None,
+		"task_names": [],
+		"refresh_loop_call": None,  # {bankroll, interval, warn_after} once started
+		"built_gate": None,         # gate returned by _fake_build_risk (for identity)
+	}
+
+	import edge_catcher.engine.engine as engmod
+
+	class _ComposeDone(BaseException):
+		pass
+
+	async def _noop_recovery(*_a, **_kw):
+		return None
+
+	monkeypatch.setattr(engmod, "run_recovery", _noop_recovery)
+
+	async def _spy_ws_loop(*_a, **kw):
+		captured["ws_loop_kwargs"] = kw
+		raise _ComposeDone("captured _ws_loop kwargs — stop at the WS seam")
+
+	monkeypatch.setattr(engmod, "_ws_loop", _spy_ws_loop)
+
+	import edge_catcher.live.reconciliation as _reconmod
+
+	async def _noop_async(*_a, **_kw):
+		return None
+
+	monkeypatch.setattr(_reconmod, "startup_reconcile", _noop_async)
+	monkeypatch.setattr(_reconmod, "poll_pending_rows_loop", _noop_async)
+
+	# Inert stub strategy on a synthetic series so step-2 discovery passes
+	# (mode-agnostic — identical paper/live, NOT the seam under test).
+	from edge_catcher.engine.strategy_base import Signal, Strategy, TickContext
+
+	class _StubStrategy(Strategy):
+		name = "g1-mode-stub"
+		supported_series = ["KXSTUB15M"]
+		default_params: dict = {}
+
+		def on_tick(self, ctx: TickContext) -> list[Signal]:
+			return []
+
+	monkeypatch.setattr(engmod, "discover_strategies", lambda: [_StubStrategy()])
+
+	# Fake the live-only wiring helpers at their lazy-import source modules.
+	import edge_catcher.engine.risk as _riskmod
+	import edge_catcher.live.client as _clientmod
+
+	async def _fake_build_risk(*_a, **_kw):
+		from unittest.mock import MagicMock
+
+		gate = MagicMock(name="Gate")
+		gate._bankroll = MagicMock(name="BankrollCache")
+		captured["built_gate"] = gate
+		return gate
+
+	monkeypatch.setattr(_riskmod, "build_risk_module", _fake_build_risk)
+
+	class _FakeKalshiClient:
+		def __init__(self, *a, **kw):
+			pass
+
+		async def close(self):
+			return None
+
+	monkeypatch.setattr(_clientmod, "KalshiOrderClient", _FakeKalshiClient)
+
+	# bankroll_refresh_loop must not actually sleep/refresh — replace with an
+	# inert coroutine factory so the started task name is observable without I/O.
+	# Args are captured by the factory wrapper (called synchronously before
+	# create_task schedules the coro) so the live-boot assertion can verify
+	# interval=ttl/2 and warn_after derivation without wall-clock waits.
+	def _capturing_refresh_loop(bankroll, *, interval, warn_after):
+		captured["refresh_loop_call"] = {
+			"bankroll": bankroll,
+			"interval": interval,
+			"warn_after": warn_after,
+		}
+
+		async def _noop() -> None:
+			return None
+
+		return _noop()
+
+	monkeypatch.setattr(engmod, "bankroll_refresh_loop", _capturing_refresh_loop)
+
+	# Spy create_task to record every started task name.
+	_orig_create_task = asyncio.create_task
+
+	def _spy_create_task(coro, *, name=None):
+		captured["task_names"].append(name)
+		return _orig_create_task(coro, name=name)
+
+	monkeypatch.setattr(engmod.asyncio, "create_task", _spy_create_task)
+
+	captured["_ComposeDone"] = _ComposeDone
+	return captured
+
+
+def _g1_live_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+	"""A fully-coherent live cfg + the §8 execution: block + step-2 prereqs."""
+	cfg = make_live_cfg(tmp_path, monkeypatch)
+	cfg["execution"] = {
+		"entry_slippage_cents": 2,
+		"exit_slippage_cents": {
+			"take_profit": 1, "stop_loss": 1, "time_exit": 1,
+		},
+	}
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg["strategies"] = {
+		"g1-mode-stub": {"enabled": True, "series": ["KXSTUB15M"]},
+	}
+	return cfg
+
+
+def test_live_boot_wires_provider_exec_cfg_refresh_task(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _g1_boot_spies,
+) -> None:
+	"""Live boot: ``config['_exec_cfg']`` is a typed ``ExecCfg``; a
+	``RiskContextProvider`` is threaded into ``_ws_loop`` alongside the gate; a
+	task named ``bankroll_refresh`` is started. THE no-op-gate composition.
+	"""
+	from edge_catcher.engine.engine import run_engine
+	from edge_catcher.engine.execution import ExecCfg
+	from edge_catcher.engine.risk_context_provider import RiskContextProvider
+
+	cfg = _g1_live_cfg(tmp_path, monkeypatch)
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	loaded: dict = {}
+	# Capture the SAME config dict the engine threads downstream so we can
+	# assert _exec_cfg landed on it (run_engine loads its own dict from YAML).
+	import edge_catcher.engine.engine as engmod
+
+	_orig_load = engmod.load_config
+
+	def _capture_load(p):
+		c = _orig_load(p)
+		loaded["config"] = c
+		return c
+
+	monkeypatch.setattr(engmod, "load_config", _capture_load)
+
+	with pytest.raises(_g1_boot_spies["_ComposeDone"]):
+		asyncio.run(run_engine(config_path=cfg_path))
+
+	# (1) The live config carries a typed ExecCfg for _handle_enter's live path.
+	config = loaded["config"]
+	assert isinstance(config.get("_exec_cfg"), ExecCfg), (
+		"live boot must stash a typed ExecCfg in config['_exec_cfg'] — the live "
+		f"_handle_enter reads it to build the sized order; got {config.get('_exec_cfg')!r}"
+	)
+
+	# (2) A RiskContextProvider AND the gate were threaded into _ws_loop.
+	kw = _g1_boot_spies["ws_loop_kwargs"]
+	assert kw is not None, "_ws_loop was never reached"
+	assert kw.get("risk") is not None, (
+		"live _ws_loop must receive the gate (risk=) — the no-op-gate fix"
+	)
+	assert isinstance(kw.get("risk_ctx_provider"), RiskContextProvider), (
+		"live _ws_loop must receive a RiskContextProvider (risk_ctx_provider=) "
+		f"so the gate sees per-signal context; got {kw.get('risk_ctx_provider')!r}"
+	)
+
+	# (3) The bankroll refresh task is running (live-only) AND its wiring args
+	# are correct.  A broken interval=ttl/2 derivation or wrong warn_after would
+	# leave the gate's bankroll perpetually stale (STALE_BANKROLL trips every
+	# entry) or warn too late (after the kill threshold).
+	names = [n for n in _g1_boot_spies["task_names"] if n]
+	assert "bankroll_refresh" in names, (
+		"live boot must start the 'bankroll_refresh' task (E1 loop) so the "
+		f"bankroll cache stays fresh; started tasks={names!r}"
+	)
+
+	risk_cfg = cfg.get("risk", {})
+	ttl = float(risk_cfg.get("bankroll_ttl_seconds", 300))
+	failures_until_kill = int(risk_cfg.get("bankroll_failures_until_kill", 2))
+	expected_interval = ttl / 2
+	expected_warn_after = failures_until_kill - 1
+
+	refresh_call = _g1_boot_spies["refresh_loop_call"]
+	assert refresh_call is not None, (
+		"bankroll_refresh_loop must have been called (task started) during live boot"
+	)
+	assert refresh_call["interval"] == expected_interval, (
+		f"bankroll_refresh_loop interval must be ttl/2={expected_interval!r}; "
+		f"got {refresh_call['interval']!r}"
+	)
+	assert refresh_call["warn_after"] == expected_warn_after, (
+		f"bankroll_refresh_loop warn_after must be failures_until_kill-1="
+		f"{expected_warn_after!r}; got {refresh_call['warn_after']!r}"
+	)
+
+	# Identity check: refresh loop must receive the gate's own bankroll cache,
+	# not a copy or a different object.
+	gate = _g1_boot_spies["built_gate"]
+	assert gate is not None, "_fake_build_risk must have been called during live boot"
+	assert refresh_call["bankroll"] is gate._bankroll, (
+		"bankroll_refresh_loop must be started with the gate's own _bankroll "
+		"cache (identity check); a different object would leave a stale backup "
+		"while the gate reads a different (never-refreshed) one"
+	)
+
+
+def test_paper_boot_no_gate_no_provider_no_refresh_task(
+	tmp_path: Path, _g1_boot_spies,
+) -> None:
+	"""G-parity: paper boot threads ``risk=None`` AND ``risk_ctx_provider=None``
+	into ``_ws_loop``, leaves NO ``_exec_cfg`` on the config, and starts NO
+	``bankroll_refresh`` task. Byte-exact with pre-G1 paper.
+	"""
+	from edge_catcher.engine.engine import run_engine
+
+	cfg = make_paper_cfg(tmp_path)
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg["strategies"] = {
+		"g1-mode-stub": {"enabled": True, "series": ["KXSTUB15M"]},
+	}
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	loaded: dict = {}
+	import edge_catcher.engine.engine as engmod
+
+	_orig_load = engmod.load_config
+
+	def _capture_load(p):
+		c = _orig_load(p)
+		loaded["config"] = c
+		return c
+
+	import unittest.mock as _mock
+	with _mock.patch.object(engmod, "load_config", _capture_load):
+		with pytest.raises(_g1_boot_spies["_ComposeDone"]):
+			asyncio.run(run_engine(config_path=cfg_path))
+
+	# Paper config must NOT carry _exec_cfg (live-only — keeps _handle_enter on
+	# the byte-exact allowed_size=None paper path).
+	config = loaded["config"]
+	assert "_exec_cfg" not in config, (
+		"paper config must NOT carry _exec_cfg (live-only; its presence would "
+		"divert _handle_enter off the byte-exact paper path)"
+	)
+
+	# risk AND risk_ctx_provider reach _ws_loop as None (G-parity).
+	kw = _g1_boot_spies["ws_loop_kwargs"]
+	assert kw is not None, "_ws_loop was never reached"
+	assert kw.get("risk") is None, "paper _ws_loop must pass risk=None (G-parity)"
+	assert kw.get("risk_ctx_provider") is None, (
+		"paper _ws_loop must pass risk_ctx_provider=None (G-parity)"
+	)
+
+	# No bankroll_refresh task (live-only).
+	names = [n for n in _g1_boot_spies["task_names"] if n]
+	assert "bankroll_refresh" not in names, (
+		f"paper must NOT start the bankroll_refresh task (live-only); tasks={names!r}"
+	)

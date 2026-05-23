@@ -26,6 +26,15 @@ class SyntheticTickStrategy(Strategy):
 					series=ctx.series,
 					strategy=self.name,
 					reason="synthetic first-tick entry",
+					# Required by build_entry_order on the live dispatch path.
+					# entry_price_cents mirrors _handle_enter's own entry_price
+					# computation (ctx.yes_ask for a yes-side entry) so the live
+					# limit price is byte-equal to the paper limit when
+					# ExecCfg.entry_slippage_cents=0.  stop_loss_distance_cents
+					# is consumed by gate sizing (not by the order builder itself)
+					# and must be a positive integer on the live path.
+					entry_price_cents=ctx.yes_ask,
+					stop_loss_distance_cents=5,
 				)
 			]
 		return []

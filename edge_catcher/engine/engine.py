@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import logging
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+
+if TYPE_CHECKING:
+	from edge_catcher.engine.risk import BankrollCache, Gate
+	from edge_catcher.engine.risk_context_provider import RiskContextProvider
 
 import httpx
 import websockets
@@ -129,6 +134,38 @@ log = logging.getLogger(__name__)
 # (the paper analog is "never bound" — paper has no risk surface). NEVER
 # re-resolved per trip (mirrors the §1 keystone: wired at boot, not per-call).
 _risk_channels: list = []
+
+# F1 (§5.1 drain-then-crash supervisor) — holds the BaseException a bankroll
+# refresh raised (a KillSwitchTripFailed: the auto-panic trip's kill-WRITE
+# itself failed). asyncio ISOLATES a task's exception, so without this the
+# refresh task would die silently and the engine would keep trading ungated
+# against an untrusted balance (the C-spec L214 ghost-reject hazard). The
+# done-callback stashes it here and cancels the root task; run_engine's finally
+# turns that cancel into a fail-loud crash AFTER the money-safe drain ran.
+# module-scoped (one engine per process — reset in test fixtures).
+_REFRESH_FATAL: BaseException | None = None
+
+
+def _refresh_done_cb(
+	task: "asyncio.Task[Any]", *, root_task: "asyncio.Task[Any]"
+) -> None:
+	"""Done-callback on the §5.1 bankroll-refresh task (F1).
+
+	asyncio swallows a task's exception unless something retrieves it. This
+	callback retrieves it: a CLEAN drain cancel (``task.cancelled()``) is NOT
+	fatal and is ignored; ANY other exception (the loop's
+	``KillSwitchTripFailed`` — kill-WRITE failed) is stashed in the module
+	holder and the engine root task is cancelled. The cancel propagates the
+	usual CancelledError into ``_ws_loop`` so ``run_engine``'s finally drains
+	the in-flight place→persist sections (money-safe) and THEN re-raises the
+	stashed exception fail-loud."""
+	global _REFRESH_FATAL
+	if task.cancelled():
+		return  # clean drain cancel — not fatal
+	exc = task.exception()
+	if exc is not None:
+		_REFRESH_FATAL = exc
+		root_task.cancel()  # interrupt the engine; the finally turns this into a fail-loud crash
 
 
 def _configure_risk_channel(channels: list) -> None:
@@ -595,6 +632,62 @@ def _resolve_notify_channels(config: dict) -> list:
 # refresh, and run_engine bootstrap.
 # ---------------------------------------------------------------------------
 
+
+async def bankroll_refresh_loop(
+	bankroll: BankrollCache,
+	*,
+	interval: float,
+	warn_after: int,
+) -> None:
+	"""Periodic bankroll refresh (spec §5.1).
+
+	Awaits ``bankroll.refresh()`` every ``interval`` seconds (caller passes
+	``bankroll_ttl_seconds / 2``).  When ``bankroll._consecutive_failures``
+	reaches ``warn_after`` (= ``bankroll_failures_until_kill - 1``, the refresh
+	BEFORE the kill) a ONE-TIME WARNING is sent to the dedicated risk channel;
+	the latch resets on the next successful refresh so a fresh failure streak
+	would warn again.  ``warn_after < 1`` disables the pre-kill warning — at the
+	``bankroll_failures_until_kill == 1`` floor the kill trips on the first
+	failure, so there is no earlier cycle to warn on (a coincident warning would
+	misdescribe the manual-clear-only KILL_AUTO_PANIC as a transient gate).
+
+	**LIVE-ONLY** — started only inside the live task block (Task G1 wires the
+	``create_task`` call).  Paper / replay paths never call this function;
+	G-parity is unaffected.
+
+	Propagation contract:
+	  - ``CancelledError`` propagates — clean drain on engine shutdown.
+	  - ``KillSwitchTripFailed`` propagates — F1's done-callback surfaces it
+	    as a fail-loud crash.  NOT caught here.
+	"""
+	warned = False
+	while True:
+		await asyncio.sleep(interval)
+		await bankroll.refresh()  # KillSwitchTripFailed propagates — F1 surfaces it
+		failures = bankroll._consecutive_failures
+		if failures == 0:
+			warned = False
+		elif warn_after >= 1 and failures >= warn_after and not warned:
+			warned = True
+			from edge_catcher.notifications import Notification, send  # noqa: PLC0415
+			send(
+				Notification(
+					title="edge-catcher RISK: bankroll refresh failing",
+					body=(
+						f"Bankroll refresh failing ({failures} consecutive) — "
+						f"entries gated STALE_BANKROLL until it recovers."
+					),
+					severity="warn",
+				),
+				_risk_channels,
+			)
+			log.warning(
+				"Bankroll refresh sustained failure: %d consecutive — "
+				"WARNING sent to risk channel (warn_after=%d)",
+				failures, warn_after,
+			)
+
+
 async def _settlement_poller(
 	store: TradeStoreProtocol,
 	client: httpx.AsyncClient,
@@ -1048,11 +1141,14 @@ async def _compose_live(
 	  ``gate_entry`` sees real cash) + the client + the conn, for steps 4/5.
 
 	``validate_exec_cfg(config["execution"])`` is also CALLED here at T0
-	(§2.5/§6) purely for its fail-fast side-effect — a malformed ``execution:``
-	block aborts at boot, not at first exit. Its typed result is intentionally
-	NOT returned/stashed: there is no consumer (the exit path builds its
-	``OrderRequest`` directly — see ``dispatch._handle_exit``), so binding it
-	would be YAGNI dead state (reviewer-prescribed).
+	(§2.5/§6) for its fail-fast side-effect — a malformed ``execution:`` block
+	aborts at boot, not at first exit — AND its typed ``ExecCfg`` result is
+	stashed in ``config["_exec_cfg"]`` (LIVE-ONLY, since this is the live
+	composition branch) so dispatch's live entry path (``_handle_enter`` with
+	``allowed_size is not None``) can build the sized ``OrderRequest`` via
+	``build_entry_order``. Paper never reaches here, so paper's config carries
+	no ``_exec_cfg`` and ``_handle_enter`` stays on the byte-exact
+	``allowed_size=None`` path (§9 G-parity).
 
 	The §6-step-3 ``_handle_risk_event`` slot is registered into the Gate's
 	callback list HERE (before any gate evaluation — reconcile in step 4,
@@ -1096,9 +1192,17 @@ async def _compose_live(
 	)
 
 	# §2.5/§6: validate execution: at T0 — a malformed block fails at boot,
-	# not at first exit. Result intentionally not bound/returned (no consumer;
-	# the exit path builds its OrderRequest directly — see dispatch._handle_exit).
-	validate_exec_cfg(config.get("execution", {}))
+	# not at first exit. The typed result is stashed in config["_exec_cfg"]
+	# (LIVE-ONLY — this is the live composition branch) so dispatch's live
+	# entry path (_handle_enter, allowed_size is not None) can build the sized
+	# OrderRequest via build_entry_order without re-parsing the YAML or
+	# growing a new per-handler parameter. Paper never reaches here, so its
+	# config carries NO _exec_cfg ⇒ _handle_enter stays on the byte-exact
+	# allowed_size=None paper path (§9 G-parity). _exec_cfg is consumed ONLY
+	# by _handle_enter's live sizing branch; the exit path builds its
+	# OrderRequest directly WITHOUT _exec_cfg (see dispatch._handle_exit).
+	exec_cfg = validate_exec_cfg(config.get("execution", {}))
+	config["_exec_cfg"] = exec_cfg
 
 	# §6 step 3 — wire the risk module (pre-refreshes the bankroll cache so
 	# the first gate_entry sees real cash; a Kalshi-unreachable boot leaves
@@ -1134,6 +1238,12 @@ async def run_engine(
 			constructed against ``MarketState`` + ``config``. Sub-project D
 			provides ``LiveExecutor`` for live trading.
 	"""
+	# Reset the fatal holder — robust to in-process engine reuse; production
+	# is one-engine-per-process so this is a no-op there, but keeps in-process
+	# reuse (e.g. integration tests) safe without relying on the test fixture.
+	global _REFRESH_FATAL
+	_REFRESH_FATAL = None
+
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
 
@@ -1196,20 +1306,15 @@ async def run_engine(
 		if executor is None:
 			executor = PaperExecutor(market_state=market_state, config=config)
 
-	# Risk gate (Sub-project C) — Gate / BankrollCache / KillSwitch / etc.
-	# all live in engine/risk.py and SHIP in this PR (PR 3). However the
-	# actual construction + wiring requires KalshiBalanceSource (live HTTP
-	# client), the live_trades.db connection, and a periodic-refresh task —
-	# none of which dispatch.py has access to. E's PR owns the full
-	# bootstrap: instantiating KalshiBalanceSource, calling
-	# BankrollCache.refresh() at T0, threading RiskContext to dispatch,
-	# and starting the periodic-refresh background task.
-	#
-	# PR 3 ships only the building blocks. No risk-related wiring happens
-	# at engine startup yet. If config has executor_kind=live before E
-	# ships, the engine starts paper-style (gate not consulted) — see the
-	# warning in dispatch._handle_signal when a Gate is constructed
-	# without dispatch wiring.
+	# Risk gate (Sub-project C/E) — Gate / BankrollCache / KillSwitch / etc.
+	# all live in engine/risk.py.  For live mode (executor_kind == "live"),
+	# the full risk stack is composed here at engine startup: a
+	# KalshiBalanceSource is constructed, BankrollCache.refresh() is awaited
+	# at T0, a periodic-refresh background task is started, and both the
+	# Gate instance and a RiskContextProvider are threaded through to
+	# dispatch_message (via _ws_loop) so every live signal is gated before
+	# an order is placed.  Paper/replay paths receive risk=None and are
+	# byte-identical to pre-gate behaviour.
 
 	# §6 Path B — install the boot-resolved notify channel(s) ONCE here
 	# (after the §2 coherence gate + the mode-composition branch; the live
@@ -1376,6 +1481,11 @@ async def run_engine(
 		# the live lifecycle correct without it. CancelledError-safe by B's
 		# own contract (reconciliation.py:874). Paper starts NONE of this
 		# (byte-exact today — §1/§9 G-parity).
+		# G1: the risk gate + its per-signal context provider threaded into the
+		# WS loop (LIVE only). Paper/replay leave both None ⇒ the dispatch gate
+		# short-circuits and the WS path stays byte-identical (§9 G-parity).
+		risk: "Gate | None" = None
+		risk_ctx_provider: "RiskContextProvider | None" = None
 		if live_runtime is not None:
 			from edge_catcher.live.reconciliation import (  # noqa: PLC0415
 				poll_pending_rows_loop,
@@ -1387,6 +1497,67 @@ async def run_engine(
 					),
 					name="live_reconciler_poll_pending",
 				)
+			)
+
+			# G1 — close the no-op-gate gap. The gate (build_risk_module) + a
+			# RiskContextProvider over the SAME live db_conn B's writers use and
+			# the engine's single MarketState (mutated in place by the WS loop)
+			# are threaded into `_ws_loop` → `dispatch_message` → `process_tick`
+			# → `_handle_signal` so EVERY live entry is gated on the real WS
+			# feed. Without this the live engine sized every entry 0 and
+			# LiveExecutor rejected it (a silent no-op — zero real orders).
+			from edge_catcher.engine.risk_context_provider import (  # noqa: PLC0415
+				RiskContextProvider,
+			)
+			risk = live_runtime.gate
+			risk_ctx_provider = RiskContextProvider(
+				conn=live_runtime.db_conn,
+				operator_kill=_OPERATOR_KILL,
+				market_state=market_state,
+			)
+
+			# §5.1 bankroll refresh (LIVE only). Keeps the gate's bankroll cache
+			# fresh on a period of bankroll_ttl_seconds/2 so STALE_BANKROLL never
+			# trips in steady state. The fatal supervisor (done-callback +
+			# drain-then-crash on a refresh KillSwitchTripFailed) is wired in F1;
+			# here we only START the task so it runs.
+			risk_cfg = config.get("risk", {})
+			ttl = float(risk_cfg.get("bankroll_ttl_seconds", 300))
+			failures_until_kill = int(
+				risk_cfg.get("bankroll_failures_until_kill", 2)
+			)
+			# One-time WARNING fires the refresh BEFORE the kill. At the
+			# failures_until_kill == 1 floor this is 0 — the loop's
+			# `warn_after >= 1` guard then disables the (impossible) pre-kill
+			# warning, since the kill trips on the very first failure.
+			warn_after = failures_until_kill - 1
+			refresh_task = asyncio.create_task(
+				bankroll_refresh_loop(
+					live_runtime.gate._bankroll,
+					interval=ttl / 2,
+					warn_after=warn_after,
+				),
+				name="bankroll_refresh",
+			)
+			tasks.append(refresh_task)
+			# F1 — drain-then-crash supervisor. asyncio isolates a task's
+			# exception; without this done-callback a refresh KillSwitchTripFailed
+			# (the auto-panic trip's kill-WRITE failed) would be silently lost and
+			# the engine would keep trading ungated against an untrusted balance.
+			# The callback stashes the exception + cancels THIS run_engine root
+			# task; the finally's fatal guard re-raises it fail-loud after the
+			# money-safe drain. `asyncio.current_task()` here = the run_engine root
+			# task the cli `await`s — cancelling it triggers run_engine's finally.
+			# It is never None inside a running coroutine (defensive narrow for
+			# mypy + a fail-loud guard if that invariant were ever broken).
+			_root_task = asyncio.current_task()
+			if _root_task is None:  # pragma: no cover - unreachable inside run_engine
+				raise RuntimeError(
+					"F1: asyncio.current_task() is None inside run_engine — cannot "
+					"wire the bankroll-refresh fatal supervisor"
+				)
+			refresh_task.add_done_callback(
+				functools.partial(_refresh_done_cb, root_task=_root_task)
 			)
 
 		# Build strategy lookup by series
@@ -1418,6 +1589,7 @@ async def run_engine(
 						client, ws_ref, dirty_strategies,
 						executor,
 						capture_writer=capture_writer,
+						risk=risk, risk_ctx_provider=risk_ctx_provider,
 					)
 				except asyncio.CancelledError:
 					# Cooperative cancellation (SIGTERM, parent task cancel). Re-raise
@@ -1563,6 +1735,35 @@ async def run_engine(
 			store.close()
 			capture_writer.close()
 
+			# F1 fatal guard — AFTER the money-safe drain (steps 1-6 ran), BEFORE
+			# the clean SIGTERM alert. A bankroll-refresh KillSwitchTripFailed
+			# means the auto-panic trip's kill-WRITE itself failed, so NO RiskEvent
+			# fired (the §6 risk-event slot is reached only on a SUCCESSFUL trip) —
+			# this is the operator's ONLY signal. Emit it best-effort, then re-raise
+			# the stashed exception so the process STOPS fail-loud (NOT a clean exit
+			# the cli swallows as 0) and the clean "drain complete" alert is SKIPPED.
+			if _REFRESH_FATAL is not None:
+				try:
+					from edge_catcher.notifications import (  # noqa: PLC0415
+						Notification,
+						send,
+					)
+					send(
+						Notification(
+							title="edge-catcher RISK: FATAL — bankroll refresh kill-write failed",
+							body=(
+								f"Engine STOPPING fail-loud: bankroll-refresh trip's "
+								f"kill-write failed. "
+								f"{type(_REFRESH_FATAL).__name__}: {_REFRESH_FATAL}"
+							),
+							severity="error",
+						),
+						_risk_channels,
+					)
+				except Exception:
+					log.exception("FATAL alert send failed (proceeding to raise)")
+				raise _REFRESH_FATAL  # money-safe fail-loud — skips the clean alert below
+
 			# (7) final "shutting down" alert — LAST, signal/cancel only
 			# (paper byte-exact: the non-signal path emits no new notify).
 			if _shutdown_via_cancel:
@@ -1586,8 +1787,19 @@ async def _ws_loop(
 	dirty: set[str],
 	executor: Executor,
 	capture_writer: RawFrameWriter | None = None,
+	*,
+	risk: "Gate | None" = None,
+	risk_ctx_provider: "RiskContextProvider | None" = None,
 ) -> None:
-	"""Single WS connection lifecycle — connect, subscribe, process messages."""
+	"""Single WS connection lifecycle — connect, subscribe, process messages.
+
+	``risk`` + ``risk_ctx_provider`` are the live risk gate + its per-signal
+	context provider, threaded down to ``dispatch_message`` so the gate is
+	consulted on the REAL WS feed (G1 — closes the no-op-gate gap where the
+	live WS path bypassed the gate entirely). Both default ``None`` and are
+	passed ``None`` by paper/replay ⇒ the dispatch gate short-circuits and the
+	paper path stays byte-identical (§9 G-parity).
+	"""
 	headers = make_auth_headers()
 
 	# Use tickers already registered in market_state (seeded by recovery)
@@ -1644,7 +1856,7 @@ async def _ws_loop(
 					config, market_state, store,
 					strategies, strat_by_series, pending_states, dirty,
 					executor,
-					now=now,
+					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
 				)
 			except asyncio.CancelledError:
 				# Cooperative cancellation must propagate so the outer reconnect

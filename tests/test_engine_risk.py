@@ -115,10 +115,12 @@ def _make_ctx(
 	operator_kill_active: bool = False,
 	market_state: MarketState | None = None,
 ) -> RiskContext:
+	positions = open_positions or []
 	return RiskContext(
 		now_utc=now or datetime.now(timezone.utc),
 		market_state=market_state or _make_market_state(),
-		open_positions=open_positions or [],
+		open_positions=positions,
+		open_count=len(positions),
 		daily_pnl_cents=daily_pnl_cents,
 		operator_kill_active=operator_kill_active,
 	)
@@ -396,6 +398,42 @@ class TestBankrollCache:
 		assert "consecutive refresh failures" in trips[0][1]
 
 	@pytest.mark.asyncio
+	async def test_sustained_failure_trips_panic_once_then_rearms(self) -> None:
+		"""A sustained outage trips KILL_AUTO_PANIC exactly once per streak.
+
+		bug_001 regression: refresh() runs every TTL/2; without a latch it
+		re-fires the trip on every failed interval past the threshold. Because
+		each trip stamps a fresh datetime.now() timestamp, the
+		UNIQUE(reason, tripped_at) guard does NOT dedup them — kill_switch rows
+		and risk-channel alerts would accumulate for the whole outage. The trip
+		must latch on the first crossing and re-arm only after a successful
+		refresh (so a genuinely new outage can trip again).
+		"""
+		cfg = _phase1_cfg(bankroll_failures_until_kill=2)
+		source = MagicMock()
+		source.balance_cents = AsyncMock(side_effect=Exception("network error"))
+		cache = BankrollCache(_source=source, _cfg=cfg)
+		trips: list[tuple] = []
+		cache._emit_trip_fn = lambda reason, detail, now: trips.append((reason, detail))
+
+		# Sustained outage — 5 consecutive failed refreshes.
+		for _ in range(5):
+			await cache.refresh()
+		assert len(trips) == 1, "panic must trip once across a sustained outage"
+		assert cache._consecutive_failures == 5
+
+		# Kalshi recovers — a successful refresh resets the counter and re-arms.
+		source.balance_cents = AsyncMock(return_value=20_000)
+		await cache.refresh()
+		assert cache._consecutive_failures == 0
+
+		# A fresh outage streak trips exactly once more.
+		source.balance_cents = AsyncMock(side_effect=Exception("down again"))
+		await cache.refresh()  # failure 1 — below threshold
+		await cache.refresh()  # failure 2 — threshold, trips again
+		assert len(trips) == 2, "a new streak after recovery re-trips once"
+
+	@pytest.mark.asyncio
 	async def test_on_fill_calls_refresh(self) -> None:
 		cfg = _phase1_cfg()
 		source = _make_balance_source(cents=18_000)
@@ -606,6 +644,29 @@ class TestGateEntryOrdering:
 		result = gate.gate_entry(_make_signal(stop_loss_distance_cents=10), ctx)
 		assert isinstance(result, Reject)
 		assert result.reason == "BELOW_MIN_FILL"
+
+	def test_7b_below_min_fill_rejects_size_zero_even_with_min_fill_zero(self) -> None:
+		# Guard: gate_entry must NEVER return Allow(size_contracts=0).
+		# With min_fill_contracts=0 and tiny equity the sizing arm floors to 0;
+		# the size<=0 guard must fire before the size<min_fill check so the
+		# result is Reject("BELOW_MIN_FILL"), not Allow(size_contracts=0).
+		# (Allow(0) would cause build_entry_order to raise ValueError on the
+		# live path, silently dropping the trade via process_tick's broad except.)
+		cfg = _phase1_cfg(
+			absolute_panic_floor_cents=0,
+			drawdown_pct=0.001,
+			min_fill_contracts=0,  # "no minimum" — must not permit size=0 through
+			max_open=10,
+		)
+		conn = _make_conn()
+		# Cash=100c, sizing_pct=0.005, sl=10c → size = int(100*0.005/10) = 0
+		gate, _, _, _ = _make_gate(cfg=cfg, cash_cents=100, conn=conn, peak_cents=0)
+
+		ctx = _make_ctx()
+		result = gate.gate_entry(_make_signal(stop_loss_distance_cents=10), ctx)
+		assert isinstance(result, Reject)
+		assert result.reason == "BELOW_MIN_FILL"
+		assert "size=0" in (result.detail or "")
 
 	def test_8_allow_when_all_checks_pass(self) -> None:
 		cfg = _phase1_cfg(

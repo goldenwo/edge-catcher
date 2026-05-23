@@ -65,6 +65,7 @@ GateRejectReason = Literal[
 	"INVALID_SIGNAL",       # signal has unusable entry_price or stop_loss
 	"MAX_OPEN",             # open_count ≥ max_open
 	"BELOW_MIN_FILL",       # size < min_fill_contracts
+	"STALE_BANKROLL",       # bankroll cache too stale to trust for sizing
 ]
 
 
@@ -307,6 +308,12 @@ class BankrollCache:
 	# Injected by Gate after construction so BankrollCache can trip the kill
 	# switch without holding a direct reference to KillSwitch.
 	_emit_trip_fn: Any = field(default=None, init=False)
+	# Latches True after the first KILL_AUTO_PANIC trip of a failure streak;
+	# reset on the next successful refresh. Without it a sustained outage would
+	# re-trip every refresh interval — each trip stamps a fresh tripped_at, so
+	# the UNIQUE(reason, tripped_at) guard does not dedup them and kill_switch
+	# rows + risk-channel alerts would accumulate for the whole outage.
+	_panic_tripped: bool = field(default=False, init=False)
 
 	def cash_cents(self) -> int:
 		"""Sync read — returns the last cached balance.
@@ -358,6 +365,7 @@ class BankrollCache:
 			self._cash_cents = await self._source.balance_cents()
 			self._last_refresh_ts = time.monotonic()
 			self._consecutive_failures = 0
+			self._panic_tripped = False  # recovered — re-arm the trip latch
 			log.debug("Bankroll cache refreshed: %d cents", self._cash_cents)
 		except (NetworkError, KalshiAPIError, Exception) as exc:
 			self._consecutive_failures += 1
@@ -368,7 +376,9 @@ class BankrollCache:
 			if (
 				self._consecutive_failures >= self._cfg.bankroll_failures_until_kill
 				and self._emit_trip_fn is not None
+				and not self._panic_tripped
 			):
+				self._panic_tripped = True  # latch — trip once per failure streak
 				detail = (
 					f"bankroll cache stale: {self._consecutive_failures} "
 					f"consecutive refresh failures"
@@ -610,17 +620,19 @@ class RiskContext:
 	Built fresh per gate call by E's dispatch path.  Frozen + slots ensures
 	the gate cannot mutate inputs and makes unit tests trivial (build context
 	with synthetic values, assert decision).
+
+	``open_count`` counts open+pending+exit_pending rows (all MAX_OPEN slots);
+	``open_positions`` is status='open' only (for equity MTM) — they
+	intentionally differ (spec §3).  The caller (RiskContextProvider) supplies
+	``open_count`` via ``read_open_count`` so in-flight ``pending`` entries
+	correctly hold their MAX_OPEN slot.
 	"""
 	now_utc: datetime
 	market_state: MarketState
 	open_positions: list[OpenPosition]
+	open_count: int
 	daily_pnl_cents: int
 	operator_kill_active: bool
-
-	@property
-	def open_count(self) -> int:
-		"""Derived from open_positions so the two can never disagree."""
-		return len(self.open_positions)
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +715,16 @@ class Gate:
 				detail=f"entry={entry}c sl={sl}c",
 			)
 
+		# Staleness backstop (spec §5.3): never make an equity-based decision
+		# against an untrusted balance. SOFT, transient — NOT a persisted kill;
+		# auto-recovers on the next successful refresh. Faster tripwire than the
+		# refresh-failure -> KILL_AUTO_PANIC path.
+		if self._bankroll.is_stale():
+			return Reject(
+				"STALE_BANKROLL",
+				detail="bankroll cache older than TTL — entry gated until refresh",
+			)
+
 		# Equity — recomputed fresh each gate call
 		equity_cents = self._compute_equity(ctx)
 
@@ -765,8 +787,11 @@ class Gate:
 		# 7. Sizing
 		sizing = self._compute_size(sig, equity_cents)
 
-		# 8. Min-fill threshold
-		if sizing.size < self._cfg.min_fill_contracts:
+		# 8. Min-fill threshold — also reject size<=0 so Allow never carries a
+		# non-placeable size (size=0 raises ValueError in build_entry_order).
+		# This fires regardless of min_fill_contracts (even 0 for testing),
+		# because a 0-contract order is not a valid Kalshi placement.
+		if sizing.size <= 0 or sizing.size < self._cfg.min_fill_contracts:
 			return Reject("BELOW_MIN_FILL", detail=f"size={sizing.size}")
 
 		log.info(
@@ -963,10 +988,13 @@ async def build_risk_module(
 	first ``Gate.gate_entry`` call sees real cash rather than the 0-default.
 	Without the pre-refresh, equity = cash + mtm = 0 + 0 ≤ absolute_panic_
 	floor_cents (3000) on the very first signal, tripping KILL_AUTO_PANIC
-	on every clean startup. With it, a failed pre-refresh still leaves the
-	cache at 0 (the existing failure semantics) and the same trip fires —
-	which is the correct behaviour for the rare "Kalshi unreachable at
-	boot" case.
+	on every clean startup. If the pre-refresh FAILS (the rare "Kalshi
+	unreachable at boot" case), ``_last_refresh_ts`` stays at its 0.0 default,
+	so ``is_stale()`` is True and the first ``gate_entry`` returns the soft,
+	non-persisted ``STALE_BANKROLL`` reject — entries are gated before the
+	equity/panic branch is reached, no order placed. A persisted
+	KILL_AUTO_PANIC still escalates later via the periodic refresh-failure
+	path once ``bankroll_failures_until_kill`` consecutive failures accrue.
 
 	Args:
 		config: The full live-trader.yaml parsed dict.  Must contain a

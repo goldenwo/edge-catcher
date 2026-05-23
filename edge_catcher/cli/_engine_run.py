@@ -93,6 +93,15 @@ async def run_engine_with_signal_bridge(config_path: Path) -> Any:
 	try:
 		return await root_task
 	except asyncio.CancelledError:
+		# F1 fatal supervisor (defensive): a bankroll-refresh kill-WRITE failure
+		# cancels this root task to interrupt the engine; run_engine's finally
+		# normally re-raises _REFRESH_FATAL fail-loud (bypassing this handler).
+		# Re-check here so a cancel that DID stash a fatal can never be swallowed
+		# as a clean shutdown (defence-in-depth — the finally's re-raise is the
+		# primary path).
+		from edge_catcher.engine.engine import _REFRESH_FATAL  # noqa: PLC0415
+		if _REFRESH_FATAL is not None:
+			raise _REFRESH_FATAL  # fatal refresh crash — NOT a clean drain
 		# A SIGTERM/SIGINT cancelled the root task; run_engine's `finally:`
 		# already drained (B tasks cancelled, store.close() once, capture
 		# writer closed). This is the money-safe shutdown path -- a CLEAN

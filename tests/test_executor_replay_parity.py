@@ -15,27 +15,28 @@ rows on the existing parity column whitelist.
 The four things the spec (SC-I2, spec §10 #8) requires this docstring to state
 VERBATIM-in-intent:
 
-  (i)   **Dispatch sizing is deferred past E (SC-F2).** ``_handle_enter``
-        builds ``OrderRequest(size_contracts=0)`` as a documented PLACEHOLDER
-        (``dispatch.py:455-494``); the sized-request builder
-        ``build_entry_order`` exists + is unit-tested but is NEVER wired into
-        any runtime path — its ``allowed_size`` comes from C's dispatch-side
-        ``gate_entry`` call, which spec SC-F2 deliberately DEFERS PAST E. A
-        full end-to-end dispatch-path CR-5 is therefore structurally
-        unsatisfiable in E (``LiveExecutor._translate_order``'s
-        defense-in-depth ``size_contracts <= 0 → rejected`` guard fires before
-        any fill is read), exactly the SC-D3 pattern.
+  (i)   **Dispatch sizing is now wired (sizing-wire PR, spec §8.2 / SC-7).**
+        ``_handle_enter`` calls ``build_entry_order(signal, allowed_size,
+        exec_cfg, now)`` on the live path, producing a correctly-sized
+        ``OrderRequest`` whose ``size_contracts`` equals the gate's
+        ``Allow.size_contracts``.  The harness drives the REAL
+        ``_handle_signal → _handle_enter → build_entry_order → LiveExecutor``
+        path end-to-end — no shim substitutes for any step.
 
-  (ii)  **The harness injects the book-derived equivalent so EXECUTOR parity
-        is testable now.** A thin, documented, test-only sizing adapter
-        (:class:`_BookSizedLiveExecutor`) substitutes the SC-F2-deferred
-        dispatch-sizing step with its KNOWN book-derived equivalent: the same
-        contract count + the same per-level fills PaperExecutor's
-        ``resolve_fill`` book-walk computed from the captured bundle book,
-        keyed by the deterministic ``client_order_id``. This is NOT a fiction
-        — it replaces a spec-deferred step with its exact known output so the
-        comparison isolates executor-translation (the real CR-5 question), not
-        the orthogonal spec-deferred dispatch sizing.
+  (ii)  **The harness injects a book-derived mock gate so EXECUTOR parity
+        is testable in CI.** A lightweight ``_BookSizeGate`` (test-only)
+        returns ``Allow(size_contracts=N)`` for each entry signal in the SAME
+        FIFO order the paper run's ``_RecordingPaperExecutor`` resolved sizes,
+        where ``N`` is the contract count ``resolve_fill`` computed from the
+        captured bundle's orderbook.  This is NOT a fiction — the gate returns
+        the exact known book-derived size so the live path places an order with
+        the identical size PaperExecutor would have, and the ``MockKalshiServer``
+        returns the identical per-level fills, making the comparison isolate
+        executor-translation (the real CR-5 question).  The previously-existing
+        ``_BookSizedLiveExecutor`` shim (which patched ``size_contracts`` at the
+        executor layer, bypassing ``build_entry_order``) is RETIRED as of the
+        sizing-wire PR — spec §8.2 mandates it must not survive as a second,
+        divergent account of "a live run."
 
   (iii) **CI runs harness-correctness on the tracked synthetic fixture.** The
         ``tests/fixtures/synthetic_bundle/2026-04-15`` fixture yields exactly
@@ -46,10 +47,10 @@ VERBATIM-in-intent:
         split-row input (the fixture cannot exercise it end-to-end).
 
   (iv)  **The AUTHORITATIVE real-money parity verdict is the spec's own
-        ≥5-real-bundle Pi/local runbook gate**, run AFTER the SC-F2-deferred
-        dispatch-sizing wiring lands post-E (real bundles are gitignored —
-        private-data scope). This in-E harness proves the machinery is correct
-        and ready; it does not and cannot replace that runbook gate.
+        ≥5-real-bundle Pi/local runbook gate**, run at Pi cutover (real bundles
+        are gitignored — private-data scope). This harness — now full-fidelity
+        since sizing is wired — proves the machinery is correct and ready; the
+        runbook gate proves parity on real captured production data.
 
 Deterministic ``client_order_id`` join key
 ------------------------------------------
@@ -92,12 +93,15 @@ from __future__ import annotations
 
 import contextlib
 import uuid as _uuid_mod
-from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 import pytest
 
+from edge_catcher.engine.execution import ExecCfg, validate_exec_cfg
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.engine.executors.paper import (
 	FillSkip,
@@ -107,6 +111,7 @@ from edge_catcher.engine.executors.paper import (
 from edge_catcher.engine.executors.live import LiveExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 from edge_catcher.engine.replay.backtester import replay_capture
+from edge_catcher.engine.risk import Allow, RiskContext, SizingBreakdown
 
 # REUSE the parity machinery — import, never edit (spec SC-I2 step 4).
 from tests.test_replay_parity import (
@@ -440,34 +445,85 @@ def _reconstruct_fills(
 	return fills
 
 
-class _BookSizedLiveExecutor:
-	"""Test-only sizing adapter — the SANCTIONED SC-F2-deferral stand-in.
+class _BookSizeGate:
+	"""Test-only mock gate — returns book-derived sizes in paper-run FIFO order.
 
-	Holds the REAL :class:`LiveExecutor` plus the ``{client_order_id ->
-	resolved_size}`` map derived from the paper book-walk. ``place`` rebuilds
-	the frozen :class:`OrderRequest` with ``size_contracts`` set to the
-	paper-resolved size for that ``client_order_id`` (substituting the
-	SC-F2-deferred dispatch-sizing step with its known book-derived
-	equivalent), then delegates to the real ``LiveExecutor.place`` verbatim.
+	Used by the CR-5 live run to inject the real ``gate_entry → Allow`` path
+	through ``_handle_signal → _handle_enter → build_entry_order`` without
+	requiring a live DB or a real ``BankrollCache``.  The sizes it returns are
+	the SAME contract counts ``resolve_fill`` computed from the captured
+	bundle's orderbook (recorded by ``_RecordingPaperExecutor`` during the
+	paper run) — not a fiction, but the exact known book-derived output.
 
-	An order with no recorded size (e.g. paper skipped it as a stale/empty
-	book — no fill, no exposure) is passed through UNCHANGED: the real
-	LiveExecutor's ``size_contracts <= 0 → rejected`` guard then fires, which
-	is the correct parity outcome (paper skipped ⇒ no row; live rejects ⇒ no
-	row).
+	Implements only the ``gate_entry`` / ``gate_exit`` protocol that
+	``_handle_signal`` calls — no other ``Gate`` surface is needed.
+
+	``gate_entry`` pops sizes from a FIFO queue built from the recorder's
+	``entry_order`` (the deterministic per-bundle dispatch sequence).  When the
+	queue is exhausted (more signals than recorded entries — shouldn't happen
+	on the synthetic fixture, which has exactly one entry) it returns
+	``Allow(size_contracts=1)`` as a safe fallback so the executor's
+	``size <= 0`` guard never fires unexpectedly.
+
+	``gate_exit`` always returns ``Allow(size_contracts=0)`` (the proxy size;
+	the real exit size comes from the trade row inside ``_handle_exit`` — the
+	same convention as the production gate).
 	"""
 
-	def __init__(
-		self, live: LiveExecutor, sizes_by_coid: dict[str, int]
-	) -> None:
-		self._live = live
-		self._sizes = sizes_by_coid
+	def __init__(self, recorder: _RecordingPaperExecutor) -> None:
+		# FIFO queue of book-derived sizes in the order paper placed entries.
+		self._size_queue: list[int] = [
+			recorder.book_walk[c]["size"] for c in recorder.entry_order
+		]
 
-	async def place(self, req: OrderRequest) -> OrderResult:
-		size = self._sizes.get(req.client_order_id)
-		if size is not None and size > 0:
-			req = replace(req, size_contracts=size)
-		return await self._live.place(req)
+	def gate_entry(self, sig: object, ctx: object) -> Allow:
+		size = self._size_queue.pop(0) if self._size_queue else 1
+		# SizingBreakdown is required by Allow but not inspected by _handle_signal.
+		breakdown = SizingBreakdown(
+			fixed_fraction_contracts=size,
+			quarter_kelly_contracts=2**31,  # sentinel: Kelly arm inert
+			absolute_max_contracts=size,
+			bound_by="fixed_fraction",
+		)
+		return Allow(size_contracts=size, sizing_breakdown=breakdown)
+
+	def gate_exit(self, sig: object, ctx: object) -> Allow:
+		breakdown = SizingBreakdown(
+			fixed_fraction_contracts=0,
+			quarter_kelly_contracts=2**31,
+			absolute_max_contracts=0,
+			bound_by="fixed_fraction",
+		)
+		return Allow(size_contracts=0, sizing_breakdown=breakdown)
+
+
+class _MinimalRiskContextProvider:
+	"""Test-only RiskContextProvider that builds a safe, minimal RiskContext.
+
+	The CR-5 harness has no live DB so it cannot use the real provider.  This
+	stub satisfies ``_handle_signal``'s ``assert risk_ctx_provider is not None``
+	invariant and returns a RiskContext with neutral values (0 open positions,
+	0 P&L, no kill active) so ``_BookSizeGate.gate_entry`` is the only gate
+	check that fires.
+
+	``market_state`` is injected at construction (after the paper run has
+	seeded it) so the context is structurally correct for any gate logic that
+	inspects it.
+	"""
+
+	def __init__(self, market_state: MarketState) -> None:
+		self._market_state = market_state
+
+	def build(self, signal: object, now: object) -> RiskContext:
+		now_dt = now if isinstance(now, datetime) else datetime.now(tz=timezone.utc)
+		return RiskContext(
+			now_utc=now_dt,
+			market_state=self._market_state,
+			open_positions=[],
+			open_count=0,
+			daily_pnl_cents=0,
+			operator_kill_active=False,
+		)
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +567,29 @@ async def _run_live(
 	live_cfg: Any,
 	live_audit: Any,
 ) -> list[dict]:
-	"""Live run: LiveExecutor → MockKalshiServer fed the book-derived fills,
-	wrapped by the book-sizing adapter. ``corrupt=True`` deliberately offsets
-	the blended price (non-vacuity probe)."""
+	"""Live run: REAL dispatch path (gate → build_entry_order → LiveExecutor).
+
+	Drives ``replay_capture`` with:
+	  * A ``_BookSizeGate`` mock gate that returns ``Allow(size_contracts=N)``
+	    for each entry signal in the FIFO order the paper run resolved sizes
+	    from the book.  This threads through the REAL ``_handle_signal →
+	    _handle_enter → build_entry_order → LiveExecutor`` path end-to-end.
+	  * A ``_MinimalRiskContextProvider`` that satisfies the
+	    ``risk_ctx_provider is not None`` invariant without a live DB.
+	  * A ``MockKalshiServer`` queued with the book-derived per-level fills
+	    (same fills PaperExecutor walked), so ``LiveExecutor._translate_order``
+	    sees the identical economics.
+	  * ``ExecCfg(entry_slippage_cents=0, ...)`` injected into the config so
+	    ``build_entry_order``'s limit price equals the tick ask price (byte-
+	    equal to the paper path when slippage is zero).
+
+	``corrupt=True`` deliberately offsets the blended price (+5¢ per fill) to
+	prove the parity assertion CAN fail (non-vacuity probe).
+
+	The ``_BookSizedLiveExecutor`` shim is RETIRED — spec §8.2 / sizing-wire PR.
+	"""
+	import edge_catcher.engine.replay.backtester as _bt
+
 	server = MockKalshiServer()
 	# Queue one filled response per placed entry, in the deterministic
 	# bundle/dispatch order the recorder observed (FIFO sticky-tail). Each
@@ -536,11 +612,52 @@ async def _run_live(
 
 	client = server.make_client(live_cfg, live_audit)
 	live_exec = LiveExecutor(client)
-	sizes = {c: recorder.book_walk[c]["size"] for c in recorder.entry_order}
-	adapter = _BookSizedLiveExecutor(live_exec, sizes)
 
-	with _deterministic_client_order_ids():
-		result = await replay_capture(bundle, executor=adapter)
+	# Build ExecCfg with zero entry slippage so build_entry_order's limit price
+	# equals the tick's yes_ask — byte-identical to the paper path's
+	# limit_price_cents (entry_price = ctx.yes_ask; slippage = 0 → limit =
+	# yes_ask + 0 = yes_ask). MockKalshiServer ignores the limit price; the
+	# fills are book-derived regardless, so slippage here only affects the
+	# OrderRequest.limit_price_cents field, not the fill economics.
+	exec_cfg: ExecCfg = validate_exec_cfg({
+		"entry_slippage_cents": 0,
+		"exit_slippage_cents": {
+			"take_profit": 0,
+			"stop_loss": 0,
+			"time_exit": 0,
+		},
+	})
+
+	# Load the bundle config (same path replay_capture uses internally) so we
+	# can inject _exec_cfg before passing it as the config override.
+	_cfg_path = bundle / "paper-trader.yaml"
+	_base_cfg: dict = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+	_base_cfg["_exec_cfg"] = exec_cfg
+
+	# Build the mock gate + provider now that the paper run has finalised the
+	# recorder.  Both are constructed after the paper run — the FIFO queue in
+	# _BookSizeGate is built from recorder.entry_order (deterministic).
+	mock_gate = _BookSizeGate(recorder)
+	mock_provider = _MinimalRiskContextProvider(recorder._ms)
+
+	# Patch dispatch_message to inject risk + risk_ctx_provider so the live
+	# replay drives the REAL _handle_signal → _handle_enter → build_entry_order
+	# path.  The patch wraps the real function for the duration of this call
+	# only (restored in the finally block) — zero edge_catcher/ source change.
+	_orig_dispatch = _bt.dispatch_message
+
+	async def _patched_dispatch(**kwargs: Any) -> None:
+		kwargs["risk"] = mock_gate
+		kwargs["risk_ctx_provider"] = mock_provider
+		return await _orig_dispatch(**kwargs)
+
+	_bt.dispatch_message = _patched_dispatch  # type: ignore[assignment]
+	try:
+		with _deterministic_client_order_ids():
+			result = await replay_capture(bundle, executor=live_exec, config=_base_cfg)
+	finally:
+		_bt.dispatch_message = _orig_dispatch
+
 	await client.close()
 	return result.trades
 

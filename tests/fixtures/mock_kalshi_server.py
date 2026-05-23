@@ -19,10 +19,20 @@ Conventions matched:
 * Monkeypatches A's async backoff (``asyncio.sleep`` in
   ``edge_catcher.live.client``) to a no-op so 503-exhaustion tests run in
   well under 100ms instead of the production ~62s.
+
+H1 extension (2026-05-23):
+* ``MockKalshiServer`` gains an optional ``response_delay_seconds`` field.
+  When set, the transport handler is an async handler that ``await``s
+  ``asyncio.sleep(response_delay_seconds)`` before returning the response.
+  ``httpx.MockTransport`` accepts both sync and async handlers — existing
+  users are unaffected (the field defaults to ``None`` / sync path).
+* Use ``queue_slow_response`` to both set the delay and queue the response
+  body in one call, keeping existing callers free of the new field.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -171,6 +181,11 @@ class MockKalshiServer:
 	_responses: list[tuple[int, dict[str, Any]]] = field(default_factory=list)
 	# All received request objects, in arrival order.
 	requests: list[httpx.Request] = field(default_factory=list)
+	# H1 extension: optional delay injected before each response.  When set,
+	# the transport switches to an async handler (httpx.MockTransport supports
+	# both sync and async).  Existing callers leave this None → sync handler,
+	# zero behavior change.
+	response_delay_seconds: float | None = None
 
 	def queue_response(
 		self,
@@ -199,28 +214,63 @@ class MockKalshiServer:
 		status, body = kalshi_503_unavailable()
 		self.queue_status(status, body)
 
+	def queue_slow_response(
+		self,
+		body: dict[str, Any],
+		*,
+		status: int = 201,
+		delay_seconds: float,
+	) -> None:
+		"""Queue a response body AND arm the server-side delay (H1 timeout test).
+
+		Sets ``self.response_delay_seconds`` so the async transport handler
+		sleeps ``delay_seconds`` before returning.  The transport switches to
+		async mode automatically when this field is non-None; existing callers
+		that never call this method are unaffected (sync handler, no sleep).
+
+		Use this instead of ``queue_response`` when you need the server to
+		respond slowly enough to trigger ``_ENTRY_PLACEMENT_TIMEOUT_SECONDS``.
+		"""
+		self.response_delay_seconds = delay_seconds
+		self._responses.append((status, body))
+
 	def transport(self) -> httpx.MockTransport:
 		"""Build an :class:`httpx.MockTransport` that serves the queued responses.
 
 		The handler captures every request into ``self.requests`` so tests
 		can assert headers (signed Authorization), path, body, etc.
-		"""
 
-		def _handler(request: httpx.Request) -> httpx.Response:
-			self.requests.append(request)
+		When ``response_delay_seconds`` is set (H1 timeout test), the handler
+		is async and ``await``s ``asyncio.sleep(delay)`` before returning.
+		``httpx.MockTransport`` accepts both sync and async callables — existing
+		callers that leave the field ``None`` get the same sync handler as before.
+		"""
+		delay = self.response_delay_seconds
+
+		def _consume_response() -> httpx.Response:
+			"""Shared sticky-tail consumption logic (sync core)."""
 			if not self._responses:
-				# No queued responses — return a server error so the test sees
-				# a clear failure rather than the default httpx 200 empty body.
 				return httpx.Response(
 					500,
 					json={"error": {"message": "MockKalshiServer: no response queued"}},
 				)
-			# Sticky-tail consumption: pop while we have multiple, else peek.
 			if len(self._responses) > 1:
 				status, body = self._responses.pop(0)
 			else:
 				status, body = self._responses[0]
 			return httpx.Response(status, json=body)
+
+		if delay is not None:
+			async def _async_handler(request: httpx.Request) -> httpx.Response:
+				self.requests.append(request)
+				await asyncio.sleep(delay)
+				return _consume_response()
+
+			return httpx.MockTransport(_async_handler)
+
+		def _handler(request: httpx.Request) -> httpx.Response:
+			self.requests.append(request)
+			return _consume_response()
 
 		return httpx.MockTransport(_handler)
 
