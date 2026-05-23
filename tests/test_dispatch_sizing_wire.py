@@ -578,3 +578,296 @@ async def test_paper_mode_risk_none_no_gate() -> None:
 	assert placed_reqs[0].size_contracts == 0, (
 		f"paper path must pass size_contracts=0, got {placed_reqs[0].size_contracts}"
 	)
+
+
+# ---------------------------------------------------------------------------
+# D1 Tests — gate_exit operator-kill veto wired into _handle_signal exit branch
+# ---------------------------------------------------------------------------
+#
+# Three invariants under test:
+#   1. operator_kill_active=True → gate_exit → Reject("KILL_OPERATOR") →
+#      _handle_exit NOT called (exit fully blocked — full-stop, spec §6)
+#   2. operator_kill_active=False → gate_exit → Allow → _handle_exit IS called;
+#      Allow.size_contracts is NOT used as exit size (real size from trade row)
+#   3. risk=None (paper/replay) → _handle_exit called directly, no gate consulted
+#      (G-parity: byte-identical to pre-D1)
+# ---------------------------------------------------------------------------
+
+_NOW_D1 = datetime(2026, 5, 22, 16, 0, 0, tzinfo=timezone.utc)
+_TICKER_D1 = "KXSOL15M-26MAY22H16"
+_SERIES_D1 = "KXSOL15M"
+_STRATEGY_D1 = "debut_fade"
+
+
+def _exit_signal_d1(trade_id: int = 42, side: str = "yes") -> Signal:
+	"""Exit Signal carrying a trade_id (required by _handle_exit)."""
+	return Signal(
+		action="exit",
+		ticker=_TICKER_D1,
+		series=_SERIES_D1,
+		side=side,
+		strategy=_STRATEGY_D1,
+		reason="test_d1",
+		trade_id=trade_id,
+	)
+
+
+def _ctx_d1(yes_bid: int = 60, no_bid: int = 40) -> MagicMock:
+	"""TickContext stub for exit tests; _handle_exit reads yes_bid/no_bid."""
+	ctx = MagicMock()
+	ctx.yes_bid = yes_bid
+	ctx.no_bid = no_bid
+	ctx.market_state = MagicMock()
+	return ctx
+
+
+def _rctx_d1(*, operator_kill_active: bool) -> RiskContext:
+	"""Minimal RiskContext with operator_kill_active set as requested."""
+	return RiskContext(
+		now_utc=_NOW_D1,
+		market_state=MagicMock(),
+		open_count=1,
+		open_positions=[],
+		daily_pnl_cents=0,
+		operator_kill_active=operator_kill_active,
+	)
+
+
+class _FakeExitGate:
+	"""Scripted Gate for exit tests: gate_entry is unused; gate_exit returns a fixed decision."""
+
+	def __init__(self, exit_decision: Any) -> None:
+		self._exit_decision = exit_decision
+		self.gate_exit_calls: list[Any] = []
+
+	def gate_entry(self, signal: Any, ctx: Any) -> Any:  # pragma: no cover
+		raise AssertionError("gate_entry must NOT be called from the exit branch")
+
+	def gate_exit(self, signal: Any, ctx: Any) -> Any:
+		self.gate_exit_calls.append((signal, ctx))
+		return self._exit_decision
+
+
+class _FakeExitRiskContextProvider:
+	"""Returns a fixed RiskContext; records whether .build() was called."""
+
+	def __init__(self, rctx: RiskContext) -> None:
+		self._rctx = rctx
+		self.build_calls: list[tuple[Any, Any]] = []
+
+	def build(self, signal: Any, now: Any) -> RiskContext:
+		self.build_calls.append((signal, now))
+		return self._rctx
+
+
+# ---------------------------------------------------------------------------
+# D1 Test 1 — operator kill ACTIVE → gate_exit Reject → _handle_exit NOT called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exit_blocked_by_operator_kill(monkeypatch: Any) -> None:
+	"""gate_exit returns Reject('KILL_OPERATOR') when operator_kill_active=True;
+	dispatch must NOT call _handle_exit — exit is fully blocked (spec §6 full-stop).
+
+	Spy: monkeypatch replaces dispatch._handle_exit with a sentinel that records
+	calls. If it is invoked, the test fails — the operator kill must BLOCK the exit.
+	"""
+	import edge_catcher.engine.dispatch as dispatch_mod
+
+	handle_exit_calls: list[Any] = []
+
+	async def _spy_handle_exit(*args: Any, **kwargs: Any) -> None:
+		handle_exit_calls.append((args, kwargs))
+
+	monkeypatch.setattr(dispatch_mod, "_handle_exit", _spy_handle_exit)
+
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:  # pragma: no cover
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	rctx = _rctx_d1(operator_kill_active=True)
+	reject_decision = Reject(reason="KILL_OPERATOR", detail="exit blocked by operator kill")
+	fake_risk = _FakeExitGate(exit_decision=reject_decision)
+	fake_provider = _FakeExitRiskContextProvider(rctx=rctx)
+
+	sig = _exit_signal_d1(trade_id=42)
+
+	await dispatch_mod._handle_signal(
+		sig,
+		_ctx_d1(),
+		store,
+		config={},
+		executor=executor,
+		now=_NOW_D1,
+		risk=fake_risk,  # type: ignore[arg-type]
+		risk_ctx_provider=fake_provider,  # type: ignore[arg-type]
+	)
+
+	# gate_exit must have been consulted exactly once.
+	assert len(fake_risk.gate_exit_calls) == 1, (
+		"gate_exit() must be called exactly once on the exit path"
+	)
+
+	# _handle_exit must NOT be called — operator kill is a full-stop (spec §6).
+	assert handle_exit_calls == [], (
+		"_handle_exit must NOT be called when gate_exit returns Reject('KILL_OPERATOR')"
+	)
+
+	# executor.place must NOT be called (no exit placed).
+	assert placed_reqs == [], "executor.place must NOT be called on an operator-kill-blocked exit"
+
+
+# ---------------------------------------------------------------------------
+# D1 Test 2 — operator kill INACTIVE → gate_exit Allow → _handle_exit IS called;
+#             Allow.size_contracts is NOT used as exit size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exit_allowed_under_auto_kill(monkeypatch: Any) -> None:
+	"""gate_exit returns Allow when operator_kill_active=False (auto-kills do NOT
+	block exits — spec §6: only operator kill is a full-stop).
+
+	Asserts:
+	- _handle_exit IS called (exit proceeds).
+	- Allow.size_contracts (proxy value 99) is NOT used as the exit size —
+	  the real exit size comes from the trade row inside _handle_exit.
+
+	The proxy size invariant is enforced structurally: gate_exit returns Allow with
+	a sentinel size (99) distinct from any plausible row fill_size; if dispatch
+	passed Allow.size_contracts into _handle_exit as the exit size, a downstream
+	assertion would catch the 99 contamination. Here we just confirm _handle_exit
+	receives NO size_contracts kwarg from the caller (it reads the row itself).
+	"""
+	import edge_catcher.engine.dispatch as dispatch_mod
+
+	handle_exit_calls: list[tuple[Any, Any]] = []
+
+	async def _spy_handle_exit(*args: Any, **kwargs: Any) -> None:
+		handle_exit_calls.append((args, kwargs))
+
+	monkeypatch.setattr(dispatch_mod, "_handle_exit", _spy_handle_exit)
+
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:  # pragma: no cover
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	rctx = _rctx_d1(operator_kill_active=False)
+	# Sentinel proxy size 99 — must NOT appear in _handle_exit kwargs.
+	allow_decision = Allow(size_contracts=99, sizing_breakdown=_bd_c3(99))
+	fake_risk = _FakeExitGate(exit_decision=allow_decision)
+	fake_provider = _FakeExitRiskContextProvider(rctx=rctx)
+
+	sig = _exit_signal_d1(trade_id=7)
+
+	await dispatch_mod._handle_signal(
+		sig,
+		_ctx_d1(),
+		store,
+		config={},
+		executor=executor,
+		now=_NOW_D1,
+		risk=fake_risk,  # type: ignore[arg-type]
+		risk_ctx_provider=fake_provider,  # type: ignore[arg-type]
+	)
+
+	# gate_exit must have been consulted.
+	assert len(fake_risk.gate_exit_calls) == 1, "gate_exit() must be called exactly once"
+
+	# _handle_exit must be called (exit is allowed).
+	assert len(handle_exit_calls) == 1, (
+		"_handle_exit must be called when gate_exit returns Allow"
+	)
+
+	# Allow.size_contracts (proxy=99) must NOT be forwarded as exit size.
+	# _handle_exit signature takes no `size_contracts` param — verify it was not
+	# smuggled via kwargs either.
+	_, kw = handle_exit_calls[0]
+	assert "size_contracts" not in kw, (
+		f"Allow.size_contracts must NOT be passed to _handle_exit — "
+		f"exit size comes from the trade row; got kwargs={sorted(kw)!r}"
+	)
+	assert kw.get("size_contracts", None) != 99, (
+		"Allow.size_contracts sentinel 99 must not leak into _handle_exit kwargs"
+	)
+
+
+# ---------------------------------------------------------------------------
+# D1 Test 3 — Paper path: risk=None → _handle_exit called directly, no gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exit_paper_mode_no_gate(monkeypatch: Any) -> None:
+	"""risk=None (paper/replay): _handle_exit called directly with no gate consultation.
+
+	G-parity: the paper exit path is BYTE-IDENTICAL — no RiskContext constructed,
+	no gate_exit call, unconditional _handle_exit invocation (spec §6 / G-parity).
+
+	Spy: monkeypatch replaces dispatch._handle_exit with a sentinel that records
+	calls. Confirms it is called exactly once with no gate intervention.
+	"""
+	import edge_catcher.engine.dispatch as dispatch_mod
+
+	handle_exit_calls: list[tuple[Any, Any]] = []
+
+	async def _spy_handle_exit(*args: Any, **kwargs: Any) -> None:
+		handle_exit_calls.append((args, kwargs))
+
+	monkeypatch.setattr(dispatch_mod, "_handle_exit", _spy_handle_exit)
+
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:  # pragma: no cover
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	# Spy provider — must NOT be consulted on the paper path.
+	fake_provider = _FakeExitRiskContextProvider(rctx=_rctx_d1(operator_kill_active=True))
+	# fake_risk with gate_entry guard — must NOT be consulted on paper path.
+	fake_risk = _FakeExitGate(exit_decision=Reject(reason="KILL_OPERATOR", detail="should not reach"))
+
+	sig = _exit_signal_d1(trade_id=5)
+
+	await dispatch_mod._handle_signal(
+		sig,
+		_ctx_d1(),
+		store,
+		config={},
+		executor=executor,
+		now=_NOW_D1,
+		risk=None,  # paper/replay path — gate is a no-op
+		risk_ctx_provider=fake_provider,  # present but must NOT be called
+	)
+
+	# Provider.build() must NOT have been called (paper path).
+	assert fake_provider.build_calls == [], (
+		"provider.build() must NOT be called when risk=None (paper path)"
+	)
+
+	# gate_exit must NOT have been consulted.
+	assert fake_risk.gate_exit_calls == [], (
+		"gate_exit must NOT be called when risk=None (paper/replay G-parity)"
+	)
+
+	# _handle_exit must be called exactly once (exit proceeds ungated on paper path).
+	assert len(handle_exit_calls) == 1, (
+		"_handle_exit must be called exactly once on the paper exit path"
+	)

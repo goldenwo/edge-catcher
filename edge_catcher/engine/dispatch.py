@@ -421,6 +421,34 @@ def _consult_entry_gate(
 	return decision.size_contracts, False
 
 
+def _consult_exit_gate(
+	risk: Gate,
+	signal: Signal,
+	rctx: "RiskContext",
+) -> bool:
+	"""Consult gate_exit (operator-kill full-stop, spec §6). Returns True when the
+	exit is BLOCKED (operator kill active) and the caller must return without exiting.
+
+	Extracted from ``_handle_signal`` so the ``isinstance(Reject)`` check lives here,
+	not inside ``_handle_signal`` (an AST-level structural guard in
+	``test_live_exit_settlement_routing.py`` forbids ``isinstance`` in
+	``_handle_signal`` because it serves as a proxy for mode-discriminator branches —
+	any ``isinstance`` in that function would trip the assertion).
+
+	gate_exit is pure and never raises; ``Allow.size_contracts`` is a proxy size and
+	is intentionally discarded — the real exit size comes from the trade row inside
+	``_handle_exit``.
+	"""
+	decision = risk.gate_exit(signal, rctx)
+	if isinstance(decision, Reject):  # KILL_OPERATOR only (spec §6)
+		log.info(
+			"Gate REJECT exit %s %s: %s",
+			signal.strategy, signal.ticker, decision.reason,
+		)
+		return True
+	return False
+
+
 async def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
@@ -499,9 +527,20 @@ async def _handle_signal(
 		# LiveExecutor places a real IOC + B's async path owns the close) and
 		# receives executor/config UNCONDITIONALLY (no mode branch — the
 		# executor absorbs the live-vs-paper difference; paper close stays
-		# byte-EXACT via the unconditional store.exit_trade). `risk` is NOT
-		# threaded: exits bypass the entry gate (kills cap NEW exposure; they
-		# never trap existing exposure — see this function's docstring).
+		# byte-EXACT via the unconditional store.exit_trade).
+		#
+		# D1 (spec §6): gate_exit is now wired here for live mode. ONLY the
+		# operator kill (KILL_SWITCH env or SIGTERM-driven _OperatorKill) blocks
+		# exits — it is a true full-stop that halts BOTH new entries AND exits.
+		# Auto-tripped caps (drawdown/daily/panic) do NOT block exits because
+		# exits REDUCE risk; trapping existing exposure would be worse. The
+		# isinstance(Reject) check lives in _consult_exit_gate (not here) to
+		# keep _handle_signal free of isinstance (AST structural guard).
+		# Paper/replay (risk is None): unconditional _handle_exit — G-parity.
+		if risk is not None:
+			assert rctx is not None  # invariant: set above whenever risk is not None
+			if _consult_exit_gate(risk, signal, rctx):
+				return  # operator-kill full-stop (spec §6): exit blocked
 		await _handle_exit(
 			signal, ctx, store, bullet, now=now,
 			executor=executor, config=config,
