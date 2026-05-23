@@ -1142,6 +1142,12 @@ def _f3_gate(conn: sqlite3.Connection) -> Gate:
 	hermetic + Windows-correct."""
 	cfg = _f3_risk_cfg()
 	bankroll = BankrollCache(_source=_ZeroBalanceSource(), _cfg=cfg)
+	# Mark the bankroll FRESH so gate_entry reaches the panic/kill logic these
+	# tests exercise. Without this, A3's STALE_BANKROLL backstop short-circuits
+	# before the panic branch and the tests never see KILL_AUTO_PANIC.
+	# Cash stays 0 (never actually refreshed from the stub source) so equity
+	# (0) ≤ the high panic floor and the panic branch still trips deterministically.
+	bankroll._last_refresh_ts = 1e12
 	kill_switch = KillSwitch(conn=conn)
 	peak = PeakTracker(conn=conn)
 	return Gate(cfg=cfg, bankroll=bankroll, kill_switch=kill_switch, peak_tracker=peak)
