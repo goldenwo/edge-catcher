@@ -94,11 +94,6 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-# Module-level flag to ensure the "Gate constructed but dispatch wiring deferred"
-# warning fires only once per process, not per signal (would be noisy in tests
-# that exercise many signals against a constructed Gate).
-_gate_unwired_warning_logged = False
-
 
 # ===========================================================================
 # Sub-project E / §4.2 L2 + §4.3 — money-safe SIGTERM drain primitives.
@@ -168,8 +163,9 @@ class _OperatorKill:
 
 # Process-lifetime singleton. Module-scoped (NOT engine-instance-scoped):
 # there is exactly one engine per process (one ``asyncio.run`` root), and the
-# future ``RiskContext`` construction reads it without threading a new param
-# through every handler — same rationale as ``_gate_unwired_warning_logged``.
+# ``RiskContext`` construction reads it without threading a new param through
+# every handler — the same module-global, wired-at-boot convention as
+# ``_INFLIGHT_SECTIONS`` (no per-call parameter threading required).
 _OPERATOR_KILL = _OperatorKill()
 
 

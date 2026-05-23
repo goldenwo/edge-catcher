@@ -1296,20 +1296,15 @@ async def run_engine(
 		if executor is None:
 			executor = PaperExecutor(market_state=market_state, config=config)
 
-	# Risk gate (Sub-project C) — Gate / BankrollCache / KillSwitch / etc.
-	# all live in engine/risk.py and SHIP in this PR (PR 3). However the
-	# actual construction + wiring requires KalshiBalanceSource (live HTTP
-	# client), the live_trades.db connection, and a periodic-refresh task —
-	# none of which dispatch.py has access to. E's PR owns the full
-	# bootstrap: instantiating KalshiBalanceSource, calling
-	# BankrollCache.refresh() at T0, threading RiskContext to dispatch,
-	# and starting the periodic-refresh background task.
-	#
-	# PR 3 ships only the building blocks. No risk-related wiring happens
-	# at engine startup yet. If config has executor_kind=live before E
-	# ships, the engine starts paper-style (gate not consulted) — see the
-	# warning in dispatch._handle_signal when a Gate is constructed
-	# without dispatch wiring.
+	# Risk gate (Sub-project C/E) — Gate / BankrollCache / KillSwitch / etc.
+	# all live in engine/risk.py.  For live mode (executor_kind == "live"),
+	# the full risk stack is composed here at engine startup: a
+	# KalshiBalanceSource is constructed, BankrollCache.refresh() is awaited
+	# at T0, a periodic-refresh background task is started, and both the
+	# Gate instance and a RiskContextProvider are threaded through to
+	# dispatch_message (via _ws_loop) so every live signal is gated before
+	# an order is placed.  Paper/replay paths receive risk=None and are
+	# byte-identical to pre-gate behaviour.
 
 	# §6 Path B — install the boot-resolved notify channel(s) ONCE here
 	# (after the §2 coherence gate + the mode-composition branch; the live
