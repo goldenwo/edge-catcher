@@ -609,6 +609,29 @@ class TestGateEntryOrdering:
 		assert isinstance(result, Reject)
 		assert result.reason == "BELOW_MIN_FILL"
 
+	def test_7b_below_min_fill_rejects_size_zero_even_with_min_fill_zero(self) -> None:
+		# Guard: gate_entry must NEVER return Allow(size_contracts=0).
+		# With min_fill_contracts=0 and tiny equity the sizing arm floors to 0;
+		# the size<=0 guard must fire before the size<min_fill check so the
+		# result is Reject("BELOW_MIN_FILL"), not Allow(size_contracts=0).
+		# (Allow(0) would cause build_entry_order to raise ValueError on the
+		# live path, silently dropping the trade via process_tick's broad except.)
+		cfg = _phase1_cfg(
+			absolute_panic_floor_cents=0,
+			drawdown_pct=0.001,
+			min_fill_contracts=0,  # "no minimum" — must not permit size=0 through
+			max_open=10,
+		)
+		conn = _make_conn()
+		# Cash=100c, sizing_pct=0.005, sl=10c → size = int(100*0.005/10) = 0
+		gate, _, _, _ = _make_gate(cfg=cfg, cash_cents=100, conn=conn, peak_cents=0)
+
+		ctx = _make_ctx()
+		result = gate.gate_entry(_make_signal(stop_loss_distance_cents=10), ctx)
+		assert isinstance(result, Reject)
+		assert result.reason == "BELOW_MIN_FILL"
+		assert "size=0" in (result.detail or "")
+
 	def test_8_allow_when_all_checks_pass(self) -> None:
 		cfg = _phase1_cfg(
 			absolute_panic_floor_cents=3000,

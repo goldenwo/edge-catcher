@@ -778,8 +778,11 @@ class Gate:
 		# 7. Sizing
 		sizing = self._compute_size(sig, equity_cents)
 
-		# 8. Min-fill threshold
-		if sizing.size < self._cfg.min_fill_contracts:
+		# 8. Min-fill threshold — also reject size<=0 so Allow never carries a
+		# non-placeable size (size=0 raises ValueError in build_entry_order).
+		# This fires regardless of min_fill_contracts (even 0 for testing),
+		# because a 0-contract order is not a valid Kalshi placement.
+		if sizing.size <= 0 or sizing.size < self._cfg.min_fill_contracts:
 			return Reject("BELOW_MIN_FILL", detail=f"size={sizing.size}")
 
 		log.info(

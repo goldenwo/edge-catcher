@@ -700,11 +700,11 @@ async def _handle_enter(
 			# NetworkError-pending path. Flagged by the PR #38 pass-3 review
 			# (G2); surfaced loudly so the reconciler never silently drops it.
 			log.warning(
-				"executor.place exceeded %ds for %s %s (client_order_id=%s) — "
-				"synthesizing pending+None (intended_size=0, sizing-deferred "
-				"placeholder) for B's reconciler to resolve via client_order_id",
+				"executor.place exceeded %ds for %s %s (client_order_id=%s, "
+				"intended_size=%d) — synthesizing pending+None for B's reconciler "
+				"to resolve via client_order_id",
 				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
-				req.client_order_id,
+				req.client_order_id, req.size_contracts,
 			)
 			_result = OrderResult(
 				status="pending",

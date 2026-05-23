@@ -1234,6 +1234,12 @@ async def run_engine(
 			constructed against ``MarketState`` + ``config``. Sub-project D
 			provides ``LiveExecutor`` for live trading.
 	"""
+	# Reset the fatal holder — robust to in-process engine reuse; production
+	# is one-engine-per-process so this is a no-op there, but keeps in-process
+	# reuse (e.g. integration tests) safe without relying on the test fixture.
+	global _REFRESH_FATAL
+	_REFRESH_FATAL = None
+
 	# 1. Load config, init TradeStore, init MarketState
 	config = load_config(config_path)
 
