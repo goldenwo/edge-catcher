@@ -17,6 +17,7 @@ Running::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import patch
@@ -96,23 +97,41 @@ def restore_risk_channels() -> Any:
 
 @pytest.mark.asyncio
 async def test_bankroll_refresh_loop_calls_refresh_at_interval() -> None:
-	"""refresh() is called at least twice after two intervals elapse."""
-	cache = FakeCache()
-	interval = 0.02  # 20 ms — fast but not so fast as to be flaky
+	"""refresh() is called repeatedly; verified via Event-gate (not wall-clock).
 
+	Rather than sleeping a fixed multiple of the interval and hoping N cycles
+	ran, we gate on an asyncio.Event that fires once the target call-count is
+	reached, with a generous safety timeout.  This is deterministic regardless
+	of machine load.
+	"""
+	TARGET = 3
+	done = asyncio.Event()
+
+	class _EventCache:
+		def __init__(self) -> None:
+			self.calls: int = 0
+			self._consecutive_failures: int = 0
+
+		async def refresh(self) -> None:
+			self.calls += 1
+			self._consecutive_failures = 0
+			if self.calls >= TARGET:
+				done.set()
+
+	cache = _EventCache()
 	task = asyncio.create_task(
-		bankroll_refresh_loop(cache, interval=interval, warn_after=99)
+		bankroll_refresh_loop(cache, interval=0.001, warn_after=99)
 	)
-	# Wait long enough for at least 2 intervals to elapse
-	await asyncio.sleep(interval * 2.5)
-	task.cancel()
 	try:
-		await task
-	except asyncio.CancelledError:
-		pass
+		# Waits until TARGET calls happen — safety timeout only trips on a genuine hang.
+		await asyncio.wait_for(done.wait(), timeout=5.0)
+	finally:
+		task.cancel()
+		with contextlib.suppress(asyncio.CancelledError):
+			await task
 
-	assert len(cache.refresh_calls) >= 2, (
-		f"Expected refresh() called >= 2 times, got {len(cache.refresh_calls)}"
+	assert cache.calls >= TARGET, (
+		f"Expected refresh() called >= {TARGET} times, got {cache.calls}"
 	)
 
 
@@ -124,78 +143,116 @@ async def test_bankroll_refresh_loop_calls_refresh_at_interval() -> None:
 async def test_sustained_failure_emits_one_time_warning() -> None:
 	"""Exactly ONE warning fires on threshold crossing; latch resets on success.
 
+	All three phases use Event-gated progress (not wall-clock sleep) so the
+	test is deterministic regardless of machine load.
+
 	Phase A — failure streak:
 	  - warn_after=2; cache fails every call (consecutive_failures grows).
-	  - Run enough intervals for >=3 failure-refreshes.
-	  - Assert send() called exactly once (one-time, not per-iteration).
+	  - Gate: Event set by the fake_send spy the moment the first warning fires.
+	  - Assert send() called exactly once (one-time, not per-iteration) and
+	    refresh() was called >= 3 times before cancellation.
 
 	Phase B — success resets latch:
-	  - Switch to a recoverable cache that succeeds after the first call.
-	  - Run another cycle past warn_after; confirm no second warning (no streak).
-	  - Then immediately confirm the latch DID reset by running a pure-fail
-	    cache again and checking a second warning fires.
+	  - A cache that fails twice then succeeds; run until >= 4 calls.
+	  - Gate: Event set when call-count reaches 4 (2 fails + 2 successes).
+	  - Assert exactly 1 warning from the failing streak; no second warning after
+	    the success reset.
+
+	Phase C — latch truly reset — a fresh fail streak warns again:
+	  - Brand-new failing cache + loop; gate on second warning Event.
+	  - Assert exactly 1 warning for the new streak (proves per-loop `warned`).
 	"""
-	interval = 0.02  # 20 ms
+	send_calls: list[Any] = []
+	sentinel_channel = object()
 
 	# --- Phase A: failure streak triggers exactly one warning ---------------
 
-	send_calls: list[Any] = []
+	warned_event_a = asyncio.Event()
 
-	def fake_send(notification: Any, channels: Any) -> dict:
+	def fake_send_a(notification: Any, channels: Any) -> dict:
 		send_calls.append((notification, channels))
+		warned_event_a.set()  # unblock the wait the moment the warning fires
 		return {}
 
-	# Set a non-empty risk channel so the warning path is taken
-	sentinel_channel = object()
 	engine_module._risk_channels = [sentinel_channel]  # type: ignore[assignment]
 
-	failing_cache = FailingFakeCache()
+	class _FailingCache:
+		def __init__(self) -> None:
+			self.calls: int = 0
+			self._consecutive_failures: int = 0
 
-	with patch("edge_catcher.notifications.send", side_effect=fake_send):
+		async def refresh(self) -> None:
+			self.calls += 1
+			self._consecutive_failures += 1
+
+	failing_cache = _FailingCache()
+
+	with patch("edge_catcher.notifications.send", side_effect=fake_send_a):
 		task = asyncio.create_task(
-			bankroll_refresh_loop(failing_cache, interval=interval, warn_after=2)
+			bankroll_refresh_loop(failing_cache, interval=0.001, warn_after=2)
 		)
-		# Allow at least 3 refresh cycles (>= 2 * warn_after)
-		await asyncio.sleep(interval * 3.5)
-		task.cancel()
 		try:
-			await task
-		except asyncio.CancelledError:
-			pass
+			# Gate: wait until the warning fires (not a fixed sleep).
+			await asyncio.wait_for(warned_event_a.wait(), timeout=5.0)
+			# Let the loop run a few more cycles to confirm no second warning.
+			await asyncio.sleep(0.01)
+		finally:
+			task.cancel()
+			with contextlib.suppress(asyncio.CancelledError):
+				await task
 
-	assert failing_cache.refresh_calls >= 3, (
-		f"Expected >= 3 refresh calls, got {failing_cache.refresh_calls}"
+	assert failing_cache.calls >= 3, (
+		f"Expected >= 3 refresh calls, got {failing_cache.calls}"
 	)
 	assert len(send_calls) == 1, (
 		f"Expected exactly 1 warning notification (one-time), got {len(send_calls)}"
 	)
-	# Check it's the right severity
+	# Check it's the right severity and the correct channel was passed
 	notif, channels = send_calls[0]
 	assert notif.severity == "warn"
 	assert channels is engine_module._risk_channels
 
 	# --- Phase B: success resets the `warned` latch -------------------------
 
-	# A cache that fails twice (triggers warn), then succeeds (resets latch),
-	# then we verify by running a second streak that would warn again.
 	send_calls.clear()
-
-	# fail_for=2 → after 2 calls consecutive_failures hits warn_after=2,
-	# then call 3+ resets to 0 (success).
-	recover_cache = RecoverableFakeCache(fail_for=2)
 	engine_module._risk_channels = [sentinel_channel]  # type: ignore[assignment]
 
-	with patch("edge_catcher.notifications.send", side_effect=fake_send):
+	PHASE_B_TARGET = 4  # 2 fails (warn fires) + 2 successes (latch reset)
+	done_b = asyncio.Event()
+
+	def fake_send_b(notification: Any, channels: Any) -> dict:
+		send_calls.append((notification, channels))
+		return {}
+
+	class _RecoverableCache:
+		"""Fails for the first `fail_for` calls, then succeeds."""
+
+		def __init__(self, fail_for: int) -> None:
+			self._fail_for = fail_for
+			self.calls: int = 0
+			self._consecutive_failures: int = 0
+
+		async def refresh(self) -> None:
+			self.calls += 1
+			if self.calls <= self._fail_for:
+				self._consecutive_failures += 1
+			else:
+				self._consecutive_failures = 0
+			if self.calls >= PHASE_B_TARGET:
+				done_b.set()
+
+	recover_cache = _RecoverableCache(fail_for=2)
+
+	with patch("edge_catcher.notifications.send", side_effect=fake_send_b):
 		task = asyncio.create_task(
-			bankroll_refresh_loop(recover_cache, interval=interval, warn_after=2)
+			bankroll_refresh_loop(recover_cache, interval=0.001, warn_after=2)
 		)
-		# 4 intervals: fail, fail (warn fires), succeed (latch reset), succeed
-		await asyncio.sleep(interval * 4.5)
-		task.cancel()
 		try:
-			await task
-		except asyncio.CancelledError:
-			pass
+			await asyncio.wait_for(done_b.wait(), timeout=5.0)
+		finally:
+			task.cancel()
+			with contextlib.suppress(asyncio.CancelledError):
+				await task
 
 	# Exactly one warning from the first streak; the success reset the latch;
 	# subsequent success calls don't re-warn.
@@ -204,23 +261,38 @@ async def test_sustained_failure_emits_one_time_warning() -> None:
 	)
 
 	# --- Phase C: latch truly reset — a fresh fail streak warns again -------
-	# Now start a brand-new loop with a new failing cache to confirm the latch
-	# reset is per-loop (not a global stale state). This is the key "resets on
-	# success" proof: the previous loop's `warned` flag is gone.
+	# Brand-new loop instance → `warned` starts False; confirms per-loop isolation.
 	send_calls.clear()
-	fresh_failing = FailingFakeCache()
 	engine_module._risk_channels = [sentinel_channel]  # type: ignore[assignment]
 
-	with patch("edge_catcher.notifications.send", side_effect=fake_send):
+	warned_event_c = asyncio.Event()
+
+	def fake_send_c(notification: Any, channels: Any) -> dict:
+		send_calls.append((notification, channels))
+		warned_event_c.set()
+		return {}
+
+	class _FreshFailingCache:
+		def __init__(self) -> None:
+			self.calls: int = 0
+			self._consecutive_failures: int = 0
+
+		async def refresh(self) -> None:
+			self.calls += 1
+			self._consecutive_failures += 1
+
+	fresh_failing = _FreshFailingCache()
+
+	with patch("edge_catcher.notifications.send", side_effect=fake_send_c):
 		task = asyncio.create_task(
-			bankroll_refresh_loop(fresh_failing, interval=interval, warn_after=2)
+			bankroll_refresh_loop(fresh_failing, interval=0.001, warn_after=2)
 		)
-		await asyncio.sleep(interval * 3.5)
-		task.cancel()
 		try:
-			await task
-		except asyncio.CancelledError:
-			pass
+			await asyncio.wait_for(warned_event_c.wait(), timeout=5.0)
+		finally:
+			task.cancel()
+			with contextlib.suppress(asyncio.CancelledError):
+				await task
 
 	assert len(send_calls) == 1, (
 		f"Phase C: expected 1 warning for new streak, got {len(send_calls)}"
