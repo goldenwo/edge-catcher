@@ -445,6 +445,37 @@ def _consult_exit_gate(
 	return False
 
 
+def _enrich_live_entry_signal(signal: Signal, ctx: TickContext) -> None:
+	"""Populate the execution fields the LIVE entry path needs but strategies
+	don't emit.
+
+	Strategies stay framework-agnostic: they pick side/ticker and a reason; the
+	engine owns execution mechanics. The PAPER path already derives the entry
+	price from the tick inside ``_handle_enter`` (``entry_price = ctx.yes_ask``
+	for a yes-side entry). The LIVE path's gate (``gate_entry``, which Rejects
+	INVALID_SIGNAL when ``entry<=0 or sl<=0``) AND order builder
+	(``build_entry_order``, which raises on a missing field) both REQUIRE
+	``entry_price_cents`` + ``stop_loss_distance_cents`` on the signal — so
+	derive them here, ONCE, before the gate, from the SAME tick price paper
+	books at, so live and paper enter at the same limit.
+
+	Only fills fields the strategy left ``None`` — a strategy that DOES populate
+	them (a future limit-below-ask entry, or an explicit stop) keeps its values.
+
+	``stop_loss_distance_cents`` defaults to the entry cost: on a binary contract
+	with no hard stop the worst case is losing the full entry, so the cost basis
+	IS the per-contract risk. That makes the fixed-fraction sizing arm
+	(``equity * sizing_pct / sl_cents``, risk.py) reduce to
+	``equity * sizing_pct / entry`` — pure-fractional capital allocation, the
+	Phase-1 sizing intent. Caller MUST gate this on ``risk is not None`` so the
+	paper/replay path never enriches (G-parity: paper signals stay byte-exact).
+	"""
+	if signal.entry_price_cents is None:
+		signal.entry_price_cents = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
+	if signal.stop_loss_distance_cents is None:
+		signal.stop_loss_distance_cents = signal.entry_price_cents
+
+
 async def _handle_signal(
 	signal: Signal,
 	ctx: TickContext,
@@ -510,6 +541,12 @@ async def _handle_signal(
 		#   defense). process_tick already re-raises it past the broad except.
 		allowed_size: int | None = None  # paper sentinel — None = ungated paper path
 		if risk is not None:
+			# LIVE only: strategies emit framework-agnostic enter signals (no
+			# execution price/stop). Derive both from the tick BEFORE the gate
+			# AND build_entry_order consume them. Paper derives the price itself
+			# in _handle_enter and runs no gate, so this is live-only and the
+			# paper path stays byte-exact (G-parity).
+			_enrich_live_entry_signal(signal, ctx)
 			# _consult_entry_gate holds the isinstance(Reject) check so this
 			# function stays free of it (structural AST guard in test suite).
 			# KillSwitchTripFailed propagates untouched — do NOT catch here.
