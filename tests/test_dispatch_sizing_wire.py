@@ -871,3 +871,177 @@ async def test_exit_paper_mode_no_gate(monkeypatch: Any) -> None:
 	assert len(handle_exit_calls) == 1, (
 		"_handle_exit must be called exactly once on the paper exit path"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Live-signal enrichment — derive entry_price_cents / stop_loss_distance_cents
+# from the tick for strategies that don't emit them.
+#
+# Production strategies (edge_catcher/engine/strategies_local.py) emit
+# framework-agnostic enter signals: side/ticker/series/reason, NO execution
+# price/stop. The paper path derives the entry price from the tick inside
+# _handle_enter (entry_price = ctx.yes_ask), so paper works. The LIVE path has
+# TWO consumers that REQUIRE those fields:
+#   * gate_entry (risk.py:712) Rejects INVALID_SIGNAL when entry<=0 or sl<=0;
+#   * build_entry_order (execution.py:190) raises ValueError if either is None.
+# So on the live path the dispatcher must derive both from the tick BEFORE the
+# gate sees the signal. CR-5 caught this: the bundled real strategy produced 7
+# paper trades and 0 live trades (every entry ValueError'd at build_entry_order;
+# in production the real gate would reject every entry as INVALID_SIGNAL first).
+# Enrichment is LIVE-ONLY (risk is not None) → paper/replay signals stay None
+# (paper derives the price internally + has no gate) → G-parity preserved.
+# ---------------------------------------------------------------------------
+
+
+def _bare_entry_signal(side: str = "yes") -> Signal:
+	"""An enter Signal as the real strategies emit it — NO entry_price_cents /
+	stop_loss_distance_cents (those are execution concerns the strategy doesn't
+	know about)."""
+	return Signal(
+		action="enter",
+		ticker=_TICKER_C3,
+		series=_SERIES_C3,
+		side=side,
+		strategy=_STRATEGY_C3,
+		reason="bare-signal (real strategy shape)",
+	)
+
+
+@pytest.mark.asyncio
+async def test_live_enter_derives_missing_price_and_stop_before_gate() -> None:
+	"""LIVE path: a bare enter signal (no price/stop) is enriched from the tick
+	BEFORE the gate is consulted, so the gate's INVALID_SIGNAL check passes and
+	build_entry_order can build the order.
+
+	entry_price_cents must equal the tick ask the paper path books at
+	(ctx.yes_ask) so live and paper book at the same price. stop_loss_distance_cents
+	defaults to the entry cost — the per-contract risk on a binary contract with
+	no hard stop — so the fixed-fraction sizing arm becomes
+	equity·sizing_pct/entry = pure-fractional capital allocation (Phase-1 intent).
+	"""
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	fake_risk = _FakeGate(Allow(size_contracts=4, sizing_breakdown=_bd_c3(4)))
+	fake_provider = _FakeRiskContextProvider()
+	config: dict[str, Any] = {
+		"_metrics": Metrics(),
+		"_exec_cfg": _exec_cfg(entry_slippage_cents=0),  # 0 → limit == tick ask
+	}
+
+	bare = _bare_entry_signal(side="yes")
+	assert bare.entry_price_cents is None and bare.stop_loss_distance_cents is None
+
+	await _handle_signal(
+		bare,
+		_ctx_c3(yes_ask=45),
+		store,
+		config,
+		executor,
+		now=_NOW_C3,
+		risk=fake_risk,  # type: ignore[arg-type]
+		risk_ctx_provider=fake_provider,  # type: ignore[arg-type]
+	)
+
+	# The gate must have been consulted with an ENRICHED signal.
+	assert len(fake_risk.gate_entry_calls) == 1, "gate_entry must be called once"
+	seen_sig = fake_risk.gate_entry_calls[0][0]
+	assert seen_sig.entry_price_cents == 45, (
+		"entry_price_cents must be derived from the tick ask (45) before the gate "
+		f"sees the signal, got {seen_sig.entry_price_cents!r}"
+	)
+	assert seen_sig.stop_loss_distance_cents == 45, (
+		"stop_loss_distance_cents must default to the entry cost (45) for "
+		f"pure-fractional sizing, got {seen_sig.stop_loss_distance_cents!r}"
+	)
+
+	# An order was placed with the derived limit (slippage 0 → limit == tick ask).
+	assert len(placed_reqs) == 1, "executor.place must be called once (not ValueError)"
+	assert placed_reqs[0].limit_price_cents == 45, (
+		f"live limit must equal the tick ask 45, got {placed_reqs[0].limit_price_cents}"
+	)
+
+
+@pytest.mark.asyncio
+async def test_live_enter_no_side_derives_from_no_ask() -> None:
+	"""LIVE path, NO-side bare signal: entry price is derived from ctx.no_ask
+	(mirrors paper's _handle_enter entry_price = ctx.no_ask for no-side)."""
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	fake_risk = _FakeGate(Allow(size_contracts=3, sizing_breakdown=_bd_c3(3)))
+	fake_provider = _FakeRiskContextProvider()
+	config: dict[str, Any] = {
+		"_metrics": Metrics(),
+		"_exec_cfg": _exec_cfg(entry_slippage_cents=0),
+	}
+
+	bare = _bare_entry_signal(side="no")
+	await _handle_signal(
+		bare,
+		_ctx_c3(yes_ask=45, no_ask=55),
+		store,
+		config,
+		executor,
+		now=_NOW_C3,
+		risk=fake_risk,  # type: ignore[arg-type]
+		risk_ctx_provider=fake_provider,  # type: ignore[arg-type]
+	)
+
+	seen_sig = fake_risk.gate_entry_calls[0][0]
+	assert seen_sig.entry_price_cents == 55, (
+		f"no-side entry price must derive from no_ask (55), got {seen_sig.entry_price_cents!r}"
+	)
+	assert placed_reqs[0].limit_price_cents == 55
+
+
+@pytest.mark.asyncio
+async def test_paper_enter_bare_signal_not_enriched() -> None:
+	"""G-parity guard: on the PAPER path (risk=None) a bare signal is NOT
+	enriched — its execution fields stay None (paper derives the entry price
+	itself inside _handle_enter) and the order is placed with size_contracts=0.
+	Enrichment must be live-only so the paper path stays byte-identical."""
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	config: dict[str, Any] = {"_metrics": Metrics()}  # no _exec_cfg → paper path
+	bare = _bare_entry_signal(side="yes")
+
+	await _handle_signal(
+		bare,
+		_ctx_c3(yes_ask=45),
+		store,
+		config,
+		executor,
+		now=_NOW_C3,
+		risk=None,  # paper/replay — no gate, no enrichment
+		risk_ctx_provider=None,
+	)
+
+	# Signal left untouched (no live-only enrichment on the paper path).
+	assert bare.entry_price_cents is None, "paper path must NOT enrich the signal"
+	assert bare.stop_loss_distance_cents is None
+	# Paper places size_contracts=0 (executor sizes internally) — byte-exact.
+	assert len(placed_reqs) == 1
+	assert placed_reqs[0].size_contracts == 0

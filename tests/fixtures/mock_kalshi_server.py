@@ -33,6 +33,7 @@ H1 extension (2026-05-23):
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -186,6 +187,14 @@ class MockKalshiServer:
 	# both sync and async).  Existing callers leave this None → sync handler,
 	# zero behavior change.
 	response_delay_seconds: float | None = None
+	# CR-5 opt-in: when True, the handler answers each request by matching the
+	# request body's client_order_id to a queued response's coid (out-of-order
+	# safe) and synthesises a fully-filled echo for any unqueued coid — the
+	# fresh exit-order coid generated inside _handle_exit, which the harness
+	# never queues.  When False (default) the server keeps the strict
+	# FIFO/sticky-tail behaviour the error-storm tests depend on.  Contract:
+	# tests/test_mock_kalshi_server.py.
+	match_by_client_order_id: bool = False
 
 	def queue_response(
 		self,
@@ -240,6 +249,11 @@ class MockKalshiServer:
 		The handler captures every request into ``self.requests`` so tests
 		can assert headers (signed Authorization), path, body, etc.
 
+		Response selection depends on ``match_by_client_order_id``:
+		* False (default) — strict FIFO/sticky-tail via ``_consume_response``.
+		* True (CR-5) — coid-matched via ``_coid_matched_response`` (queued
+		  response whose coid matches the request, else a synthesised echo).
+
 		When ``response_delay_seconds`` is set (H1 timeout test), the handler
 		is async and ``await``s ``asyncio.sleep(delay)`` before returning.
 		``httpx.MockTransport`` accepts both sync and async callables — existing
@@ -247,32 +261,115 @@ class MockKalshiServer:
 		"""
 		delay = self.response_delay_seconds
 
-		def _consume_response() -> httpx.Response:
-			"""Shared sticky-tail consumption logic (sync core)."""
-			if not self._responses:
-				return httpx.Response(
-					500,
-					json={"error": {"message": "MockKalshiServer: no response queued"}},
-				)
-			if len(self._responses) > 1:
-				status, body = self._responses.pop(0)
-			else:
-				status, body = self._responses[0]
-			return httpx.Response(status, json=body)
+		def _respond(request: httpx.Request) -> httpx.Response:
+			if self.match_by_client_order_id:
+				return self._coid_matched_response(request)
+			return self._consume_response()
 
 		if delay is not None:
 			async def _async_handler(request: httpx.Request) -> httpx.Response:
 				self.requests.append(request)
 				await asyncio.sleep(delay)
-				return _consume_response()
+				return _respond(request)
 
 			return httpx.MockTransport(_async_handler)
 
 		def _handler(request: httpx.Request) -> httpx.Response:
 			self.requests.append(request)
-			return _consume_response()
+			return _respond(request)
 
 		return httpx.MockTransport(_handler)
+
+	def _consume_response(self) -> httpx.Response:
+		"""FIFO/sticky-tail consumption (default mode).
+
+		Pops the head while more than one response remains; reuses the tail
+		when only one is left (sticky-tail — the 503-storm semantics); returns
+		500 when the queue is empty.
+		"""
+		if not self._responses:
+			return httpx.Response(
+				500,
+				json={"error": {"message": "MockKalshiServer: no response queued"}},
+			)
+		if len(self._responses) > 1:
+			status, body = self._responses.pop(0)
+		else:
+			status, body = self._responses[0]
+		return httpx.Response(status, json=body)
+
+	def _coid_matched_response(self, request: httpx.Request) -> httpx.Response:
+		"""CR-5 mode: answer by matching the request's client_order_id.
+
+		Returns (and consumes) the queued response whose order ``client_order_id``
+		equals the request's; a matched response is used once. An unmatched coid
+		— the fresh exit-order coid ``_handle_exit`` generates, which the harness
+		never queues — yields a 201 echo of the request (``filled_count`` ==
+		requested count, a valid ``fills`` array) so ``LiveExecutor`` translates
+		it as a clean fill and the replay completes with no 500/retry stall.
+		"""
+		coid = self._request_coid(request)
+		if coid is not None:
+			for i, (status, body) in enumerate(self._responses):
+				if self._response_coid(body) == coid:
+					self._responses.pop(i)
+					return httpx.Response(status, json=body)
+		return httpx.Response(201, json=self._synthesise_echo(request))
+
+	@staticmethod
+	def _request_coid(request: httpx.Request) -> str | None:
+		"""Extract ``client_order_id`` from a place request body (None if absent
+		or the body isn't JSON — e.g. a cancel/status GET with no content)."""
+		try:
+			payload = json.loads(request.content)
+		except (ValueError, TypeError):
+			return None
+		coid = payload.get("client_order_id") if isinstance(payload, dict) else None
+		return coid if isinstance(coid, str) else None
+
+	@staticmethod
+	def _response_coid(body: dict[str, Any]) -> str | None:
+		"""Extract the order ``client_order_id`` from a queued response body."""
+		order = body.get("order") if isinstance(body, dict) else None
+		coid = order.get("client_order_id") if isinstance(order, dict) else None
+		return coid if isinstance(coid, str) else None
+
+	@staticmethod
+	def _synthesise_echo(request: httpx.Request) -> dict[str, Any]:
+		"""Build a fully-filled 201 body echoing the placed order.
+
+		Used for an unqueued (exit) coid so the place still translates cleanly.
+		The fill price is the request's limit (``yes_price`` / ``no_price``); the
+		exit result is discarded by ``_handle_exit``, so the exact price is
+		immaterial — what matters is ``filled_count`` > 0 and a valid ``fills``
+		array.  Mirrors the production ``{"order": {...}}`` wire shape.
+		"""
+		try:
+			payload = json.loads(request.content)
+		except (ValueError, TypeError):
+			payload = {}
+		if not isinstance(payload, dict):
+			payload = {}
+		count = int(payload.get("count", 0) or 0)
+		side = payload.get("side", "yes")
+		price = payload.get("yes_price") if side == "yes" else payload.get("no_price")
+		price = int(price or 0)
+		coid = payload.get("client_order_id")
+		return {
+			"order": {
+				"order_id": f"echo-{coid}" if coid else "echo-order",
+				"ticker": payload.get("ticker", ""),
+				"side": side,
+				"action": payload.get("action", "buy"),
+				"count": count,
+				"yes_price": price,
+				"time_in_force": payload.get("time_in_force", "ioc"),
+				"status": "executed",
+				"filled_count": count,
+				"fills": [{"price": price, "size": count}] if count > 0 else [],
+				"client_order_id": coid,
+			}
+		}
 
 	def make_client(
 		self,

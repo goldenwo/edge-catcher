@@ -382,6 +382,7 @@ class _RecordingPaperExecutor:
 		# Mirror PaperExecutor.place's entry book-walk to recover the exact
 		# size + per-level fills. We re-call resolve_fill (the SAME pure
 		# function the inner executor calls) on the SAME snapshot.
+		_rec: dict[str, Any] | None = None
 		if req.action == "buy":
 			snapshot = self._ms.get_orderbook(req.ticker) or OrderbookSnapshot([], [])
 			fill_or_skip = resolve_fill(
@@ -394,14 +395,31 @@ class _RecordingPaperExecutor:
 					fill_or_skip.fill_size,
 					fill_or_skip.blended_price_cents,
 				)
-				self.book_walk[req.client_order_id] = {
+				_rec = {
 					"size": fill_or_skip.fill_size,
 					"fills": fills,
 					"blended": fill_or_skip.blended_price_cents,
+					# Recorded so the live run's queued response carries the REAL
+					# bundle ticker (real bundles span many tickers; the synthetic
+					# fixture happens to be SYN-TEST-T1). Keeps the entry response
+					# internally consistent with the request LiveExecutor places.
+					"ticker": req.ticker,
+					# Entry intent the executor-level CR-5 path rebuilds the live
+					# OrderRequest from (same intent in → isolate executor xlation).
+					"series": req.series,
+					"side": req.side,
+					"strategy": req.strategy,
+					"limit": req.limit_price_cents,
 				}
-				self.entry_order.append(req.client_order_id)
 		# Delegate verbatim — the recorded paper row is the REAL executor's.
-		return await self._inner.place(req)
+		result = await self._inner.place(req)
+		if _rec is not None:
+			# Capture PaperExecutor's authoritative OrderResult so the
+			# executor-level CR-5 path can diff live vs paper translation directly.
+			_rec["paper_result"] = result
+			self.book_walk[req.client_order_id] = _rec
+			self.entry_order.append(req.client_order_id)
+		return result
 
 
 def _reconstruct_fills(
@@ -590,10 +608,17 @@ async def _run_live(
 	"""
 	import edge_catcher.engine.replay.backtester as _bt
 
-	server = MockKalshiServer()
-	# Queue one filled response per placed entry, in the deterministic
-	# bundle/dispatch order the recorder observed (FIFO sticky-tail). Each
-	# response reproduces the SAME per-level fills PaperExecutor walked.
+	# Coid-matched mode (CR-5): each entry response is keyed by its deterministic
+	# client_order_id, so entries match regardless of dispatch order, and the
+	# fresh exit-order coids _handle_exit generates (which we never queue) hit
+	# the server's synthesised fully-filled echo — letting a real bundle's
+	# exit places complete instead of stalling on A's retry backoff. The
+	# previous FIFO/sticky-tail queue only worked because the synthetic fixture
+	# has exactly one entry and no exit.
+	server = MockKalshiServer(match_by_client_order_id=True)
+	# Queue one filled response per placed entry, keyed by coid. Each response
+	# reproduces the SAME per-level fills PaperExecutor walked, at the SAME
+	# bundle ticker the entry placed.
 	for coid in recorder.entry_order:
 		walk = recorder.book_walk[coid]
 		fills = [dict(f) for f in walk["fills"]]
@@ -607,6 +632,7 @@ async def _run_live(
 				order_id=f"ord-{coid}",
 				fills=fills,
 				client_order_id=coid,
+				ticker=walk["ticker"],
 			)
 		)
 
@@ -663,17 +689,21 @@ async def _run_live(
 
 
 def _kalshi_filled_body(
-	*, order_id: str, fills: list[dict[str, int]], client_order_id: str
+	*, order_id: str, fills: list[dict[str, int]], client_order_id: str,
+	ticker: str = "SYN-TEST-T1",
 ) -> dict[str, Any]:
 	"""Kalshi 201 body for a fully-filled order whose fills are the
 	book-derived per-level fills (sums to filled_count; price irrelevant to
 	count). Mirrors the production ``{"order": {...}}`` wire shape
-	``LiveExecutor._translate_order`` reads (``order.raw["fills"]``)."""
+	``LiveExecutor._translate_order`` reads (``order.raw["fills"]``).
+
+	``ticker`` defaults to the synthetic fixture's ticker but is supplied
+	per-entry for real bundles (which span many tickers)."""
 	filled = sum(f["size"] for f in fills)
 	return {
 		"order": {
 			"order_id": order_id,
-			"ticker": "SYN-TEST-T1",
+			"ticker": ticker,
 			"side": "yes",
 			"action": "buy",
 			"count": filled,
@@ -685,6 +715,102 @@ def _kalshi_filled_body(
 			"client_order_id": client_order_id,
 		}
 	}
+
+
+def _compare_executor_results(
+	paper: OrderResult, live: OrderResult
+) -> dict[str, tuple[Any, Any]]:
+	"""CR-5 economic diff: ``blended_entry_cents`` / ``filled_size`` EXACT, plus
+	live must reach ``filled`` status (a live reject/pending on an entry paper
+	FILLED is itself a divergence).
+
+	These are the P&L-determining fields — equal cost basis + fill size ⇒ equal
+	trade-row economics, because ``record_trade`` derives entry fee + pnl
+	deterministically from them, mode-agnostically (so OrderResult parity on
+	these two ⟹ trade-row parity).
+
+	``slippage_cents`` is INTENTIONALLY NOT compared. It is a diagnostic field
+	the two executors compute against DIFFERENT references — PaperExecutor vs the
+	top-of-book best price (``executors/paper.py``: "market impact"), LiveExecutor
+	vs the order's limit (``executors/live.py``: "vs-limit execution"). On a real
+	book where the fill lands below the limit they legitimately differ (paper 0
+	vs live the favorable delta) with ZERO P&L divergence. CR-5 proves economic
+	(cost-basis) parity; whether to unify the slippage reporting reference for
+	F-UI consistency is tracked as a separate follow-up — it is not a cutover
+	concern (it never moves cost basis, size, fees, or pnl).
+	"""
+	d: dict[str, tuple[Any, Any]] = {}
+	if live.status != "filled":
+		d["status"] = (paper.status, live.status)
+	if paper.blended_entry_cents != live.blended_entry_cents:
+		d["blended_entry_cents"] = (paper.blended_entry_cents, live.blended_entry_cents)
+	if paper.filled_size != live.filled_size:
+		d["filled_size"] = (paper.filled_size, live.filled_size)
+	return d
+
+
+async def _run_executor_parity_diffs(
+	bundle: Path,
+	*,
+	live_cfg: Any,
+	live_audit: Any,
+	corrupt: bool = False,
+) -> tuple[list[tuple[str, dict]], int]:
+	"""Executor-translation parity over a bundle's FILLED entries (real-bundle CR-5).
+
+	Replays the bundle through PaperExecutor ONCE (the recording wrapper captures
+	each filled entry's intent + book-derived fills + PaperExecutor's OrderResult),
+	then for EACH filled entry feeds ``LiveExecutor`` the SAME OrderRequest intent
+	+ the SAME book-derived fills via a coid-matched ``MockKalshiServer`` and diffs
+	the two executors' OrderResults (``_compare_executor_results``).
+
+	This isolates the only thing that varies live-vs-paper in production — the
+	executor translation. There is NO gate / dispatch-replay / coid-join, so an
+	entry PaperExecutor SKIPPED can never phantom-fill live (the full-replay
+	harness's failure mode on real multi-entry bundles). ``record_trade`` is a
+	deterministic function of the OrderResult, so OrderResult parity ⟹ trade-row
+	parity. Only one replay (paper) is needed — ~2× faster than the dual replay.
+
+	``corrupt=True`` offsets every live fill +5¢ to prove the diff CAN fail.
+	Returns ``(diffs, n_filled_entries)`` where ``diffs`` is
+	``[(client_order_id, diffdict), ...]`` (empty ⇒ parity holds).
+	"""
+	_, recorder = await _run_paper(bundle)
+	diffs: list[tuple[str, dict]] = []
+	for coid in recorder.entry_order:
+		rec = recorder.book_walk[coid]
+		fills = [dict(f) for f in rec["fills"]]
+		if corrupt:
+			fills = [{"price": f["price"] + 5, "size": f["size"]} for f in fills]
+		server = MockKalshiServer(match_by_client_order_id=True)
+		server.queue_response(
+			_kalshi_filled_body(
+				order_id=f"ord-{coid}", fills=fills,
+				client_order_id=coid, ticker=rec["ticker"],
+			)
+		)
+		client = server.make_client(live_cfg, live_audit)
+		try:
+			live_exec = LiveExecutor(client)
+			# Same sized intent PaperExecutor walked: size = book-derived fill_size,
+			# limit = the entry price paper booked at (so slippage is comparable).
+			live_req = OrderRequest(
+				ticker=rec["ticker"],
+				series=rec["series"],
+				side=rec["side"],
+				size_contracts=rec["size"],
+				limit_price_cents=rec["limit"],
+				strategy=rec["strategy"],
+				client_order_id=coid,
+				action="buy",
+			)
+			live_result = await live_exec.place(live_req)
+		finally:
+			await client.close()
+		d = _compare_executor_results(rec["paper_result"], live_result)
+		if d:
+			diffs.append((coid, d))
+	return diffs, len(recorder.entry_order)
 
 
 @pytest.mark.asyncio
@@ -921,3 +1047,49 @@ def test_collapse_live_split_rows_single_row_passthrough():
 	collapsed = _collapse_live_split_rows(single)
 	assert collapsed == single
 	assert collapsed is not single  # defensive copy, not the same list/dicts
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — EXECUTOR-LEVEL parity (the real-bundle CR-5 path).
+#
+# CR-5's question is executor-translation parity: given the SAME sized intent
+# and the SAME fills, does LiveExecutor produce the same OrderResult economics
+# as PaperExecutor's book-walk? Dispatch is mode-agnostic (the executor is the
+# only seam) and record_trade is a deterministic function of the OrderResult,
+# so OrderResult parity ⟹ trade-row parity. This compares the two executors
+# DIRECTLY per filled entry — no gate, no dispatch-replay, no coid-join, so it
+# cannot phantom-fill an entry PaperExecutor skipped (the full-replay harness's
+# failure mode on real multi-entry bundles). The gitignored real-bundle runner
+# (scripts/run_cr5_parity.py) reuses _run_executor_parity_diffs over the local
+# captured bundles. These tests prove the comparator on the tracked fixture.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_executor_level_parity_synthetic_entry(live_cfg, live_audit, signing_env):
+	"""On the tracked fixture: feeding LiveExecutor the SAME intent + the SAME
+	book-derived fills PaperExecutor walked yields the SAME P&L-determining
+	economics (blended_entry + fill_size EXACT). slippage_cents is excluded —
+	see _compare_executor_results (paper measures vs best, live vs limit)."""
+	diffs, n_entries = await _run_executor_parity_diffs(
+		_SYNTHETIC_BUNDLE, live_cfg=live_cfg, live_audit=live_audit
+	)
+	assert n_entries >= 1, "fixture must produce at least one filled entry"
+	assert not diffs, f"executor-level parity violated: {diffs}"
+
+
+@pytest.mark.asyncio
+async def test_executor_level_parity_is_non_vacuous(live_cfg, live_audit, signing_env):
+	"""A corrupted live fill (blended +5¢) MUST trip the comparator — proves the
+	executor-level check can fail (a parity gate that can't fail is worthless)."""
+	diffs, n_entries = await _run_executor_parity_diffs(
+		_SYNTHETIC_BUNDLE, live_cfg=live_cfg, live_audit=live_audit, corrupt=True
+	)
+	assert n_entries >= 1
+	assert diffs, (
+		"NON-VACUITY FAILURE: corrupted live fills (+5¢) did not trip the "
+		"executor-level comparator"
+	)
+	assert any("blended_entry_cents" in d for _, d in diffs), (
+		f"expected blended_entry divergence under corruption, got {diffs}"
+	)
