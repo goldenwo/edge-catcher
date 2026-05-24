@@ -16,12 +16,14 @@ already equals ``recv_seq`` order) — so it's removed in favour of streaming.
 
 Malformed lines, oversized lines, blank lines, and the schema header are all
 silently skipped (the oversized + malformed cases log at WARNING / DEBUG
-respectively). The one integrity violation the loader does NOT tolerate is a
-``recv_seq`` that goes backwards: the bundle file is external input (read from
-disk, possibly fetched from R2), and a backwards ``recv_seq`` means it is
-corrupt or was reordered, breaking the writer invariant. Replaying it out of
-order would silently produce wrong trades and invalidate a parity verdict
-before live cutover, so that raises ``ValueError`` rather than failing quietly.
+respectively). What the loader does NOT tolerate is a broken ``recv_seq``: any
+yielded event missing a valid integer ``recv_seq``, or a ``recv_seq`` that is
+not strictly increasing (a decrease OR a duplicate). The bundle file is
+external input (read from disk, possibly fetched from R2), so any of these
+means it is corrupt or was reordered, breaking the writer invariant. Replaying
+it out of order — or silently skipping a garbled event, which would also blind
+the ordering check — would produce wrong trades and invalidate a parity verdict
+before live cutover, so it raises ``ValueError`` rather than failing quietly.
 """
 from __future__ import annotations
 
@@ -53,8 +55,10 @@ def read_jsonl_window(
 	exceed ``MAX_LINE_BYTES`` when read. Memory is bounded to one event at a
 	time — the file is never materialised.
 
-	Raises ``ValueError`` if ``recv_seq`` ever decreases: that breaks the
-	writer invariant and means the bundle is corrupt or was reordered.
+	Raises ``ValueError`` if any yielded event lacks a valid integer
+	``recv_seq`` or if ``recv_seq`` is not strictly increasing (a decrease OR a
+	duplicate): all break the writer's monotonic-counter invariant and mean the
+	bundle is corrupt or was reordered.
 
 	Args:
 		path:          Path to a ``.jsonl`` or ``.jsonl.zst`` file.
@@ -67,17 +71,30 @@ def read_jsonl_window(
 	last_seq: Optional[int] = None
 	for event in _stream_raw(path, ticker_filter):
 		seq = event.get("recv_seq")
-		if isinstance(seq, int):
-			# A ticker filter yields a subsequence, which stays monotonic, so
-			# this never false-trips on filtered streams.
-			if last_seq is not None and seq < last_seq:
-				raise ValueError(
-					f"replay loader: recv_seq went backwards in {path} "
-					f"({seq} after {last_seq}). The capture writer appends "
-					f"monotonically (capture/writer.py), so on-disk order must "
-					f"be recv_seq order — this bundle is corrupt or reordered."
-				)
-			last_seq = seq
+		# Every real event carries an int recv_seq (capture/writer.py); the only
+		# seq-less line — the schema header — is dropped by _parse_line before
+		# it reaches here. A missing / non-int / bool recv_seq is therefore
+		# corruption, not a normal case: fail loud rather than silently skip it
+		# (a skipped seq also can't advance the monotonic check below, blinding
+		# the guard to a reorder straddling that event). bool is excluded because
+		# isinstance(True, int) is True in Python.
+		if not isinstance(seq, int) or isinstance(seq, bool):
+			raise ValueError(
+				f"replay loader: event in {path} has no valid integer recv_seq "
+				f"(got {seq!r}); the bundle is corrupt or was tampered with."
+			)
+		# recv_seq is a strictly-increasing monotonic counter (one per event), so
+		# on-disk order must strictly increase; <= catches both a reorder and a
+		# duplicated/re-emitted seq. A ticker filter yields a subsequence, which
+		# stays strictly increasing, so this never false-trips on filtered streams.
+		if last_seq is not None and seq <= last_seq:
+			raise ValueError(
+				f"replay loader: recv_seq not strictly increasing in {path} "
+				f"({seq} after {last_seq}). The capture writer appends "
+				f"monotonically (capture/writer.py), so on-disk order must be "
+				f"recv_seq order — this bundle is corrupt or reordered."
+			)
+		last_seq = seq
 		yield event
 
 

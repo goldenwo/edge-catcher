@@ -66,6 +66,59 @@ def test_loader_raises_on_recv_seq_inversion(tmp_path: Path) -> None:
 		list(read_jsonl_window(path))
 
 
+def test_loader_raises_on_non_int_recv_seq(tmp_path: Path) -> None:
+	"""Every real event carries an int recv_seq (writer.py); the only seq-less
+	line — the header — is filtered before the guard. A yielded event whose
+	recv_seq is missing or non-int therefore means the bundle is corrupt or
+	tampered. The loader must fail loud, not silently pass it: a non-int seq
+	can't advance the monotonic check, so silently skipping it would also blind
+	the ordering guard to a reorder straddling that event."""
+	from edge_catcher.engine.replay.loader import read_jsonl_window
+
+	# String recv_seq (e.g. a botched schema rev or a partial-write garble).
+	str_seq = tmp_path / "kalshi_engine_2026-04-14.jsonl"
+	str_seq.write_text(
+		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
+		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": "2", "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 3, "source": "ws", "payload": {}}) + "\n",
+		encoding="utf-8",
+	)
+	with pytest.raises(ValueError, match="recv_seq"):
+		list(read_jsonl_window(str_seq))
+
+	# Bool recv_seq — isinstance(True, int) is True in Python, so it must be
+	# rejected explicitly rather than silently treated as 1.
+	bool_seq = tmp_path / "kalshi_engine_2026-04-15.jsonl"
+	bool_seq.write_text(
+		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
+		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": True, "source": "ws", "payload": {}}) + "\n",
+		encoding="utf-8",
+	)
+	with pytest.raises(ValueError, match="recv_seq"):
+		list(read_jsonl_window(bool_seq))
+
+
+def test_loader_raises_on_duplicate_recv_seq(tmp_path: Path) -> None:
+	"""recv_seq is a strictly-increasing monotonic counter — one per event
+	(writer.py). A repeated recv_seq means a duplicated/re-emitted event
+	(corruption or a botched crash-recovery), so the loader rejects a
+	non-strictly-increasing sequence, not just a backwards one."""
+	from edge_catcher.engine.replay.loader import read_jsonl_window
+
+	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
+	path.write_text(
+		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
+		+ json.dumps({"recv_seq": 1, "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 2, "source": "ws", "payload": {}}) + "\n",
+		encoding="utf-8",
+	)
+	with pytest.raises(ValueError, match="recv_seq"):
+		list(read_jsonl_window(path))
+
+
 def test_loader_streams_without_materializing_whole_file(tmp_path: Path) -> None:
 	"""Peak memory while iterating must NOT scale with file size. The loader
 	streams one event at a time; it must never buffer the whole file. A real
@@ -107,13 +160,16 @@ def test_loader_streams_without_materializing_whole_file(tmp_path: Path) -> None
 	# Correctness: every event streamed, in order.
 	assert count == n_events
 	assert last_seq == n_events
-	# Bounded memory: peak is a small fraction of the file, not ~all of it.
-	# Streaming holds one event (~2 KB) + a 64 KiB read chunk; the old
-	# materialising loader peaked at ~the whole file (tens of MB).
-	assert peak < 8_000_000, (
-		f"loader peak memory {peak/1e6:.1f} MB while streaming a "
-		f"{file_bytes/1e6:.1f} MB file — it is buffering the whole file instead "
-		f"of streaming (regression of the CR-5 OOM fix)"
+	# Bounded memory: peak must be a small FRACTION of the file, not O(file).
+	# Streaming holds one event (~2 KB) + a 64 KiB read chunk (well under 1 MB
+	# here); full materialisation (the old bug) peaks at ~the whole file. A
+	# file/8 ceiling stays many x above the real streaming peak yet ~8x below a
+	# full-file blowup, and scales with the file so it can't silently loosen.
+	ceiling = file_bytes // 8
+	assert peak < ceiling, (
+		f"loader peak memory {peak/1e6:.1f} MB streaming a {file_bytes/1e6:.1f} MB "
+		f"file (ceiling {ceiling/1e6:.1f} MB = file/8) — it is buffering the file "
+		f"instead of streaming (regression of the CR-5 OOM fix)"
 	)
 
 
