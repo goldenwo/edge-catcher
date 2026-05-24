@@ -794,6 +794,10 @@ async def _run_executor_parity_diffs(
 			live_exec = LiveExecutor(client)
 			# Same sized intent PaperExecutor walked: size = book-derived fill_size,
 			# limit = the entry price paper booked at (so slippage is comparable).
+			# NOTE: built DIRECTLY here, not via build_entry_order — this path
+			# isolates the executor's fills->economics translation. The real
+			# build_entry_order path (limit = entry + entry_slippage_cents, fresh
+			# coid) is covered end-to-end by test_executor_parity_synthetic_bundle_entry.
 			live_req = OrderRequest(
 				ticker=rec["ticker"],
 				series=rec["series"],
