@@ -162,6 +162,7 @@ def _order(
 	filled_count: int = 0,
 	ticker: str = "KXSOL15M-26MAY16H12",
 	limit_price_cents: int = 40,
+	avg_fill_price_cents: int = 0,
 ) -> Order:
 	return Order(
 		order_id=order_id,
@@ -173,6 +174,7 @@ def _order(
 		time_in_force="ioc",
 		status=status,
 		filled_count=filled_count,
+		avg_fill_price_cents=avg_fill_price_cents,
 		client_order_id=client_order_id,
 		raw={},
 	)
@@ -357,6 +359,57 @@ async def test_17_startup_pending_matched_filled_resolves_to_open(
 	assert row["entry_fee_remaining_cents"] == 17
 	assert row["slippage_cents"] == 0  # REST Order has no fill-vs-limit delta
 	assert report.pending_resolved == 1
+
+
+@pytest.mark.asyncio
+async def test_17b_matched_filled_prefers_true_avg_fill_over_limit(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Reconcile-recovered basis is Kalshi's TRUE volume-weighted fill price
+	(``avg_fill_price_cents``, from ``taker_fill_cost_dollars``), NOT the IOC
+	limit.
+
+	An IOC that takes resting liquidity fills BELOW its limit (price
+	improvement); recording the limit would overstate the cost basis and
+	corrupt P&L on every reconcile-recovered row. Regression guard for the
+	live-fill-parse fix — before it, the REST Order exposed no fill price and
+	the reconciler had to proxy with the limit.
+	"""
+	coid = "debut-fade-KXSOL15M-avgfill"
+	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-avg",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=10,
+				limit_price_cents=40,
+				avg_fill_price_cents=38,  # filled 2c better than the 40c limit
+			)
+		],
+		# Corroborating position so the just-opened row isn't flagged
+		# lost_truth on the open-vs-positions cross-check (mirrors test_17).
+		positions=[
+			Position(
+				ticker="KXSOL15M-26MAY16H12",
+				side="yes",
+				count=10,
+				average_price_cents=38,
+				raw={},
+			)
+		],
+	)
+
+	await startup_reconcile(client, conn, FakeBankrollCache())
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	# Basis is the TRUE fill price (38), not the 40c limit proxy.
+	assert row["blended_entry_cents"] == 38
+	# Entry fee is computed on the true basis, not the limit.
+	assert row["entry_fee_cents"] == int(round(STANDARD_FEE.calculate(38, 10)))
 
 
 # ---------------------------------------------------------------------------

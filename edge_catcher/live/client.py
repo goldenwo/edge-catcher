@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -103,6 +104,13 @@ class Order:
 	time_in_force: TimeInForce
 	status: str  # Kalshi values: 'pending' / 'resting' / 'executed' / 'canceled' / 'rejected'
 	filled_count: int = 0
+	# Volume-weighted average fill price in cents (the real cost basis), derived
+	# from Kalshi's aggregate ``taker_fill_cost_dollars`` / ``fill_count_fp``.
+	# 0 when nothing filled or cost is unavailable. This is the TRUE entry price
+	# (often better than ``limit_price_cents`` for an IOC that took resting
+	# liquidity); ``_translate_order`` and the reconciler use it as the blended
+	# cost basis. Kalshi's create-order response carries NO per-fill array.
+	avg_fill_price_cents: int = 0
 	created_ts: str = ""  # ISO-8601 from Kalshi
 	client_order_id: str | None = None
 	raw: dict = field(default_factory=dict)  # full API response, for forward-compat
@@ -128,6 +136,52 @@ class Position:
 	count: int
 	average_price_cents: int
 	raw: dict = field(default_factory=dict)
+
+
+def _fp_to_int(value: object) -> int:
+	"""Parse a Kalshi fixed-point count STRING (e.g. ``"6.00"``) to ``int``.
+
+	Kalshi reports order counts as fixed-point decimal strings. Phase-1 binary
+	contracts are whole numbers; round half-up defensively. Tolerates ``None``
+	and numeric inputs; returns 0 on anything unparseable.
+	"""
+	if value is None:
+		return 0
+	try:
+		return int(Decimal(str(value)).to_integral_value(rounding=ROUND_HALF_UP))
+	except (InvalidOperation, ValueError):
+		return 0
+
+
+def _dollars_to_cents(value: object) -> int:
+	"""Parse a Kalshi dollar STRING (e.g. ``"0.1700"``) to integer cents.
+
+	Returns 0 when absent/unparseable (caller decides on a fallback).
+	"""
+	if value is None:
+		return 0
+	try:
+		return int((Decimal(str(value)) * 100).to_integral_value(rounding=ROUND_HALF_UP))
+	except (InvalidOperation, ValueError):
+		return 0
+
+
+def _avg_fill_cents(cost_dollars: object, fill_count: int) -> int:
+	"""Volume-weighted average fill price in cents.
+
+	Kalshi's create-order response carries NO per-fill array — only the
+	aggregate ``taker_fill_cost_dollars`` (cost of the taker fills on the
+	bought side). The blended cost basis is therefore ``cost / fill_count``.
+	Returns 0 when nothing filled or the cost is unavailable, matching the
+	``blended_price_cents`` 0-sentinel convention downstream code expects.
+	"""
+	if fill_count <= 0 or cost_dollars is None:
+		return 0
+	try:
+		cost_cents = Decimal(str(cost_dollars)) * 100
+		return int((cost_cents / fill_count).to_integral_value(rounding=ROUND_HALF_UP))
+	except (InvalidOperation, ValueError, ZeroDivisionError):
+		return 0
 
 
 class KalshiOrderClient:
@@ -561,32 +615,69 @@ class KalshiOrderClient:
 		return body
 
 	def _parse_order(self, data: dict, fallback_request: OrderRequest | None = None) -> Order:
+		"""Map a Kalshi order object (the inner ``"order"`` dict, also each
+		``list_orders`` element) to an :class:`Order`.
+
+		Kalshi's real wire shape (NOT the pre-fix assumed shape):
+		  * ``fill_count_fp`` / ``initial_count_fp`` — fixed-point count STRINGS.
+		  * ``{yes,no}_price_dollars`` — the order's limit price as a dollar
+		    STRING; ×100 → cents.
+		  * ``taker_fill_cost_dollars`` — aggregate taker fill cost (no per-fill
+		    array); the blended average is ``cost / fill_count``.
+		  * ``created_time`` — ISO-8601 (not ``created_ts``).
+		"""
 		side: OrderSide = data.get("side", fallback_request.side if fallback_request else "yes")
 		action: OrderAction = data.get("action", fallback_request.action if fallback_request else "buy")
-		price_cents = (
-			data.get("yes_price") if side == "yes" else data.get("no_price")
-		) or 0
+
+		filled_count = _fp_to_int(data.get("fill_count_fp"))
+		# initial_count_fp is the order's original size; the reconciler compares
+		# filled_count >= count, so count must be that original size.
+		count = _fp_to_int(data.get("initial_count_fp"))
+
+		# The limit price echoes back as {side}_price_dollars. Fall back to the
+		# request's limit only when the field is absent (forward-compat / minimal
+		# bodies) — never silently zero a real-money cost basis.
+		price_field = "yes_price_dollars" if side == "yes" else "no_price_dollars"
+		limit_price_cents = _dollars_to_cents(data.get(price_field))
+		if limit_price_cents == 0 and fallback_request is not None:
+			limit_price_cents = fallback_request.limit_price_cents
+
 		return Order(
 			order_id=data.get("order_id", ""),
 			ticker=data.get("ticker", fallback_request.ticker if fallback_request else ""),
 			side=side,
 			action=action,
-			count=int(data.get("count", 0)),
-			limit_price_cents=int(price_cents),
+			count=count,
+			limit_price_cents=limit_price_cents,
 			time_in_force=data.get("time_in_force", "gtc"),
 			status=data.get("status", "pending"),
-			filled_count=int(data.get("filled_count", 0)),
-			created_ts=data.get("created_ts", ""),
+			filled_count=filled_count,
+			avg_fill_price_cents=_avg_fill_cents(data.get("taker_fill_cost_dollars"), filled_count),
+			created_ts=data.get("created_time", ""),
 			client_order_id=data.get("client_order_id"),
 			raw=data,
 		)
 
 	def _parse_position(self, data: dict) -> Position:
-		side: OrderSide = "yes" if int(data.get("position", 0)) >= 0 else "no"
+		"""Map a Kalshi ``market_positions`` element to a :class:`Position`.
+
+		Real wire shape: ``position_fp`` is a SIGNED fixed-point count STRING
+		(``"10.00"`` long-yes, ``"-3.00"`` long-no); ``market_exposure_dollars``
+		is the cost basis of the open position as a dollar STRING. The average
+		entry price is therefore ``market_exposure / |position|``. (NOT the
+		pre-fix ``position`` / ``average_position_cost`` integer fields, which
+		Kalshi does not return — they parsed to 0 and silently mis-recovered any
+		real orphan position as flat.)
+		"""
+		position = _fp_to_int(data.get("position_fp"))
+		count = abs(position)
+		side: OrderSide = "yes" if position >= 0 else "no"
+		exposure_cents = _dollars_to_cents(data.get("market_exposure_dollars"))
+		average_price_cents = round(exposure_cents / count) if count > 0 else 0
 		return Position(
 			ticker=data.get("ticker", ""),
 			side=side,
-			count=abs(int(data.get("position", 0))),
-			average_price_cents=int(data.get("average_position_cost", 0)),
+			count=count,
+			average_price_cents=average_price_cents,
 			raw=data,
 		)

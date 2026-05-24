@@ -9,12 +9,11 @@ Covers spec test inventory #7-#13, #15, #17 (v1.6.0 PR 4 / sub-project D):
 * #11 — :class:`NetworkError` → pending with ``kalshi_unreachable:...``,
         order_id=None (B reconciles via client_order_id)
 * #12 — :class:`CapExceededError` → rejected with ``absolute_max_exceeded``
-* #13 — malformed fills (Kalshi returned filled_count>0 with bad fills) →
-        pending with ``kalshi_malformed_fills``, order_id preserved
+* #13 — filled_count>0 but no usable fill cost (``avg_fill_price_cents==0``)
+        → pending with ``kalshi_missing_fill_cost``, order_id preserved; does
+        NOT fabricate a 0¢ "perfect fill" it never saw
 * #15 — AST regression: ``_to_kalshi_request`` must not hardcode ``"buy"``/
         ``"sell"`` literals (action MUST come from ``req.action``)
-* #17 — malformed fills is pending (NOT filled) — does not pretend to know
-        the price
 
 Test methodology: every test names the failure mode it prevents. Each result-
 assertion checks the *defined* :class:`OrderResult` rejection_reason / status
@@ -41,6 +40,7 @@ from edge_catcher.live.errors import (
 	NetworkError,
 	OrderRejected,
 )
+from tests.fixtures.kalshi_responses import PLACE_201_CASES
 
 
 # ---------------------------------------------------------------------------
@@ -101,26 +101,19 @@ def _make_order(
 	count: int = 10,
 	limit_price: int = 5,
 	filled_count: int = 10,
-	fills: list | None = None,
+	avg_fill_price_cents: int | None = None,
 	status: str = "executed",
 ) -> Order:
-	"""Construct a :class:`Order` matching what KalshiOrderClient.place returns.
+	"""Construct an :class:`Order` as ``KalshiOrderClient._parse_order`` yields
+	it from a real create-order 201.
 
-	The ``raw`` dict mirrors Kalshi's wire response shape (the per-fill array
-	lives inside ``raw["fills"]`` — spec L408).
+	Kalshi's response carries the blended cost as the aggregate
+	``taker_fill_cost_dollars`` (there is NO per-fill array); the Order surfaces
+	it as ``avg_fill_price_cents``. That field defaults to ``limit_price`` here
+	(a clean full fill at the limit) — pass it explicitly to model price
+	improvement (an IOC that took resting liquidity below the limit) or
+	walked-book slippage.
 	"""
-	raw: dict = {
-		"order_id": order_id,
-		"ticker": ticker,
-		"side": side,
-		"action": action,
-		"count": count,
-		"yes_price": limit_price,
-		"status": status,
-		"filled_count": filled_count,
-	}
-	if fills is not None:
-		raw["fills"] = fills
 	return Order(
 		order_id=order_id,
 		ticker=ticker,
@@ -131,8 +124,62 @@ def _make_order(
 		time_in_force="ioc",
 		status=status,
 		filled_count=filled_count,
-		raw=raw,
+		avg_fill_price_cents=limit_price if avg_fill_price_cents is None else avg_fill_price_cents,
 	)
+
+
+# ---------------------------------------------------------------------------
+# Real Kalshi shape — regression guard for the ioc_zero_fill misread.
+# A real executed IOC carries an aggregate ``taker_fill_cost_dollars`` and NO
+# per-fill ``fills`` array; the Order surfaces it as ``avg_fill_price_cents``.
+# _translate_order must book it as ``filled`` with that blended basis.
+# ---------------------------------------------------------------------------
+
+
+def _make_real_order(expected: dict, ticker: str) -> Order:
+	"""Build an Order exactly as _parse_order yields it from a real 201:
+	filled_count + avg_fill_price_cents set, NO raw["fills"] array."""
+	return Order(
+		order_id=expected["order_id"],
+		ticker=ticker,
+		side=expected["side"],  # type: ignore[arg-type]
+		action="buy",
+		count=expected["count"],
+		limit_price_cents=expected["limit_price_cents"],
+		time_in_force="ioc",
+		status=expected["status"],
+		filled_count=expected["filled_count"],
+		avg_fill_price_cents=expected["avg_fill_price_cents"],
+	)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,expected", PLACE_201_CASES)
+async def test_place_real_kalshi_fill_is_filled(body, expected):
+	"""Real executed IOC → filled, blended = avg fill price (NOT ioc_zero_fill).
+
+	Failure mode prevented: the live daemon orphaning every real position
+	because _translate_order read a non-existent fills array and demoted the
+	fill to pending/rejected.
+	"""
+	order = _make_real_order(expected, body["order"]["ticker"])
+	client = FakeKalshiClient()
+	client.return_value = order
+	req = _make_request(
+		side=expected["side"], size=expected["count"],
+		limit=expected["limit_price_cents"],
+	)
+
+	result = await LiveExecutor(client).place(req)  # type: ignore[arg-type]
+
+	assert result.status == "filled"
+	assert result.filled_size == expected["filled_count"]
+	assert result.blended_entry_cents == expected["avg_fill_price_cents"]
+	assert result.fill_pct == pytest.approx(1.0)
+	assert result.order_id == expected["order_id"]
+	# Buy slippage = blended - limit; IOC took resting liquidity at-or-better,
+	# so slippage is <= 0 for these real fills.
+	assert result.slippage_cents == expected["avg_fill_price_cents"] - expected["limit_price_cents"]
 
 
 # ---------------------------------------------------------------------------
@@ -145,14 +192,14 @@ async def test_place_happy_path_single_fill():
 	"""KalshiOrderClient returns a full IOC fill → OrderResult(filled, slippage=0).
 
 	Failure mode prevented: silent demotion of a perfectly-filled order to
-	pending/rejected. Asserts the canonical happy-path Order shape (raw["fills"]
-	list with price+size dicts) round-trips cleanly through _translate_order.
+	pending/rejected. Asserts a real-shape Order (aggregate avg_fill_price_cents,
+	no per-fill array) round-trips cleanly through _translate_order.
 	"""
 	client = FakeKalshiClient()
 	client.return_value = _make_order(
 		filled_count=10,
 		limit_price=5,
-		fills=[{"price": 5, "size": 10}],
+		avg_fill_price_cents=5,  # full fill at the limit
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -177,23 +224,17 @@ async def test_place_happy_path_single_fill():
 
 @pytest.mark.asyncio
 async def test_place_partial_ioc_blended_price():
-	"""Partial IOC across two price levels → volume-weighted blended price.
+	"""Partial IOC (7 of 10 requested filled) → fill_pct reflects the partial.
 
-	Failure mode prevented: collapsing a walked-book fill to single-price
-	leaks the walked-volume slippage signal F's slippage-distribution chart
-	depends on.
-
-	Math: fill at 5¢ × 5 contracts + fill at 6¢ × 2 contracts = 37¢ over 7
-	contracts → round(37/7) = round(5.285…) = 5¢.
+	Failure mode prevented: dropping the partial-fill signal F's fill-rate
+	analytics depend on. Blended is the aggregate avg_fill_price_cents Kalshi
+	reports — here equal to the 5¢ limit (a clean partial at the limit).
 	"""
 	client = FakeKalshiClient()
 	client.return_value = _make_order(
 		filled_count=7,
 		limit_price=5,
-		fills=[
-			{"price": 5, "size": 5},
-			{"price": 6, "size": 2},
-		],
+		avg_fill_price_cents=5,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -212,19 +253,16 @@ async def test_place_partial_ioc_blended_price():
 
 @pytest.mark.asyncio
 async def test_place_partial_ioc_blended_price_with_walk():
-	"""Walked-book fill: blended price ABOVE limit → positive slippage.
+	"""Blended fill price ABOVE limit → positive slippage.
 
-	Fills: 5¢×3 + 7¢×2 = 29¢ over 5 → round(29/5) = 6¢. Limit was 5¢; signed
-	slippage = blended - limit = +1¢ (paid 1¢ per contract above the limit).
+	Kalshi reports avg_fill_price_cents=6 for a 5¢-limit buy (the IOC walked up
+	1¢). Signed slippage = blended - limit = +1¢ (paid 1¢ above the limit).
 	"""
 	client = FakeKalshiClient()
 	client.return_value = _make_order(
 		filled_count=5,
 		limit_price=5,
-		fills=[
-			{"price": 5, "size": 3},
-			{"price": 7, "size": 2},
-		],
+		avg_fill_price_cents=6,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -254,7 +292,6 @@ async def test_place_zero_fill_ioc_rejected():
 	client.return_value = _make_order(
 		order_id="ord-kx-empty",
 		filled_count=0,
-		fills=[],
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -430,21 +467,22 @@ async def test_place_cap_exceeded_rejected():
 
 
 @pytest.mark.asyncio
-async def test_place_malformed_fills_missing_array_pending():
-	"""filled_count>0 but no ``fills`` key in raw → pending + order_id preserved.
+async def test_place_filled_but_no_cost_pending():
+	"""filled_count>0 but Kalshi reports no usable fill cost
+	(``avg_fill_price_cents == 0``) → pending, order_id preserved.
 
-	Failure mode prevented: pretending we know the blended price ("perfect
-	fill at limit") would corrupt B's slippage tracking and F's slippage
-	chart. Order WAS placed (we have the order_id); B re-fetches and
-	reconciles the true price.
+	Defensive: a real executed fill ALWAYS carries ``taker_fill_cost_dollars``,
+	but if a future/partial response ever omits it we must NOT fabricate a 0¢
+	"perfect fill" (that would silently corrupt B's reconciliation and F's
+	slippage chart). Mark pending so B re-fetches by order_id and reconciles the
+	true basis. (Replaces the four pre-fix "malformed fills array" tests —
+	Kalshi's create-order response carries no per-fill array to malform.)
 	"""
 	client = FakeKalshiClient()
-	# Note: _make_order with fills=None produces an Order whose raw dict has
-	# NO "fills" key — exactly the malformed shape we're guarding against.
 	client.return_value = _make_order(
-		order_id="ord-kx-malformed",
+		order_id="ord-kx-nocost",
 		filled_count=5,
-		fills=None,
+		avg_fill_price_cents=0,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -452,76 +490,15 @@ async def test_place_malformed_fills_missing_array_pending():
 	result = await executor.place(req)
 
 	assert result.status == "pending"
-	assert result.rejection_reason == "kalshi_malformed_fills"
-	# Order ID MUST be preserved — B reconciles via order_id, not client_order_id.
-	assert result.order_id == "ord-kx-malformed"
+	assert result.rejection_reason == "kalshi_missing_fill_cost"
+	# Order ID MUST be preserved — B reconciles via order_id.
+	assert result.order_id == "ord-kx-nocost"
 	assert result.intended_size == 10
 	assert result.filled_size == 5
-	# Blended-price is 0-sentinel; we don't lie about a price we never saw.
+	# Blended is the 0-sentinel; we don't invent a price we never saw.
 	assert result.blended_entry_cents == 0
 	# fill_pct still reflects the reported partial.
 	assert result.fill_pct == pytest.approx(0.5)
-
-
-@pytest.mark.asyncio
-async def test_place_malformed_fills_empty_list_pending():
-	"""filled_count>0 with ``fills=[]`` → pending (defensive)."""
-	client = FakeKalshiClient()
-	client.return_value = _make_order(
-		order_id="ord-kx-empty-fills",
-		filled_count=5,
-		fills=[],
-	)
-	executor = LiveExecutor(client)  # type: ignore[arg-type]
-	req = _make_request(size=10, limit=5)
-
-	result = await executor.place(req)
-
-	# filled_count=0 wouldn't reach here — the zero-fill branch fires first.
-	# This is the filled_count>0 + empty-array shape.
-	assert result.status == "rejected" if result.filled_size == 0 else "pending"
-	# Actually the FakeOrder above has filled_count=5 but fills=[]; ensure
-	# we go through the pending branch.
-	assert result.status == "pending"
-	assert result.rejection_reason == "kalshi_malformed_fills"
-	assert result.order_id == "ord-kx-empty-fills"
-
-
-@pytest.mark.asyncio
-async def test_place_malformed_fills_non_dict_entries_pending():
-	"""``fills`` is a list of strings (wrong shape) → pending."""
-	client = FakeKalshiClient()
-	client.return_value = _make_order(
-		order_id="ord-kx-bad-fills",
-		filled_count=5,
-		fills=["not-a-dict-entry"],  # type: ignore[list-item]
-	)
-	executor = LiveExecutor(client)  # type: ignore[arg-type]
-	req = _make_request()
-
-	result = await executor.place(req)
-
-	assert result.status == "pending"
-	assert result.rejection_reason == "kalshi_malformed_fills"
-	assert result.order_id == "ord-kx-bad-fills"
-
-
-@pytest.mark.asyncio
-async def test_place_malformed_fills_missing_price_key_pending():
-	"""``fills`` entries missing 'price' key → pending."""
-	client = FakeKalshiClient()
-	client.return_value = _make_order(
-		order_id="ord-kx-no-price",
-		filled_count=5,
-		fills=[{"size": 5}],
-	)
-	executor = LiveExecutor(client)  # type: ignore[arg-type]
-	req = _make_request()
-
-	result = await executor.place(req)
-
-	assert result.status == "pending"
-	assert result.rejection_reason == "kalshi_malformed_fills"
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +516,7 @@ async def test_place_forwards_client_order_id_to_kalshi_request():
 	unmodified.
 	"""
 	client = FakeKalshiClient()
-	client.return_value = _make_order(filled_count=10, fills=[{"price": 5, "size": 10}])
+	client.return_value = _make_order(filled_count=10)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(client_order_id="debut-fade-KXSOL15M-1715195456789-abc12345")
 
@@ -727,30 +704,6 @@ async def test_error_map_coverage(exception, expected_status, reason_substring):
 
 
 # ---------------------------------------------------------------------------
-# Defensive parsing — Order.raw is not a dict (Kalshi wire-shape drift)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_place_raw_not_dict_pending():
-	"""If Kalshi response shape drifts and ``order.raw`` is not a dict,
-	we must NOT crash. Demote to pending + preserve order_id."""
-	client = FakeKalshiClient()
-	bad = _make_order(order_id="ord-bad-raw", filled_count=5, fills=None)
-	# Forcibly corrupt raw to a non-dict — simulates a future Kalshi schema change.
-	object.__setattr__(bad, "raw", "this is not a dict")
-	client.return_value = bad
-	executor = LiveExecutor(client)  # type: ignore[arg-type]
-	req = _make_request(size=10, limit=5)
-
-	result = await executor.place(req)
-
-	assert result.status == "pending"
-	assert result.rejection_reason == "kalshi_malformed_fills"
-	assert result.order_id == "ord-bad-raw"
-
-
-# ---------------------------------------------------------------------------
 # Exception propagation contract — never re-raises, EXCEPT CancelledError
 # ---------------------------------------------------------------------------
 
@@ -872,7 +825,6 @@ async def test_translate_order_rejects_zero_size_contracts() -> None:
 		filled_count=5,
 		count=10,
 		limit_price=5,
-		fills=[{"price": 5, "size": 5}],
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=0, limit=5)  # size_contracts=0 — the defect
@@ -901,7 +853,7 @@ async def test_translate_order_clamps_overfill_fill_pct_to_one() -> None:
 	client.return_value = _make_order(
 		filled_count=12,  # overfill: more than requested
 		limit_price=5,
-		fills=[{"price": 5, "size": 12}],
+		avg_fill_price_cents=5,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=5)
@@ -932,7 +884,7 @@ async def test_translate_order_sell_slippage_positive_when_received_less() -> No
 	client.return_value = _make_order(
 		filled_count=10,
 		limit_price=50,
-		fills=[{"price": 48, "size": 10}],
+		avg_fill_price_cents=48,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=50, action="sell")
@@ -958,7 +910,7 @@ async def test_translate_order_buy_slippage_positive_when_paid_more() -> None:
 	client.return_value = _make_order(
 		filled_count=10,
 		limit_price=50,
-		fills=[{"price": 52, "size": 10}],
+		avg_fill_price_cents=52,
 	)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
 	req = _make_request(size=10, limit=50, action="buy")

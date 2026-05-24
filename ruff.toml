@@ -21,5 +21,11 @@ force-exclude = true
 select = ["E", "F", "W"]  # pycodestyle errors, pyflakes, warnings (not full default set)
 ignore = ["W191", "E101"]  # tab-indentation rules don't apply — codebase uses tabs
 
+[lint.per-file-ignores]
+# Verbatim Kalshi REST response captures + the parse-expectations table: long
+# single-line data dicts read better whole than line-wrapped, and faithfulness
+# to the real wire bytes matters more than the 120-col limit for fixture data.
+"tests/fixtures/kalshi_responses.py" = ["E501"]
+
 [format]
 indent-style = "tab"

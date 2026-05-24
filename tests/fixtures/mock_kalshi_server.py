@@ -62,29 +62,43 @@ def kalshi_201_filled(
 	fills: list[dict[str, int]] | None = None,
 	client_order_id: str | None = None,
 ) -> dict[str, Any]:
-	"""Build Kalshi's 201 response body for a fully-filled order.
+	"""Build Kalshi's REAL 201 response body for a filled order.
 
-	Mirrors the production wire shape (``{"order": {...}}``) where ``fills``
-	lives inside the order object (per the Kalshi schema D's ``_translate_order``
-	reads via ``order.raw.get("fills", [])``).
+	Mirrors the production wire shape captured from the live audit log
+	(``{"order": {...}}``): counts are fixed-point STRINGS (``fill_count_fp`` /
+	``initial_count_fp``), the limit price is a dollar STRING
+	(``{side}_price_dollars``), and the blended cost is the AGGREGATE
+	``taker_fill_cost_dollars`` — there is NO per-fill array.
 
-	Defaults populate a single-fill happy path at ``yes_price`` × ``count``.
+	``yes_price`` (cents) is the order's own-side limit; ``fills`` is the
+	caller's book-walk (cents) folded into the aggregate the real API returns:
+	``taker_fill_cost_dollars = Σ price·size`` and ``fill_count = Σ size``. This
+	preserves parity — ``_parse_order`` recovers blended =
+	``round(cost·100 / fill_count)`` = ``blended_price_cents(fills)``.
 	"""
 	if filled_count is None:
 		filled_count = count
 	if fills is None:
 		fills = [{"price": yes_price, "size": filled_count}]
+	total_cost_cents = sum(f["price"] * f["size"] for f in fills)
+	# Kalshi reports both sides' prices (complementary); _parse_order reads the
+	# order's own side. yes_price is the own-side limit in cents.
+	own = f"{yes_price / 100:.4f}"
+	comp = f"{(100 - yes_price) / 100:.4f}"
 	order: dict[str, Any] = {
 		"order_id": order_id,
 		"ticker": ticker,
 		"side": side,
 		"action": action,
-		"count": count,
-		"yes_price": yes_price,
+		"initial_count_fp": f"{count}.00",
+		"fill_count_fp": f"{filled_count}.00",
+		"remaining_count_fp": f"{count - filled_count}.00",
+		"yes_price_dollars": own if side == "yes" else comp,
+		"no_price_dollars": own if side == "no" else comp,
+		"taker_fill_cost_dollars": f"{total_cost_cents / 100:.6f}",
+		"taker_fees_dollars": "0.000000",
 		"time_in_force": "immediate_or_cancel",
 		"status": "executed" if filled_count == count else "resting",
-		"filled_count": filled_count,
-		"fills": fills,
 	}
 	if client_order_id is not None:
 		order["client_order_id"] = client_order_id
@@ -341,8 +355,8 @@ class MockKalshiServer:
 		Used for an unqueued (exit) coid so the place still translates cleanly.
 		The fill price is the request's limit (``yes_price`` / ``no_price``); the
 		exit result is discarded by ``_handle_exit``, so the exact price is
-		immaterial — what matters is ``filled_count`` > 0 and a valid ``fills``
-		array.  Mirrors the production ``{"order": {...}}`` wire shape.
+		immaterial — what matters is a positive fill at a real cost basis.
+		Delegates to :func:`kalshi_201_filled` for the real wire shape.
 		"""
 		try:
 			payload = json.loads(request.content)
@@ -355,21 +369,17 @@ class MockKalshiServer:
 		price = payload.get("yes_price") if side == "yes" else payload.get("no_price")
 		price = int(price or 0)
 		coid = payload.get("client_order_id")
-		return {
-			"order": {
-				"order_id": f"echo-{coid}" if coid else "echo-order",
-				"ticker": payload.get("ticker", ""),
-				"side": side,
-				"action": payload.get("action", "buy"),
-				"count": count,
-				"yes_price": price,
-				"time_in_force": payload.get("time_in_force", "ioc"),
-				"status": "executed",
-				"filled_count": count,
-				"fills": [{"price": price, "size": count}] if count > 0 else [],
-				"client_order_id": coid,
-			}
-		}
+		return kalshi_201_filled(
+			order_id=f"echo-{coid}" if coid else "echo-order",
+			ticker=payload.get("ticker", ""),
+			side=side,
+			action=payload.get("action", "buy"),
+			count=count,
+			filled_count=count,
+			yes_price=price,
+			fills=[{"price": price, "size": count}] if count > 0 else [],
+			client_order_id=coid,
+		)
 
 	def make_client(
 		self,

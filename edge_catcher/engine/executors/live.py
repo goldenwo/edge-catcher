@@ -14,8 +14,8 @@ Funds-at-risk lens:
 * Kalshi 4xx → ``rejected`` (authoritative — don't retry).
 * Kalshi 5xx / unmapped exception → ``pending`` + ``order_id=None`` (treated
   identically to NetworkError; we never lie about a placement we can't confirm).
-* Order placed but malformed fills array → ``pending`` + ``order_id=<known>``.
-  B reconciles the true blended price via ``order_id``.
+* Order filled but Kalshi reports no usable fill cost → ``pending`` +
+  ``order_id=<known>``. B reconciles the true blended basis via ``order_id``.
 * IOC zero-fill → ``rejected`` with ``ioc_zero_fill`` (no fill = no exposure).
 """
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import cast
 
 from edge_catcher.engine.execution import ENTRY_TIF, EXIT_TIF
 from edge_catcher.engine.executor import OrderRequest, OrderResult
@@ -39,7 +38,7 @@ from edge_catcher.live.errors import (
 	OrderRejected,
 )
 
-from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
+from edge_catcher.engine.fill_math import signed_slippage_cents
 
 
 log = logging.getLogger(__name__)
@@ -160,9 +159,10 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	  ``ZeroDivisionError`` here as ``unexpected_exception:ZeroDivisionError``,
 	  hiding the real sizing bug. Loud reject surfaces the upstream defect.
 	* ``filled_count == 0`` → rejected (``ioc_zero_fill``).
-	* ``filled_count > 0`` but ``raw["fills"]`` missing/malformed → pending
-	  with ``order_id`` preserved (B reconciles true blended price).
-	* Happy path: blended price from per-fill array; status=filled.
+	* ``filled_count > 0`` but no usable ``avg_fill_price_cents`` → pending
+	  with ``order_id`` preserved (B reconciles the true blended basis).
+	* Happy path: blended = ``avg_fill_price_cents`` (Kalshi's aggregate taker
+	  fill cost / fill count — no per-fill array exists); status=filled.
 	"""
 	# Defense in depth — size_contracts <= 0 must never reach here from the
 	# builders, but the divisions below would mask the bug as a div-by-zero
@@ -185,36 +185,22 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			order_id=None,
 		)
 
-	# Parse the per-fill array from order.raw — Kalshi returns it as
-	# raw["fills"]: [{"price": int, "size": int}, ...] when fills exist.
-	# A missing/malformed shape falls through to the pending branch below;
-	# B will reconcile by order_id. We cast at the boundary because the
-	# Kalshi wire shape is dynamically typed but we've validated it has the
-	# FillEvent shape (price+size keys) before passing to fill_math.
-	fills: list[FillEvent] = []
-	try:
-		raw_fills = order.raw.get("fills") if isinstance(order.raw, dict) else None
-		if isinstance(raw_fills, list):
-			# Light-touch validation: every entry must have integer price+size.
-			# Malformed entries (missing keys, wrong types) demote to pending.
-			if all(
-				isinstance(f, dict) and "price" in f and "size" in f for f in raw_fills
-			):
-				fills = cast(list[FillEvent], raw_fills)
-	except (AttributeError, TypeError):
-		fills = []
-
-	if not fills:
-		# Kalshi reported a fill count but didn't give us a usable fills array.
-		# Under the zero-error lens we DO NOT pretend we know the price — a
-		# silent "perfect fill" lie masks data-quality issues from B's
-		# reconciliation and F's slippage chart. Mark pending so B re-fetches
-		# the order by order_id and reconciles the true blended price.
+	# Kalshi's create-order response carries the blended cost as an AGGREGATE
+	# (taker_fill_cost_dollars / fill_count), surfaced on the Order as
+	# avg_fill_price_cents — there is NO per-fill array. If a positive fill
+	# count comes back without a usable cost basis, do NOT fabricate a 0¢
+	# "perfect fill" (that silently corrupts B's reconciliation and F's
+	# slippage chart). Mark pending so B re-fetches by order_id and reconciles
+	# the true blended basis (zero-error lens).
+	blended = order.avg_fill_price_cents
+	if blended <= 0:
 		log.warning(
-			"Kalshi order %s has filled_count=%d but no/malformed fills "
-			"array — returning pending so B reconciles the true blended price",
+			"Kalshi order %s has filled_count=%d but no trustworthy fill cost "
+			"(avg_fill_price_cents=%d) — returning pending so B reconciles the "
+			"true blended price",
 			order.order_id,
 			order.filled_count,
+			blended,
 		)
 		return OrderResult(
 			status="pending",
@@ -223,11 +209,10 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			blended_entry_cents=0,
 			fill_pct=_clamp_fill_pct(order.filled_count, req.size_contracts, order.order_id),
 			slippage_cents=0,
-			rejection_reason="kalshi_malformed_fills",
+			rejection_reason="kalshi_missing_fill_cost",
 			order_id=order.order_id or None,
 		)
 
-	blended = blended_price_cents(fills)
 	fill_pct = _clamp_fill_pct(order.filled_count, req.size_contracts, order.order_id)
 	slippage = signed_slippage_cents(
 		blended=blended, limit=req.limit_price_cents, action=req.action

@@ -64,7 +64,9 @@ def test_place_yes_skip_calls_client(monkeypatch, tmp_path, signing_env_cli):
 	def handler(request: httpx.Request) -> httpx.Response:
 		captured.append(request)
 		return httpx.Response(201, json={"order": {
-			"order_id": "ord-1", "status": "resting", "count": 1, "yes_price": 1,
+			"order_id": "ord-1", "status": "resting",
+			"initial_count_fp": "1.00", "fill_count_fp": "0.00",
+			"yes_price_dollars": "0.0100",
 			"side": "yes", "action": "buy", "time_in_force": "gtc",
 		}})
 
@@ -179,8 +181,10 @@ def test_status_prints_order_details(monkeypatch, tmp_path, capsys, signing_env_
 	def handler(request: httpx.Request) -> httpx.Response:
 		return httpx.Response(200, json={"order": {
 			"order_id": "ord-x", "ticker": "X", "side": "yes", "action": "buy",
-			"count": 10, "yes_price": 5, "time_in_force": "gtc",
-			"status": "resting", "filled_count": 3,
+			"initial_count_fp": "10.00", "fill_count_fp": "3.00",
+			"remaining_count_fp": "7.00", "yes_price_dollars": "0.0500",
+			"taker_fill_cost_dollars": "0.150000", "time_in_force": "gtc",
+			"status": "resting",
 		}})
 
 	original = httpx.AsyncClient

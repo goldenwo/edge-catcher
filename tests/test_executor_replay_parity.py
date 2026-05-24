@@ -118,7 +118,7 @@ from tests.test_replay_parity import (
 	_composite_key,
 	_diff_rows,
 )
-from tests.fixtures.mock_kalshi_server import MockKalshiServer
+from tests.fixtures.mock_kalshi_server import MockKalshiServer, kalshi_201_filled
 
 # The tracked synthetic fixture (NOT the gitignored replay_parity/* bundles).
 _SYNTHETIC_BUNDLE = (
@@ -692,29 +692,25 @@ def _kalshi_filled_body(
 	*, order_id: str, fills: list[dict[str, int]], client_order_id: str,
 	ticker: str = "SYN-TEST-T1",
 ) -> dict[str, Any]:
-	"""Kalshi 201 body for a fully-filled order whose fills are the
-	book-derived per-level fills (sums to filled_count; price irrelevant to
-	count). Mirrors the production ``{"order": {...}}`` wire shape
-	``LiveExecutor._translate_order`` reads (``order.raw["fills"]``).
+	"""Kalshi 201 body (REAL shape) for a fully-filled order whose fills are the
+	book-derived per-level fills. The real API returns the blended cost as the
+	aggregate ``taker_fill_cost_dollars`` (Σ price·size) with NO per-fill array;
+	``_parse_order`` recovers blended = ``round(cost·100 / fill_count)`` =
+	``blended_price_cents(fills)``, so executor parity holds EXACTLY. Delegates
+	to the shared :func:`kalshi_201_filled` builder.
 
 	``ticker`` defaults to the synthetic fixture's ticker but is supplied
 	per-entry for real bundles (which span many tickers)."""
 	filled = sum(f["size"] for f in fills)
-	return {
-		"order": {
-			"order_id": order_id,
-			"ticker": ticker,
-			"side": "yes",
-			"action": "buy",
-			"count": filled,
-			"yes_price": fills[0]["price"] if fills else 0,
-			"time_in_force": "immediate_or_cancel",
-			"status": "executed",
-			"filled_count": filled,
-			"fills": fills,
-			"client_order_id": client_order_id,
-		}
-	}
+	return kalshi_201_filled(
+		order_id=order_id,
+		ticker=ticker,
+		count=filled,
+		filled_count=filled,
+		yes_price=fills[0]["price"] if fills else 0,
+		fills=fills,
+		client_order_id=client_order_id,
+	)
 
 
 def _compare_executor_results(
