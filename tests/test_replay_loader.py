@@ -1,18 +1,24 @@
-"""Tests for replay/loader.py — JSONL streaming, decompression, and sorting.
+"""Tests for replay/loader.py — JSONL streaming, decompression, ordering.
 
 The loader is the entry point for the replay backtester. It must:
   * Transparently read raw .jsonl or .jsonl.zst files
   * Skip the schema header line
   * Skip malformed lines (log warning, don't crash)
   * Skip lines exceeding MAX_LINE_BYTES (defensive cap)
-  * Yield events sorted by recv_seq for deterministic replay
+  * Stream events in on-disk (== recv_seq) order WITHOUT buffering the whole
+    file. A real day is ~8M events / multiple GB; the previous materialise-
+    then-sort loader OOM'd the CR-5 sweep. On-disk order IS recv_seq order by
+    the capture writer's monotonic-append invariant (writer.py); a backwards
+    recv_seq means a corrupt/reordered bundle and raises.
   * Optionally filter by ticker set
 """
 from __future__ import annotations
 
 import json
+import tracemalloc
 from pathlib import Path
 
+import pytest
 import zstandard as zstd
 
 
@@ -21,21 +27,94 @@ import zstandard as zstd
 # ---------------------------------------------------------------------------
 
 
-def test_loader_yields_events_in_recv_seq_order(tmp_path: Path) -> None:
-	"""Events must be sorted by recv_seq, not by on-disk order."""
+def test_loader_yields_events_in_file_order(tmp_path: Path) -> None:
+	"""Events stream in on-disk order, which is recv_seq order by the capture
+	writer's monotonic-append invariant (writer.py)."""
 	from edge_catcher.engine.replay.loader import read_jsonl_window
 
 	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
 	path.write_text(
 		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
-		+ json.dumps({"recv_seq": 3, "recv_ts": "2026-04-14T00:00:03+00:00", "source": "ws", "payload": {}}) + "\n"
 		+ json.dumps({"recv_seq": 1, "recv_ts": "2026-04-14T00:00:01+00:00", "source": "ws", "payload": {}}) + "\n"
-		+ json.dumps({"recv_seq": 2, "recv_ts": "2026-04-14T00:00:02+00:00", "source": "ws", "payload": {}}) + "\n",
+		+ json.dumps({"recv_seq": 2, "recv_ts": "2026-04-14T00:00:02+00:00", "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 3, "recv_ts": "2026-04-14T00:00:03+00:00", "source": "ws", "payload": {}}) + "\n",
 		encoding="utf-8",
 	)
 
 	events = list(read_jsonl_window(path))
 	assert [e["recv_seq"] for e in events] == [1, 2, 3]
+
+
+def test_loader_raises_on_recv_seq_inversion(tmp_path: Path) -> None:
+	"""A backwards recv_seq violates the writer's monotonic-append invariant
+	(writer.py) — the bundle is corrupt or reordered. The loader raises rather
+	than silently replaying out of order (which would invalidate a CR-5 parity
+	verdict before live cutover). The previous loader silently re-sorted, which
+	required buffering the whole multi-GB file and OOM'd the sweep."""
+	from edge_catcher.engine.replay.loader import read_jsonl_window
+
+	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
+	path.write_text(
+		json.dumps({"schema_version": 1, "exchange": "kalshi", "header": True}) + "\n"
+		+ json.dumps({"recv_seq": 1, "recv_ts": "2026-04-14T00:00:01+00:00", "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 3, "recv_ts": "2026-04-14T00:00:03+00:00", "source": "ws", "payload": {}}) + "\n"
+		+ json.dumps({"recv_seq": 2, "recv_ts": "2026-04-14T00:00:02+00:00", "source": "ws", "payload": {}}) + "\n",
+		encoding="utf-8",
+	)
+
+	with pytest.raises(ValueError, match="recv_seq"):
+		list(read_jsonl_window(path))
+
+
+def test_loader_streams_without_materializing_whole_file(tmp_path: Path) -> None:
+	"""Peak memory while iterating must NOT scale with file size. The loader
+	streams one event at a time; it must never buffer the whole file. A real
+	day is ~8M events / multiple GB — the previous list()+sort() loader OOM'd
+	the CR-5 sweep at ~12 GB for a single bundle.
+
+	Builds a ~40 MB JSONL and asserts the tracemalloc peak stays a small
+	fraction of that while consuming every event. The old materialise-then-sort
+	loader peaked at ~the whole file; streaming keeps peak well under 1 MB."""
+	from edge_catcher.engine.replay.loader import read_jsonl_window
+
+	path = tmp_path / "kalshi_engine_2026-04-14.jsonl"
+	n_events = 20_000
+	blob = "x" * 2000  # ~2 KB payload per event
+	with path.open("w", encoding="utf-8") as fh:
+		fh.write(json.dumps({"schema_version": 1, "header": True}) + "\n")
+		for seq in range(1, n_events + 1):
+			fh.write(json.dumps({
+				"recv_seq": seq,
+				"recv_ts": "2026-04-14T00:00:00+00:00",
+				"source": "ws",
+				"payload": {"blob": blob},
+			}) + "\n")
+
+	file_bytes = path.stat().st_size
+	assert file_bytes > 30_000_000, f"test file too small to be meaningful: {file_bytes}"
+
+	tracemalloc.start()
+	try:
+		count = 0
+		last_seq = 0
+		for ev in read_jsonl_window(path):
+			count += 1
+			last_seq = ev["recv_seq"]
+		_current, peak = tracemalloc.get_traced_memory()
+	finally:
+		tracemalloc.stop()
+
+	# Correctness: every event streamed, in order.
+	assert count == n_events
+	assert last_seq == n_events
+	# Bounded memory: peak is a small fraction of the file, not ~all of it.
+	# Streaming holds one event (~2 KB) + a 64 KiB read chunk; the old
+	# materialising loader peaked at ~the whole file (tens of MB).
+	assert peak < 8_000_000, (
+		f"loader peak memory {peak/1e6:.1f} MB while streaming a "
+		f"{file_bytes/1e6:.1f} MB file — it is buffering the whole file instead "
+		f"of streaming (regression of the CR-5 OOM fix)"
+	)
 
 
 def test_loader_skips_header_line(tmp_path: Path) -> None:

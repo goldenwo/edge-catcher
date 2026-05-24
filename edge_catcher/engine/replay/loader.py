@@ -1,13 +1,27 @@
 """Replay JSONL loader.
 
 Streams captured engine-input events from a bundle's JSONL (or ``.jsonl.zst``)
-file, transparently decompressing zstd, sorting by ``recv_seq`` for
-deterministic replay, and optionally filtering by a ticker set.
+file, transparently decompressing zstd, in on-disk order, optionally filtering
+by a ticker set.
 
-Malformed lines, oversized lines, blank lines, and the schema header are
-all silently skipped (the oversized + malformed cases log at WARNING /
-DEBUG respectively). The loader never raises on content — only on
-fundamental I/O failures.
+On-disk order IS ``recv_seq`` order: the capture writer assigns ``recv_seq``
+from a monotonic counter and appends each event synchronously on the single
+engine thread (a flock bars a second writer) — see ``capture/writer.py``. So
+the loader streams in file order WITHOUT buffering the whole file. This matters:
+a real trading day is ~8M events / multiple GB decompressed, and the previous
+"materialise the whole file into a list, then ``sort`` by ``recv_seq``"
+approach made replay (and the CR-5 parity sweep) OOM at ~12 GB for a single
+bundle. The sort was redundant — it never reordered real captures (file order
+already equals ``recv_seq`` order) — so it's removed in favour of streaming.
+
+Malformed lines, oversized lines, blank lines, and the schema header are all
+silently skipped (the oversized + malformed cases log at WARNING / DEBUG
+respectively). The one integrity violation the loader does NOT tolerate is a
+``recv_seq`` that goes backwards: the bundle file is external input (read from
+disk, possibly fetched from R2), and a backwards ``recv_seq`` means it is
+corrupt or was reordered, breaking the writer invariant. Replaying it out of
+order would silently produce wrong trades and invalidate a parity verdict
+before live cutover, so that raises ``ValueError`` rather than failing quietly.
 """
 from __future__ import annotations
 
@@ -33,9 +47,14 @@ def read_jsonl_window(
 ) -> Iterator[dict]:
 	"""Stream parsed events from a captured JSONL or ``.jsonl.zst`` file.
 
-	Sorts by ``recv_seq`` for deterministic replay. Skips the schema header,
-	malformed lines, blank lines, and any line that would exceed
-	``MAX_LINE_BYTES`` when read.
+	Yields in on-disk order, which is ``recv_seq`` order by the capture
+	writer's monotonic-append invariant (see module docstring). Skips the
+	schema header, malformed lines, blank lines, and any line that would
+	exceed ``MAX_LINE_BYTES`` when read. Memory is bounded to one event at a
+	time — the file is never materialised.
+
+	Raises ``ValueError`` if ``recv_seq`` ever decreases: that breaks the
+	writer invariant and means the bundle is corrupt or was reordered.
 
 	Args:
 		path:          Path to a ``.jsonl`` or ``.jsonl.zst`` file.
@@ -45,9 +64,21 @@ def read_jsonl_window(
 		               and metadata-only events).
 	"""
 	path = Path(path)
-	events: list[dict] = list(_stream_raw(path, ticker_filter))
-	events.sort(key=lambda e: e.get("recv_seq", 0))
-	yield from events
+	last_seq: Optional[int] = None
+	for event in _stream_raw(path, ticker_filter):
+		seq = event.get("recv_seq")
+		if isinstance(seq, int):
+			# A ticker filter yields a subsequence, which stays monotonic, so
+			# this never false-trips on filtered streams.
+			if last_seq is not None and seq < last_seq:
+				raise ValueError(
+					f"replay loader: recv_seq went backwards in {path} "
+					f"({seq} after {last_seq}). The capture writer appends "
+					f"monotonically (capture/writer.py), so on-disk order must "
+					f"be recv_seq order — this bundle is corrupt or reordered."
+				)
+			last_seq = seq
+		yield event
 
 
 # ---------------------------------------------------------------------------
