@@ -1169,3 +1169,33 @@ async def test_handle_enter_paper_ignores_spread_gate() -> None:
 	assert store.intent_kwargs != {}
 	assert placed
 	assert metrics.snapshot()["entries_skipped_wide_spread"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_live_skips_wide_spread_no_side() -> None:
+	"""The spread gate is side-agnostic: a NO-side entry is also skipped on a
+	wide spread (spread = yes_ask - yes_bid, identical for both sides)."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
+	# yes_ask=70, yes_bid=58 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP.
+	# no-side entry pays no_ask (=42 here, a valid 1..99 price) but the gate
+	# measures spread off yes_ask/yes_bid, which equals the no-side spread.
+	ctx = _ctx(yes_ask=70, no_ask=42, yes_bid=58)
+
+	await _handle_enter(
+		_entry_signal(side="no", stop_loss_distance_cents=8),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
+	)
+
+	assert store.intent_kwargs == {}
+	assert placed == []
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 1
