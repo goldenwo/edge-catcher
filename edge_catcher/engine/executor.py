@@ -72,6 +72,12 @@ class OrderResult:
 	book_snapshot: str | None = None
 	rejection_reason: str | None = None
 	order_id: str | None = None
+	# Reporting-only diagnostics (dual-slippage-metrics). Populated by
+	# PaperExecutor; LiveExecutor leaves them None (live computes them at
+	# transition_pending_to_open from persisted references). Never feed cost
+	# basis / size / fees / pnl.
+	market_impact_cents: int | None = None   # blended vs top-of-book best
+	limit_slippage_cents: int | None = None  # blended vs the order limit
 
 
 @dataclass(frozen=True, slots=True)

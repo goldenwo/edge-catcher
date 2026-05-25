@@ -6,6 +6,35 @@ import pytest
 from edge_catcher.engine.executor import Executor, OpenPosition, OrderRequest, OrderResult
 
 
+def test_order_result_has_dual_slippage_fields_defaulting_none():
+	"""OrderResult gains market_impact_cents + limit_slippage_cents (additive,
+	default None) per the Protocol growth invariant. Paper populates them; live
+	leaves them None."""
+	r = OrderResult(
+		status="filled",
+		intended_size=5,
+		filled_size=5,
+		blended_entry_cents=52,
+		fill_pct=1.0,
+		slippage_cents=2,
+	)
+	assert r.market_impact_cents is None
+	assert r.limit_slippage_cents is None
+
+	r2 = OrderResult(
+		status="filled",
+		intended_size=5,
+		filled_size=5,
+		blended_entry_cents=52,
+		fill_pct=1.0,
+		slippage_cents=2,
+		market_impact_cents=2,
+		limit_slippage_cents=-3,
+	)
+	assert r2.market_impact_cents == 2
+	assert r2.limit_slippage_cents == -3
+
+
 def test_order_request_is_frozen():
 	req = OrderRequest(
 		ticker="KXSOL15M-25-T1",
