@@ -10,10 +10,10 @@ import time
 import httpx
 import pytest
 
-from edge_catcher.live.client import (
+from edge_catcher.live.client import KalshiOrderClient
+from edge_catcher.live.venue import (
 	Balance,  # noqa: F401 — used by Tasks 7-9 tests
 	CancelResult,  # noqa: F401 — used by Tasks 7-9 tests
-	KalshiOrderClient,
 	Order,  # noqa: F401 — used by Tasks 7-9 tests
 	OrderRequest,
 	Position,  # noqa: F401 — used by Tasks 7-9 tests

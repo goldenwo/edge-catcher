@@ -34,7 +34,8 @@ import httpx
 import pytest
 
 from edge_catcher.live.audit import AuditLogger
-from edge_catcher.live.client import KalshiOrderClient, OrderRequest
+from edge_catcher.live.client import KalshiOrderClient
+from edge_catcher.live.venue import OrderRequest
 from edge_catcher.live.config import LiveConfig
 from edge_catcher.live.errors import OrderAlreadyFinal
 

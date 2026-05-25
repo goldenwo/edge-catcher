@@ -31,7 +31,8 @@ import pytest
 
 from edge_catcher.adapters.kalshi import auth as kalshi_auth
 from edge_catcher.live.audit import AuditLogger
-from edge_catcher.live.client import KalshiOrderClient, Order
+from edge_catcher.live.client import KalshiOrderClient
+from edge_catcher.live.venue import Order
 from edge_catcher.live.config import LiveConfig
 from edge_catcher.live.errors import KalshiAPIError, OrderAlreadyFinal
 

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from edge_catcher.live.client import OrderRequest
+from edge_catcher.live.venue import OrderRequest
 from tests.fixtures.mock_kalshi_server import MockKalshiServer, kalshi_201_filled
 
 

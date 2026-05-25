@@ -33,7 +33,7 @@ from edge_catcher.engine.executors.live import (
 	LiveExecutor,
 	_to_kalshi_request,
 )
-from edge_catcher.live.client import Order
+from edge_catcher.live.venue import Order
 from edge_catcher.live.errors import (
 	CapExceededError,
 	KalshiAPIError,

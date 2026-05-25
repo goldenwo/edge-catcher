@@ -23,7 +23,7 @@ import pytest
 
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.live import reconciliation as recon
-from edge_catcher.live.client import Order, Position
+from edge_catcher.live.venue import Order, Position
 from edge_catcher.live.reconciliation import (
 	_RECONCILE_LOOKBACK_SECONDS,
 	StartupReconcileReport,
