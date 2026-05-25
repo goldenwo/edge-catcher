@@ -83,21 +83,27 @@ def _order_json(
 	side: str = "yes",
 	yes_price: int = 5,
 ) -> dict:
-	"""Kalshi GET /portfolio/orders element shape (legacy fields the existing
-	_parse_order reads — same schema place()/status() were integration-tested
-	against in PR #24)."""
+	"""Kalshi GET /portfolio/orders element shape — the REAL inner order shape
+	(identical to what create-order / get-order return): fixed-point count
+	STRINGS, dollar price STRINGS, aggregate taker fill cost; no per-fill
+	array."""
+	own = f"{yes_price / 100:.4f}"
+	comp = f"{(100 - yes_price) / 100:.4f}"
 	return {
 		"order_id": order_id,
 		"client_order_id": client_order_id,
 		"ticker": "KXSOL15M-26MAY09H06",
 		"side": side,
 		"action": "buy",
-		"count": count,
-		"yes_price": yes_price,
+		"initial_count_fp": f"{count}.00",
+		"fill_count_fp": f"{filled_count}.00",
+		"remaining_count_fp": f"{count - filled_count}.00",
+		"yes_price_dollars": own if side == "yes" else comp,
+		"no_price_dollars": own if side == "no" else comp,
+		"taker_fill_cost_dollars": f"{yes_price * filled_count / 100:.6f}",
 		"time_in_force": "immediate_or_cancel",
 		"status": status,
-		"filled_count": filled_count,
-		"created_ts": "2026-05-16T18:00:00Z",
+		"created_time": "2026-05-16T18:00:00Z",
 	}
 
 

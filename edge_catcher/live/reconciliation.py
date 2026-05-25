@@ -294,47 +294,44 @@ def _resolve_matched_pending(
 					rejection_reason="reconcile_zero_fill",
 				)
 				return "resolved"
-			# A1 — untrustworthy-price defense. ``limit_price_cents`` is the
-			# only price the reconciler can see (Kalshi's REST ``Order`` has
-			# no average-fill field), but ``_parse_order`` coerces a
-			# missing/empty ``yes_price``/``no_price`` to ``0`` (client.py
-			# ``... or 0``). A live binary-market order limit is never ``0``¢
-			# (valid limits are 1–99¢; 0/100¢ are settlement), so a
-			# non-positive limit means "no trustworthy price". Booking
-			# ``pending→open`` at a ``0``¢ blended basis would silently
-			# mislabel won/lost and corrupt P&L on every reconcile-recovered
-			# row — and ``record_partial_exit``'s ``blended is None`` guard
-			# does NOT catch a non-NULL ``0``. Never fabricate a basis: leave
-			# the row ``pending`` (return ``"noop"``) — NOT rejected (the
-			# order matched and filled, so Kalshi holds the contracts;
-			# rejecting would orphan a real position). The caller leaves a
-			# young row untouched (it retries on the next reconcile / its WS
-			# fill, which carries the true VWAP) and TTLs a stale one, after
-			# which the orphan/``positions()`` path recovers the real
+			# Cost basis: prefer Kalshi's TRUE volume-weighted fill price
+			# (``avg_fill_price_cents``, derived from the order's aggregate
+			# ``taker_fill_cost_dollars`` — present on the list_orders / status
+			# responses the reconciler reads), and fall back to the IOC
+			# ``limit_price_cents`` only when the response carried no usable
+			# fill cost.
+			#
+			# A1 — untrustworthy-price defense. A live binary-market fill is
+			# never ``0``¢ (valid prices are 1–99¢; 0/100¢ are settlement), so a
+			# non-positive basis means "no trustworthy price". Booking
+			# ``pending→open`` at a ``0``¢ basis would silently mislabel
+			# won/lost and corrupt P&L on every reconcile-recovered row — and
+			# ``record_partial_exit``'s ``blended is None`` guard does NOT catch
+			# a non-NULL ``0``. Never fabricate a basis: leave the row
+			# ``pending`` (return ``"noop"``) — NOT rejected (the order matched
+			# and filled, so Kalshi holds the contracts; rejecting would orphan
+			# a real position). The caller leaves a young row untouched (it
+			# retries on the next reconcile / its WS fill) and TTLs a stale one,
+			# after which the orphan/``positions()`` path recovers the real
 			# position with Kalshi's trustworthy ``average_price_cents``.
 			# Mirrors ``on_fill_event``'s "no trustworthy price → no-op,
 			# reconcile owns recovery" posture (zero-error lens).
-			if order.limit_price_cents <= 0:
+			blended = order.avg_fill_price_cents or order.limit_price_cents
+			if blended <= 0:
 				log.warning(
 					"reconcile: matched Kalshi order %s for coid=%s is "
 					"'executed' (filled_count=%d) but exposes no trustworthy "
-					"price (limit_price_cents=%d) — leaving the row 'pending' "
+					"price (avg_fill=%d limit=%d) — leaving the row 'pending' "
 					"(NOT phantom-opening at a 0c basis, NOT rejecting a "
 					"really-held position); recovered later via the WS fill / "
 					"next reconcile / positions()",
 					order.order_id,
 					order.client_order_id,
 					order.filled_count,
+					order.avg_fill_price_cents,
 					order.limit_price_cents,
 				)
 				return "noop"
-			# Cost basis: Kalshi's REST ``Order`` carries no average-fill
-			# price field, so the IOC ``limit_price_cents`` is the only
-			# price the reconciler can see (guaranteed > 0 by the guard
-			# above). The WS fill event carries the true VWAP; reconcile is
-			# the fallback when that event was missed, so the limit is the
-			# best available proxy.
-			blended = order.limit_price_cents
 			# Entry fee MUST be computed here (spec §283 — B computes the
 			# fee via STANDARD_FEE at row-write time; this resolution IS the
 			# entry-fill write that seeds entry_fee_cents /
@@ -679,10 +676,25 @@ def _apply_startup_matrix(
 		).fetchall()
 	]
 	local_open_tickers = {t for _, t in open_rows}
+	# GET /portfolio/positions lists every market the account ever traded — many
+	# FLAT (position_fp "0.00" → count 0; see tests/fixtures/kalshi_responses).
+	# held_positions (count>0) feeds ONLY the orphan loop: recording a flat as a
+	# phantom zero-size 'open' orphan would consume a C-gate MAX_OPEN slot forever
+	# and never drain, blocking real entries at cutover.
+	held_positions = [p for p in positions if p.count > 0]
+	# kalshi_tickers feeds the lost-truth check below and MUST include FLAT
+	# positions. A flat-but-present position means the market SETTLED/closed
+	# (Kalshi keeps the row, with realized P&L), so a local 'open' row for it is
+	# NOT truth-lost — the settlement poller (engine._settlement_poller →
+	# check_market_result, a REST query BY TICKER) closes it to won/lost on its
+	# next cycle, including a position that settled while the daemon was DOWN.
+	# Marking it lost_truth (terminal) would make store.settle_trade's CAS no-op
+	# (it requires status IN ('open','exit_pending')) and FREEZE a real settled
+	# position's P&L. lost_truth is reserved for a ticker ABSENT from positions().
 	kalshi_tickers = {p.ticker for p in positions}
 
 	orphans_recovered = 0
-	for pos in positions:
+	for pos in held_positions:
 		if pos.ticker in local_open_tickers:
 			continue  # matrix row 6 — both agree, no action.
 		# Orphan: Kalshi holds a position we have no open row for. INSERT an

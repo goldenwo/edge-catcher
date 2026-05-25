@@ -27,6 +27,7 @@ from edge_catcher.live.errors import (
 	OrderAlreadyFinal,
 	OrderRejected,
 )
+from tests.fixtures.kalshi_responses import PLACE_201_BODIES, PLACE_201_CASES
 
 
 @pytest.fixture
@@ -37,6 +38,26 @@ def cfg(tmp_path):
 @pytest.fixture
 def audit(tmp_path):
 	return AuditLogger(tmp_path / "audit.jsonl")
+
+
+def test_avg_fill_cents_matches_blended_price_cents_at_midpoint():
+	"""``_avg_fill_cents`` (live REST aggregate-cost VWAP) MUST agree with
+	``fill_math.blended_price_cents`` (the single-source-of-truth per-fill VWAP)
+	so replay-live parity holds byte-exact — including at a .5¢ midpoint, where
+	ROUND_HALF_UP and Python ``round()``'s half-even diverge by 1¢.
+
+	Fills [10¢×1, 11¢×1] → aggregate ``taker_fill_cost_dollars`` $0.21 over 2
+	contracts → VWAP 10.5¢. Both paths must round the SAME way (half-even,
+	matching the paper/replay source of truth) → 10¢, not 11¢."""
+	from edge_catcher.engine.fill_math import blended_price_cents
+	from edge_catcher.live.client import _avg_fill_cents
+
+	fills = [{"price": 10, "size": 1}, {"price": 11, "size": 1}]
+	aggregate_cost_dollars = "0.21"  # Σ(price·size)/100 = (10 + 11)/100
+	fill_count = 2
+
+	assert _avg_fill_cents(aggregate_cost_dollars, fill_count) == blended_price_cents(fills)
+	assert _avg_fill_cents(aggregate_cost_dollars, fill_count) == 10
 
 
 def test_order_request_exposure_dollars():
@@ -187,10 +208,13 @@ async def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 			"ticker": "X",
 			"side": "yes",
 			"action": "buy",
-			"count": 10,
-			"yes_price": 5,
+			"initial_count_fp": "10.00",
+			"fill_count_fp": "10.00",
+			"remaining_count_fp": "0.00",
+			"yes_price_dollars": "0.0500",
+			"taker_fill_cost_dollars": "0.500000",
 			"time_in_force": "gtc",
-			"status": "resting",
+			"status": "executed",
 			"client_order_id": "did-not-set-this-yet",
 		}})
 	c = make_mock_client(cfg_with_audit, audit_logger, httpx.MockTransport(handler))
@@ -328,6 +352,59 @@ async def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, t
 
 
 # ---------------------------------------------------------------------------
+# Real Kalshi create-order 201 shape — regression guard for the fill-parse bug.
+# The live daemon misread EVERY executed fill as ioc_zero_fill because
+# _parse_order read fictional fields (filled_count / yes_price / count) instead
+# of Kalshi's real schema (fill_count_fp / *_price_dollars / initial_count_fp /
+# taker_fill_cost_dollars). Bodies are captured verbatim from the live Pi audit
+# log; see tests/fixtures/kalshi_responses.py.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body,expected", PLACE_201_CASES)
+def test_parse_order_real_kalshi_shape(cfg, audit, body, expected):
+	"""_parse_order maps the REAL create-order 201 fields, not the old fiction.
+
+	Failure mode prevented: fill_count_fp/initial_count_fp/*_price_dollars/
+	taker_fill_cost_dollars being ignored → filled_count=0 → ioc_zero_fill →
+	orphaned real position.
+	"""
+	client = KalshiOrderClient(cfg, audit)
+	order = client._parse_order(body["order"])
+	assert order.order_id == expected["order_id"]
+	assert order.status == expected["status"]
+	assert order.side == expected["side"]
+	# fill_count_fp "6.00" (str) → 6, NOT data["filled_count"] (absent → 0).
+	assert order.filled_count == expected["filled_count"]
+	# initial_count_fp → original order size, NOT data["count"] (absent → 0).
+	assert order.count == expected["count"]
+	# {yes,no}_price_dollars "0.1700" → 17¢, NOT data["yes_price"]/["no_price"].
+	assert order.limit_price_cents == expected["limit_price_cents"]
+	# Blended cost basis = round(taker_fill_cost_dollars*100 / fill_count); the
+	# real entry price (often better than the limit for an IOC).
+	assert order.avg_fill_price_cents == expected["avg_fill_price_cents"]
+
+
+def test_parse_order_zero_fill_canceled_shape(cfg, audit):
+	"""An IOC that matched nothing: status canceled, fill_count_fp '0.00'.
+
+	(Synthetic — the live run had no zero-fills — but pins the genuine
+	zero-fill shape so _translate_order's ioc_zero_fill branch stays reachable.)
+	"""
+	client = KalshiOrderClient(cfg, audit)
+	inner = dict(PLACE_201_BODIES[0]["order"])
+	inner.update({"fill_count_fp": "0.00", "remaining_count_fp": "6.00",
+	              "status": "canceled", "taker_fill_cost_dollars": "0.000000",
+	              "taker_fees_dollars": "0.000000"})
+	order = client._parse_order(inner)
+	assert order.filled_count == 0
+	assert order.avg_fill_price_cents == 0
+	assert order.status == "canceled"
+	# limit price still parses (the order existed, just didn't fill).
+	assert order.limit_price_cents == 17
+
+
+# ---------------------------------------------------------------------------
 # Task 8 — cancel() tests
 # ---------------------------------------------------------------------------
 
@@ -394,8 +471,10 @@ async def test_status_happy_path(cfg, audit, signing_env, tmp_path):
 		assert request.url.path == "/trade-api/v2/portfolio/orders/ord-1"
 		return httpx.Response(200, json={"order": {
 			"order_id": "ord-1", "ticker": "X", "side": "yes", "action": "buy",
-			"count": 10, "yes_price": 5, "time_in_force": "gtc",
-			"status": "resting", "filled_count": 3,
+			"initial_count_fp": "10.00", "fill_count_fp": "3.00",
+			"remaining_count_fp": "7.00", "yes_price_dollars": "0.0500",
+			"taker_fill_cost_dollars": "0.150000", "time_in_force": "gtc",
+			"status": "resting",
 		}})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	o = await c.status("ord-1")
@@ -453,9 +532,12 @@ def test_order_request_accepts_64_char_client_order_id():
 async def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	def handler(request: httpx.Request) -> httpx.Response:
+		# Real GET /portfolio/positions market_positions shape: a SIGNED
+		# fixed-point position_fp + market_exposure_dollars (the cost basis of
+		# the open position). avg cost = exposure*100 / |position|.
 		return httpx.Response(200, json={"market_positions": [
-			{"ticker": "X", "position": 10, "average_position_cost": 5},
-			{"ticker": "Y", "position": -3, "average_position_cost": 95},
+			{"ticker": "X", "position_fp": "10.00", "market_exposure_dollars": "0.500000"},
+			{"ticker": "Y", "position_fp": "-3.00", "market_exposure_dollars": "2.850000"},
 		]})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	positions = await c.positions()
@@ -463,9 +545,11 @@ async def test_positions_non_empty(cfg, audit, signing_env, tmp_path):
 	assert positions[0].ticker == "X"
 	assert positions[0].count == 10
 	assert positions[0].side == "yes"
+	assert positions[0].average_price_cents == 5   # 0.50 / 10 → 5c
 	# Negative position interpreted as no-side
 	assert positions[1].side == "no"
 	assert positions[1].count == 3
+	assert positions[1].average_price_cents == 95  # 2.85 / 3 → 95c
 
 
 # ---------------------------------------------------------------------------
