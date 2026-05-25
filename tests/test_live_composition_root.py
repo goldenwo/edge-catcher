@@ -231,7 +231,11 @@ def _compose_spies(monkeypatch: pytest.MonkeyPatch):
 	import edge_catcher.live.reconciliation as _reconmod
 
 	async def _noop_startup_reconcile(*_a, **_kw):
-		return None
+		# Faithful to the real ``-> StartupReconcileReport`` contract: the live
+		# boot now consumes the return to fan reconcile alerts to Discord, so a
+		# ``None`` stub would AttributeError. A clean (all-zero) report yields no
+		# notification, keeping this fixture focused on the composition decision.
+		return _reconmod.StartupReconcileReport()
 
 	async def _noop_poll_pending_rows_loop(*_a, **_kw):
 		return None

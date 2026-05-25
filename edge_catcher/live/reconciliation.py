@@ -142,7 +142,6 @@ class StartupReconcileReport:
 	# left 'open' for the settlement poller to close to won/lost, NOT marked
 	# terminal lost_truth. Benign — does NOT count toward operator ``alerts``.
 	settled_recovered: int = 0
-	mismatches: int = 0
 	alerts: int = 0
 
 
@@ -758,7 +757,6 @@ async def _resolve_absent_open_rows(
 		report,
 		lost_truth=lost,
 		settled_recovered=settled,
-		mismatches=lost,
 		alerts=report.alerts + lost,
 	)
 
