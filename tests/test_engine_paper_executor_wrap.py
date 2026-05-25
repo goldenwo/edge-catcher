@@ -133,3 +133,58 @@ async def test_FillSkip_translates_to_rejected_with_reason():
 	assert result.filled_size == 0
 	assert result.fill_pct == 0.0
 	assert result.book_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_place_populates_dual_slippage_on_fill():
+	"""Filled paper entry: market_impact aliases the vs-best slippage the book
+	walk already computed; limit_slippage is vs the order's limit."""
+	from edge_catcher.engine.fill_math import signed_slippage_cents
+	# Best level qty < raw_size forces the walk to climb above best → market_impact > 0.
+	book = _canned_book(yes_levels=[(0.03, 10), (0.04, 10), (0.05, 10)])
+	cfg = _canned_config()
+	cfg["sizing"]["risk_per_trade_cents"] = 120
+	ms = _StubMarketState(book)
+	req = _canned_request(side="yes", limit=6)
+
+	fill = resolve_fill(cfg, req.limit_price_cents, req.side, book)
+	assert not isinstance(fill, FillSkip), "canned book should produce a fill"
+
+	result = await PaperExecutor(market_state=ms, config=cfg).place(req)
+	assert result.status == "filled"
+	assert result.market_impact_cents == fill.slippage_cents
+	assert result.market_impact_cents is not None and result.market_impact_cents >= 0
+	assert result.limit_slippage_cents == signed_slippage_cents(
+		blended=result.blended_entry_cents, limit=req.limit_price_cents, action="buy"
+	)
+
+
+@pytest.mark.asyncio
+async def test_place_dual_slippage_none_on_reject():
+	"""Empty fill side → rejected → both metrics None (not 0)."""
+	cfg = _canned_config()
+	book = _canned_book(yes_levels=[])
+	ms = _StubMarketState(book)
+	req = _canned_request(side="yes", limit=42)
+
+	result = await PaperExecutor(market_state=ms, config=cfg).place(req)
+	assert result.status == "rejected"
+	assert result.market_impact_cents is None
+	assert result.limit_slippage_cents is None
+
+
+@pytest.mark.asyncio
+async def test_place_dual_slippage_none_on_sell_shortcircuit():
+	"""Exit/sell short-circuit ACK → both metrics None."""
+	cfg = _canned_config()
+	ms = _StubMarketState(_canned_book())
+	req = OrderRequest(
+		ticker="KXSOL15M-25-T1", series="KXSOL15M", side="yes",
+		size_contracts=4, limit_price_cents=50, strategy="debut-fade",
+		client_order_id="c1", action="sell",
+	)
+
+	result = await PaperExecutor(market_state=ms, config=cfg).place(req)
+	assert result.status == "filled"
+	assert result.market_impact_cents is None
+	assert result.limit_slippage_cents is None
