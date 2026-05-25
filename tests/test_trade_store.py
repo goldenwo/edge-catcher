@@ -26,6 +26,51 @@ def store(tmp_path: Path) -> TradeStore:
 	ts.close()
 
 
+def test_record_trade_persists_dual_slippage(store):
+	"""record_trade persists market_impact_cents + limit_slippage_cents."""
+	tid = store.record_trade(
+		ticker="TKR", entry_price=50, strategy="s", side="yes",
+		series_ticker="KXTKR", intended_size=5, fill_size=5,
+		blended_entry=52, fill_pct=1.0, slippage_cents=2.0,
+		market_impact_cents=2, limit_slippage_cents=-3,
+		now=_now(),
+	)
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(tid,),
+	).fetchone()
+	assert row[0] == 2
+	assert row[1] == -3
+
+
+def test_migrate_backfills_market_impact_from_slippage(store):
+	"""Backfill: a paper_trades row with slippage_cents set but market_impact_cents
+	NULL (the pre-existing-row case) gets market_impact_cents = slippage_cents on
+	_migrate — paper slippage IS vs-best market-impact. limit_slippage_cents stays
+	NULL (not derivable for history)."""
+	tid = store.record_trade(
+		ticker="TKR", entry_price=50, strategy="s", side="yes",
+		series_ticker="KXTKR", intended_size=5, fill_size=5,
+		blended_entry=52, fill_pct=1.0, slippage_cents=4.0,
+		now=_now(),  # market_impact_cents NOT passed → stored NULL
+	)
+	pre = store._conn.execute(
+		"SELECT market_impact_cents FROM paper_trades WHERE id=?", (tid,)
+	).fetchone()
+	assert pre[0] is None, "new column starts NULL for a row that didn't set it"
+
+	# Re-run the migration backfill (idempotent; mirrors a startup against a DB
+	# whose rows predate the new column).
+	store._migrate()
+
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(tid,),
+	).fetchone()
+	assert row[0] == 4
+	assert row[1] is None
+
+
 # ---------------------------------------------------------------------------
 # 1. Init: both tables exist, sizing columns present
 # ---------------------------------------------------------------------------

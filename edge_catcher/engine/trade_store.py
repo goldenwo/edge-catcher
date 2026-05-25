@@ -207,6 +207,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 	book_depth INTEGER,
 	fill_pct REAL,
 	slippage_cents REAL,
+	market_impact_cents INTEGER,
+	limit_slippage_cents INTEGER,
 	book_snapshot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_ticker ON paper_trades (ticker);
@@ -234,6 +236,8 @@ _MIGRATION_COLUMNS: list[tuple[str, str]] = [
 	("book_depth", "INTEGER"),
 	("fill_pct", "REAL"),
 	("slippage_cents", "REAL"),
+	("market_impact_cents", "INTEGER"),
+	("limit_slippage_cents", "INTEGER"),
 	("book_snapshot", "TEXT"),
 ]
 
@@ -270,6 +274,13 @@ class TradeStore:
 		self._conn.execute(
 			"UPDATE paper_trades SET slippage_cents = 0.0 WHERE slippage_cents IS NULL"
 		)
+		# Paper's legacy slippage_cents IS vs-best market-impact — backfill the
+		# new column from it (identical value, zero-risk). limit_slippage_cents
+		# stays NULL for pre-migration history (no stored limit; F coalesces).
+		self._conn.execute(
+			"UPDATE paper_trades SET market_impact_cents = slippage_cents "
+			"WHERE market_impact_cents IS NULL"
+		)
 		self._conn.commit()
 
 	# -------------------------------------------------------------------------
@@ -294,6 +305,8 @@ class TradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id.
 
@@ -336,14 +349,16 @@ class TradeStore:
 				ticker, entry_price, entry_time, status,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,
-				fill_pct, slippage_cents, book_snapshot
-			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				fill_pct, slippage_cents, market_impact_cents,
+				limit_slippage_cents, book_snapshot
+			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			(
 				ticker, entry_price, entry_time_iso,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,  # blended_entry already sanitised above
-				fill_pct, slippage_cents, book_snapshot,
+				fill_pct, slippage_cents, market_impact_cents,
+				limit_slippage_cents, book_snapshot,
 			),
 		)
 		self._conn.commit()
