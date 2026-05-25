@@ -792,3 +792,49 @@ def test_build_exit_order_client_order_id_uses_pos_ticker() -> None:
 	req = build_exit_order(pos=pos, sig=sig, cfg=_exec_cfg(), now=_NOW)
 	# client_order_id format: {strategy}-{ticker}-{ms_ts}-{uuid8}
 	assert "-KXTEST15M-26MAY09H06-" in req.client_order_id
+
+
+# --------------------------------------------------------------------------
+# Test #25 — validate_exec_cfg entry_spread_stop_buffer_cents validation
+# --------------------------------------------------------------------------
+
+
+def test_validate_exec_cfg_defaults_spread_buffer_to_zero() -> None:
+	"""Failure mode: an existing live-trader.yaml without the new key must
+	still boot — absent => 0 (gate compares spread directly to the stop)."""
+	cfg = validate_exec_cfg({
+		"entry_slippage_cents": 2,
+		"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
+	})
+	assert cfg.entry_spread_stop_buffer_cents == 0
+
+
+def test_validate_exec_cfg_reads_spread_buffer() -> None:
+	"""The configured buffer is parsed onto the typed ExecCfg."""
+	cfg = validate_exec_cfg({
+		"entry_slippage_cents": 2,
+		"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
+		"entry_spread_stop_buffer_cents": 2,
+	})
+	assert cfg.entry_spread_stop_buffer_cents == 2
+
+
+def test_validate_exec_cfg_negative_spread_buffer_raises() -> None:
+	"""Failure mode: a negative buffer would invert the gate. Boot-time refusal."""
+	with pytest.raises(ValueError):
+		validate_exec_cfg({
+			"entry_slippage_cents": 2,
+			"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
+			"entry_spread_stop_buffer_cents": -1,
+		})
+
+
+def test_validate_exec_cfg_string_spread_buffer_raises_type_error() -> None:
+	"""Failure mode: YAML string '2' would never compare correctly to an int
+	spread. Reject at boot (bool is an int subclass and is also rejected)."""
+	with pytest.raises(TypeError):
+		validate_exec_cfg({
+			"entry_slippage_cents": 2,
+			"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
+			"entry_spread_stop_buffer_cents": "2",
+		})

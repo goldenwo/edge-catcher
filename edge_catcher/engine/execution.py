@@ -62,6 +62,10 @@ class ExecCfg:
 
 	entry_slippage_cents: int
 	exit_slippage_cents: Mapping[ExitKind, int]
+	# Live-only entry spread gate headroom (cents). 0 => skip when spread alone
+	# reaches the stop. Optional in config (default 0). See spec
+	# 2026-05-25-live-spread-entry-gate-design.md.
+	entry_spread_stop_buffer_cents: int = 0
 
 
 def _series_of(ticker: str) -> str:
@@ -373,7 +377,22 @@ def validate_exec_cfg(cfg: dict[str, object]) -> ExecCfg:
 	# Wrap in MappingProxyType so the frozen=True invariant is total — without
 	# the wrap, ``cfg.exit_slippage_cents["stop_loss"] = 999`` would silently
 	# succeed and corrupt live order limits mid-stream.
+
+	# Optional live spread-gate buffer. Absent key => 0. bool is an int
+	# subclass; reject it explicitly (True/False would coerce to 1/0).
+	buffer_cents = cfg.get("entry_spread_stop_buffer_cents", 0)
+	if not isinstance(buffer_cents, int) or isinstance(buffer_cents, bool):
+		raise TypeError(
+			f"execution.entry_spread_stop_buffer_cents must be int, "
+			f"got {type(buffer_cents).__name__}: {buffer_cents!r}"
+		)
+	if buffer_cents < 0:
+		raise ValueError(
+			f"execution.entry_spread_stop_buffer_cents must be >= 0, got {buffer_cents}"
+		)
+
 	return ExecCfg(
 		entry_slippage_cents=entry,
 		exit_slippage_cents=MappingProxyType(typed_exits),
+		entry_spread_stop_buffer_cents=buffer_cents,
 	)
