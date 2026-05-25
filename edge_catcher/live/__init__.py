@@ -1,9 +1,10 @@
 """Live order placement primitives. Foundation for sub-projects B/C/D/E/F."""
 
-from edge_catcher.live.client import (
+from edge_catcher.live.client import KalshiOrderClient
+from edge_catcher.live.venue import (
 	Balance,
 	CancelResult,
-	KalshiOrderClient,
+	LiveVenueClient,
 	Order,
 	OrderRequest,
 	Position,
@@ -35,6 +36,7 @@ __all__ = [
 	"KalshiOrderClient",
 	"LiveConfig",
 	"LiveError",
+	"LiveVenueClient",
 	"NetworkError",
 	"Order",
 	"OrderAlreadyFinal",

@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
-from edge_catcher.live.client import Order, Position
+from edge_catcher.live.venue import Order, Position
 from edge_catcher.live.state import (
 	mark_lost_truth,
 	record_open,
