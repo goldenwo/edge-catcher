@@ -40,6 +40,26 @@ def audit(tmp_path):
 	return AuditLogger(tmp_path / "audit.jsonl")
 
 
+def test_avg_fill_cents_matches_blended_price_cents_at_midpoint():
+	"""``_avg_fill_cents`` (live REST aggregate-cost VWAP) MUST agree with
+	``fill_math.blended_price_cents`` (the single-source-of-truth per-fill VWAP)
+	so replay-live parity holds byte-exact — including at a .5¢ midpoint, where
+	ROUND_HALF_UP and Python ``round()``'s half-even diverge by 1¢.
+
+	Fills [10¢×1, 11¢×1] → aggregate ``taker_fill_cost_dollars`` $0.21 over 2
+	contracts → VWAP 10.5¢. Both paths must round the SAME way (half-even,
+	matching the paper/replay source of truth) → 10¢, not 11¢."""
+	from edge_catcher.engine.fill_math import blended_price_cents
+	from edge_catcher.live.client import _avg_fill_cents
+
+	fills = [{"price": 10, "size": 1}, {"price": 11, "size": 1}]
+	aggregate_cost_dollars = "0.21"  # Σ(price·size)/100 = (10 + 11)/100
+	fill_count = 2
+
+	assert _avg_fill_cents(aggregate_cost_dollars, fill_count) == blended_price_cents(fills)
+	assert _avg_fill_cents(aggregate_cost_dollars, fill_count) == 10
+
+
 def test_order_request_exposure_dollars():
 	req = OrderRequest(
 		ticker="X", action="buy", side="yes", count=10, limit_price_cents=5,

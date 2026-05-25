@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, ROUND_HALF_UP
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -174,12 +174,18 @@ def _avg_fill_cents(cost_dollars: object, fill_count: int) -> int:
 	bought side). The blended cost basis is therefore ``cost / fill_count``.
 	Returns 0 when nothing filled or the cost is unavailable, matching the
 	``blended_price_cents`` 0-sentinel convention downstream code expects.
+
+	Rounds HALF-EVEN to match ``fill_math.blended_price_cents`` — the single
+	source of truth the paper/replay per-fill path uses (via Python ``round``).
+	This aggregate path and that per-fill path therefore agree byte-exact,
+	including at a .5¢ VWAP midpoint where ROUND_HALF_UP would diverge by 1¢ and
+	break replay-live parity.
 	"""
 	if fill_count <= 0 or cost_dollars is None:
 		return 0
 	try:
 		cost_cents = Decimal(str(cost_dollars)) * 100
-		return int((cost_cents / fill_count).to_integral_value(rounding=ROUND_HALF_UP))
+		return int((cost_cents / fill_count).to_integral_value(rounding=ROUND_HALF_EVEN))
 	except (InvalidOperation, ValueError, ZeroDivisionError):
 		return 0
 
