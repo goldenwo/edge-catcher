@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -530,6 +531,98 @@ def test_composition_branch_is_single_and_at_the_root() -> None:
 	assert executor_mode_ifs == 1, (
 		"run_engine must branch on the config 'executor' mode EXACTLY ONCE "
 		f"(the single composition-root branch — §1/§3); found {executor_mode_ifs}"
+	)
+
+
+# ---------------------------------------------------------------------------
+# Cutover-verification beacon — the executor word is mode-driven (logging
+# accuracy). The beacon doubles as the runbook's cutover grep target, so its
+# label must reflect the ACTIVE executor: a live boot must not emit "paper".
+# ---------------------------------------------------------------------------
+
+_BEACON_PACKAGE_TOKEN = "package=edge_catcher.engine"
+
+
+def _captured_beacons(caplog: pytest.LogCaptureFixture) -> list[str]:
+	"""The boot-beacon line(s) caplog saw (the only INFO lines that carry the
+	'executor wired' phrase). A list so a regressed double-emit is visible."""
+	return [m for m in caplog.messages if "executor wired" in m]
+
+
+def test_live_beacon_reflects_live_executor(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+	caplog: pytest.LogCaptureFixture, _compose_spies,
+) -> None:
+	"""Failure mode prevented (operator trust in real-money logs): the cutover
+	beacon hard-codes "paper executor wired" even when ``executor: live`` wires
+	the LiveExecutor and places REAL Kalshi orders (observed at the 2026-05-25
+	cutover — a "paper" word in a real-money log erodes trust in the logs).
+
+	The executor word must be MODE-DRIVEN: a live boot emits "live executor
+	wired". The stable ``package=edge_catcher.engine`` token (the package
+	discriminator that proves engine/ — not monitors/ — is loaded) is
+	unchanged."""
+	from edge_catcher.engine.engine import run_engine
+
+	cfg = make_live_cfg(tmp_path, monkeypatch)
+	# §8: the execution: block lives in the live-trader.yaml the engine loads.
+	cfg["execution"] = {
+		"entry_slippage_cents": 2,
+		"exit_slippage_cents": {"take_profit": 1, "stop_loss": 1, "time_exit": 1},
+	}
+	# Mode-agnostic step-2 prerequisites so the boot reaches _ComposeDone
+	# (identical paper/live — NOT the seam under test).
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg["strategies"] = {
+		_ComposeStubStrategy.name: {
+			"enabled": True, "series": [_COMPOSE_STUB_SERIES],
+		}
+	}
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	with caplog.at_level(logging.INFO, logger="edge_catcher.engine.engine"):
+		with pytest.raises(_compose_spies["_ComposeDone"]):
+			asyncio.run(run_engine(config_path=cfg_path))
+
+	assert _captured_beacons(caplog) == [
+		f"engine[G]: live executor wired, {_BEACON_PACKAGE_TOKEN}"
+	], (
+		"a live boot must emit 'live executor wired' (mode-driven), NOT the "
+		f"hard-coded 'paper'; captured beacon line(s)={_captured_beacons(caplog)!r}"
+	)
+
+
+def test_paper_beacon_reflects_paper_executor(
+	tmp_path: Path, caplog: pytest.LogCaptureFixture, _compose_spies,
+) -> None:
+	"""Companion regression guard: making the beacon mode-driven must NOT
+	regress the paper label. A paper boot still emits "paper executor wired"
+	(byte-exact with the historical v1.5.0 cutover record + the same
+	``package=edge_catcher.engine`` discriminator)."""
+	from edge_catcher.engine.engine import run_engine
+
+	cfg = make_paper_cfg(tmp_path)
+	cfg["sizing"] = {
+		"risk_per_trade_cents": 500, "max_slippage_cents": 5, "min_fill": 1,
+	}
+	cfg["strategies"] = {
+		_ComposeStubStrategy.name: {
+			"enabled": True, "series": [_COMPOSE_STUB_SERIES],
+		}
+	}
+	cfg_path = _write_cfg(cfg, tmp_path)
+
+	with caplog.at_level(logging.INFO, logger="edge_catcher.engine.engine"):
+		with pytest.raises(_compose_spies["_ComposeDone"]):
+			asyncio.run(run_engine(config_path=cfg_path))
+
+	assert _captured_beacons(caplog) == [
+		f"engine[G]: paper executor wired, {_BEACON_PACKAGE_TOKEN}"
+	], (
+		"a paper boot must keep 'paper executor wired'; captured beacon "
+		f"line(s)={_captured_beacons(caplog)!r}"
 	)
 
 
