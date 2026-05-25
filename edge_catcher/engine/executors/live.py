@@ -1,7 +1,8 @@
 """Live-mode Executor.
 
-Wraps :class:`KalshiOrderClient` and translates Kalshi REST responses into the
-engine's :class:`OrderResult`. Conservative error-mapping policy: every failure
+Wraps a :class:`~edge_catcher.live.venue.LiveVenueClient` (Kalshi today) and
+translates its order responses into the engine's :class:`OrderResult`.
+Conservative error-mapping policy: every failure
 mode produces a *defined* :class:`OrderResult` — never propagates out of
 ``place()`` — so the dispatch layer can route uniformly to ``filled`` /
 ``pending`` / ``rejected`` branches and B's reconciler can resolve the true
@@ -26,8 +27,8 @@ import logging
 
 from edge_catcher.engine.execution import ENTRY_TIF, EXIT_TIF
 from edge_catcher.engine.executor import OrderRequest, OrderResult
-from edge_catcher.live.client import (
-	KalshiOrderClient,
+from edge_catcher.live.venue import (
+	LiveVenueClient,
 	Order,
 	OrderRequest as KalshiOrderRequest,
 )
@@ -47,13 +48,15 @@ log = logging.getLogger(__name__)
 class LiveExecutor:
 	"""Engine-facing live executor.
 
-	Holds a single :class:`KalshiOrderClient` for the process lifetime (see
-	the client's docstring re: per-process semantics). ``place()`` is async
-	because the underlying client is async-native; dispatch awaits the call
-	from its async context.
+	Holds a single :class:`~edge_catcher.live.venue.LiveVenueClient` (Kalshi
+	today) for the process lifetime (see the client's docstring re: per-process
+	semantics). ``place()`` is async because the underlying client is
+	async-native; dispatch awaits the call from its async context. Typed to the
+	venue Protocol — NOT the concrete client — so a second venue needs no change
+	here.
 	"""
 
-	def __init__(self, client: KalshiOrderClient) -> None:
+	def __init__(self, client: LiveVenueClient) -> None:
 		self._client = client
 
 	async def place(self, req: OrderRequest) -> OrderResult:
