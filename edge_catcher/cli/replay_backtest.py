@@ -18,26 +18,36 @@ def run(args) -> None:
 	ticker_filter = set(args.series.split(",")) if args.series else None
 
 	# replay_capture is async (dispatch_message → executor.place is async);
-	# wrap at the CLI sync→async boundary.
-	result = asyncio.run(replay_capture(
-		bundle_path=bundle,
-		prior_bundle=prior,
-		ticker_filter=ticker_filter,
-	))
+	# wrap at the CLI sync→async boundary. Any failure mode — bad/missing
+	# strategies_local.py (BundleStrategyLoadError), unsupported manifest
+	# schema_version or a reordered/non-int recv_seq (ValueError), or no
+	# JSONL/JSONL.zst in the bundle (FileNotFoundError) — must surface as the
+	# same {"status":"error",...} envelope as the bundle-not-found case above,
+	# so the --json stdout contract holds for ALL failures rather than leaking
+	# an uncaught traceback to a downstream parser.
+	try:
+		result = asyncio.run(replay_capture(
+			bundle_path=bundle,
+			prior_bundle=prior,
+			ticker_filter=ticker_filter,
+		))
 
-	output = {
-		"status": "ok",
-		"bundle": str(bundle),
-		"events_processed": result.events_processed,
-		"duration_seconds": round(result.duration_seconds, 2),
-		"capture_window": {
-			"start": result.capture_start_ts,
-			"end": result.capture_end_ts,
-		},
-		"strategies": result.strategies_loaded,
-		"trades": result.trades,
-		"trade_count": len(result.trades),
-	}
+		output = {
+			"status": "ok",
+			"bundle": str(bundle),
+			"events_processed": result.events_processed,
+			"duration_seconds": round(result.duration_seconds, 2),
+			"capture_window": {
+				"start": result.capture_start_ts,
+				"end": result.capture_end_ts,
+			},
+			"strategies": result.strategies_loaded,
+			"trades": result.trades,
+			"trade_count": len(result.trades),
+		}
+	except Exception as e:
+		print(json.dumps({"status": "error", "message": str(e)}))
+		sys.exit(1)
 
 	if args.output:
 		out_path = Path(args.output)

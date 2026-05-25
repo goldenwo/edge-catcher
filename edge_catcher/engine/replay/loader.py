@@ -1,13 +1,29 @@
 """Replay JSONL loader.
 
 Streams captured engine-input events from a bundle's JSONL (or ``.jsonl.zst``)
-file, transparently decompressing zstd, sorting by ``recv_seq`` for
-deterministic replay, and optionally filtering by a ticker set.
+file, transparently decompressing zstd, in on-disk order, optionally filtering
+by a ticker set.
 
-Malformed lines, oversized lines, blank lines, and the schema header are
-all silently skipped (the oversized + malformed cases log at WARNING /
-DEBUG respectively). The loader never raises on content — only on
-fundamental I/O failures.
+On-disk order IS ``recv_seq`` order: the capture writer assigns ``recv_seq``
+from a monotonic counter and appends each event synchronously on the single
+engine thread (a flock bars a second writer) — see ``capture/writer.py``. So
+the loader streams in file order WITHOUT buffering the whole file. This matters:
+a real trading day is ~8M events / multiple GB decompressed, and the previous
+"materialise the whole file into a list, then ``sort`` by ``recv_seq``"
+approach made replay (and the CR-5 parity sweep) OOM at ~12 GB for a single
+bundle. The sort was redundant — it never reordered real captures (file order
+already equals ``recv_seq`` order) — so it's removed in favour of streaming.
+
+Malformed lines, oversized lines, blank lines, and the schema header are all
+silently skipped (the oversized + malformed cases log at WARNING / DEBUG
+respectively). What the loader does NOT tolerate is a broken ``recv_seq``: any
+yielded event missing a valid integer ``recv_seq``, or a ``recv_seq`` that is
+not strictly increasing (a decrease OR a duplicate). The bundle file is
+external input (read from disk, possibly fetched from R2), so any of these
+means it is corrupt or was reordered, breaking the writer invariant. Replaying
+it out of order — or silently skipping a garbled event, which would also blind
+the ordering check — would produce wrong trades and invalidate a parity verdict
+before live cutover, so it raises ``ValueError`` rather than failing quietly.
 """
 from __future__ import annotations
 
@@ -33,9 +49,16 @@ def read_jsonl_window(
 ) -> Iterator[dict]:
 	"""Stream parsed events from a captured JSONL or ``.jsonl.zst`` file.
 
-	Sorts by ``recv_seq`` for deterministic replay. Skips the schema header,
-	malformed lines, blank lines, and any line that would exceed
-	``MAX_LINE_BYTES`` when read.
+	Yields in on-disk order, which is ``recv_seq`` order by the capture
+	writer's monotonic-append invariant (see module docstring). Skips the
+	schema header, malformed lines, blank lines, and any line that would
+	exceed ``MAX_LINE_BYTES`` when read. Memory is bounded to one event at a
+	time — the file is never materialised.
+
+	Raises ``ValueError`` if any yielded event lacks a valid integer
+	``recv_seq`` or if ``recv_seq`` is not strictly increasing (a decrease OR a
+	duplicate): all break the writer's monotonic-counter invariant and mean the
+	bundle is corrupt or was reordered.
 
 	Args:
 		path:          Path to a ``.jsonl`` or ``.jsonl.zst`` file.
@@ -45,9 +68,34 @@ def read_jsonl_window(
 		               and metadata-only events).
 	"""
 	path = Path(path)
-	events: list[dict] = list(_stream_raw(path, ticker_filter))
-	events.sort(key=lambda e: e.get("recv_seq", 0))
-	yield from events
+	last_seq: Optional[int] = None
+	for event in _stream_raw(path, ticker_filter):
+		seq = event.get("recv_seq")
+		# Every real event carries an int recv_seq (capture/writer.py); the only
+		# seq-less line — the schema header — is dropped by _parse_line before
+		# it reaches here. A missing / non-int / bool recv_seq is therefore
+		# corruption, not a normal case: fail loud rather than silently skip it
+		# (a skipped seq also can't advance the monotonic check below, blinding
+		# the guard to a reorder straddling that event). bool is excluded because
+		# isinstance(True, int) is True in Python.
+		if not isinstance(seq, int) or isinstance(seq, bool):
+			raise ValueError(
+				f"replay loader: event in {path} has no valid integer recv_seq "
+				f"(got {seq!r}); the bundle is corrupt or was tampered with."
+			)
+		# recv_seq is a strictly-increasing monotonic counter (one per event), so
+		# on-disk order must strictly increase; <= catches both a reorder and a
+		# duplicated/re-emitted seq. A ticker filter yields a subsequence, which
+		# stays strictly increasing, so this never false-trips on filtered streams.
+		if last_seq is not None and seq <= last_seq:
+			raise ValueError(
+				f"replay loader: recv_seq not strictly increasing in {path} "
+				f"({seq} after {last_seq}). The capture writer appends "
+				f"monotonically (capture/writer.py), so on-disk order must be "
+				f"recv_seq order — this bundle is corrupt or reordered."
+			)
+		last_seq = seq
+		yield event
 
 
 # ---------------------------------------------------------------------------
