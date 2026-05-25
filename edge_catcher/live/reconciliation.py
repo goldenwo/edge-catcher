@@ -676,10 +676,19 @@ def _apply_startup_matrix(
 		).fetchall()
 	]
 	local_open_tickers = {t for _, t in open_rows}
-	kalshi_tickers = {p.ticker for p in positions}
+	# Only positions Kalshi actually HOLDS (count>0) are real. GET
+	# /portfolio/positions lists every market the account ever traded — most of
+	# them FLAT (position_fp "0.00" → count 0; see tests/fixtures/kalshi_responses).
+	# A flat position is NOT an orphan to recover (recording it would inject a
+	# phantom zero-size 'open' row that consumes a C-gate MAX_OPEN slot forever)
+	# and does NOT mean "Kalshi still holds this ticker" for the lost-truth check
+	# below (a local open row whose Kalshi position went flat IS lost-truth, not
+	# both-agree). Exclude flats from BOTH derived sets.
+	held_positions = [p for p in positions if p.count > 0]
+	kalshi_tickers = {p.ticker for p in held_positions}
 
 	orphans_recovered = 0
-	for pos in positions:
+	for pos in held_positions:
 		if pos.ticker in local_open_tickers:
 			continue  # matrix row 6 — both agree, no action.
 		# Orphan: Kalshi holds a position we have no open row for. INSERT an

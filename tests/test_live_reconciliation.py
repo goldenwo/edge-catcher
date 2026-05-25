@@ -309,6 +309,58 @@ async def test_16_startup_local_open_kalshi_missing_marks_lost_truth(
 
 
 # ---------------------------------------------------------------------------
+# Flat-position guard — GET /portfolio/positions lists every market the account
+# ever traded, most of them FLAT (position_fp "0.00" → count 0; real shape in
+# tests/fixtures/kalshi_responses.py). A flat position is NOT a held position:
+# it must neither be recovered as an orphan (phantom MAX_OPEN-filling rows that
+# never drain → real entries gate-blocked at cutover) nor count as "Kalshi
+# still holds this ticker" for lost-truth.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flat_positions_are_not_recovered_as_orphans(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Flat Kalshi positions (count=0) with no local row create NO rows. Else
+	startup_reconcile injects one phantom zero-size 'open' orphan row per
+	ever-traded-but-flat market, each consuming a C-gate MAX_OPEN slot forever."""
+	client = FakeClient(
+		positions=[
+			Position(ticker="KXAISPIKE-26B-1550", side="yes", count=0, average_price_cents=0, raw={}),
+			Position(ticker="KXCODINGMODEL-26DEC-GOOG", side="no", count=0, average_price_cents=0, raw={}),
+		]
+	)
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	rows = conn.execute("SELECT id, ticker, status FROM live_trades").fetchall()
+	assert rows == [], f"flat positions must create no rows, got {rows}"
+	assert report.orphan_positions_recovered == 0
+	assert report.alerts == 0
+
+
+@pytest.mark.asyncio
+async def test_local_open_with_flat_kalshi_position_is_lost_truth(
+	conn: sqlite3.Connection,
+) -> None:
+	"""A local 'open' row whose Kalshi position has gone FLAT (count=0 —
+	closed/settled) is lost-truth, NOT 'both agree'. A flat position must not
+	count as 'Kalshi still holds this ticker', or a stale open row silently
+	survives reconcile while Kalshi holds nothing."""
+	ticker = "KXSOL15M-26MAY16H12"
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-flat", ticker=ticker)
+	client = FakeClient(
+		positions=[
+			Position(ticker=ticker, side="yes", count=0, average_price_cents=0, raw={})
+		]
+	)
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "lost_truth"
+	assert report.lost_truth == 1
+
+
+# ---------------------------------------------------------------------------
 # #17 — startup: local pending matched to Kalshi filled → open
 # ---------------------------------------------------------------------------
 
