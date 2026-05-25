@@ -64,6 +64,14 @@ log = logging.getLogger(__name__)
 # volume. Unix-seconds, matching ``adapters/kalshi/adapter.py``'s convention.
 _RECONCILE_LOOKBACK_SECONDS: int = 6 * 60 * 60
 
+# Grace past a market's ``expiration_time`` before an absent-ticker 'open' row
+# with NO yes/no settlement result is escalated to lost_truth (C2 —
+# _resolve_absent_open_rows). Generous vs the 15-min markets' near-instant
+# settlement so a still-settling market is NEVER mislabelled; only a market
+# long-expired with no result (void / scratched / purged) AND no Kalshi
+# position escalates, so it cannot squat a C-gate MAX_OPEN slot indefinitely.
+_SETTLEMENT_GRACE_SECONDS: int = 60 * 60  # 1h
+
 # Kalshi resolved/terminal order states (``Order.status`` enum; client.py
 # documents the wire values pending/resting/executed/canceled/rejected).
 _KALSHI_FILLED = "executed"
@@ -158,6 +166,22 @@ def _parse_iso(ts: str) -> datetime:
 	if dt.tzinfo is None:
 		dt = dt.replace(tzinfo=timezone.utc)
 	return dt
+
+
+def _parse_iso_or_none(ts: object) -> datetime | None:
+	"""Best-effort ISO-8601 → aware-UTC parse; ``None`` on anything unusable.
+
+	Tolerates missing / non-string / malformed values (e.g. a market-meta dict
+	that lacks ``expiration_time``, or came back ``{}`` on a REST error). The
+	caller treats ``None`` as "can't determine" and leaves the row 'open' rather
+	than acting on a bad timestamp.
+	"""
+	if not isinstance(ts, str) or not ts:
+		return None
+	try:
+		return _parse_iso(ts)
+	except (ValueError, TypeError):
+		return None
 
 
 def _clamp_fill_pct(fill_size: int, intended_size: int) -> float:
@@ -619,10 +643,13 @@ async def startup_reconcile(
 		db, positions=positions, orders=orders, now=now
 	)
 	# C2 — resolve 'open' rows whose ticker is ABSENT from positions() by
-	# probing each market's settlement status (async REST): settled → leave
-	# 'open' for the settlement poller; still-active → lost_truth; inconclusive
-	# → leave 'open' and retry (never terminal on uncertainty).
-	report = await _resolve_absent_open_rows(client, db, absent_open_rows, report)
+	# probing each market's settlement result + expiration (async REST): settled
+	# → leave 'open' for the settlement poller; still-live or long-expired-with-
+	# no-result → lost_truth; just-settling / inconclusive → leave 'open' and
+	# retry (never terminal on uncertainty).
+	report = await _resolve_absent_open_rows(
+		client, db, absent_open_rows, report, now=now
+	)
 	log.info(
 		"startup_reconcile complete: pending_resolved=%d "
 		"rejected_post_hoc=%d orphans_recovered=%d lost_truth=%d "
@@ -642,30 +669,42 @@ async def _resolve_absent_open_rows(
 	db: sqlite3.Connection,
 	candidates: list[tuple[int, str]],
 	report: StartupReconcileReport,
+	*,
+	now: datetime,
 ) -> StartupReconcileReport:
 	"""C2 — resolve 'open' rows whose ticker is ABSENT from ``positions()``.
 
 	Kalshi keeps SETTLED positions in ``positions()`` (flat, with realized P&L)
 	for a retention window, so an absent ticker means the position settled AND
-	was purged, or it genuinely never existed. Probe each market:
+	was purged, or it genuinely never existed. We decide per market from its
+	settlement ``result`` and ``expiration_time`` (both returned by
+	``fetch_market_meta``) — deliberately NOT the market ``status`` STRING,
+	whose exact vocabulary is a Kalshi-version detail we will not hard-code
+	(guessing it is the wire-shape bug class this whole effort exists to kill);
+	the timestamp is unambiguous:
 
-	* ``result`` ``"yes"``/``"no"`` (market SETTLED) → leave the row ``'open'``;
-	  the settlement poller (``get_open_trades`` → ``check_market_result`` →
-	  ``settle_trade``) closes it to won/lost. Terminal ``lost_truth`` here
-	  would FREEZE its P&L (settle CAS requires ``open``/``exit_pending``).
-	  Counted as ``settled_recovered`` (benign — NOT an operator alert).
-	* market still ``"active"`` with no position → genuine truth-loss →
+	* ``result`` ``"yes"``/``"no"`` (SETTLED) → leave the row ``'open'``; the
+	  settlement poller (``get_open_trades`` → ``check_market_result`` →
+	  ``settle_trade``) closes it to won/lost. Terminal ``lost_truth`` here would
+	  FREEZE its P&L (settle CAS requires ``open``/``exit_pending``). Counted
+	  ``settled_recovered`` (benign — NOT an operator alert).
+	* no result, ``expiration_time`` in the FUTURE → the market is still live and
+	  Kalshi holds no position for us → genuine truth-loss →
 	  :func:`mark_lost_truth`.
-	* anything else (REST error → ``{}``, or expired-but-result-pending) →
-	  leave ``'open'`` and retry on the next reconcile / poller cycle. NEVER
-	  terminally mislabel on uncertainty (zero-error lens).
+	* no result, ``expiration_time`` long PAST (> ``_SETTLEMENT_GRACE_SECONDS``)
+	  → the market should have settled but exposes no result and we hold no
+	  position (void / scratched / purged) → escalate → :func:`mark_lost_truth`
+	  so it cannot squat a C-gate MAX_OPEN slot indefinitely.
+	* otherwise (just-expired and still settling within grace, or an
+	  inconclusive REST probe with no usable ``expiration_time``) → leave
+	  ``'open'`` and retry next reconcile / let the poller settle it. NEVER
+	  terminal on uncertainty (zero-error lens).
 	"""
 	lost = 0
 	settled = 0
 	for row_id, ticker in candidates:
 		meta = await client.market_meta(ticker)
 		result = meta.get("result")
-		status = meta.get("status")
 		if result in ("yes", "no"):
 			settled += 1
 			log.info(
@@ -674,23 +713,46 @@ async def _resolve_absent_open_rows(
 				"settlement poller to close to won/lost (NOT lost_truth).",
 				ticker, result, row_id,
 			)
-		elif status == "active":
+			continue
+		expiration = _parse_iso_or_none(meta.get("expiration_time"))
+		if expiration is not None and expiration > now:
+			# Market still live, but Kalshi holds no position for us → truth-loss.
 			mark_lost_truth(
 				db,
 				row_id,
 				notes=(
-					f"startup reconcile: Kalshi reports no position for {ticker} "
-					f"and its market is still active — manual investigation"
+					f"startup reconcile: {ticker} market still live (expires "
+					f"{expiration.isoformat()}) but Kalshi reports no position — "
+					f"manual investigation"
+				),
+			)
+			lost += 1
+		elif (
+			expiration is not None
+			and (now - expiration).total_seconds() > _SETTLEMENT_GRACE_SECONDS
+		):
+			# Long-expired, no settlement result, no position (void / scratched /
+			# purged) → escalate so it can't squat a MAX_OPEN slot forever.
+			mark_lost_truth(
+				db,
+				row_id,
+				notes=(
+					f"startup reconcile: {ticker} market expired "
+					f"{expiration.isoformat()} with no settlement result and no "
+					f"Kalshi position (void/purged?) — manual investigation"
 				),
 			)
 			lost += 1
 		else:
+			# Just-expired-and-settling (within grace) or an inconclusive probe
+			# (REST error / no expiration_time) → leave 'open' for the next
+			# reconcile / settlement poller. Never terminal on uncertainty.
 			log.warning(
-				"startup_reconcile: ticker %s absent from positions() and its "
-				"market meta is inconclusive (status=%r result=%r) — leaving row "
-				"id=%d 'open' to retry next reconcile (NOT lost_truth on "
-				"uncertainty).",
-				ticker, status, result, row_id,
+				"startup_reconcile: ticker %s absent from positions(), unsettled "
+				"and recently/indeterminately expired (expiration=%r) — leaving "
+				"row id=%d 'open' to retry next reconcile / settlement poller "
+				"(NOT lost_truth on uncertainty).",
+				ticker, meta.get("expiration_time"), row_id,
 			)
 	return replace(
 		report,

@@ -227,11 +227,15 @@ class FakeClient:
 
 	async def market_meta(self, ticker: str) -> dict:
 		self.market_meta_calls.append(ticker)
-		# Default: market still ACTIVE (no result) ⇒ an absent ticker is genuine
-		# truth-loss (lost_truth), preserving pre-C2 behaviour. Tests model a
-		# SETTLED market by supplying {"result": "yes"|"no"} and an inconclusive
-		# probe (REST error) by supplying {}.
-		return self._market_meta.get(ticker, {"status": "active", "result": None})
+		# Default models a still-LIVE market (no settlement result, expiration far
+		# in the FUTURE) ⇒ an absent ticker is genuine truth-loss (lost_truth),
+		# preserving pre-C2 behaviour for the matrix-row-2 tests. Tests override
+		# with {"result": "yes"|"no"} (settled), {} (inconclusive REST error), or
+		# an explicit "expiration_time" (live / just-expired / long-expired).
+		return self._market_meta.get(
+			ticker,
+			{"status": "open", "result": None, "expiration_time": "2099-01-01T00:00:00Z"},
+		)
 
 
 class FakeBankrollCache:
@@ -342,6 +346,13 @@ async def test_absent_ticker_settled_market_stays_open_for_poller(
 	assert report.settled_recovered == 1
 	assert report.alerts == 0                      # settled is benign, not an alert
 
+	# Idempotent: a second pass re-probes and re-leaves it 'open' (the settled
+	# branch is non-terminal by design — the poller owns the actual close).
+	report2 = await startup_reconcile(client, conn, FakeBankrollCache())
+	assert _status(conn, row_id) == "open"
+	assert report2.lost_truth == 0
+	assert report2.settled_recovered == 1
+
 
 @pytest.mark.asyncio
 async def test_absent_ticker_inconclusive_meta_stays_open_not_lost_truth(
@@ -361,6 +372,97 @@ async def test_absent_ticker_inconclusive_meta_stays_open_not_lost_truth(
 
 	assert _status(conn, row_id) == "open"
 	assert report.lost_truth == 0
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_live_market_marks_lost_truth(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2: an absent-ticker 'open' row whose market is still LIVE (no settlement
+	result, expiration in the FUTURE) is genuine truth-loss — we should still
+	hold the position but Kalshi reports none → lost_truth. Decided off the
+	unambiguous expiration_time, NOT a guessed status string."""
+	future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-live")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {
+			"status": "open", "result": None, "expiration_time": future,
+		}},
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "lost_truth"
+	assert report.lost_truth == 1
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_just_expired_within_grace_stays_open(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2: an absent-ticker 'open' row whose market JUST expired (within the
+	settlement grace) with no result yet is still SETTLING — leave it 'open' for
+	the poller to close once the result lands; do NOT mark lost_truth."""
+	just_expired = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-settling")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {
+			"status": "closed", "result": None, "expiration_time": just_expired,
+		}},
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "open"
+	assert report.lost_truth == 0
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_long_expired_no_result_marks_lost_truth(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2: an absent-ticker 'open' row whose market expired LONG ago (past the
+	settlement grace) with no result and no Kalshi position is a void/scratched/
+	purged anomaly — escalate to lost_truth so it can't squat a C-gate MAX_OPEN
+	slot forever. Also exercises empty-string result (fetch_market_meta does NOT
+	normalize ''→None)."""
+	long_expired = (
+		datetime.now(timezone.utc)
+		- timedelta(seconds=recon._SETTLEMENT_GRACE_SECONDS + 600)
+	).isoformat()
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-void")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {
+			"status": "closed", "result": "", "expiration_time": long_expired,
+		}},
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "lost_truth"
+	assert report.lost_truth == 1
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_settled_no_result_stays_open(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2: settled with result 'no' (not just 'yes') also stays 'open' for the
+	poller — the settled branch is side-agnostic."""
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-settled-no")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {"status": "finalized", "result": "no"}},
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "open"
+	assert report.lost_truth == 0
+	assert report.settled_recovered == 1
 
 
 # ---------------------------------------------------------------------------
