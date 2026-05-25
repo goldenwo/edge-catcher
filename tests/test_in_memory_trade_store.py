@@ -40,6 +40,21 @@ def in_memory_store() -> InMemoryTradeStore:
 	return InMemoryTradeStore()
 
 
+def test_in_memory_record_trade_round_trips_dual_slippage(in_memory_store):
+	"""In-memory store persists market_impact_cents + limit_slippage_cents in its
+	row dict (load-bearing: replay / G-parity write through this store)."""
+	tid = in_memory_store.record_trade(
+		ticker="TKR", entry_price=50, strategy="s", side="yes",
+		series_ticker="KXTKR", intended_size=5, fill_size=5,
+		blended_entry=52, fill_pct=1.0, slippage_cents=2.0,
+		market_impact_cents=2, limit_slippage_cents=-3,
+		now=datetime.now(timezone.utc),
+	)
+	row = next(r for r in in_memory_store._rows if r["id"] == tid)
+	assert row["market_impact_cents"] == 2
+	assert row["limit_slippage_cents"] == -3
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

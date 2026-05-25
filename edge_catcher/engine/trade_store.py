@@ -39,6 +39,8 @@ class TradeStoreProtocol(Protocol):
 		now: datetime,
 		client_order_id: Optional[str] = ...,
 		kalshi_order_id: Optional[str] = ...,
+		market_impact_cents: Optional[int] = ...,
+		limit_slippage_cents: Optional[int] = ...,
 	) -> int:
 		"""Record a filled entry; return the trade row id.
 
@@ -631,6 +633,8 @@ class InMemoryTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Mirror of SQLiteTradeStore.record_trade — see trade_store.py:106.
 		Computes entry_fee_cents internally using STANDARD_FEE. Raises
@@ -674,6 +678,8 @@ class InMemoryTradeStore:
 			"book_depth": book_depth,
 			"fill_pct": fill_pct,
 			"slippage_cents": slippage_cents,
+			"market_impact_cents": market_impact_cents,
+			"limit_slippage_cents": limit_slippage_cents,
 			"book_snapshot": book_snapshot,
 			"status": "open",
 			"entry_time": entry_time_iso,
