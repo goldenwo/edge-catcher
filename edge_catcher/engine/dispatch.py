@@ -669,6 +669,21 @@ async def _handle_enter(
 	# `now` is the threaded tick clock (module invariant L14-L18: handlers
 	# never read datetime.now()) so replay produces a byte-identical
 	# placed_at_utc to the original live execution.
+	# Reporting-only: fill-side top-of-book best at submit, persisted on the
+	# pending row so transition_pending_to_open can later compute the live
+	# market_impact metric. Same book + ×100-from-dollars convention paper's
+	# walk_book_with_ceiling uses, so the two tables' market_impact stay
+	# comparable — deliberately NOT ctx.yes_ask (the tick ask diverges from
+	# book-top by up to the stale-book threshold). A diagnostic must NEVER raise
+	# into the entry path (zero-error lens): any unreadable/empty book → None.
+	_entry_best_cents: int | None = None
+	try:
+		_levels = ctx.orderbook.yes_levels if signal.side == "yes" else ctx.orderbook.no_levels
+		if _levels and isinstance(_levels[0][0], (int, float)):
+			_entry_best_cents = round(_levels[0][0] * 100)
+	except (IndexError, TypeError, AttributeError):
+		_entry_best_cents = None
+
 	store.record_intent(
 		ticker=signal.ticker,
 		series=signal.series,
@@ -679,6 +694,8 @@ async def _handle_enter(
 		stop_loss_distance_cents=signal.stop_loss_distance_cents,
 		client_order_id=req.client_order_id,
 		placed_at_utc=now.isoformat(),
+		entry_best_price_cents=_entry_best_cents,
+		entry_limit_price_cents=req.limit_price_cents,
 	)
 
 	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to

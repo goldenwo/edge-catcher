@@ -887,6 +887,8 @@ class SQLiteTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""LIVE filled-entry write — a CAS ``pending → open`` TRANSITION of
 		the C1 row, **NOT an insert** (spec §3 ``:400 filled`` row / §4.2 /
@@ -942,6 +944,11 @@ class SQLiteTradeStore:
 		so a missing one raises loudly rather than writing an empty,
 		unreconcilable id (same zero-error lens, both identity keys).
 		"""
+		# Reporting-only dual-slippage metrics: the live path computes BOTH at
+		# transition_pending_to_open from the references persisted at
+		# record_intent, so this CAS write accepts-and-IGNORES them (dispatch
+		# forwards them UNCONDITIONALLY — spec §1 keystone — and paper consumes).
+		del market_impact_cents, limit_slippage_cents
 		if not client_order_id:
 			raise ValueError(
 				"SQLiteTradeStore.record_trade requires client_order_id on "

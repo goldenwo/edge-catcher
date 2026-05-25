@@ -250,6 +250,50 @@ async def test_handle_enter_forwards_dual_slippage_to_record_trade() -> None:
 	assert call["limit_slippage_cents"] == -3
 
 
+@pytest.mark.asyncio
+async def test_handle_enter_passes_reference_prices_to_record_intent() -> None:
+	"""_handle_enter snapshots ctx.orderbook fill-side top (×100) as
+	entry_best_price_cents, and passes req.limit_price_cents as
+	entry_limit_price_cents — both onto the pending row via record_intent."""
+	store = _CapturingStore()
+	placed_reqs: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed_reqs.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	config: dict[str, Any] = {
+		"_metrics": Metrics(),
+		"_exec_cfg": _exec_cfg(entry_slippage_cents=2),
+	}
+	# Real fill-side levels so the snapshot resolves to 49¢ (0.49 * 100).
+	ctx = MagicMock(
+		yes_ask=_YES_ASK,
+		no_ask=58,
+		orderbook=MagicMock(depth=5, yes_levels=[(0.49, 10)], no_levels=[]),
+	)
+
+	await _handle_enter(
+		_entry_signal(entry_price_cents=_YES_ASK),
+		ctx,
+		store,
+		config,
+		executor,
+		now=_NOW_C2,
+		allowed_size=7,
+	)
+
+	assert store.intent_kwargs.get("entry_best_price_cents") == 49
+	assert len(placed_reqs) == 1
+	assert (
+		store.intent_kwargs.get("entry_limit_price_cents")
+		== placed_reqs[0].limit_price_cents
+	)
+
+
 # ---------------------------------------------------------------------------
 # C2 Test 2 — paper path: allowed_size omitted → size_contracts==0
 # (byte-exact unchanged; paper executor sizes internally)
