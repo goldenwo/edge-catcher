@@ -273,6 +273,21 @@ class KalshiOrderClient:
 		raw = response.get("market_positions", [])
 		return [self._parse_position(p) for p in raw]
 
+	async def market_meta(self, ticker: str) -> dict:
+		"""Public market metadata (``status`` / ``result`` / ``expiration_time``)
+		for a ticker, via ``GET /markets/{ticker}``.
+
+		Reuses the engine's REST market-meta fetcher — the SAME parser the
+		settlement poller's ``check_market_result`` is built on — so B's startup
+		reconcile can tell a SETTLED-but-purged position (leave 'open' for the
+		settlement poller) from a genuine truth-loss (mark lost_truth) for a
+		ticker absent from ``positions()`` (C2). Market data is public, so this
+		is an UNSIGNED GET on the shared httpx client (no order auth). The lazy
+		import avoids a client↔engine import cycle at module load.
+		"""
+		from edge_catcher.engine.recovery import fetch_market_meta
+		return await fetch_market_meta(self._http, ticker)
+
 	async def list_orders(
 		self,
 		*,

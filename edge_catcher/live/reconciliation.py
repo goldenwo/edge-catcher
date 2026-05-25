@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
@@ -103,6 +103,11 @@ class _OrderClient(Protocol):
 		min_ts: int | None = ...,
 	) -> list[Order]: ...
 
+	# Public market metadata (status / result / expiration) for one ticker.
+	# Used by startup_reconcile (C2) to tell a SETTLED-but-purged position
+	# from a genuine truth-loss for a ticker absent from positions().
+	async def market_meta(self, ticker: str) -> dict: ...
+
 
 class _BankrollCache(Protocol):
 	"""Structural subset of ``engine.risk.BankrollCache`` — only ``refresh``
@@ -125,6 +130,10 @@ class StartupReconcileReport:
 	pending_post_hoc_rejected: int = 0
 	orphan_positions_recovered: int = 0
 	lost_truth: int = 0
+	# Absent-ticker 'open' rows whose market has SETTLED (Kalshi result yes/no):
+	# left 'open' for the settlement poller to close to won/lost, NOT marked
+	# terminal lost_truth. Benign — does NOT count toward operator ``alerts``.
+	settled_recovered: int = 0
 	mismatches: int = 0
 	alerts: int = 0
 
@@ -606,19 +615,90 @@ async def startup_reconcile(
 	positions = await client.positions()
 	orders = await client.list_orders(min_ts=min_ts)
 
-	report = _apply_startup_matrix(
+	report, absent_open_rows = _apply_startup_matrix(
 		db, positions=positions, orders=orders, now=now
 	)
+	# C2 — resolve 'open' rows whose ticker is ABSENT from positions() by
+	# probing each market's settlement status (async REST): settled → leave
+	# 'open' for the settlement poller; still-active → lost_truth; inconclusive
+	# → leave 'open' and retry (never terminal on uncertainty).
+	report = await _resolve_absent_open_rows(client, db, absent_open_rows, report)
 	log.info(
 		"startup_reconcile complete: pending_resolved=%d "
-		"rejected_post_hoc=%d orphans_recovered=%d lost_truth=%d alerts=%d",
+		"rejected_post_hoc=%d orphans_recovered=%d lost_truth=%d "
+		"settled_recovered=%d alerts=%d",
 		report.pending_resolved,
 		report.pending_post_hoc_rejected,
 		report.orphan_positions_recovered,
 		report.lost_truth,
+		report.settled_recovered,
 		report.alerts,
 	)
 	return report
+
+
+async def _resolve_absent_open_rows(
+	client: _OrderClient,
+	db: sqlite3.Connection,
+	candidates: list[tuple[int, str]],
+	report: StartupReconcileReport,
+) -> StartupReconcileReport:
+	"""C2 — resolve 'open' rows whose ticker is ABSENT from ``positions()``.
+
+	Kalshi keeps SETTLED positions in ``positions()`` (flat, with realized P&L)
+	for a retention window, so an absent ticker means the position settled AND
+	was purged, or it genuinely never existed. Probe each market:
+
+	* ``result`` ``"yes"``/``"no"`` (market SETTLED) → leave the row ``'open'``;
+	  the settlement poller (``get_open_trades`` → ``check_market_result`` →
+	  ``settle_trade``) closes it to won/lost. Terminal ``lost_truth`` here
+	  would FREEZE its P&L (settle CAS requires ``open``/``exit_pending``).
+	  Counted as ``settled_recovered`` (benign — NOT an operator alert).
+	* market still ``"active"`` with no position → genuine truth-loss →
+	  :func:`mark_lost_truth`.
+	* anything else (REST error → ``{}``, or expired-but-result-pending) →
+	  leave ``'open'`` and retry on the next reconcile / poller cycle. NEVER
+	  terminally mislabel on uncertainty (zero-error lens).
+	"""
+	lost = 0
+	settled = 0
+	for row_id, ticker in candidates:
+		meta = await client.market_meta(ticker)
+		result = meta.get("result")
+		status = meta.get("status")
+		if result in ("yes", "no"):
+			settled += 1
+			log.info(
+				"startup_reconcile: ticker %s absent from positions() but its "
+				"market SETTLED (result=%s) — leaving row id=%d 'open' for the "
+				"settlement poller to close to won/lost (NOT lost_truth).",
+				ticker, result, row_id,
+			)
+		elif status == "active":
+			mark_lost_truth(
+				db,
+				row_id,
+				notes=(
+					f"startup reconcile: Kalshi reports no position for {ticker} "
+					f"and its market is still active — manual investigation"
+				),
+			)
+			lost += 1
+		else:
+			log.warning(
+				"startup_reconcile: ticker %s absent from positions() and its "
+				"market meta is inconclusive (status=%r result=%r) — leaving row "
+				"id=%d 'open' to retry next reconcile (NOT lost_truth on "
+				"uncertainty).",
+				ticker, status, result, row_id,
+			)
+	return replace(
+		report,
+		lost_truth=lost,
+		settled_recovered=settled,
+		mismatches=lost,
+		alerts=report.alerts + lost,
+	)
 
 
 def _apply_startup_matrix(
@@ -627,11 +707,14 @@ def _apply_startup_matrix(
 	positions: list[Position],
 	orders: list[Order],
 	now: datetime,
-) -> StartupReconcileReport:
-	"""The sync core of :func:`startup_reconcile` (all six matrix rows).
+) -> tuple[StartupReconcileReport, list[tuple[int, str]]]:
+	"""The sync core of :func:`startup_reconcile` (matrix rows 1, 3-6).
 
 	Split out so the I/O (``await``) and the pure SQL stay on opposite sides
-	of a clean boundary and the matrix is unit-testable in isolation.
+	of a clean boundary and the matrix is unit-testable in isolation. Matrix
+	row 2 (an 'open' row whose ticker Kalshi has no position for) is NOT
+	resolved here — it needs an async per-market settlement probe, so the
+	candidate rows are RETURNED for :func:`_resolve_absent_open_rows` (C2).
 	"""
 	orders_by_coid: dict[str, Order] = {
 		o.client_order_id: o
@@ -767,7 +850,12 @@ def _apply_startup_matrix(
 			_ORPHAN_STRATEGY,
 		)
 
-	lost_truth_count = 0
+	# Matrix row 2 candidates: an 'open' row whose ticker is ABSENT from
+	# positions(). Do NOT mark lost_truth here — defer to the async caller,
+	# which probes the market's settlement status (C2): a SETTLED-but-purged
+	# position must stay 'open' for the settlement poller; only a still-active
+	# market with no position is genuine truth-loss.
+	absent_open_rows: list[tuple[int, str]] = []
 	for row_id, ticker in open_rows:
 		if ticker in kalshi_tickers:
 			# Matrix row 6 — both agree (Kalshi still holds this ticker's
@@ -775,25 +863,18 @@ def _apply_startup_matrix(
 			# 4.A's CAS-guarded helper, then continue (no money-state move).
 			touch_reconciled(db, row_id, now_utc=now.isoformat())
 			continue
-		mark_lost_truth(
-			db,
-			row_id,
-			notes=(
-				f"startup reconcile: Kalshi reports no position for "
-				f"{ticker} but local row was 'open' — manual investigation"
-			),
-		)
-		lost_truth_count += 1
+		absent_open_rows.append((row_id, ticker))
 
-	alerts = orphans_recovered + lost_truth_count
-	return StartupReconcileReport(
+	# lost_truth / settled_recovered require async market-meta I/O and are
+	# finalized by _resolve_absent_open_rows; this sync layer reports only what
+	# it knows (orphan recoveries are the sole alerts determinable here).
+	report = StartupReconcileReport(
 		pending_resolved=resolved,
 		pending_post_hoc_rejected=ttl_actioned,
 		orphan_positions_recovered=orphans_recovered,
-		lost_truth=lost_truth_count,
-		mismatches=lost_truth_count,
-		alerts=alerts,
+		alerts=orphans_recovered,
 	)
+	return report, absent_open_rows
 
 
 def _orphan_coid(pos: Position) -> str:

@@ -194,11 +194,14 @@ class FakeClient:
 		*,
 		orders: list[Order] | None = None,
 		positions: list[Position] | None = None,
+		market_meta: dict[str, dict] | None = None,
 	) -> None:
 		self._orders = orders or []
 		self._positions = positions or []
+		self._market_meta = market_meta or {}
 		self.list_orders_calls: list[dict[str, object]] = []
 		self.positions_call_count = 0
+		self.market_meta_calls: list[str] = []
 
 	async def list_orders(
 		self,
@@ -221,6 +224,14 @@ class FakeClient:
 	async def positions(self) -> list[Position]:
 		self.positions_call_count += 1
 		return list(self._positions)
+
+	async def market_meta(self, ticker: str) -> dict:
+		self.market_meta_calls.append(ticker)
+		# Default: market still ACTIVE (no result) ⇒ an absent ticker is genuine
+		# truth-loss (lost_truth), preserving pre-C2 behaviour. Tests model a
+		# SETTLED market by supplying {"result": "yes"|"no"} and an inconclusive
+		# probe (REST error) by supplying {}.
+		return self._market_meta.get(ticker, {"status": "active", "result": None})
 
 
 class FakeBankrollCache:
@@ -306,6 +317,50 @@ async def test_16_startup_local_open_kalshi_missing_marks_lost_truth(
 	assert _status(conn, row_id) == "lost_truth"
 	assert report.lost_truth == 1
 	assert report.alerts >= 1
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_settled_market_stays_open_for_poller(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2: an 'open' row whose ticker is ABSENT from positions() but whose
+	market has SETTLED (Kalshi result yes/no) must STAY 'open' — NOT terminal
+	lost_truth — so the settlement poller (get_open_trades → check_market_result
+	→ settle_trade) closes it to won/lost. Marking it lost_truth would freeze a
+	real settled position's P&L (settle_trade's CAS requires status in
+	open/exit_pending)."""
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-settled")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {"status": "finalized", "result": "yes"}},
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "open"        # NOT lost_truth
+	assert report.lost_truth == 0
+	assert report.settled_recovered == 1
+	assert report.alerts == 0                      # settled is benign, not an alert
+
+
+@pytest.mark.asyncio
+async def test_absent_ticker_inconclusive_meta_stays_open_not_lost_truth(
+	conn: sqlite3.Connection,
+) -> None:
+	"""C2 zero-error lens: if the market-meta probe is inconclusive (REST error
+	→ {}, or expired-but-result-pending), an absent-ticker 'open' row must be
+	LEFT 'open' (retry next reconcile / settlement poller), NEVER terminally
+	marked lost_truth on uncertainty."""
+	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-unknown")
+	client = FakeClient(
+		positions=[], orders=[],
+		market_meta={"KXSOL15M-26MAY16H12": {}},  # REST error / unknown
+	)
+
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+
+	assert _status(conn, row_id) == "open"
+	assert report.lost_truth == 0
 
 
 # ---------------------------------------------------------------------------
