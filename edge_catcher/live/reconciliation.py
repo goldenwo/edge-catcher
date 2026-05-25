@@ -676,16 +676,22 @@ def _apply_startup_matrix(
 		).fetchall()
 	]
 	local_open_tickers = {t for _, t in open_rows}
-	# Only positions Kalshi actually HOLDS (count>0) are real. GET
-	# /portfolio/positions lists every market the account ever traded — most of
-	# them FLAT (position_fp "0.00" → count 0; see tests/fixtures/kalshi_responses).
-	# A flat position is NOT an orphan to recover (recording it would inject a
-	# phantom zero-size 'open' row that consumes a C-gate MAX_OPEN slot forever)
-	# and does NOT mean "Kalshi still holds this ticker" for the lost-truth check
-	# below (a local open row whose Kalshi position went flat IS lost-truth, not
-	# both-agree). Exclude flats from BOTH derived sets.
+	# GET /portfolio/positions lists every market the account ever traded — many
+	# FLAT (position_fp "0.00" → count 0; see tests/fixtures/kalshi_responses).
+	# held_positions (count>0) feeds ONLY the orphan loop: recording a flat as a
+	# phantom zero-size 'open' orphan would consume a C-gate MAX_OPEN slot forever
+	# and never drain, blocking real entries at cutover.
 	held_positions = [p for p in positions if p.count > 0]
-	kalshi_tickers = {p.ticker for p in held_positions}
+	# kalshi_tickers feeds the lost-truth check below and MUST include FLAT
+	# positions. A flat-but-present position means the market SETTLED/closed
+	# (Kalshi keeps the row, with realized P&L), so a local 'open' row for it is
+	# NOT truth-lost — the settlement poller (engine._settlement_poller →
+	# check_market_result, a REST query BY TICKER) closes it to won/lost on its
+	# next cycle, including a position that settled while the daemon was DOWN.
+	# Marking it lost_truth (terminal) would make store.settle_trade's CAS no-op
+	# (it requires status IN ('open','exit_pending')) and FREEZE a real settled
+	# position's P&L. lost_truth is reserved for a ticker ABSENT from positions().
+	kalshi_tickers = {p.ticker for p in positions}
 
 	orphans_recovered = 0
 	for pos in held_positions:

@@ -340,13 +340,20 @@ async def test_flat_positions_are_not_recovered_as_orphans(
 
 
 @pytest.mark.asyncio
-async def test_local_open_with_flat_kalshi_position_is_lost_truth(
+async def test_local_open_with_flat_kalshi_position_stays_open_for_settlement(
 	conn: sqlite3.Connection,
 ) -> None:
-	"""A local 'open' row whose Kalshi position has gone FLAT (count=0 —
-	closed/settled) is lost-truth, NOT 'both agree'. A flat position must not
-	count as 'Kalshi still holds this ticker', or a stale open row silently
-	survives reconcile while Kalshi holds nothing."""
+	"""A local 'open' row whose Kalshi position is FLAT-but-PRESENT (count=0,
+	the shape Kalshi returns for a market that SETTLED/closed — it keeps the row
+	with realized P&L) must STAY 'open' (both-agree), NOT be marked lost_truth.
+
+	The settlement poller (engine._settlement_poller → check_market_result, a
+	REST query BY TICKER) closes such a row to won/lost on its next cycle —
+	including a position that settled while the daemon was DOWN. lost_truth is
+	TERMINAL: store.settle_trade's CAS is `status IN ('open','exit_pending')` and
+	the poller reads get_open_trades() (status='open'), so marking it lost_truth
+	would FREEZE a real settled position's P&L forever. lost_truth is reserved
+	for a ticker ABSENT from positions() entirely (genuine truth loss)."""
 	ticker = "KXSOL15M-26MAY16H12"
 	row_id = _seed_open(conn, coid="debut-fade-KXSOL15M-flat", ticker=ticker)
 	client = FakeClient(
@@ -356,8 +363,11 @@ async def test_local_open_with_flat_kalshi_position_is_lost_truth(
 	)
 	report = await startup_reconcile(client, conn, FakeBankrollCache())
 
-	assert _status(conn, row_id) == "lost_truth"
-	assert report.lost_truth == 1
+	assert _status(conn, row_id) == "open", (
+		"flat-but-present (settled) position must stay open for the settlement "
+		"poller to close to won/lost — NOT be frozen as terminal lost_truth"
+	)
+	assert report.lost_truth == 0
 
 
 # ---------------------------------------------------------------------------
