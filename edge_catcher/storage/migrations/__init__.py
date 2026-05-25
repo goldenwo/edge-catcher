@@ -130,7 +130,25 @@ def apply_migrations(
 
 		# executescript() issues an implicit COMMIT before executing and
 		# commits after — same pattern as storage/db.py:init_db.
-		conn.executescript(sql)
+		#
+		# Crash-window idempotency for additive ADD COLUMN migrations: the body
+		# commit (above) and the tracking-row commit (below) are separate, so a
+		# crash between them re-runs the body on the next boot. SQLite ADD COLUMN
+		# is not idempotent — a re-run raises "duplicate column name". Tolerate
+		# exactly that (the columns already exist from the crashed prior run) and
+		# fall through to record the version so it never re-runs again. Any OTHER
+		# OperationalError (a genuine SQL error) still propagates.
+		try:
+			conn.executescript(sql)
+		except sqlite3.OperationalError as exc:
+			if "duplicate column name" not in str(exc).lower():
+				raise
+			log.warning(
+				"Migration %04d: columns already present (crash-window re-run) "
+				"— recording version without re-applying: %s",
+				version,
+				exc,
+			)
 
 		# Record the applied version.
 		conn.execute(
