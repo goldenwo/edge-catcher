@@ -207,6 +207,49 @@ async def test_handle_enter_live_builds_sized_request() -> None:
 	)
 
 
+@pytest.mark.asyncio
+async def test_handle_enter_forwards_dual_slippage_to_record_trade() -> None:
+	"""dispatch's filled branch forwards _result.market_impact_cents /
+	limit_slippage_cents into record_trade (paper consumes; live ignores)."""
+	store = _CapturingStore()
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		return OrderResult(
+			status="filled",
+			intended_size=req.size_contracts,
+			filled_size=req.size_contracts,
+			blended_entry_cents=_YES_ASK,
+			fill_pct=1.0,
+			slippage_cents=2,
+			order_id="ord-test-123",
+			market_impact_cents=2,
+			limit_slippage_cents=-3,
+		)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	config: dict[str, Any] = {
+		"_metrics": Metrics(),
+		"_exec_cfg": _exec_cfg(entry_slippage_cents=2),
+	}
+
+	await _handle_enter(
+		_entry_signal(entry_price_cents=_YES_ASK),
+		_ctx(yes_ask=_YES_ASK),
+		store,
+		config,
+		executor,
+		now=_NOW_C2,
+		allowed_size=7,
+	)
+
+	assert len(store.trade_calls) == 1, "filled entry must call record_trade once"
+	call = store.trade_calls[0]
+	assert call["market_impact_cents"] == 2
+	assert call["limit_slippage_cents"] == -3
+
+
 # ---------------------------------------------------------------------------
 # C2 Test 2 — paper path: allowed_size omitted → size_contracts==0
 # (byte-exact unchanged; paper executor sizes internally)

@@ -782,6 +782,8 @@ async def _handle_enter(
 				now=now,
 				client_order_id=req.client_order_id,
 				kalshi_order_id=_result.order_id,
+				market_impact_cents=_result.market_impact_cents,
+				limit_slippage_cents=_result.limit_slippage_cents,
 			)
 		return _result, _trade_id
 
