@@ -58,6 +58,35 @@ def _row(conn: sqlite3.Connection, row_id: int) -> dict[str, object]:
 	return dict(r)
 
 
+def test_record_pending_persists_reference_prices(conn):
+	"""record_pending persists the two reconcile-support reference prices."""
+	rid = record_pending(
+		conn,
+		ticker="TKR", series="KXTKR", strategy="s", side="yes",
+		intended_size=5, entry_price_cents=50, stop_loss_distance_cents=10,
+		client_order_id="coid-1", kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO, rejection_reason=None,
+		entry_best_price_cents=49, entry_limit_price_cents=52,
+	)
+	row = _row(conn, rid)
+	assert row["entry_best_price_cents"] == 49
+	assert row["entry_limit_price_cents"] == 52
+
+
+def test_record_pending_reference_prices_default_none(conn):
+	"""Defaults are None so existing call-sites keep working unchanged."""
+	rid = record_pending(
+		conn,
+		ticker="TKR", series="KXTKR", strategy="s", side="yes",
+		intended_size=5, entry_price_cents=50, stop_loss_distance_cents=10,
+		client_order_id="coid-2", kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO, rejection_reason=None,
+	)
+	row = _row(conn, rid)
+	assert row["entry_best_price_cents"] is None
+	assert row["entry_limit_price_cents"] is None
+
+
 def _seed_open(
 	conn: sqlite3.Connection,
 	*,

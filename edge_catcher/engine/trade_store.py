@@ -145,6 +145,8 @@ class TradeStoreProtocol(Protocol):
 		stop_loss_distance_cents: int | None,
 		client_order_id: str,
 		placed_at_utc: str,
+		entry_best_price_cents: int | None = None,
+		entry_limit_price_cents: int | None = None,
 	) -> None:
 		"""Pre-place durability hook (sub-project E / L1). Paper + InMemory =
 		no-op. Live = INSERT a `pending` row keyed by client_order_id BEFORE

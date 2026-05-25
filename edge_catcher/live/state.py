@@ -158,6 +158,8 @@ def record_pending(
 	kalshi_order_id: str | None,
 	placed_at_utc: str,
 	rejection_reason: str | None = None,
+	entry_best_price_cents: int | None = None,
+	entry_limit_price_cents: int | None = None,
 ) -> int:
 	"""INSERT a new ``pending`` row. Called by dispatch.py on D's pending
 	OrderResult (NetworkError / malformed-fills / engine-timeout).
@@ -186,8 +188,9 @@ def record_pending(
 			"ticker, series, strategy, side, intended_size, "
 			"original_intended_size, fill_size, entry_price_cents, "
 			"stop_loss_distance_cents, status, client_order_id, "
-			"kalshi_order_id, placed_at_utc, rejection_reason"
-			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)",
+			"kalshi_order_id, placed_at_utc, rejection_reason, "
+			"entry_best_price_cents, entry_limit_price_cents"
+			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
 			(
 				ticker,
 				series,
@@ -204,6 +207,8 @@ def record_pending(
 				kalshi_order_id,
 				placed_at_utc,
 				rejection_reason,
+				entry_best_price_cents,
+				entry_limit_price_cents,
 			),
 		)
 		conn.commit()
