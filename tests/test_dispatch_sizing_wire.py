@@ -1045,3 +1045,11 @@ async def test_paper_enter_bare_signal_not_enriched() -> None:
 	# Paper places size_contracts=0 (executor sizes internally) — byte-exact.
 	assert len(placed_reqs) == 1
 	assert placed_reqs[0].size_contracts == 0
+
+
+def test_metrics_registers_wide_spread_counter() -> None:
+	"""The live spread gate increments entries_skipped_wide_spread; Metrics.inc
+	raises KeyError on an unregistered key, so the counter MUST be registered."""
+	m = Metrics()
+	m.inc("entries_skipped_wide_spread")
+	assert m.snapshot()["entries_skipped_wide_spread"] == 1
