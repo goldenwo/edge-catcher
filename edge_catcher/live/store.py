@@ -424,6 +424,8 @@ class SQLiteTradeStore:
 		stop_loss_distance_cents: Optional[int],
 		client_order_id: str,
 		placed_at_utc: str,
+		entry_best_price_cents: Optional[int] = None,
+		entry_limit_price_cents: Optional[int] = None,
 	) -> None:
 		"""LIVE pre-place durability hook (spec §3 / §3.1 / §4.2).
 
@@ -440,8 +442,9 @@ class SQLiteTradeStore:
 		Pure delegation to :func:`live.state.record_pending` over the held
 		connection with ``kalshi_order_id=None`` (no order placed yet) and
 		``rejection_reason=None`` (no rejection — this is the intent, not a
-		terminal outcome). The 9-kwarg signature matches
-		``TradeStoreProtocol.record_intent`` verbatim; the post-place outcome
+		terminal outcome). The 11-kwarg signature matches
+		``TradeStoreProtocol.record_intent`` verbatim (the two reference-price
+		kwargs default ``None`` so existing 9-kwarg call-sites are unaffected); the post-place outcome
 		(open / rejected / pending-on-failure) is a later CAS transition on
 		THIS row, not this method's concern.
 
@@ -469,6 +472,8 @@ class SQLiteTradeStore:
 			kalshi_order_id=None,
 			placed_at_utc=placed_at_utc,
 			rejection_reason=None,
+			entry_best_price_cents=entry_best_price_cents,
+			entry_limit_price_cents=entry_limit_price_cents,
 		)
 
 	def record_pending(

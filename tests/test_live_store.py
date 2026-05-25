@@ -116,6 +116,25 @@ def _intent_kwargs(**overrides: Any) -> dict[str, Any]:
 	return base
 
 
+def test_record_intent_threads_reference_prices(tmp_path):
+	"""SQLiteTradeStore.record_intent persists the two reference prices onto the
+	pending row (consumed later by transition_pending_to_open)."""
+	from edge_catcher.live.store import SQLiteTradeStore
+
+	store = SQLiteTradeStore(tmp_path / "live.db")
+	store.record_intent(
+		**_intent_kwargs(client_order_id="coid-3"),
+		entry_best_price_cents=49,
+		entry_limit_price_cents=52,
+	)
+	row = store._conn.execute(
+		"SELECT entry_best_price_cents, entry_limit_price_cents "
+		"FROM live_trades WHERE client_order_id = 'coid-3'"
+	).fetchone()
+	assert row[0] == 49
+	assert row[1] == 52
+
+
 def _locked_rejected_kwargs(**overrides: Any) -> dict[str, Any]:
 	"""The exact 10-kwarg set dispatch.py passes to record_rejected (pinned by
 	test_engine_dispatch_pending_branch.py::
