@@ -610,6 +610,28 @@ async def _handle_enter(
 	metrics = config.get("_metrics")
 	if metrics is None:
 		metrics = Metrics()
+
+	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate). debut-fade
+	# is an IOC taker: it buys the ask and marks the bid, so a fill starts
+	# -(spread) underwater; spread >= stop stops the position out on entry (the
+	# proven cause of the 2026-05-25 cutover loss). Skip when the spread is wide
+	# enough to (near-)trip the stop. LIVE-ONLY: the `allowed_size is not None`
+	# guard keeps the paper/replay path byte-exact (off the G-parity paper
+	# path). Placed before `entries_attempted`, mirroring the degenerate-price
+	# skip above — a skip is not an attempt.
+	if allowed_size is not None and signal.stop_loss_distance_cents is not None:
+		exec_cfg = config["_exec_cfg"]
+		spread = ctx.yes_ask - ctx.yes_bid
+		threshold = signal.stop_loss_distance_cents - exec_cfg.entry_spread_stop_buffer_cents
+		if spread >= threshold:
+			metrics.inc("entries_skipped_wide_spread")
+			log.info(
+				"Skip: wide spread %dc >= stop %dc - buffer %dc for %s %s",
+				spread, signal.stop_loss_distance_cents,
+				exec_cfg.entry_spread_stop_buffer_cents, signal.side, signal.ticker,
+			)
+			return
+
 	metrics.inc("entries_attempted")
 
 	# Build typed request — EXACTLY ONCE (spec §2.2 single-build invariant).
