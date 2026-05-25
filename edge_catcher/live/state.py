@@ -28,6 +28,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
+from edge_catcher.engine.fill_math import signed_slippage_cents
 from edge_catcher.storage.migrations import apply_migrations
 
 log = logging.getLogger(__name__)
@@ -881,6 +882,31 @@ def transition_pending_to_open(
 	never recomputed here. CAS precondition: status='pending'. A lost race is
 	a logged no-op.
 	"""
+	# Reporting-only dual-slippage metrics: computed HERE — the single chokepoint
+	# every live fill converges on (sync record_trade + WS-fill + reconcile) —
+	# from the references persisted on the pending row at record_intent. Each is
+	# None when its ref is NULL (a row INSERTed before 0004, or a NetworkError
+	# row that never had a clean book snapshot). The Python None-guard is
+	# mandatory: signed_slippage_cents's ``limit`` is typed int and would
+	# mishandle None. action="buy" is correct for Phase-1 entries; revisit if a
+	# sell-entry is ever introduced. Never affects cost basis / size / fees / pnl.
+	ref_row = conn.execute(
+		"SELECT entry_best_price_cents, entry_limit_price_cents "
+		"FROM live_trades WHERE id = ?",
+		(row_id,),
+	).fetchone()
+	best_ref = ref_row[0] if ref_row else None
+	limit_ref = ref_row[1] if ref_row else None
+	market_impact_cents = (
+		signed_slippage_cents(blended=blended_entry_cents, limit=best_ref, action="buy")
+		if best_ref is not None
+		else None
+	)
+	limit_slippage_cents = (
+		signed_slippage_cents(blended=blended_entry_cents, limit=limit_ref, action="buy")
+		if limit_ref is not None
+		else None
+	)
 	changed = _cas_update(
 		conn,
 		row_id=row_id,
@@ -889,7 +915,8 @@ def transition_pending_to_open(
 			"status = 'open', kalshi_order_id = ?, fill_size = ?, "
 			"blended_entry_cents = ?, slippage_cents = ?, fill_pct = ?, "
 			"entry_time = ?, entry_fee_cents = ?, "
-			"entry_fee_remaining_cents = ? "
+			"entry_fee_remaining_cents = ?, "
+			"market_impact_cents = ?, limit_slippage_cents = ? "
 			"WHERE id = ? AND status = 'pending'"
 		),
 		params=(
@@ -901,6 +928,8 @@ def transition_pending_to_open(
 			entry_time,
 			entry_fee_cents,
 			entry_fee_cents,
+			market_impact_cents,
+			limit_slippage_cents,
 			row_id,
 		),
 		transition="pending->open",

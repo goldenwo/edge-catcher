@@ -87,6 +87,47 @@ def test_record_pending_reference_prices_default_none(conn):
 	assert row["entry_limit_price_cents"] is None
 
 
+def test_transition_computes_dual_slippage_from_refs(conn):
+	"""transition_pending_to_open computes BOTH metrics from the persisted
+	reference prices + the reconciled blended price (the single live compute
+	site — covers sync record_trade + WS-fill + reconcile callers)."""
+	from edge_catcher.engine.fill_math import signed_slippage_cents
+
+	rid = record_pending(
+		conn, ticker="TKR", series="KXTKR", strategy="s", side="yes",
+		intended_size=5, entry_price_cents=50, stop_loss_distance_cents=10,
+		client_order_id="coid-A", kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO, rejection_reason=None,
+		entry_best_price_cents=49, entry_limit_price_cents=52,
+	)
+	transition_pending_to_open(
+		conn, rid, kalshi_order_id="K1", fill_size=5, blended_entry_cents=51,
+		slippage_cents=-1, fill_pct=1.0, entry_time=_NOW_ISO, entry_fee_cents=3,
+	)
+	row = _row(conn, rid)
+	# blended 51 vs best 49 → +2 (worse than best); vs limit 52 → -1 (better than limit)
+	assert row["market_impact_cents"] == signed_slippage_cents(blended=51, limit=49, action="buy")
+	assert row["limit_slippage_cents"] == signed_slippage_cents(blended=51, limit=52, action="buy")
+
+
+def test_transition_dual_slippage_none_when_refs_null(conn):
+	"""A pending row with NULL reference prices (a row INSERTed before 0004, or a
+	NetworkError row that never had a clean book) → both metrics stay None."""
+	rid = record_pending(
+		conn, ticker="TKR", series="KXTKR", strategy="s", side="yes",
+		intended_size=5, entry_price_cents=50, stop_loss_distance_cents=10,
+		client_order_id="coid-B", kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO, rejection_reason=None,
+	)  # reference prices default None
+	transition_pending_to_open(
+		conn, rid, kalshi_order_id="K2", fill_size=5, blended_entry_cents=51,
+		slippage_cents=0, fill_pct=1.0, entry_time=_NOW_ISO, entry_fee_cents=3,
+	)
+	row = _row(conn, rid)
+	assert row["market_impact_cents"] is None
+	assert row["limit_slippage_cents"] is None
+
+
 def _seed_open(
 	conn: sqlite3.Connection,
 	*,
