@@ -500,7 +500,13 @@ def _g1_boot_spies(monkeypatch: pytest.MonkeyPatch):
 	async def _noop_async(*_a, **_kw):
 		return None
 
-	monkeypatch.setattr(_reconmod, "startup_reconcile", _noop_async)
+	async def _noop_startup_reconcile(*_a, **_kw):
+		# Honour the real ``-> StartupReconcileReport`` contract — the live boot
+		# now consumes the return for the reconcile-alert Discord fan-out; a
+		# clean report = no notification (poll_pending_rows_loop still -> None).
+		return _reconmod.StartupReconcileReport()
+
+	monkeypatch.setattr(_reconmod, "startup_reconcile", _noop_startup_reconcile)
 	monkeypatch.setattr(_reconmod, "poll_pending_rows_loop", _noop_async)
 
 	# Inert stub strategy on a synthetic series so step-2 discovery passes
