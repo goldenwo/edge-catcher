@@ -672,8 +672,12 @@ async def test_refresh_killwrite_failure_crashes_fail_loud(
 	# DB reconciliation runs (the F1 path under test is the refresh supervisor).
 	import edge_catcher.live.reconciliation as _reconmod
 
-	async def _noop_startup_reconcile(*_a: Any, **_kw: Any) -> None:
-		return None
+	async def _noop_startup_reconcile(*_a: Any, **_kw: Any) -> Any:
+		# Faithful to the real ``-> StartupReconcileReport`` contract: the live
+		# boot now consumes the return for the reconcile-alert Discord fan-out.
+		# A clean report yields no notification, leaving the F1 refresh-
+		# supervisor path under test unaffected.
+		return _reconmod.StartupReconcileReport()
 
 	async def _noop_poll_pending_rows_loop(*_a: Any, **_kw: Any) -> None:
 		return None

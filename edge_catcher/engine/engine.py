@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 if TYPE_CHECKING:
 	from edge_catcher.engine.risk import BankrollCache, Gate
 	from edge_catcher.engine.risk_context_provider import RiskContextProvider
+	from edge_catcher.live.reconciliation import StartupReconcileReport
+	from edge_catcher.notifications import Notification
 
 import httpx
 import websockets
@@ -314,6 +316,78 @@ def _handle_risk_event(event: Any) -> None:
 		"RISK EVENT routed to dedicated channel (kind=%s reason=%s "
 		"severity=%s)", kind, reason, severity,
 	)
+
+
+def _reconcile_alert_notification(
+	report: StartupReconcileReport,
+) -> Notification | None:
+	"""Build an operator notification from a ``startup_reconcile`` report, or
+	``None`` when the pass found nothing worth surfacing.
+
+	Fires on operator-attention alerts (orphan recoveries + lost_truth) OR
+	settled-recovered rows (real money that settled while the daemon was down,
+	now handed to the settlement poller). A fully clean reconcile returns
+	``None`` — no Discord noise on every boot. Severity is the WORST outcome:
+
+	* ``lost_truth > 0``                  → ``"error"`` (we believe we hold a
+	  position Kalshi has no record of — manual investigation, real money).
+	* else ``orphan_positions_recovered`` → ``"warn"`` (Kalshi held a position
+	  we had no row for; auto-recovered, operator confirms which strategy).
+	* else (settled-recovered only)       → ``"info"`` (benign hand-off).
+	"""
+	has_alerts = report.alerts > 0
+	if not has_alerts and report.settled_recovered <= 0:
+		return None
+	severity: Literal["info", "warn", "error"]
+	if report.lost_truth > 0:
+		severity = "error"
+	elif report.orphan_positions_recovered > 0:
+		severity = "warn"
+	else:
+		severity = "info"
+	# Local import keeps engine.py importable on paper-only deployments that
+	# lack the notifications extra (same convention as _handle_risk_event).
+	from edge_catcher.notifications import Notification  # noqa: PLC0415
+
+	suffix = " — manual investigation" if has_alerts else " (settled-recovered)"
+	title = f"edge-catcher reconcile: {report.alerts} alert(s){suffix}"
+	body = (
+		"Startup reconcile completed with operator-relevant outcomes.\n"
+		f"orphan_positions_recovered={report.orphan_positions_recovered}\n"
+		f"lost_truth={report.lost_truth}\n"
+		f"settled_recovered={report.settled_recovered}\n"
+		f"pending_resolved={report.pending_resolved}\n"
+		f"pending_post_hoc_rejected={report.pending_post_hoc_rejected}\n"
+		f"alerts={report.alerts}"
+	)
+	return Notification(title=title, body=body, severity=severity)
+
+
+def _emit_reconcile_report(
+	report: StartupReconcileReport,
+	channels: list,
+) -> None:
+	"""Fan a ``startup_reconcile`` report out to the operator's risk channel(s).
+
+	Glue around :func:`_reconcile_alert_notification`: build the notification
+	(``None`` → nothing to say, no send) and deliver it via the unified
+	``send`` (sync, matching ``_handle_risk_event``; safe at boot — the WS is
+	not subscribed yet, so a brief sync HTTP post blocks nothing). A delivery
+	failure is logged and SWALLOWED: the reconcile already succeeded, so a
+	notification error must never crash a live engine (``send`` is documented
+	never-raises; the guard is defence in depth)."""
+	note = _reconcile_alert_notification(report)
+	if note is None:
+		return
+	from edge_catcher.notifications import send  # noqa: PLC0415
+
+	try:
+		send(note, channels)
+	except Exception:
+		log.exception(
+			"reconcile-report notification send failed (non-fatal — reconcile "
+			"already succeeded; not crashing the live engine)"
+		)
 
 
 # ---------------------------------------------------------------------------
@@ -1410,7 +1484,7 @@ async def run_engine(
 				startup_reconcile,
 			)
 			try:
-				await startup_reconcile(
+				reconcile_report = await startup_reconcile(
 					live_runtime.kalshi_client,
 					live_runtime.db_conn,
 					live_runtime.gate._bankroll,
@@ -1426,6 +1500,15 @@ async def run_engine(
 					"WS loop (no order placed; fail-closed §2/§6)"
 				)
 				raise
+			# Reconcile succeeded — fan its operator-attention outcomes (orphan
+			# recoveries / lost_truth, plus settled-recovered as benign context)
+			# out to the DEDICATED risk channel via the same unified `send` the
+			# kill-trip path uses. The lost_truth/orphan WARNINGs also hit the
+			# logs via 4.A; this surfaces them to Discord so the operator sees a
+			# reconcile anomaly during the run without tailing the journal.
+			# Post-reconcile and NEVER fatal: nothing-to-say → no send, and a
+			# delivery failure is swallowed (the engine has already reconciled).
+			_emit_reconcile_report(reconcile_report, _risk_channels)
 
 		# 5. Call on_startup for each strategy
 		all_open = store.get_open_trades()
