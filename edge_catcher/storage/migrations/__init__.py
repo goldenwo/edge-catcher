@@ -137,7 +137,10 @@ def apply_migrations(
 		# is not idempotent — a re-run raises "duplicate column name". Tolerate
 		# exactly that (the columns already exist from the crashed prior run) and
 		# fall through to record the version so it never re-runs again. Any OTHER
-		# OperationalError (a genuine SQL error) still propagates.
+		# OperationalError (a genuine SQL error) still propagates. NOTE: this
+		# tolerance assumes an all-or-nothing additive body (independent nullable
+		# ADD COLUMNs, as 0004 is). Keep future ADD COLUMN migrations independent
+		# + nullable so a crash-window re-run is always safe.
 		try:
 			conn.executescript(sql)
 		except sqlite3.OperationalError as exc:

@@ -66,12 +66,12 @@ def test_apply_migrations_creates_expected_tables() -> None:
 
 
 def test_apply_migrations_records_versions() -> None:
-	"""live_schema_migrations has exactly 3 rows after applying shipped migrations."""
+	"""live_schema_migrations has exactly 4 rows after applying shipped migrations."""
 	conn = _open_mem()
 	apply_migrations(conn, _MIGRATIONS_DIR)
 
 	versions = _applied_versions(conn)
-	assert versions == [1, 2, 3], f"expected [1, 2, 3], got {versions}"
+	assert versions == [1, 2, 3, 4], f"expected [1, 2, 3, 4], got {versions}"
 
 
 def test_apply_migrations_idempotent() -> None:
@@ -80,9 +80,9 @@ def test_apply_migrations_idempotent() -> None:
 	first = apply_migrations(conn, _MIGRATIONS_DIR)
 	second = apply_migrations(conn, _MIGRATIONS_DIR)
 
-	assert first == [1, 2, 3], "first run should apply all shipped migrations"
+	assert first == [1, 2, 3, 4], "first run should apply all shipped migrations"
 	assert second == [], "second run should apply nothing"
-	assert _applied_versions(conn) == [1, 2, 3], "no duplicate rows"
+	assert _applied_versions(conn) == [1, 2, 3, 4], "no duplicate rows"
 
 
 def test_apply_migrations_missing_dir_raises() -> None:
@@ -176,8 +176,8 @@ def test_apply_migrations_does_not_collide_with_init_db(tmp_path: Path) -> None:
 	conn.row_factory = sqlite3.Row
 	try:
 		applied = apply_migrations(conn, _MIGRATIONS_DIR)
-		assert applied == [1, 2, 3], (
-			f"expected 0001+0002+0003 applied, got {applied} — collision likely"
+		assert applied == [1, 2, 3, 4], (
+			f"expected 0001+0002+0003+0004 applied, got {applied} — collision likely"
 		)
 		assert _table_exists(conn, "kill_switch"), (
 			"kill_switch table must exist; would not if 0001 was skipped"
