@@ -340,6 +340,60 @@ def test_live_exit_zero_fill_does_not_book_phantom_close(tmp_path: Path) -> None
 		store.close()
 
 
+class _TimeoutExecutor:
+	"""Live-style executor whose place() never returns within the cap — models
+	a Kalshi exit POST that hangs (no response before
+	_ENTRY_PLACEMENT_TIMEOUT_SECONDS). asyncio.wait_for cancels the sleep and
+	raises asyncio.TimeoutError into dispatch; the post-sleep line is
+	unreachable. Distinct from _ZeroFillExecutor (a prompt 0-fill rejection):
+	here the executor gives NO answer at all, driving dispatch's
+	``except asyncio.TimeoutError`` branch rather than the fill gate."""
+
+	async def place(self, req: OrderRequest) -> OrderResult:
+		await asyncio.sleep(30)
+		raise AssertionError("unreachable — wait_for must cancel this first")
+
+
+def test_live_exit_timeout_leaves_row_open(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Funds-at-risk / observability: when the exit place() exceeds the
+	_ENTRY_PLACEMENT_TIMEOUT_SECONDS cap, dispatch catches asyncio.TimeoutError,
+	leaves exit_result None, and SKIPS the close — the sale was never confirmed,
+	so the row stays ``open`` and the settlement poller books the true outcome
+	(exit_reason='settlement'). Pins the OTHER non-fill branch (the 0-fill
+	rejection is covered by test_live_exit_zero_fill_does_not_book_phantom_close);
+	pre-fix, a timed-out exit fell through to the unconditional store.exit_trade
+	and booked a phantom close at the bid. The cap is monkeypatched low (the real
+	60s would stall the suite) and the executor never returns in time, so
+	asyncio.wait_for raises a genuine TimeoutError through the real path."""
+	monkeypatch.setattr(_dispatch_mod, "_ENTRY_PLACEMENT_TIMEOUT_SECONDS", 0.05)
+	store = SQLiteTradeStore(tmp_path / "live_trades.db")
+	try:
+		tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
+		conn = store._conn
+		assert _row(conn, tid)["status"] == "open"
+
+		asyncio.run(
+			_handle_exit(
+				_exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
+				executor=_TimeoutExecutor(), config={},
+			)
+		)
+
+		row = _row(conn, tid)
+		assert row["status"] == "open", (
+			"an exit whose place() timed out is NOT a confirmed sale — the row "
+			"must stay open for the settlement poller, NOT be booked as a close"
+		)
+		assert row["pnl_cents"] is None, "no confirmed fill → no realized P&L"
+		assert row["exit_reason"] is None
+		assert row["exit_price_cents"] is None
+		assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	finally:
+		store.close()
+
+
 # ===========================================================================
 # (1) LIVE exit — mode-agnostic + B-CAS-correct + idempotent vs B's async
 # ===========================================================================

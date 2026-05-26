@@ -1108,16 +1108,17 @@ async def _handle_exit(
 		except asyncio.TimeoutError:
 			# The exit POST may still have reached Kalshi (live) — we don't
 			# know, so we don't lie: leave exit_result None so the close below
-			# is SKIPPED and the row stays open. B's reconciler resolves an
-			# in-flight exit by client_order_id / the exit_pending TTL path,
-			# and the settlement poller books the true outcome on expiry.
+			# is SKIPPED and the row stays OPEN. dispatch does NOT set the row
+			# exit_pending here, so the reconciler (which scans pending/
+			# exit_pending) does not own this — the settlement poller books the
+			# true outcome on the open row (exit_reason='settlement') at expiry.
 			# Paper's PaperExecutor.place cannot time out (pure CPU) so this is
 			# a live-only safety net, not a paper-visible path (G-parity safe).
 			exit_result = None
 			log.warning(
 				"exit executor.place exceeded %ds for %s %s (coid=%s) — close "
-				"SKIPPED (no confirmed fill); B's reconciler / exit_pending TTL "
-				"/ settlement poller owns recovery",
+				"SKIPPED (no confirmed fill); row left open, settlement poller "
+				"owns recovery",
 				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy,
 				signal.ticker, exit_req.client_order_id,
 			)
