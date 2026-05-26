@@ -39,6 +39,7 @@ from edge_catcher.engine.execution import (
 	_series_of,
 	build_entry_order,
 	build_exit_order,
+	entry_spread_too_wide,
 	validate_exec_cfg,
 )
 from edge_catcher.engine.strategy_base import ExitKind, Signal
@@ -838,3 +839,27 @@ def test_validate_exec_cfg_string_spread_buffer_raises_type_error() -> None:
 			"exit_slippage_cents": {"take_profit": 2, "stop_loss": 10, "time_exit": 5},
 			"entry_spread_stop_buffer_cents": "2",
 		})
+
+
+# --------------------------------------------------------------------------
+# Test #26 — entry_spread_too_wide predicate
+# --------------------------------------------------------------------------
+
+
+def test_entry_spread_too_wide_at_and_above_stop_skips() -> None:
+	"""spread >= stop - buffer is the instant-stop-out condition → skip (True)."""
+	assert entry_spread_too_wide(8, 5, 0) is True
+	assert entry_spread_too_wide(5, 5, 0) is True
+	assert entry_spread_too_wide(13, 5, 0) is True
+
+
+def test_entry_spread_too_wide_below_stop_allows() -> None:
+	"""spread < stop - buffer → allow (False)."""
+	assert entry_spread_too_wide(4, 5, 0) is False
+	assert entry_spread_too_wide(0, 5, 0) is False
+
+
+def test_entry_spread_too_wide_buffer_tightens_the_gate() -> None:
+	"""A non-zero buffer lowers the threshold. Pins the `stop - buffer` direction."""
+	assert entry_spread_too_wide(6, 8, 0) is False
+	assert entry_spread_too_wide(6, 8, 2) is True

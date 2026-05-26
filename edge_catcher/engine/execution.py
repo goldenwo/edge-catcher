@@ -37,7 +37,7 @@ from edge_catcher.engine.strategy_base import ExitKind, Signal
 # alongside the builders that consume it. The canonical definition lives in
 # engine/executor.py — see module docstring above.
 __all__ = ["ENTRY_TIF", "EXIT_TIF", "ExecCfg", "OpenPosition", "build_entry_order",
-           "build_exit_order", "validate_exec_cfg"]
+           "build_exit_order", "entry_spread_too_wide", "validate_exec_cfg"]
 
 # Kalshi time-in-force value used for both entries and exits in Phase 1.
 # IOC = "fill at the limit immediately and cancel any unfilled remainder";
@@ -214,6 +214,15 @@ def build_entry_order(
 		client_order_id=_make_client_order_id(sig.strategy, sig.ticker, now),
 		action="buy",
 	)
+
+
+def entry_spread_too_wide(spread_cents: int, protective_stop_cents: int, buffer_cents: int) -> bool:
+	"""True when the bid-ask spread is wide enough to (near-)trip the protective
+	stop on a taker fill: an IOC entry books at the ask but marks at the bid, so
+	it starts -(spread) underwater and stops out the instant spread >= stop.
+	``buffer_cents`` reserves headroom below the stop (0 = skip only when the
+	spread alone reaches the stop)."""
+	return spread_cents >= protective_stop_cents - buffer_cents
 
 
 def build_exit_order(
