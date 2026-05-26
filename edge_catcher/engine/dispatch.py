@@ -357,6 +357,7 @@ async def process_tick(
 				await _handle_signal(
 					signal, ctx, store, config, executor, strategy.emoji,
 					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+					protective_stop_cents=getattr(strategy, "default_params", {}).get("stop_loss"),
 				)
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
@@ -445,7 +446,7 @@ def _consult_exit_gate(
 	return False
 
 
-def _enrich_live_entry_signal(signal: Signal, ctx: TickContext) -> None:
+def _enrich_live_entry_signal(signal: Signal, ctx: TickContext, protective_stop_cents: int | None = None) -> None:
 	"""Populate the execution fields the LIVE entry path needs but strategies
 	don't emit.
 
@@ -474,6 +475,8 @@ def _enrich_live_entry_signal(signal: Signal, ctx: TickContext) -> None:
 		signal.entry_price_cents = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 	if signal.stop_loss_distance_cents is None:
 		signal.stop_loss_distance_cents = signal.entry_price_cents
+	if signal.protective_stop_cents is None:
+		signal.protective_stop_cents = protective_stop_cents
 
 
 async def _handle_signal(
@@ -487,6 +490,7 @@ async def _handle_signal(
 	now: datetime,
 	risk: Gate | None = None,
 	risk_ctx_provider: RiskContextProvider | None = None,
+	protective_stop_cents: int | None = None,
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
@@ -546,7 +550,7 @@ async def _handle_signal(
 			# AND build_entry_order consume them. Paper derives the price itself
 			# in _handle_enter and runs no gate, so this is live-only and the
 			# paper path stays byte-exact (G-parity).
-			_enrich_live_entry_signal(signal, ctx)
+			_enrich_live_entry_signal(signal, ctx, protective_stop_cents)
 			# _consult_entry_gate holds the isinstance(Reject) check so this
 			# function stays free of it (structural AST guard in test suite).
 			# KillSwitchTripFailed propagates untouched — do NOT catch here.

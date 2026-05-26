@@ -18,7 +18,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from edge_catcher.engine.dispatch import _handle_enter, _handle_signal, _inc_gate_metric
+from edge_catcher.engine.dispatch import (
+	_enrich_live_entry_signal,
+	_handle_enter,
+	_handle_signal,
+	_inc_gate_metric,
+	process_tick,
+)
 from edge_catcher.engine.execution import ExecCfg
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.engine.metrics import Metrics
@@ -30,7 +36,7 @@ from edge_catcher.engine.risk import (
 	RiskContext,
 	SizingBreakdown,
 )
-from edge_catcher.engine.strategy_base import Signal
+from edge_catcher.engine.strategy_base import Signal, Strategy
 
 
 def _bd() -> SizingBreakdown:
@@ -1199,3 +1205,87 @@ async def test_handle_enter_live_skips_wide_spread_no_side() -> None:
 	assert store.intent_kwargs == {}
 	assert placed == []
 	assert metrics.snapshot()["entries_skipped_wide_spread"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Signal.protective_stop_cents threading (process_tick → _handle_signal
+# → _enrich_live_entry_signal). The gate's real-stop input (Task 3 consumes it).
+# ---------------------------------------------------------------------------
+
+
+def _bare_signal() -> Signal:
+	return Signal(action="enter", ticker=_TICKER, side="yes", series=_SERIES,
+				  strategy=_STRATEGY, reason="test")
+
+
+def test_enrich_sets_protective_stop_from_param() -> None:
+	"""_enrich_live_entry_signal copies the passed stop onto the signal (live-only)."""
+	sig = _bare_signal()
+	_enrich_live_entry_signal(sig, _ctx(yes_ask=42, yes_bid=40), protective_stop_cents=5)
+	assert sig.protective_stop_cents == 5
+
+
+def test_enrich_leaves_protective_stop_none_when_no_stop() -> None:
+	"""No stop passed → field stays None → gate will be inert."""
+	sig = _bare_signal()
+	_enrich_live_entry_signal(sig, _ctx(yes_ask=42, yes_bid=40), protective_stop_cents=None)
+	assert sig.protective_stop_cents is None
+
+
+class _StopFixtureStrategy(Strategy):
+	"""Fixture: declares stop_loss as a CLASS default_params default, NOT via config —
+	so a config-dict read would miss it. on_tick emits one enter signal."""
+	name = "stop-fixture"
+	supported_series = ["KXTEST"]
+	default_params = {"stop_loss": 5}
+
+	def on_tick(self, ctx):
+		return [Signal(action="enter", ticker="KXTEST-1", side="yes", series="KXTEST",
+					   strategy="stop-fixture", reason="t")]
+
+
+@pytest.mark.asyncio
+async def test_process_tick_threads_strategy_stop_to_handle_signal(monkeypatch) -> None:
+	"""process_tick must pass the PRODUCING strategy's default_params['stop_loss']
+	(post-merge authoritative value, NOT the config dict) to _handle_signal. config
+	here has NO stop_loss → asserting 5 proves it comes from the strategy object."""
+	captured: dict = {}
+
+	async def _fake_handle_signal(signal, ctx, store, config, executor, bullet,
+								  *, now, risk=None, risk_ctx_provider=None,
+								  protective_stop_cents=None):
+		captured["protective_stop_cents"] = protective_stop_cents
+
+	monkeypatch.setattr("edge_catcher.engine.dispatch._handle_signal", _fake_handle_signal)
+
+	await process_tick(
+		_ctx(yes_ask=42, yes_bid=40), [_StopFixtureStrategy()], _CapturingStore(),
+		{"strategies": {}}, MagicMock(),
+		now=_NOW_C2, risk=MagicMock(), risk_ctx_provider=MagicMock(),
+	)
+
+	assert captured["protective_stop_cents"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_tick_passes_none_when_strategy_has_no_stop(monkeypatch) -> None:
+	"""A strategy with no stop_loss in default_params → process_tick passes None."""
+	captured: dict = {}
+
+	async def _fake_handle_signal(signal, ctx, store, config, executor, bullet,
+								  *, now, risk=None, risk_ctx_provider=None,
+								  protective_stop_cents="UNSET"):
+		captured["protective_stop_cents"] = protective_stop_cents
+
+	monkeypatch.setattr("edge_catcher.engine.dispatch._handle_signal", _fake_handle_signal)
+
+	class _NoStop(_StopFixtureStrategy):
+		default_params: dict = {}
+
+	await process_tick(
+		_ctx(yes_ask=42, yes_bid=40), [_NoStop()], _CapturingStore(),
+		{"strategies": {}}, MagicMock(),
+		now=_NOW_C2, risk=MagicMock(), risk_ctx_provider=MagicMock(),
+	)
+
+	assert captured["protective_stop_cents"] is None
