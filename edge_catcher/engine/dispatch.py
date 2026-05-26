@@ -1044,6 +1044,13 @@ async def _handle_exit(
 	  property; B/Kalshi-truth is the authority + reconciler is the L3
 	  backstop). The store/Protocol absorbs the live-vs-paper difference; this
 	  function is mode-AGNOSTIC (§1).
+
+	**F-PENDING REALITY (engine.py ~1566):** B's account-scope fill WS pump
+	(``on_fill_event`` / ``on_order_status_event``) is sub-project F and is
+	UNWIRED today. Until F ships, the LIVE close is owned by the sync
+	``store.exit_trade`` here + the ``_settlement_poller`` + the
+	pending/exit_pending reconciler — NOT ``on_fill_event``. The "races B's
+	async path / B is the authority" framing above is the F-shipped END-STATE.
 	"""
 	if signal.trade_id is None:
 		log.warning(
@@ -1097,8 +1104,9 @@ async def _handle_exit(
 		# Place the exit UNCONDITIONALLY through the executor (the §1 seam).
 		# PaperExecutor → synchronous deterministic ACK (not consumed here —
 		# the paper close is store.exit_trade below, byte-exact). LiveExecutor
-		# → real IOC sell; B's async on_fill_event/reconciler owns the
-		# authoritative close. Hard-capped exactly like the entry place() so a
+		# → real IOC sell; the live close is the sync store.exit_trade below
+		# (on_fill_event is F-scope/unwired — see docstring). Hard-capped
+		# exactly like the entry place() so a
 		# pathological client retry-loop cannot wedge the WS message loop.
 		try:
 			exit_result = await asyncio.wait_for(

@@ -365,8 +365,9 @@ class PaperExecutor:
 		# request's own size + limit so it can never be misrouted into the
 		# entry `record_trade`/`record_pending` arms (those are reached only
 		# from `_handle_enter`, never `_handle_exit`). For LIVE, LiveExecutor
-		# (a different class — §1) instead places a real IOC sell and B's
-		# async on_fill_event/reconciler owns the authoritative close; this
+		# (a different class — §1) instead places a real IOC sell; the live
+		# close is owned by the sync store.exit_trade + settlement poller +
+		# reconciler today (on_fill_event is F-scope, unwired); this
 		# branch is paper-only by construction (PaperExecutor is wired only in
 		# paper mode at the composition root).
 		if req.action == "sell":
