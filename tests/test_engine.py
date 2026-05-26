@@ -1164,8 +1164,9 @@ async def test_summary_logger_reports_wide_spread_skips(caplog) -> None:
 		if calls["n"] >= 2:
 			raise asyncio.CancelledError  # break the infinite loop after one log
 
-	with patch("edge_catcher.engine.engine.asyncio.sleep", _fake_sleep), caplog.at_level("INFO", logger="edge_catcher.engine.engine"):
-		with pytest.raises(asyncio.CancelledError):
-			await _summary_logger(store, metrics, interval=1)
+	with patch("edge_catcher.engine.engine.asyncio.sleep", _fake_sleep):
+		with caplog.at_level("INFO", logger="edge_catcher.engine.engine"):
+			with pytest.raises(asyncio.CancelledError):
+				await _summary_logger(store, metrics, interval=1)
 
 	assert "wide_spread=1" in caplog.text
