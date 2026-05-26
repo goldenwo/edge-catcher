@@ -394,6 +394,76 @@ def test_live_exit_timeout_leaves_row_open(
 		store.close()
 
 
+class _PartialFillExecutor:
+	"""Live-style executor whose IOC exit sell fills only M of N (a thin
+	book with some bid at the limit, but not enough depth for the full size).
+	Mirrors LiveExecutor's partial branch: status='filled', filled_size=M
+	(< intended), blended_entry_cents>0. A partial is B's async on_fill_event's
+	job (record_partial_exit split, keyed on the Kalshi order id); dispatch's
+	Protocol exit_trade is full-close-only (store.py: 'never via this Protocol
+	method')."""
+
+	def __init__(self, *, filled: int, fill_price: int) -> None:
+		self._filled = filled
+		self._fill_price = fill_price
+
+	async def place(self, req: OrderRequest) -> OrderResult:
+		return OrderResult(
+			status="filled",
+			intended_size=req.size_contracts,
+			filled_size=self._filled,
+			blended_entry_cents=self._fill_price,
+			fill_pct=self._filled / req.size_contracts,
+			slippage_cents=0,
+			rejection_reason=None,
+			order_id="kx-exit-partial",
+		)
+
+
+def test_live_exit_partial_fill_does_not_book_full_close(tmp_path: Path) -> None:
+	"""Funds-at-risk / observability: an IOC exit that fills only M of N must
+	NOT be booked as a FULL close at the bid — that fabricates a sale of the
+	unsold N-M and, once the row is terminal, B's settlement CAS no-ops so the
+	remainder's true outcome is lost. The Protocol exit_trade is full-close-only
+	(no closed_size / kalshi_exit_order_id); a PARTIAL is B's async
+	on_fill_event's job (it splits via record_partial_exit, keyed on the Kalshi
+	order id). So dispatch must step aside on a partial: the row stays ``open``
+	(unchanged), and B's async path + the settlement poller book the truth.
+	Drives the REAL dispatch._handle_exit against the REAL live SQLiteTradeStore
+	with a live-style partial-fill executor (1 of 2)."""
+	store = SQLiteTradeStore(tmp_path / "live_trades.db")
+	try:
+		tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
+		conn = store._conn
+		assert _row(conn, tid)["status"] == "open"
+
+		# IOC sells 1 of the 2 contracts into ctx.no_bid=37 → partial fill.
+		asyncio.run(
+			_handle_exit(
+				_exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
+				executor=_PartialFillExecutor(filled=1, fill_price=37),
+				config={},
+			)
+		)
+
+		row = _row(conn, tid)
+		assert row["status"] == "open", (
+			"a PARTIAL exit fill (1 of 2) was booked as a full close — dispatch "
+			"must step aside so B's on_fill_event splits it; the row stays open"
+		)
+		assert row["fill_size"] == 2, (
+			"dispatch must NOT decrement fill_size on a partial — that is B's "
+			"record_partial_exit job (the split child + parent decrement)"
+		)
+		assert row["pnl_cents"] is None, "no full close → no realized P&L booked"
+		assert row["exit_reason"] is None
+		assert row["exit_price_cents"] is None
+		# Exactly one row — dispatch does NOT split (no child); B's async does.
+		assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	finally:
+		store.close()
+
+
 # ===========================================================================
 # (1) LIVE exit — mode-agnostic + B-CAS-correct + idempotent vs B's async
 # ===========================================================================
