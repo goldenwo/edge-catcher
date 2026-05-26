@@ -72,6 +72,7 @@ import pytest
 from edge_catcher.engine import dispatch as _dispatch_mod
 from edge_catcher.engine import engine as _engine_mod
 from edge_catcher.engine.dispatch import _handle_exit
+from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.strategy_base import Signal
@@ -268,6 +269,129 @@ def _seed_paper_open_row(
 		slippage_cents=0,
 		now=_NOW,
 	)
+
+
+# ---------------------------------------------------------------------------
+# Regression — a live exit whose IOC sell does NOT fill must NOT book a phantom
+# close. On a thin book the IOC sell finds no resting bid at the limit and gets
+# 0-fill; the position was never sold and rides to settlement. The engine
+# previously DISCARDED the executor result and booked store.exit_trade at the
+# ctx bid regardless, fabricating a stop/TP exit (exit_reason='ws_exit_fill')
+# for a sale that never happened. Confirmed on real money 2026-05-26: the live
+# db read -$8.53 (phantom closes) vs Kalshi settlements -$3.53; several true
+# settlement wins were recorded as small stop-losses.
+# ---------------------------------------------------------------------------
+
+
+class _ZeroFillExecutor:
+	"""Live-style executor whose IOC sell finds no liquidity at the limit and
+	returns a 0-fill rejection — byte-identical to
+	``LiveExecutor._translate_order``'s ``ioc_zero_fill`` OrderResult
+	(executors/live.py:179-189). Used in place of PaperExecutor (which always
+	returns a full fill) to drive the real live no-fill path through dispatch."""
+
+	async def place(self, req: OrderRequest) -> OrderResult:
+		return OrderResult(
+			status="rejected",
+			intended_size=req.size_contracts,
+			filled_size=0,
+			blended_entry_cents=0,
+			fill_pct=0.0,
+			slippage_cents=0,
+			rejection_reason="ioc_zero_fill",
+			order_id=None,
+		)
+
+
+def test_live_exit_zero_fill_does_not_book_phantom_close(tmp_path: Path) -> None:
+	"""Funds-at-risk / observability: when the live IOC exit sell gets 0 fill,
+	the position was NOT sold — it rides to settlement, where the settlement
+	poller books the true outcome (exit_reason='settlement'). The row MUST stay
+	``open``; booking a close here fabricates a stop/TP at the bid that never
+	executed — the 2026-05-26 phantom-exit bug (db -$8.53 vs true Kalshi
+	-$3.53). Drives the REAL ``dispatch._handle_exit`` against the REAL live
+	``SQLiteTradeStore`` with a live-style 0-fill executor seam."""
+	store = SQLiteTradeStore(tmp_path / "live_trades.db")
+	try:
+		tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
+		conn = store._conn
+		assert _row(conn, tid)["status"] == "open"
+
+		# No-side row → would sell into ctx.no_bid=37 (the TP target). The IOC
+		# finds no buyer at 37 → 0-fill. The close MUST be skipped.
+		asyncio.run(
+			_handle_exit(
+				_exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
+				executor=_ZeroFillExecutor(), config={},
+			)
+		)
+
+		row = _row(conn, tid)
+		assert row["status"] == "open", (
+			"a 0-fill IOC exit did not sell the position — the row must stay "
+			"open for settlement, NOT be booked as a phantom ws_exit_fill close"
+		)
+		assert row["pnl_cents"] is None, "no fill → no realized P&L may be booked"
+		assert row["exit_reason"] is None
+		assert row["exit_price_cents"] is None
+		# Exactly one row, untouched (no split, no terminal transition).
+		assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	finally:
+		store.close()
+
+
+class _TimeoutExecutor:
+	"""Live-style executor whose place() never returns within the cap — models
+	a Kalshi exit POST that hangs (no response before
+	_ENTRY_PLACEMENT_TIMEOUT_SECONDS). asyncio.wait_for cancels the sleep and
+	raises asyncio.TimeoutError into dispatch; the post-sleep line is
+	unreachable. Distinct from _ZeroFillExecutor (a prompt 0-fill rejection):
+	here the executor gives NO answer at all, driving dispatch's
+	``except asyncio.TimeoutError`` branch rather than the fill gate."""
+
+	async def place(self, req: OrderRequest) -> OrderResult:
+		await asyncio.sleep(30)
+		raise AssertionError("unreachable — wait_for must cancel this first")
+
+
+def test_live_exit_timeout_leaves_row_open(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""Funds-at-risk / observability: when the exit place() exceeds the
+	_ENTRY_PLACEMENT_TIMEOUT_SECONDS cap, dispatch catches asyncio.TimeoutError,
+	leaves exit_result None, and SKIPS the close — the sale was never confirmed,
+	so the row stays ``open`` and the settlement poller books the true outcome
+	(exit_reason='settlement'). Pins the OTHER non-fill branch (the 0-fill
+	rejection is covered by test_live_exit_zero_fill_does_not_book_phantom_close);
+	pre-fix, a timed-out exit fell through to the unconditional store.exit_trade
+	and booked a phantom close at the bid. The cap is monkeypatched low (the real
+	60s would stall the suite) and the executor never returns in time, so
+	asyncio.wait_for raises a genuine TimeoutError through the real path."""
+	monkeypatch.setattr(_dispatch_mod, "_ENTRY_PLACEMENT_TIMEOUT_SECONDS", 0.05)
+	store = SQLiteTradeStore(tmp_path / "live_trades.db")
+	try:
+		tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
+		conn = store._conn
+		assert _row(conn, tid)["status"] == "open"
+
+		asyncio.run(
+			_handle_exit(
+				_exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
+				executor=_TimeoutExecutor(), config={},
+			)
+		)
+
+		row = _row(conn, tid)
+		assert row["status"] == "open", (
+			"an exit whose place() timed out is NOT a confirmed sale — the row "
+			"must stay open for the settlement poller, NOT be booked as a close"
+		)
+		assert row["pnl_cents"] is None, "no confirmed fill → no realized P&L"
+		assert row["exit_reason"] is None
+		assert row["exit_price_cents"] is None
+		assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	finally:
+		store.close()
 
 
 # ===========================================================================

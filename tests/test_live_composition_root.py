@@ -813,14 +813,19 @@ def test_paper_exit_idempotent_double_close_still_noop(tmp_path: Path) -> None:
 def test_live_exit_places_exit_via_executor_and_b_async_owns_close(
 	tmp_path: Path,
 ) -> None:
-	"""Failure mode prevented (SC-D3 funds-at-risk): in live mode a strategy/
-	TP-SL exit does NOT place an exit order via the executor — the real-money
-	position is never closed on Kalshi (only the local idempotent backstop
-	runs). Asserts ``_handle_exit`` calls ``executor.place(exit_req)`` with an
-	exit-shaped (action='sell') OrderRequest for the position, AND the
-	idempotent C5 ``store.exit_trade`` backstop still runs (the
-	non-authoritative race-safe close — B's async on_fill_event/reconciler is
-	the AUTHORITY, started by Obl 1 in live mode)."""
+	"""Failure mode prevented (SC-D3 funds-at-risk + the 2026-05-26 phantom-exit
+	bug): (a) in live mode a strategy/TP-SL exit MUST place an exit order via
+	the executor (else the real-money position is never closed on Kalshi); and
+	(b) when that exit IOC does NOT fill — pending / 0-fill, i.e. no resting bid
+	at the limit (the common thin-book case) — the sync ``store.exit_trade``
+	backstop MUST NOT fabricate a close: the row stays ``open`` so B's async
+	on_fill_event / reconciler / settlement poller books the true outcome.
+	Pre-2026-05-26 the backstop booked a phantom 'won' at the bid regardless of
+	fill — the bug that made the live db read -$8.53 vs Kalshi settlements
+	-$3.53 (settlement wins recorded as small stop-losses). ``_handle_exit`` now
+	gates the close on a venue-confirmed fill (the executor IS the §1 seam:
+	PaperExecutor returns a full fill → byte-exact close; LiveExecutor reports
+	the real fill, or a non-fill that leaves the row open)."""
 	from edge_catcher.live.store import SQLiteTradeStore
 	from edge_catcher.live.state import connect_live_trades_db  # noqa: F401
 
@@ -858,9 +863,10 @@ def test_live_exit_places_exit_via_executor_and_b_async_owns_close(
 
 		async def _place(req: OrderRequest):
 			placed.append(req)
-			# LiveExecutor returns IOC; the AUTHORITATIVE close is B's async
-			# on_fill_event/reconciler. Return a benign pending so dispatch
-			# does not treat it as an entry fill.
+			# The live IOC exit found no resting bid at the limit → no fill.
+			# LiveExecutor returns pending/0-fill here; the close must be
+			# SKIPPED (the position rides to settlement / B's async path),
+			# NOT booked as a phantom 'won' at the bid.
 			from edge_catcher.engine.executor import OrderResult
 
 			return OrderResult(
@@ -901,21 +907,23 @@ def test_live_exit_places_exit_via_executor_and_b_async_owns_close(
 			"the exit order closes the full open position size"
 		)
 
-		# (b) The idempotent C5 store.exit_trade backstop still ran (the
-		# non-authoritative race-safe close — B/Kalshi-truth is authority).
+		# (b) The exit IOC returned pending/0-fill — the position was NOT sold,
+		# so the sync store.exit_trade backstop must NOT fabricate a close. The
+		# row stays OPEN; B's async on_fill_event / reconciler / settlement
+		# poller is the authority for the true outcome. (Pre-fix this booked a
+		# phantom 'won' at the bid — the 2026-05-26 phantom-exit bug.)
 		conn = store._conn
 		conn.row_factory = __import__("sqlite3").Row
 		row = conn.execute(
 			"SELECT status, exit_reason FROM live_trades WHERE id=?", (tid,)
 		).fetchone()
 		conn.row_factory = None
-		assert row["status"] == "won", (
-			"the C5 idempotent store.exit_trade backstop must still book the "
-			"close (race-safe non-authoritative; B's async path is authority)"
+		assert row["status"] == "open", (
+			"a pending / no-fill exit must NOT be booked as a close — the row "
+			"stays open; B's async path / settlement is the authority"
 		)
-		assert row["exit_reason"] == "ws_exit_fill", (
-			"C5 store.exit_trade routes to B's record_close CAS "
-			"(exit_reason='ws_exit_fill') — the idempotent backstop"
+		assert row["exit_reason"] is None, (
+			"no confirmed fill ⇒ no close ⇒ no exit_reason written"
 		)
 	finally:
 		store.close()

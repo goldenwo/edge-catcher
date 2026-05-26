@@ -1065,6 +1065,9 @@ async def _handle_exit(
 	pos_row = store.get_trade_by_id(signal.trade_id)
 	exit_size = int((pos_row or {}).get("fill_size") or 0)
 
+	# Captured from the exit place() so the close below is booked ONLY on a
+	# venue-confirmed fill. None ⇒ no place attempted (no position) or timeout.
+	exit_result: OrderResult | None = None
 	if exit_size > 0:
 		# Build the exit OrderRequest for the open position (action="sell";
 		# limit = the bid we sell into, the same price the paper close books
@@ -1098,33 +1101,59 @@ async def _handle_exit(
 		# authoritative close. Hard-capped exactly like the entry place() so a
 		# pathological client retry-loop cannot wedge the WS message loop.
 		try:
-			await asyncio.wait_for(
+			exit_result = await asyncio.wait_for(
 				executor.place(exit_req),
 				timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
 			)
 		except asyncio.TimeoutError:
 			# The exit POST may still have reached Kalshi (live) — we don't
-			# know, so we don't lie. B's reconciler resolves an in-flight
-			# exit by client_order_id / the exit_pending TTL path; the
-			# idempotent store.exit_trade backstop below still runs. Paper's
-			# PaperExecutor.place cannot time out (pure CPU) so this is a
-			# live-only safety net, not a paper-visible path (G-parity safe).
+			# know, so we don't lie: leave exit_result None so the close below
+			# is SKIPPED and the row stays OPEN. dispatch does NOT set the row
+			# exit_pending here, so the reconciler (which scans pending/
+			# exit_pending) does not own this — the settlement poller books the
+			# true outcome on the open row (exit_reason='settlement') at expiry.
+			# Paper's PaperExecutor.place cannot time out (pure CPU) so this is
+			# a live-only safety net, not a paper-visible path (G-parity safe).
+			exit_result = None
 			log.warning(
-				"exit executor.place exceeded %ds for %s %s (coid=%s) — "
-				"B's reconciler / exit_pending TTL owns recovery; the "
-				"idempotent store.exit_trade backstop still applies",
+				"exit executor.place exceeded %ds for %s %s (coid=%s) — close "
+				"SKIPPED (no confirmed fill); row left open, settlement poller "
+				"owns recovery",
 				_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy,
 				signal.ticker, exit_req.client_order_id,
 			)
 
-	# Mode-agnostic close (§1). PAPER: this IS the authoritative close
-	# (byte-EXACT vs pre-E3 — paper TradeStore.exit_trade does the
-	# won/lost/scratch + pnl + fee arithmetic synchronously, idempotent on
-	# WHERE status='open'). LIVE: C5's IDEMPOTENT non-authoritative backstop
-	# (store.exit_trade → record_close CAS; B's async on_fill_event /
-	# reconciler is the authority — whichever lands the CAS first wins, the
-	# other no-ops, NEVER raises — the §4.2-sound benign-lost-CAS property).
-	# dispatch does NOT branch on mode — the store/Protocol absorbs it.
+	# Book the close ONLY on a venue-confirmed fill (the §1 seam: the executor
+	# reports what actually traded). PaperExecutor returns a full fill at the
+	# bid → byte-EXACT close (mandatory G-parity). LiveExecutor returns the
+	# REAL fill, or a 0-fill 'rejected' / unknown 'pending' when the IOC sell
+	# finds no resting bid at the limit (thin book — common). A non-fill means
+	# the position was NOT sold: leave the row OPEN so the settlement poller
+	# books the true outcome (exit_reason='settlement'). Booking on a non-fill
+	# fabricates a stop/TP that never executed — the 2026-05-26 phantom-exit
+	# bug (live db read -$8.53 of phantom closes vs Kalshi settlements -$3.53;
+	# true settlement wins were recorded as small stop-losses). NOTE: a partial
+	# fill still books the FULL close at the bid (unchanged from pre-fix); the
+	# unsold remainder is a known, separate follow-up.
+	if not (
+		exit_result is not None
+		and exit_result.status == "filled"
+		and exit_result.filled_size > 0
+	):
+		log.info(
+			"EXIT not booked for %s %s (trade_id=%s): executor reported no "
+			"confirmed fill (status=%s) — row left open for settlement",
+			signal.strategy, signal.ticker, signal.trade_id,
+			exit_result.status if exit_result is not None else "timeout/none",
+		)
+		return
+
+	# Mode-agnostic close (§1). PAPER: authoritative close (byte-EXACT — paper
+	# TradeStore.exit_trade does won/lost/scratch + pnl + fee synchronously,
+	# idempotent on WHERE status='open'). LIVE: C5's idempotent record_close
+	# CAS backstop racing B's async path (whichever lands first wins, the other
+	# no-ops, NEVER raises — the §4.2-sound benign-lost-CAS property). dispatch
+	# does NOT branch on mode — the store/Protocol absorbs it.
 	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)
