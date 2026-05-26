@@ -25,7 +25,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from edge_catcher.engine.execution import _make_client_order_id, build_entry_order
+from edge_catcher.engine.execution import _make_client_order_id, build_entry_order, entry_spread_too_wide
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
 	MarketState,
@@ -615,23 +615,22 @@ async def _handle_enter(
 	if metrics is None:
 		metrics = Metrics()
 
-	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate). debut-fade
-	# is an IOC taker: it buys the ask and marks the bid, so a fill starts
-	# -(spread) underwater; spread >= stop stops the position out on entry (the
-	# proven cause of the 2026-05-25 cutover loss). Skip when the spread is wide
-	# enough to (near-)trip the stop. LIVE-ONLY: the `allowed_size is not None`
-	# guard keeps the paper/replay path byte-exact (off the G-parity paper
-	# path). Placed before `entries_attempted`, mirroring the degenerate-price
-	# skip above — a skip is not an attempt.
-	if allowed_size is not None and signal.stop_loss_distance_cents is not None:
+	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate v2). debut-fade
+	# is an IOC taker: buys ask, marks bid, so a fill starts -(spread) underwater;
+	# spread >= the strategy's stop stops it out on entry (the proven cause of the
+	# 2026-05-25 cutover loss). `protective_stop_cents` carries the strategy's real
+	# stop (NOT stop_loss_distance_cents, which is the sizing basis). LIVE-ONLY: the
+	# `allowed_size is not None` guard keeps paper/replay byte-exact. Skip is before
+	# `entries_attempted` (a skip is not an attempt), mirroring the degenerate guard.
+	if allowed_size is not None and signal.protective_stop_cents is not None:
 		exec_cfg = config["_exec_cfg"]
 		spread = ctx.yes_ask - ctx.yes_bid
-		threshold = signal.stop_loss_distance_cents - exec_cfg.entry_spread_stop_buffer_cents
-		if spread >= threshold:
+		if entry_spread_too_wide(spread, signal.protective_stop_cents,
+		                         exec_cfg.entry_spread_stop_buffer_cents):
 			metrics.inc("entries_skipped_wide_spread")
 			log.info(
 				"Skip: wide spread %dc >= stop %dc - buffer %dc for %s %s",
-				spread, signal.stop_loss_distance_cents,
+				spread, signal.protective_stop_cents,
 				exec_cfg.entry_spread_stop_buffer_cents, signal.side, signal.ticker,
 			)
 			return

@@ -78,6 +78,7 @@ def _entry_signal(
 	side: str = "yes",
 	entry_price_cents: int = _YES_ASK,
 	stop_loss_distance_cents: int = 8,
+	protective_stop_cents: int | None = 8,
 ) -> Signal:
 	"""Entry Signal with all live-execution fields populated."""
 	return Signal(
@@ -89,6 +90,7 @@ def _entry_signal(
 		reason="test",
 		entry_price_cents=entry_price_cents,
 		stop_loss_distance_cents=stop_loss_distance_cents,
+		protective_stop_cents=protective_stop_cents,
 	)
 
 
@@ -1080,11 +1082,14 @@ async def test_handle_enter_live_skips_wide_spread() -> None:
 	executor.place = _fake_place
 	metrics = Metrics()
 	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
-	# yes_ask=42, yes_bid=30 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP
+	# yes_ask=42, yes_bid=30 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP.
+	# stop_loss_distance_cents=99 diverges from protective_stop_cents=8 so the OLD
+	# gate (reading stop_loss_distance_cents) would NOT skip (12 < 99) — the test is
+	# genuinely RED until the gate reads protective_stop_cents.
 	ctx = _ctx(yes_ask=42, yes_bid=30)
 
 	await _handle_enter(
-		_entry_signal(side="yes", stop_loss_distance_cents=8),
+		_entry_signal(side="yes", protective_stop_cents=8, stop_loss_distance_cents=99),
 		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
 	)
 
@@ -1109,11 +1114,12 @@ async def test_handle_enter_live_allows_narrow_spread() -> None:
 	executor.place = _fake_place
 	metrics = Metrics()
 	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
-	# yes_ask=42, yes_bid=40 => spread 2; stop 8 => 2 < 8 => PROCEED
+	# yes_ask=42, yes_bid=40 => spread 2; stop 8 => 2 < 8 => PROCEED (spread 2
+	# allows either way; protective_stop_cents=8 is what the gate now reads).
 	ctx = _ctx(yes_ask=42, yes_bid=40)
 
 	await _handle_enter(
-		_entry_signal(side="yes", stop_loss_distance_cents=8),
+		_entry_signal(side="yes", protective_stop_cents=8),
 		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
 	)
 
@@ -1136,11 +1142,12 @@ async def test_handle_enter_live_spread_gate_boundary_skips() -> None:
 	executor.place = _fake_place
 	metrics = Metrics()
 	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
-	# yes_ask=42, yes_bid=34 => spread 8 == stop 8 - buffer 0 => SKIP
+	# yes_ask=42, yes_bid=34 => spread 8 == stop 8 - buffer 0 => SKIP.
+	# stop_loss_distance_cents=99 diverges so the OLD gate would NOT skip (8 < 99).
 	ctx = _ctx(yes_ask=42, yes_bid=34)
 
 	await _handle_enter(
-		_entry_signal(side="yes", stop_loss_distance_cents=8),
+		_entry_signal(side="yes", protective_stop_cents=8, stop_loss_distance_cents=99),
 		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
 	)
 
@@ -1195,10 +1202,11 @@ async def test_handle_enter_live_skips_wide_spread_no_side() -> None:
 	# yes_ask=70, yes_bid=58 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP.
 	# no-side entry pays no_ask (=42 here, a valid 1..99 price) but the gate
 	# measures spread off yes_ask/yes_bid, which equals the no-side spread.
+	# stop_loss_distance_cents=99 diverges so the OLD gate would NOT skip (12 < 99).
 	ctx = _ctx(yes_ask=70, no_ask=42, yes_bid=58)
 
 	await _handle_enter(
-		_entry_signal(side="no", stop_loss_distance_cents=8),
+		_entry_signal(side="no", protective_stop_cents=8, stop_loss_distance_cents=99),
 		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
 	)
 
