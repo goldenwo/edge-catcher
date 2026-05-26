@@ -1135,13 +1135,18 @@ async def _handle_exit(
 	# CANNOT express a partial — and booking a full close of a partially-sold
 	# position fabricates a sale of the unsold remainder (and, once the row is
 	# terminal, B's settlement CAS no-ops, so that remainder's true outcome is
-	# lost). A PARTIAL is B's async on_fill_event's job: it has the WS fill
-	# event + kalshi_order_id to record_partial_exit a proper split (M-closed
-	# child + parent decremented; the remainder stays open → settles). So on a
-	# partial / non-fill / timeout dispatch STEPS ASIDE and leaves the row OPEN
-	# for B's async path + the settlement poller (exit_reason='settlement').
-	# Booking on a non-fill was the 2026-05-26 phantom-exit bug (live db -$8.53
-	# of phantom closes vs Kalshi settlements -$3.53; wins logged as stops).
+	# lost). A PARTIAL also cannot be expressed by the Protocol exit_trade, so
+	# dispatch STEPS ASIDE and leaves the row OPEN. TODAY the settlement poller
+	# (the E3 backstop) settles the full remaining fill_size at the binary
+	# outcome (exit_reason='settlement') — the M already-sold contracts are then
+	# re-settled at binary, not their real IOC price (a P&L mislabel on the sold
+	# sliver, NOT a dropped/fabricated position; strictly better than a phantom
+	# full close). The PRECISE M/(N-M) split (record_partial_exit via B's
+	# on_fill_event) needs the account-scope fill WS pump — sub-project F;
+	# on_fill_event is UNWIRED in the live engine today (engine.py ~1566). A
+	# non-fill / timeout is the same: row left OPEN → settlement poller. Booking
+	# on a non-fill was the 2026-05-26 phantom-exit bug (live db -$8.53 of
+	# phantom closes vs Kalshi settlements -$3.53; wins logged as stops).
 	confirmed_full_fill = (
 		exit_result is not None
 		and exit_result.status == "filled"
@@ -1154,12 +1159,12 @@ async def _handle_exit(
 			and 0 < exit_result.filled_size < exit_size
 		):
 			# PARTIAL fill — full close WITHHELD (Protocol exit_trade is
-			# full-close-only); B's async on_fill_event owns the split via
-			# record_partial_exit, the settlement poller the remainder.
+			# full-close-only). Row left OPEN → today the settlement poller
+			# settles the full remainder at binary; precise split awaits F.
 			log.info(
 				"EXIT partial fill %d of %d for %s %s (trade_id=%s) — full close "
-				"WITHHELD; B's async on_fill_event owns the split + settlement "
-				"poller the remainder",
+				"WITHHELD; row left open, settlement poller settles the remainder "
+				"at binary (precise split awaits sub-project F)",
 				exit_result.filled_size, exit_size, signal.strategy,
 				signal.ticker, signal.trade_id,
 			)
