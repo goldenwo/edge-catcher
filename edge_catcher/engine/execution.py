@@ -37,7 +37,7 @@ from edge_catcher.engine.strategy_base import ExitKind, Signal
 # alongside the builders that consume it. The canonical definition lives in
 # engine/executor.py — see module docstring above.
 __all__ = ["ENTRY_TIF", "EXIT_TIF", "ExecCfg", "OpenPosition", "build_entry_order",
-           "build_exit_order", "validate_exec_cfg"]
+           "build_exit_order", "entry_spread_too_wide", "validate_exec_cfg"]
 
 # Kalshi time-in-force value used for both entries and exits in Phase 1.
 # IOC = "fill at the limit immediately and cancel any unfilled remainder";
@@ -62,6 +62,10 @@ class ExecCfg:
 
 	entry_slippage_cents: int
 	exit_slippage_cents: Mapping[ExitKind, int]
+	# Live-only entry spread gate headroom (cents). 0 => skip when spread alone
+	# reaches the stop. Optional in config (default 0). See spec
+	# 2026-05-25-live-spread-entry-gate-design.md.
+	entry_spread_stop_buffer_cents: int = 0
 
 
 def _series_of(ticker: str) -> str:
@@ -210,6 +214,15 @@ def build_entry_order(
 		client_order_id=_make_client_order_id(sig.strategy, sig.ticker, now),
 		action="buy",
 	)
+
+
+def entry_spread_too_wide(spread_cents: int, protective_stop_cents: int, buffer_cents: int) -> bool:
+	"""True when the bid-ask spread is wide enough to (near-)trip the protective
+	stop on a taker fill: an IOC entry books at the ask but marks at the bid, so
+	it starts -(spread) underwater and stops out the instant spread >= stop.
+	``buffer_cents`` reserves headroom below the stop (0 = skip only when the
+	spread alone reaches the stop)."""
+	return spread_cents >= protective_stop_cents - buffer_cents
 
 
 def build_exit_order(
@@ -373,7 +386,22 @@ def validate_exec_cfg(cfg: dict[str, object]) -> ExecCfg:
 	# Wrap in MappingProxyType so the frozen=True invariant is total — without
 	# the wrap, ``cfg.exit_slippage_cents["stop_loss"] = 999`` would silently
 	# succeed and corrupt live order limits mid-stream.
+
+	# Optional live spread-gate buffer. Absent key => 0. bool is an int
+	# subclass; reject it explicitly (True/False would coerce to 1/0).
+	buffer_cents = cfg.get("entry_spread_stop_buffer_cents", 0)
+	if not isinstance(buffer_cents, int) or isinstance(buffer_cents, bool):
+		raise TypeError(
+			f"execution.entry_spread_stop_buffer_cents must be int, "
+			f"got {type(buffer_cents).__name__}: {buffer_cents!r}"
+		)
+	if buffer_cents < 0:
+		raise ValueError(
+			f"execution.entry_spread_stop_buffer_cents must be >= 0, got {buffer_cents}"
+		)
+
 	return ExecCfg(
 		entry_slippage_cents=entry,
 		exit_slippage_cents=MappingProxyType(typed_exits),
+		entry_spread_stop_buffer_cents=buffer_cents,
 	)

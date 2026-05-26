@@ -18,7 +18,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from edge_catcher.engine.dispatch import _handle_enter, _handle_signal, _inc_gate_metric
+from edge_catcher.engine.dispatch import (
+	_enrich_live_entry_signal,
+	_handle_enter,
+	_handle_signal,
+	_inc_gate_metric,
+	process_tick,
+)
 from edge_catcher.engine.execution import ExecCfg
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.engine.metrics import Metrics
@@ -30,7 +36,7 @@ from edge_catcher.engine.risk import (
 	RiskContext,
 	SizingBreakdown,
 )
-from edge_catcher.engine.strategy_base import Signal
+from edge_catcher.engine.strategy_base import Signal, Strategy
 
 
 def _bd() -> SizingBreakdown:
@@ -72,6 +78,7 @@ def _entry_signal(
 	side: str = "yes",
 	entry_price_cents: int = _YES_ASK,
 	stop_loss_distance_cents: int = 8,
+	protective_stop_cents: int | None = 8,
 ) -> Signal:
 	"""Entry Signal with all live-execution fields populated."""
 	return Signal(
@@ -83,12 +90,15 @@ def _entry_signal(
 		reason="test",
 		entry_price_cents=entry_price_cents,
 		stop_loss_distance_cents=stop_loss_distance_cents,
+		protective_stop_cents=protective_stop_cents,
 	)
 
 
-def _ctx(yes_ask: int = _YES_ASK, no_ask: int = 58) -> MagicMock:
-	"""Minimal TickContext stub — dispatch reads yes_ask/no_ask."""
-	return MagicMock(yes_ask=yes_ask, no_ask=no_ask, orderbook=MagicMock(depth=5))
+def _ctx(yes_ask: int = _YES_ASK, no_ask: int = 58, yes_bid: int | None = None) -> MagicMock:
+	"""Minimal TickContext stub — dispatch reads yes_ask/yes_bid/no_ask."""
+	if yes_bid is None:
+		yes_bid = yes_ask - 2  # narrow spread → live spread-gate inert by default
+	return MagicMock(yes_ask=yes_ask, yes_bid=yes_bid, no_ask=no_ask, orderbook=MagicMock(depth=5))
 
 
 def _exec_cfg(entry_slippage_cents: int = 2) -> ExecCfg:
@@ -303,6 +313,7 @@ def _ctx_c3(yes_ask: int = _YES_ASK_C3, no_ask: int = 55) -> MagicMock:
 	ctx = MagicMock()
 	ctx.yes_ask = yes_ask
 	ctx.no_ask = no_ask
+	ctx.yes_bid = yes_ask - 2  # narrow spread → live spread-gate inert in C3 tests
 	ctx.orderbook = MagicMock(depth=5)
 	ctx.market_state = MagicMock()
 	return ctx
@@ -1045,3 +1056,244 @@ async def test_paper_enter_bare_signal_not_enriched() -> None:
 	# Paper places size_contracts=0 (executor sizes internally) — byte-exact.
 	assert len(placed_reqs) == 1
 	assert placed_reqs[0].size_contracts == 0
+
+
+def test_metrics_registers_wide_spread_counter() -> None:
+	"""The live spread gate increments entries_skipped_wide_spread; Metrics.inc
+	raises KeyError on an unregistered key, so the counter MUST be registered."""
+	m = Metrics()
+	m.inc("entries_skipped_wide_spread")
+	assert m.snapshot()["entries_skipped_wide_spread"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_live_skips_wide_spread() -> None:
+	"""Live entry is skipped when spread >= stop - buffer: NO record_intent,
+	NO executor.place, entries_skipped_wide_spread incremented, NOT counted as
+	an attempt."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
+	# yes_ask=42, yes_bid=30 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP.
+	# stop_loss_distance_cents=99 diverges from protective_stop_cents=8 so the OLD
+	# gate (reading stop_loss_distance_cents) would NOT skip (12 < 99) — the test is
+	# genuinely RED until the gate reads protective_stop_cents.
+	ctx = _ctx(yes_ask=42, yes_bid=30)
+
+	await _handle_enter(
+		_entry_signal(side="yes", protective_stop_cents=8, stop_loss_distance_cents=99),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
+	)
+
+	assert store.intent_kwargs == {}
+	assert placed == []
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 1
+	assert metrics.snapshot()["entries_attempted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_live_allows_narrow_spread() -> None:
+	"""Live entry proceeds when spread < stop - buffer (gate inert): the sized
+	request is placed and counted as an attempt."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result(size_contracts=req.size_contracts)
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
+	# yes_ask=42, yes_bid=40 => spread 2; stop 8 => 2 < 8 => PROCEED (spread 2
+	# allows either way; protective_stop_cents=8 is what the gate now reads).
+	ctx = _ctx(yes_ask=42, yes_bid=40)
+
+	await _handle_enter(
+		_entry_signal(side="yes", protective_stop_cents=8),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
+	)
+
+	assert placed and placed[0].size_contracts == 7
+	assert metrics.snapshot()["entries_attempted"] == 1
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_live_spread_gate_boundary_skips() -> None:
+	"""Boundary: spread == stop - buffer skips (the comparison is >=)."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
+	# yes_ask=42, yes_bid=34 => spread 8 == stop 8 - buffer 0 => SKIP.
+	# stop_loss_distance_cents=99 diverges so the OLD gate would NOT skip (8 < 99).
+	ctx = _ctx(yes_ask=42, yes_bid=34)
+
+	await _handle_enter(
+		_entry_signal(side="yes", protective_stop_cents=8, stop_loss_distance_cents=99),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
+	)
+
+	assert placed == []
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_paper_ignores_spread_gate() -> None:
+	"""Paper path (allowed_size=None) is NEVER gated — proves the gate is
+	live-only and the paper/replay path stays byte-exact. config carries NO
+	_exec_cfg, so a paper-path read of it would KeyError — asserting the gate
+	never runs on paper."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics}  # intentionally no _exec_cfg
+	ctx = _ctx(yes_ask=42, yes_bid=30)  # spread 12 (would skip on the live path)
+
+	await _handle_enter(
+		_entry_signal(side="yes", stop_loss_distance_cents=8),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=None,
+	)
+
+	assert store.intent_kwargs != {}
+	assert placed
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_enter_live_skips_wide_spread_no_side() -> None:
+	"""The spread gate is side-agnostic: a NO-side entry is also skipped on a
+	wide spread (spread = yes_ask - yes_bid, identical for both sides)."""
+	store = _CapturingStore()
+	placed: list[OrderRequest] = []
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		placed.append(req)
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+	metrics = Metrics()
+	config: dict[str, Any] = {"_metrics": metrics, "_exec_cfg": _exec_cfg(entry_slippage_cents=2)}
+	# yes_ask=70, yes_bid=58 => spread 12; stop 8, buffer 0 => 12 >= 8 => SKIP.
+	# no-side entry pays no_ask (=42 here, a valid 1..99 price) but the gate
+	# measures spread off yes_ask/yes_bid, which equals the no-side spread.
+	# stop_loss_distance_cents=99 diverges so the OLD gate would NOT skip (12 < 99).
+	ctx = _ctx(yes_ask=70, no_ask=42, yes_bid=58)
+
+	await _handle_enter(
+		_entry_signal(side="no", protective_stop_cents=8, stop_loss_distance_cents=99),
+		ctx, store, config, executor, now=_NOW_C2, allowed_size=7,
+	)
+
+	assert store.intent_kwargs == {}
+	assert placed == []
+	assert metrics.snapshot()["entries_skipped_wide_spread"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Signal.protective_stop_cents threading (process_tick → _handle_signal
+# → _enrich_live_entry_signal). The gate's real-stop input (Task 3 consumes it).
+# ---------------------------------------------------------------------------
+
+
+def _bare_signal() -> Signal:
+	return Signal(action="enter", ticker=_TICKER, side="yes", series=_SERIES,
+				  strategy=_STRATEGY, reason="test")
+
+
+def test_enrich_sets_protective_stop_from_param() -> None:
+	"""_enrich_live_entry_signal copies the passed stop onto the signal (live-only)."""
+	sig = _bare_signal()
+	_enrich_live_entry_signal(sig, _ctx(yes_ask=42, yes_bid=40), protective_stop_cents=5)
+	assert sig.protective_stop_cents == 5
+
+
+def test_enrich_leaves_protective_stop_none_when_no_stop() -> None:
+	"""No stop passed → field stays None → gate will be inert."""
+	sig = _bare_signal()
+	_enrich_live_entry_signal(sig, _ctx(yes_ask=42, yes_bid=40), protective_stop_cents=None)
+	assert sig.protective_stop_cents is None
+
+
+class _StopFixtureStrategy(Strategy):
+	"""Fixture: declares stop_loss as a CLASS default_params default, NOT via config —
+	so a config-dict read would miss it. on_tick emits one enter signal."""
+	name = "stop-fixture"
+	supported_series = ["KXTEST"]
+	default_params = {"stop_loss": 5}
+
+	def on_tick(self, ctx):
+		return [Signal(action="enter", ticker="KXTEST-1", side="yes", series="KXTEST",
+					   strategy="stop-fixture", reason="t")]
+
+
+@pytest.mark.asyncio
+async def test_process_tick_threads_strategy_stop_to_handle_signal(monkeypatch) -> None:
+	"""process_tick must pass the PRODUCING strategy's default_params['stop_loss']
+	(post-merge authoritative value, NOT the config dict) to _handle_signal. config
+	here has NO stop_loss → asserting 5 proves it comes from the strategy object."""
+	captured: dict = {}
+
+	async def _fake_handle_signal(signal, ctx, store, config, executor, bullet,
+								  *, now, risk=None, risk_ctx_provider=None,
+								  protective_stop_cents=None):
+		captured["protective_stop_cents"] = protective_stop_cents
+
+	monkeypatch.setattr("edge_catcher.engine.dispatch._handle_signal", _fake_handle_signal)
+
+	await process_tick(
+		_ctx(yes_ask=42, yes_bid=40), [_StopFixtureStrategy()], _CapturingStore(),
+		{"strategies": {}}, MagicMock(),
+		now=_NOW_C2, risk=MagicMock(), risk_ctx_provider=MagicMock(),
+	)
+
+	assert captured["protective_stop_cents"] == 5
+
+
+@pytest.mark.asyncio
+async def test_process_tick_passes_none_when_strategy_has_no_stop(monkeypatch) -> None:
+	"""A strategy with no stop_loss in default_params → process_tick passes None."""
+	captured: dict = {}
+
+	async def _fake_handle_signal(signal, ctx, store, config, executor, bullet,
+								  *, now, risk=None, risk_ctx_provider=None,
+								  protective_stop_cents="UNSET"):
+		captured["protective_stop_cents"] = protective_stop_cents
+
+	monkeypatch.setattr("edge_catcher.engine.dispatch._handle_signal", _fake_handle_signal)
+
+	class _NoStop(_StopFixtureStrategy):
+		default_params: dict = {}
+
+	await process_tick(
+		_ctx(yes_ask=42, yes_bid=40), [_NoStop()], _CapturingStore(),
+		{"strategies": {}}, MagicMock(),
+		now=_NOW_C2, risk=MagicMock(), risk_ctx_provider=MagicMock(),
+	)
+
+	assert captured["protective_stop_cents"] is None

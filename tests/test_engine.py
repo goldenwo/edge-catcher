@@ -1,6 +1,8 @@
 """Tests for the paper trading engine — process_tick pipeline and WS message handlers."""
 
+import asyncio
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +29,7 @@ from edge_catcher.engine.dispatch import (
 from edge_catcher.engine.engine import (
 	_collect_active_series,
 	_series_for_strategy,
+	_summary_logger,
 )
 from edge_catcher.engine.executors.paper import PaperExecutor
 
@@ -1145,3 +1148,25 @@ class TestFormatCloseMessage:
 		)
 		assert "fee" not in notify_line
 		assert "(settled" not in notify_line  # no settled_result → (exit) path
+
+
+@pytest.mark.asyncio
+async def test_summary_logger_reports_wide_spread_skips(caplog) -> None:
+	"""The wide-spread skip counter must appear in the operator summary line."""
+	store = MagicMock()
+	store.get_open_trades.return_value = []
+	metrics = Metrics()
+	metrics.inc("entries_skipped_wide_spread")  # = 1
+
+	calls = {"n": 0}
+	async def _fake_sleep(_s):
+		calls["n"] += 1
+		if calls["n"] >= 2:
+			raise asyncio.CancelledError  # break the infinite loop after one log
+
+	with patch("edge_catcher.engine.engine.asyncio.sleep", _fake_sleep):
+		with caplog.at_level("INFO", logger="edge_catcher.engine.engine"):
+			with pytest.raises(asyncio.CancelledError):
+				await _summary_logger(store, metrics, interval=1)
+
+	assert "wide_spread=1" in caplog.text

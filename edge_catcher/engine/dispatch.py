@@ -25,7 +25,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from edge_catcher.engine.execution import _make_client_order_id, build_entry_order
+from edge_catcher.engine.execution import _make_client_order_id, build_entry_order, entry_spread_too_wide
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
 from edge_catcher.engine.market_state import (
 	MarketState,
@@ -357,6 +357,7 @@ async def process_tick(
 				await _handle_signal(
 					signal, ctx, store, config, executor, strategy.emoji,
 					now=now, risk=risk, risk_ctx_provider=risk_ctx_provider,
+					protective_stop_cents=getattr(strategy, "default_params", {}).get("stop_loss"),
 				)
 			except KillSwitchTripFailed:
 				# C-spec L214 ghost-reject defense: kill-switch INSERT failure
@@ -445,7 +446,7 @@ def _consult_exit_gate(
 	return False
 
 
-def _enrich_live_entry_signal(signal: Signal, ctx: TickContext) -> None:
+def _enrich_live_entry_signal(signal: Signal, ctx: TickContext, protective_stop_cents: int | None = None) -> None:
 	"""Populate the execution fields the LIVE entry path needs but strategies
 	don't emit.
 
@@ -474,6 +475,8 @@ def _enrich_live_entry_signal(signal: Signal, ctx: TickContext) -> None:
 		signal.entry_price_cents = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 	if signal.stop_loss_distance_cents is None:
 		signal.stop_loss_distance_cents = signal.entry_price_cents
+	if signal.protective_stop_cents is None:
+		signal.protective_stop_cents = protective_stop_cents
 
 
 async def _handle_signal(
@@ -487,6 +490,7 @@ async def _handle_signal(
 	now: datetime,
 	risk: Gate | None = None,
 	risk_ctx_provider: RiskContextProvider | None = None,
+	protective_stop_cents: int | None = None,
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
@@ -546,7 +550,7 @@ async def _handle_signal(
 			# AND build_entry_order consume them. Paper derives the price itself
 			# in _handle_enter and runs no gate, so this is live-only and the
 			# paper path stays byte-exact (G-parity).
-			_enrich_live_entry_signal(signal, ctx)
+			_enrich_live_entry_signal(signal, ctx, protective_stop_cents)
 			# _consult_entry_gate holds the isinstance(Reject) check so this
 			# function stays free of it (structural AST guard in test suite).
 			# KillSwitchTripFailed propagates untouched — do NOT catch here.
@@ -610,6 +614,27 @@ async def _handle_enter(
 	metrics = config.get("_metrics")
 	if metrics is None:
 		metrics = Metrics()
+
+	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate v2). debut-fade
+	# is an IOC taker: buys ask, marks bid, so a fill starts -(spread) underwater;
+	# spread >= the strategy's stop stops it out on entry (the proven cause of the
+	# 2026-05-25 cutover loss). `protective_stop_cents` carries the strategy's real
+	# stop (NOT stop_loss_distance_cents, which is the sizing basis). LIVE-ONLY: the
+	# `allowed_size is not None` guard keeps paper/replay byte-exact. Skip is before
+	# `entries_attempted` (a skip is not an attempt), mirroring the degenerate guard.
+	if allowed_size is not None and signal.protective_stop_cents is not None:
+		exec_cfg = config["_exec_cfg"]
+		spread = ctx.yes_ask - ctx.yes_bid
+		if entry_spread_too_wide(spread, signal.protective_stop_cents,
+		                         exec_cfg.entry_spread_stop_buffer_cents):
+			metrics.inc("entries_skipped_wide_spread")
+			log.info(
+				"Skip: wide spread %dc >= stop %dc - buffer %dc for %s %s",
+				spread, signal.protective_stop_cents,
+				exec_cfg.entry_spread_stop_buffer_cents, signal.side, signal.ticker,
+			)
+			return
+
 	metrics.inc("entries_attempted")
 
 	# Build typed request — EXACTLY ONCE (spec §2.2 single-build invariant).

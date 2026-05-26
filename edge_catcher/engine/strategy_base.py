@@ -34,6 +34,7 @@ class Signal:
 	target_price_cents: int | None = None
 	exit_kind: ExitKind | None = None
 	stop_loss_distance_cents: int | None = None
+	protective_stop_cents: int | None = None  # strategy's real stop (TP/SL dist); gate input, NOT sizing basis above
 
 
 class Strategy(ABC):
