@@ -891,7 +891,7 @@ async def _summary_logger(
 			snap = metrics.reset_and_snapshot()
 			log.info(
 				"Summary interval=%ds open=%d attempted=%d filled=%d "
-				"stale_skipped=%d other_skipped=%d settled_won=%d "
+				"stale_skipped=%d other_skipped=%d wide_spread=%d settled_won=%d "
 				"settled_lost=%d unsupported=%d",
 				interval,
 				count,
@@ -899,6 +899,7 @@ async def _summary_logger(
 				snap["entries_filled"],
 				snap["entries_skipped_stale"],
 				snap["entries_skipped_other"],
+				snap["entries_skipped_wide_spread"],
 				snap["trades_settled_won"],
 				snap["trades_settled_lost"],
 				snap["entries_skipped_unsupported"],

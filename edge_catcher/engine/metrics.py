@@ -15,6 +15,7 @@ _COUNTER_KEYS = (
 	"entries_filled",
 	"entries_skipped_stale",
 	"entries_skipped_other",
+	"entries_skipped_wide_spread",  # live-only spread gate skips (off paper path)
 	"trades_settled_won",
 	"trades_settled_lost",
 	# Risk-gate counters (C) — incremented by Gate.gate_entry on every call.
