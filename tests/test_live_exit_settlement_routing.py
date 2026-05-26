@@ -284,60 +284,60 @@ def _seed_paper_open_row(
 
 
 class _ZeroFillExecutor:
-    """Live-style executor whose IOC sell finds no liquidity at the limit and
-    returns a 0-fill rejection — byte-identical to
-    ``LiveExecutor._translate_order``'s ``ioc_zero_fill`` OrderResult
-    (executors/live.py:179-189). Used in place of PaperExecutor (which always
-    returns a full fill) to drive the real live no-fill path through dispatch."""
+	"""Live-style executor whose IOC sell finds no liquidity at the limit and
+	returns a 0-fill rejection — byte-identical to
+	``LiveExecutor._translate_order``'s ``ioc_zero_fill`` OrderResult
+	(executors/live.py:179-189). Used in place of PaperExecutor (which always
+	returns a full fill) to drive the real live no-fill path through dispatch."""
 
-    async def place(self, req: OrderRequest) -> OrderResult:
-        return OrderResult(
-            status="rejected",
-            intended_size=req.size_contracts,
-            filled_size=0,
-            blended_entry_cents=0,
-            fill_pct=0.0,
-            slippage_cents=0,
-            rejection_reason="ioc_zero_fill",
-            order_id=None,
-        )
+	async def place(self, req: OrderRequest) -> OrderResult:
+		return OrderResult(
+			status="rejected",
+			intended_size=req.size_contracts,
+			filled_size=0,
+			blended_entry_cents=0,
+			fill_pct=0.0,
+			slippage_cents=0,
+			rejection_reason="ioc_zero_fill",
+			order_id=None,
+		)
 
 
 def test_live_exit_zero_fill_does_not_book_phantom_close(tmp_path: Path) -> None:
-    """Funds-at-risk / observability: when the live IOC exit sell gets 0 fill,
-    the position was NOT sold — it rides to settlement, where the settlement
-    poller books the true outcome (exit_reason='settlement'). The row MUST stay
-    ``open``; booking a close here fabricates a stop/TP at the bid that never
-    executed — the 2026-05-26 phantom-exit bug (db -$8.53 vs true Kalshi
-    -$3.53). Drives the REAL ``dispatch._handle_exit`` against the REAL live
-    ``SQLiteTradeStore`` with a live-style 0-fill executor seam."""
-    store = SQLiteTradeStore(tmp_path / "live_trades.db")
-    try:
-        tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
-        conn = store._conn
-        assert _row(conn, tid)["status"] == "open"
+	"""Funds-at-risk / observability: when the live IOC exit sell gets 0 fill,
+	the position was NOT sold — it rides to settlement, where the settlement
+	poller books the true outcome (exit_reason='settlement'). The row MUST stay
+	``open``; booking a close here fabricates a stop/TP at the bid that never
+	executed — the 2026-05-26 phantom-exit bug (db -$8.53 vs true Kalshi
+	-$3.53). Drives the REAL ``dispatch._handle_exit`` against the REAL live
+	``SQLiteTradeStore`` with a live-style 0-fill executor seam."""
+	store = SQLiteTradeStore(tmp_path / "live_trades.db")
+	try:
+		tid = _seed_live_open_row(store, side="no", entry=28, fill_size=2)
+		conn = store._conn
+		assert _row(conn, tid)["status"] == "open"
 
-        # No-side row → would sell into ctx.no_bid=37 (the TP target). The IOC
-        # finds no buyer at 37 → 0-fill. The close MUST be skipped.
-        asyncio.run(
-            _handle_exit(
-                _exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
-                executor=_ZeroFillExecutor(), config={},
-            )
-        )
+		# No-side row → would sell into ctx.no_bid=37 (the TP target). The IOC
+		# finds no buyer at 37 → 0-fill. The close MUST be skipped.
+		asyncio.run(
+			_handle_exit(
+				_exit_signal(tid, "no"), _ctx(no_bid=37), store, now=_LATER,
+				executor=_ZeroFillExecutor(), config={},
+			)
+		)
 
-        row = _row(conn, tid)
-        assert row["status"] == "open", (
-            "a 0-fill IOC exit did not sell the position — the row must stay "
-            "open for settlement, NOT be booked as a phantom ws_exit_fill close"
-        )
-        assert row["pnl_cents"] is None, "no fill → no realized P&L may be booked"
-        assert row["exit_reason"] is None
-        assert row["exit_price_cents"] is None
-        # Exactly one row, untouched (no split, no terminal transition).
-        assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
-    finally:
-        store.close()
+		row = _row(conn, tid)
+		assert row["status"] == "open", (
+			"a 0-fill IOC exit did not sell the position — the row must stay "
+			"open for settlement, NOT be booked as a phantom ws_exit_fill close"
+		)
+		assert row["pnl_cents"] is None, "no fill → no realized P&L may be booked"
+		assert row["exit_reason"] is None
+		assert row["exit_price_cents"] is None
+		# Exactly one row, untouched (no split, no terminal transition).
+		assert conn.execute("SELECT COUNT(*) FROM live_trades").fetchone()[0] == 1
+	finally:
+		store.close()
 
 
 # ===========================================================================
