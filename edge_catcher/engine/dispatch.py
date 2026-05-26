@@ -1123,37 +1123,61 @@ async def _handle_exit(
 				signal.ticker, exit_req.client_order_id,
 			)
 
-	# Book the close ONLY on a venue-confirmed fill (the §1 seam: the executor
-	# reports what actually traded). PaperExecutor returns a full fill at the
-	# bid → byte-EXACT close (mandatory G-parity). LiveExecutor returns the
-	# REAL fill, or a 0-fill 'rejected' / unknown 'pending' when the IOC sell
-	# finds no resting bid at the limit (thin book — common). A non-fill means
-	# the position was NOT sold: leave the row OPEN so the settlement poller
-	# books the true outcome (exit_reason='settlement'). Booking on a non-fill
-	# fabricates a stop/TP that never executed — the 2026-05-26 phantom-exit
-	# bug (live db read -$8.53 of phantom closes vs Kalshi settlements -$3.53;
-	# true settlement wins were recorded as small stop-losses). NOTE: a partial
-	# fill still books the FULL close at the bid (unchanged from pre-fix); the
-	# unsold remainder is a known, separate follow-up.
-	if not (
+	# Book the close ONLY on a venue-confirmed FULL fill (the §1 seam: the
+	# executor reports what actually traded). PaperExecutor returns a full
+	# fill at the bid → byte-EXACT close (mandatory G-parity). LiveExecutor
+	# returns the REAL outcome: a FULL fill (filled_size >= the position), a
+	# PARTIAL fill, a 0-fill 'rejected', or an unknown 'pending' (the IOC sell
+	# found no / not enough resting bid at the limit on a thin book — common).
+	#
+	# Only a FULL fill is booked here. The Protocol's exit_trade is
+	# structurally a FULL close (no closed_size / kalshi_exit_order_id), so it
+	# CANNOT express a partial — and booking a full close of a partially-sold
+	# position fabricates a sale of the unsold remainder (and, once the row is
+	# terminal, B's settlement CAS no-ops, so that remainder's true outcome is
+	# lost). A PARTIAL is B's async on_fill_event's job: it has the WS fill
+	# event + kalshi_order_id to record_partial_exit a proper split (M-closed
+	# child + parent decremented; the remainder stays open → settles). So on a
+	# partial / non-fill / timeout dispatch STEPS ASIDE and leaves the row OPEN
+	# for B's async path + the settlement poller (exit_reason='settlement').
+	# Booking on a non-fill was the 2026-05-26 phantom-exit bug (live db -$8.53
+	# of phantom closes vs Kalshi settlements -$3.53; wins logged as stops).
+	confirmed_full_fill = (
 		exit_result is not None
 		and exit_result.status == "filled"
-		and exit_result.filled_size > 0
-	):
-		log.info(
-			"EXIT not booked for %s %s (trade_id=%s): executor reported no "
-			"confirmed fill (status=%s) — row left open for settlement",
-			signal.strategy, signal.ticker, signal.trade_id,
-			exit_result.status if exit_result is not None else "timeout/none",
-		)
+		and exit_result.filled_size >= exit_size
+	)
+	if not confirmed_full_fill:
+		if (
+			exit_result is not None
+			and exit_result.status == "filled"
+			and 0 < exit_result.filled_size < exit_size
+		):
+			# PARTIAL fill — full close WITHHELD (Protocol exit_trade is
+			# full-close-only); B's async on_fill_event owns the split via
+			# record_partial_exit, the settlement poller the remainder.
+			log.info(
+				"EXIT partial fill %d of %d for %s %s (trade_id=%s) — full close "
+				"WITHHELD; B's async on_fill_event owns the split + settlement "
+				"poller the remainder",
+				exit_result.filled_size, exit_size, signal.strategy,
+				signal.ticker, signal.trade_id,
+			)
+		else:
+			log.info(
+				"EXIT not booked for %s %s (trade_id=%s): executor reported no "
+				"confirmed fill (status=%s) — row left open for settlement",
+				signal.strategy, signal.ticker, signal.trade_id,
+				exit_result.status if exit_result is not None else "timeout/none",
+			)
 		return
 
-	# Mode-agnostic close (§1). PAPER: authoritative close (byte-EXACT — paper
-	# TradeStore.exit_trade does won/lost/scratch + pnl + fee synchronously,
-	# idempotent on WHERE status='open'). LIVE: C5's idempotent record_close
-	# CAS backstop racing B's async path (whichever lands first wins, the other
-	# no-ops, NEVER raises — the §4.2-sound benign-lost-CAS property). dispatch
-	# does NOT branch on mode — the store/Protocol absorbs it.
+	# Mode-agnostic FULL close (§1). PAPER: authoritative close (byte-EXACT —
+	# paper TradeStore.exit_trade does won/lost/scratch + pnl + fee
+	# synchronously, idempotent on WHERE status='open'). LIVE: C5's idempotent
+	# record_close CAS backstop racing B's async path (whichever lands first
+	# wins, the other no-ops, NEVER raises — the §4.2-sound benign-lost-CAS
+	# property). dispatch does NOT branch on mode — the store/Protocol absorbs it.
 	store.exit_trade(signal.trade_id, exit_price, now=now)
 
 	# Read back PnL + fill fields from DB (includes fee deduction)
