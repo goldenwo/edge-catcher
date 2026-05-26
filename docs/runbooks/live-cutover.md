@@ -223,13 +223,15 @@ sudo systemctl start edge-catcher-live-trader
 
    ```bash
    sudo journalctl -u edge-catcher-live-trader | grep \
-     "engine\[G\]: paper executor wired, package=edge_catcher.engine"
+     "engine\[G\]: live executor wired, package=edge_catcher.engine"
    ```
 
    Its presence proves the new `edge_catcher.engine` package is loaded — **not**
    the OLD `monitors/` engine (whose generic "Engine starting" line this beacon
-   deliberately replaces). If the beacon is absent, the wrong code is running;
-   do not proceed.
+   deliberately replaces) — **and** that the daemon is actually in live mode: the
+   executor word is mode-driven, so a `paper` word on this (live) service means a
+   paper config is deployed to it — stop and fix. If the beacon is absent
+   entirely, the wrong code is running; do not proceed.
 
 3. **`NRestarts=0` watch post-deploy.** A healthy daemon does not restart. Watch
    it for a few minutes:
@@ -367,5 +369,5 @@ This gate has two roles:
 | Status | `sudo systemctl status edge-catcher-live-trader` |
 | Restart counter | `systemctl show -p NRestarts edge-catcher-live-trader` |
 | Logs | `tail -f /var/log/edge-catcher/live-trader.log` or `sudo journalctl -u edge-catcher-live-trader -f` |
-| Boot beacon | `sudo journalctl -u edge-catcher-live-trader \| grep "engine\[G\]: paper executor wired, package=edge_catcher.engine"` |
+| Boot beacon | `sudo journalctl -u edge-catcher-live-trader \| grep "engine\[G\]: live executor wired, package=edge_catcher.engine"` |
 | Live DB starts flat | `sqlite3 data/live_trades.db "SELECT COUNT(*) FROM trades;"` |

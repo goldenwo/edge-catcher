@@ -1401,9 +1401,12 @@ async def run_engine(
 	configure_notify(_resolve_notify_channels(config))
 
 	# Cutover-verification beacon. Pi cutover step 5 greps journalctl for this
-	# exact substring to prove the engine/ package is loaded (NOT monitors/).
+	# line to prove the engine/ package is loaded (NOT monitors/). The executor
+	# word is mode-driven (`mode` is gate-validated to "live"/"paper") so a
+	# real-money boot never mislabels itself "paper"; the stable
+	# `package=edge_catcher.engine` token is the package discriminator.
 	# Generic "Engine starting" is shared with the OLD engine; this line is unique.
-	log.info("engine[G]: paper executor wired, package=edge_catcher.engine")
+	log.info("engine[G]: %s executor wired, package=edge_catcher.engine", mode)
 
 	# Capture pipeline (default disabled — the `capture:` block in config
 	# opts in per-deploy). The writer is best-effort; if capture is disabled
