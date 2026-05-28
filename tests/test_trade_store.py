@@ -60,6 +60,106 @@ def test_init_book_snapshot_column_present(store: TradeStore) -> None:
 	assert "book_snapshot" in cols
 
 
+# ---------------------------------------------------------------------------
+# Dual-slippage columns + backfill (spec §4.2)
+# ---------------------------------------------------------------------------
+
+
+def test_init_dual_slippage_columns_present(store: TradeStore) -> None:
+	"""Fresh paper_trades schema includes both diagnostic columns. INTEGER per
+	spec §4.2 — matches live_trades; deliberately differs from legacy
+	slippage_cents REAL.
+	"""
+	cols = {
+		row[1]: row[2]  # name → type
+		for row in store._conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+	}
+	assert "market_impact_cents" in cols, "spec §4.2 requires market_impact_cents on paper_trades"
+	assert "limit_slippage_cents" in cols, "spec §4.2 requires limit_slippage_cents on paper_trades"
+	assert cols["market_impact_cents"] == "INTEGER", "must be INTEGER per spec §4.2"
+	assert cols["limit_slippage_cents"] == "INTEGER", "must be INTEGER per spec §4.2"
+
+
+def test_migrate_adds_dual_slippage_to_pre_existing_db(tmp_path: Path) -> None:
+	"""An existing paper_trades DB without the dual-slippage columns must gain
+	them via _MIGRATION_COLUMNS when TradeStore opens it (spec §4.2). Mirrors
+	the existing fill_pct / slippage_cents ALTER pattern.
+	"""
+	import sqlite3
+	db_path = tmp_path / "preexisting.db"
+	# Create the OLD schema manually (no dual-slippage columns).
+	conn = sqlite3.connect(str(db_path))
+	conn.execute(
+		"CREATE TABLE paper_trades ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, "
+		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
+		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
+		"slippage_cents REAL)"
+	)
+	conn.commit()
+	conn.close()
+
+	# Open via TradeStore — triggers _migrate(); the new columns must appear.
+	store = TradeStore(db_path)
+	try:
+		cols = {
+			row[1]
+			for row in store._conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+		}
+		assert "market_impact_cents" in cols
+		assert "limit_slippage_cents" in cols
+	finally:
+		store.close()
+
+
+def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> None:
+	"""Per spec §4.2: paper's legacy slippage_cents IS vs-best market-impact
+	(identical value). Backfill: UPDATE paper_trades SET market_impact_cents =
+	slippage_cents WHERE market_impact_cents IS NULL. limit_slippage_cents
+	stays NULL for pre-migration rows (not derivable — no stored limit).
+	"""
+	import sqlite3
+	db_path = tmp_path / "preexisting.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.execute(
+		"CREATE TABLE paper_trades ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, "
+		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
+		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
+		"slippage_cents REAL)"
+	)
+	# Pre-seed rows with non-NULL slippage_cents values.
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents) "
+		"VALUES ('T1', 50, '2026-01-01T00:00:00Z', 7.0)"
+	)
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents) "
+		"VALUES ('T2', 60, '2026-01-01T00:00:00Z', 0.0)"
+	)
+	conn.commit()
+	conn.close()
+
+	# Opening via TradeStore triggers the backfill.
+	store = TradeStore(db_path)
+	try:
+		rows = store._conn.execute(
+			"SELECT ticker, market_impact_cents, limit_slippage_cents, slippage_cents "
+			"FROM paper_trades ORDER BY id"
+		).fetchall()
+		# Both rows should have market_impact_cents == slippage_cents (backfilled);
+		# limit_slippage_cents stays NULL (not derivable for pre-migration rows).
+		assert rows[0][0] == "T1"
+		assert rows[0][1] == 7, f"market_impact_cents backfill expected 7, got {rows[0][1]}"
+		assert rows[0][2] is None, "limit_slippage_cents must remain NULL for pre-migration"
+		assert rows[1][1] == 0, f"market_impact_cents backfill expected 0, got {rows[1][1]}"
+		assert rows[1][2] is None
+	finally:
+		store.close()
+
+
 def test_record_trade_with_book_snapshot(store: TradeStore) -> None:
 	snapshot = '[[0.03, 12], [0.04, 25]]'
 	trade_id = store.record_trade(

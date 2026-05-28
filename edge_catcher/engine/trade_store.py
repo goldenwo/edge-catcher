@@ -206,8 +206,10 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 	blended_entry INTEGER,
 	book_depth INTEGER,
 	fill_pct REAL,
-	slippage_cents REAL,
-	book_snapshot TEXT
+	slippage_cents REAL, -- DEPRECATED (spec §4.2) — use market_impact_cents going forward
+	book_snapshot TEXT,
+	market_impact_cents INTEGER, -- spec §4.2: signed slippage vs top-of-book best
+	limit_slippage_cents INTEGER -- spec §4.2: signed slippage vs the order's limit
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_ticker ON paper_trades (ticker);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades (status);
@@ -235,6 +237,10 @@ _MIGRATION_COLUMNS: list[tuple[str, str]] = [
 	("fill_pct", "REAL"),
 	("slippage_cents", "REAL"),
 	("book_snapshot", "TEXT"),
+	# Dual-slippage diagnostic columns — spec §4.2 (INTEGER, deliberately
+	# differs from legacy slippage_cents REAL; matches live_trades).
+	("market_impact_cents", "INTEGER"),
+	("limit_slippage_cents", "INTEGER"),
 ]
 
 
@@ -269,6 +275,14 @@ class TradeStore:
 		)
 		self._conn.execute(
 			"UPDATE paper_trades SET slippage_cents = 0.0 WHERE slippage_cents IS NULL"
+		)
+		# Dual-slippage backfill (spec §4.2): paper's legacy slippage_cents IS
+		# vs-best market-impact (identical value), so the alias is zero-risk.
+		# limit_slippage_cents stays NULL for pre-migration rows — not derivable
+		# without a stored limit; F's consumer-migration must coalesce.
+		self._conn.execute(
+			"UPDATE paper_trades SET market_impact_cents = CAST(slippage_cents AS INTEGER) "
+			"WHERE market_impact_cents IS NULL AND slippage_cents IS NOT NULL"
 		)
 		self._conn.commit()
 
