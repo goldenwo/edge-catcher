@@ -319,6 +319,181 @@ def test_transition_pending_to_open(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #5b transition_pending_to_open dual-slippage compute (spec §4.2 / §6 / §9)
+#     — single chokepoint for ALL live entry fills (sync record_trade + WS +
+#     reconciler). Computes market_impact_cents + limit_slippage_cents from
+#     refs persisted on the pending row by live.state.record_pending; NULL
+#     ref → metric None per spec §4.3.
+# ---------------------------------------------------------------------------
+
+
+def test_transition_pending_to_open_computes_dual_slippage_metrics(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Per spec §4.2 / §6: transition_pending_to_open reads the two refs from
+	the pending row and computes market_impact_cents + limit_slippage_cents
+	via signed_slippage_cents(action='buy') at fill time. Buys use
+	``blended - limit`` so positive = paid MORE than the reference (worse).
+	"""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="p2o-refs",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		entry_best_price_cents=41,
+		entry_limit_price_cents=45,
+	)
+
+	# Blended = 42c. Refs: best=41 (top of book), limit=45 (we offered).
+	# Buy convention: market_impact = 42 - 41 = +1 (paid 1c above best — worse).
+	# Buy convention: limit_slippage = 42 - 45 = -3 (paid 3c below limit — better).
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-refs",
+		fill_size=10,
+		blended_entry_cents=42,
+		slippage_cents=1,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row = _row(conn, rid)
+	assert row["status"] == "open"
+	assert row["market_impact_cents"] == 1, (
+		"market_impact_cents = blended - entry_best_price_cents for buys; "
+		"42 - 41 = 1 (paid 1c above top of book — adverse impact)"
+	)
+	assert row["limit_slippage_cents"] == -3, (
+		"limit_slippage_cents = blended - entry_limit_price_cents for buys; "
+		"42 - 45 = -3 (paid 3c below our limit — favorable)"
+	)
+
+
+def test_transition_pending_to_open_null_refs_yield_null_metrics(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Per spec §4.3 + §9: NULL reference column → corresponding metric NULL.
+	Covers a pre-0004 pending row reconciling post-0004, dispatch
+	pending-fallback paths with no book snapshot, and any path where the
+	ref columns default to NULL on INSERT."""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="p2o-noref",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		# refs omitted — default None
+	)
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-noref",
+		fill_size=10,
+		blended_entry_cents=42,
+		slippage_cents=0,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row = _row(conn, rid)
+	assert row["status"] == "open"
+	assert row["market_impact_cents"] is None, (
+		"spec §4.3: NULL ref → NULL metric, never 0 (0 would mean 'filled exactly at best')"
+	)
+	assert row["limit_slippage_cents"] is None
+
+
+def test_transition_pending_to_open_mixed_ref(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Mixed refs: only entry_best persisted (e.g. a hypothetical fallback
+	path) → market_impact computed, limit_slippage NULL. Mirrors the
+	independent None-guard per metric."""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="p2o-mix",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		entry_best_price_cents=40,
+		entry_limit_price_cents=None,
+	)
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-mix",
+		fill_size=10,
+		blended_entry_cents=43,
+		slippage_cents=3,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row = _row(conn, rid)
+	assert row["market_impact_cents"] == 3, "43 - 40 = 3 (paid 3c above best)"
+	assert row["limit_slippage_cents"] is None
+
+
+def test_transition_pending_to_open_mixed_ref_limit_only(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Symmetry mirror of test_transition_pending_to_open_mixed_ref: only
+	entry_limit persisted → limit_slippage computed, market_impact NULL.
+	Pins independent None-guards on each metric (a one-sided defect in the
+	guard logic would only surface on one of the two mirror configurations).
+	"""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="p2o-mix-limit",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		entry_best_price_cents=None,
+		entry_limit_price_cents=45,
+	)
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-mix-l",
+		fill_size=10,
+		blended_entry_cents=42,
+		slippage_cents=0,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row = _row(conn, rid)
+	assert row["market_impact_cents"] is None
+	assert row["limit_slippage_cents"] == -3, "42 - 45 = -3 (paid 3c below limit)"
+
+
+# ---------------------------------------------------------------------------
 # #6 transition_pending_to_rejected (+ rejected_post_hoc TTL path)
 # ---------------------------------------------------------------------------
 

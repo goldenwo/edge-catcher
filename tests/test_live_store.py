@@ -978,3 +978,130 @@ def test_strategy_state_methods_are_phase1_intentional_noop(
 		"SC-E3b: load_state stays {} after save_state — the Phase-1 no-op "
 		"round-trip persists nothing (intentional flat-start, not a bug)"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Dual-slippage references — record_intent persists onto the pending row
+# (spec §4.2 / §9 / §11 — the two refs feed transition_pending_to_open's
+# compute on every entry-fill path: sync record_trade + WS-handler +
+# reconciler. Migration 0004 added the two INTEGER columns to live_trades.)
+# ---------------------------------------------------------------------------
+
+
+def test_record_intent_persists_dual_slippage_refs(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""Per spec §4.2: SQLiteTradeStore.record_intent threads
+	``entry_best_price_cents`` + ``entry_limit_price_cents`` through to
+	``live.state.record_pending``, which INSERTs them onto the pending row.
+	The values must round-trip exactly (INTEGER cents) and be readable from
+	an independent connection — i.e. actually committed to disk."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-refs0001"
+	store.record_intent(
+		**_intent_kwargs(client_order_id=coid),
+		entry_best_price_cents=41,
+		entry_limit_price_cents=45,
+	)
+
+	row = _query_one(
+		db_path,
+		"SELECT status, entry_best_price_cents, entry_limit_price_cents "
+		"FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert row is not None
+	assert row["status"] == "pending"
+	assert row["entry_best_price_cents"] == 41, (
+		"spec §4.2: pending row must persist entry_best_price_cents for "
+		"transition_pending_to_open to compute market_impact_cents at fill"
+	)
+	assert row["entry_limit_price_cents"] == 45, (
+		"spec §4.2: pending row must persist entry_limit_price_cents for "
+		"transition_pending_to_open to compute limit_slippage_cents at fill"
+	)
+
+
+def test_record_intent_default_dual_slippage_refs_null(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""Omitting the new kwargs (the ~20 existing _intent_kwargs() call sites
+	keep working unchanged per spec §4.2) persists NULL for both — "not
+	measurable" sentinel per spec §4.3, NOT zero. transition_pending_to_open
+	will then leave the metric columns NULL on this row's fill (covers a
+	pre-0004 pending row reconciling post-0004; tested by Step 10)."""
+	coid = "strat_34-KXSOL15M-26MAY16H12-refsnull"
+	store.record_intent(**_intent_kwargs(client_order_id=coid))
+
+	row = _query_one(
+		db_path,
+		"SELECT entry_best_price_cents, entry_limit_price_cents "
+		"FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert row is not None
+	assert row["entry_best_price_cents"] is None, (
+		"spec §4.3: default is NULL = 'not measurable', never 0"
+	)
+	assert row["entry_limit_price_cents"] is None, (
+		"spec §4.3: default is NULL = 'not measurable', never 0"
+	)
+
+
+def test_record_trade_ignores_dual_slippage_kwargs_uses_refs_instead(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""Per spec §4.2 / §5.2 + simplicity/coverage review: live
+	SQLiteTradeStore.record_trade accepts the two metric kwargs uniformly
+	(so dispatch never branches paper-vs-live) but IGNORES them — live's
+	authoritative compute happens at transition_pending_to_open from the
+	refs persisted on the pending row.
+
+	Distinguishing test: pass a wrong sentinel value (999) as the kwarg —
+	the row must end up with the COMPUTED metrics (from refs), NOT the
+	kwarg sentinel. Proves both halves:
+	(1) live IGNORES the kwarg (else the row would carry 999), and
+	(2) live COMPUTES from refs at the transition (else the row would be NULL).
+	"""
+	coid = "strat_34-KXSOL15M-26MAY16H12-ignore-kwarg"
+	# Seed pending row with refs: best=40, limit=45.
+	store.record_intent(
+		**_intent_kwargs(client_order_id=coid),
+		entry_best_price_cents=40,
+		entry_limit_price_cents=45,
+	)
+	# CAS to open with blended=42. Pass intentionally-wrong sentinels for the
+	# two metric kwargs to prove they're ignored.
+	store.record_trade(
+		ticker="KXSOL15M-26MAY16H12",
+		entry_price=42,
+		strategy="strat_34",
+		side="yes",
+		series_ticker="KXSOL15M",
+		intended_size=10,
+		fill_size=10,
+		blended_entry=42,
+		fill_pct=1.0,
+		slippage_cents=2,
+		now=_NOW,
+		client_order_id=coid,
+		kalshi_order_id="ord-kx-ignore",
+		market_impact_cents=999,
+		limit_slippage_cents=999,
+	)
+	row = _query_one(
+		db_path,
+		"SELECT market_impact_cents, limit_slippage_cents "
+		"FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert row is not None
+	# buy convention: blended - ref. 42-40=+2, 42-45=-3.
+	assert row["market_impact_cents"] == 2, (
+		"live IGNORES the kwarg AND computes from refs at transition; "
+		"got %r — either the kwarg leaked through (broken §5.2) or the "
+		"compute was skipped (broken §6)" % row["market_impact_cents"]
+	)
+	assert row["limit_slippage_cents"] == -3, (
+		"live IGNORES the kwarg AND computes from refs at transition; "
+		"got %r" % row["limit_slippage_cents"]
+	)

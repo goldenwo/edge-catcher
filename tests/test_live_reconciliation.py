@@ -689,6 +689,72 @@ async def test_17_startup_pending_matched_filled_resolves_to_open(
 
 
 @pytest.mark.asyncio
+async def test_17c_matched_filled_computes_dual_slippage_from_refs(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Per spec §4.2 / §6 / §9: when the reconciler drives
+	transition_pending_to_open on a startup-matched fill, the dual-slippage
+	metrics must be computed from the references persisted on the pending
+	row. End-to-end coverage of the reconciler → transition compute path —
+	mirrors the WS-handler test (the §1 keystone single chokepoint serves
+	both deferred callers)."""
+	coid = "strat-34-KXSOL15M-recon-dualslip"
+	# Direct record_pending so we can seed the two refs (entry_best=38¢ top
+	# of book; entry_limit=42¢ post-taker-cap) — _seed_pending omits them.
+	row_id = record_pending(
+		conn,
+		ticker="KXSOL15M-26MAY16H12",
+		series="KXSOL15M",
+		strategy="strat-34",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=40,
+		stop_loss_distance_cents=None,
+		client_order_id=coid,
+		kalshi_order_id=None,
+		placed_at_utc=_iso(_recent()),
+		entry_best_price_cents=38,
+		entry_limit_price_cents=42,
+	)
+	client = FakeClient(
+		orders=[
+			_order(
+				order_id="kid-recon-ds",
+				client_order_id=coid,
+				status="executed",
+				count=10,
+				filled_count=10,
+				limit_price_cents=42,
+				avg_fill_price_cents=40,
+			)
+		],
+		positions=[
+			Position(
+				ticker="KXSOL15M-26MAY16H12",
+				side="yes",
+				count=10,
+				average_price_cents=40,
+				raw={},
+			)
+		],
+	)
+
+	await startup_reconcile(client, conn, FakeBankrollCache())
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	# Buy convention: blended - ref. blended=40 (true avg from reconcile).
+	# market_impact = 40 - 38 = +2 (paid 2c above top of book — adverse).
+	# limit_slippage = 40 - 42 = -2 (paid 2c below limit — favorable).
+	assert row["market_impact_cents"] == 2, (
+		"reconciler must drive transition compute: 40 - 38 = 2"
+	)
+	assert row["limit_slippage_cents"] == -2, (
+		"reconciler must drive transition compute: 40 - 42 = -2"
+	)
+
+
+@pytest.mark.asyncio
 async def test_17b_matched_filled_prefers_true_avg_fill_over_limit(
 	conn: sqlite3.Connection,
 ) -> None:

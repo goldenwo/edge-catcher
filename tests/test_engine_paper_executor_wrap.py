@@ -106,11 +106,28 @@ async def test_blended_zero_sentinel_preserved():
 			"path — blended_entry_cents MUST round-trip as 0 so the trade "
 			"store's close-time fallback to entry_price fires correctly"
 		)
+		# Spec §4.3 + §5.1: even on the filled-with-zero sentinel branch, the
+		# dual-slippage metrics must be None ("not measurable") — the empty-book
+		# fallback has no book best to measure against. NEVER set them to 0
+		# (that would imply "filled exactly at best").
+		assert result.market_impact_cents is None, (
+			"filled-with-blended==0 sentinel must leave market_impact_cents=None "
+			"per spec §4.3 (no book to measure against → 'not measurable', "
+			"never 0)"
+		)
+		assert result.limit_slippage_cents is None, (
+			"filled-with-blended==0 sentinel must leave limit_slippage_cents=None"
+		)
 	elif result.status == "rejected":
 		assert result.rejection_reason in {"stale_book", "empty_book"}, (
 			f"empty yes_levels rejection must surface a defined reason — "
 			f"got {result.rejection_reason!r}"
 		)
+		# Rejected path also leaves both metrics None per §5.1 (already covered
+		# by test_rejected_entry_leaves_dual_slippage_None — re-asserted here
+		# for symmetry with the filled branch above).
+		assert result.market_impact_cents is None
+		assert result.limit_slippage_cents is None
 	else:
 		raise AssertionError(
 			f"PaperExecutor MUST return filled or rejected for this input — "
@@ -133,3 +150,85 @@ async def test_FillSkip_translates_to_rejected_with_reason():
 	assert result.filled_size == 0
 	assert result.fill_pct == 0.0
 	assert result.book_snapshot is None
+
+
+# ---------------------------------------------------------------------------
+# Dual-slippage metric population (spec §5.1 + §9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_filled_entry_populates_dual_slippage_metrics():
+	"""On a filled entry, PaperExecutor populates both diagnostic fields:
+	  - market_impact_cents == fill.slippage_cents (alias; vs top-of-book best)
+	  - limit_slippage_cents == signed slippage vs req.limit_price_cents
+
+	Per spec §5.1: walk_book_with_ceiling is untouched; the alias has zero
+	computational cost, and limit_slippage is the one new line in place().
+	"""
+	from edge_catcher.engine.fill_math import signed_slippage_cents
+
+	book = _canned_book()
+	cfg = _canned_config()
+	ms = _StubMarketState(book)
+	req = _canned_request()
+
+	fill = resolve_fill(cfg, req.limit_price_cents, req.side, book)
+	assert not isinstance(fill, FillSkip)
+
+	executor = PaperExecutor(market_state=ms, config=cfg)
+	result = await executor.place(req)
+
+	assert result.status == "filled"
+	# market_impact = vs-best (alias of existing slippage_cents on paper)
+	assert result.market_impact_cents == fill.slippage_cents
+	# limit_slippage = vs-limit, computed fresh against req.limit_price_cents
+	expected_limit_slippage = signed_slippage_cents(
+		blended=fill.blended_price_cents,
+		limit=req.limit_price_cents,
+		action="buy",
+	)
+	assert result.limit_slippage_cents == expected_limit_slippage
+
+
+@pytest.mark.asyncio
+async def test_rejected_entry_leaves_dual_slippage_None():
+	"""When place() rejects (FillSkip → rejected), both new fields remain None.
+	Covers stale-book / empty-book / below-min via the FillSkip codepath."""
+	cfg = _canned_config()
+	book = _canned_book(yes_levels=[])
+	ms = _StubMarketState(book)
+	req = _canned_request(side="yes", limit=42)
+
+	executor = PaperExecutor(market_state=ms, config=cfg)
+	result = await executor.place(req)
+
+	assert result.status == "rejected"
+	assert result.market_impact_cents is None
+	assert result.limit_slippage_cents is None
+
+
+@pytest.mark.asyncio
+async def test_sell_path_leaves_dual_slippage_None():
+	"""PaperExecutor short-circuits sell (paper.py:372 ish) before fill resolution.
+	Per spec §5.1 non-filled paths: both metrics None."""
+	book = _canned_book()
+	cfg = _canned_config()
+	ms = _StubMarketState(book)
+	req = OrderRequest(
+		ticker="KXSOL15M-25-T1",
+		series="KXSOL15M",
+		side="yes",
+		size_contracts=4,
+		limit_price_cents=42,
+		strategy="strat-34",
+		client_order_id="strat-34-KXSOL15M-1715000000000",
+		action="sell",
+	)
+
+	executor = PaperExecutor(market_state=ms, config=cfg)
+	result = await executor.place(req)
+
+	# Paper sells are short-circuited; both metrics remain None per spec §5.1.
+	assert result.market_impact_cents is None
+	assert result.limit_slippage_cents is None

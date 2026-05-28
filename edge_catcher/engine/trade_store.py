@@ -39,6 +39,8 @@ class TradeStoreProtocol(Protocol):
 		now: datetime,
 		client_order_id: Optional[str] = ...,
 		kalshi_order_id: Optional[str] = ...,
+		market_impact_cents: Optional[int] = ...,
+		limit_slippage_cents: Optional[int] = ...,
 	) -> int:
 		"""Record a filled entry; return the trade row id.
 
@@ -143,15 +145,21 @@ class TradeStoreProtocol(Protocol):
 		stop_loss_distance_cents: int | None,
 		client_order_id: str,
 		placed_at_utc: str,
+		entry_best_price_cents: int | None = None,
+		entry_limit_price_cents: int | None = None,
 	) -> None:
 		"""Pre-place durability hook (sub-project E / L1). Paper + InMemory =
 		no-op. Live = INSERT a `pending` row keyed by client_order_id BEFORE
-		the order is sent (spec §3/§3.1/§4.2). Additive — no member removed.
+		the order is sent (spec §3/§3.1/§4.2).
 
 		``entry_price_cents``/``stop_loss_distance_cents`` are ``int | None``
-		to match ``Signal`` (their only source) and the ``record_pending`` /
-		``record_rejected`` siblings — a ``None`` intent persists B's inert
-		sentinel; the real basis lands on fill (CAS ``pending→open``)."""
+		to match ``Signal``; a ``None`` intent persists the inert sentinel
+		(the real basis lands on fill via CAS ``pending→open``).
+
+		``entry_best_price_cents`` + ``entry_limit_price_cents`` (spec §4.2)
+		are dual-slippage references — live persists them on the pending row;
+		paper/in-memory ignore. Defaults ``None`` keep existing call sites
+		unchanged."""
 		...
 
 	def get_open_trades(self) -> list[dict[str, Any]]: ...
@@ -206,8 +214,10 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 	blended_entry INTEGER,
 	book_depth INTEGER,
 	fill_pct REAL,
-	slippage_cents REAL,
-	book_snapshot TEXT
+	slippage_cents REAL, -- DEPRECATED (spec §4.2) — use market_impact_cents going forward
+	book_snapshot TEXT,
+	market_impact_cents INTEGER, -- spec §4.2: signed slippage vs top-of-book best
+	limit_slippage_cents INTEGER -- spec §4.2: signed slippage vs the order's limit
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_ticker ON paper_trades (ticker);
 CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades (status);
@@ -235,6 +245,10 @@ _MIGRATION_COLUMNS: list[tuple[str, str]] = [
 	("fill_pct", "REAL"),
 	("slippage_cents", "REAL"),
 	("book_snapshot", "TEXT"),
+	# Dual-slippage diagnostic columns — spec §4.2 (INTEGER, deliberately
+	# differs from legacy slippage_cents REAL; matches live_trades).
+	("market_impact_cents", "INTEGER"),
+	("limit_slippage_cents", "INTEGER"),
 ]
 
 
@@ -270,6 +284,23 @@ class TradeStore:
 		self._conn.execute(
 			"UPDATE paper_trades SET slippage_cents = 0.0 WHERE slippage_cents IS NULL"
 		)
+		# Dual-slippage backfill (spec §4.2): paper's legacy slippage_cents IS
+		# vs-best market-impact (identical value), so the alias is zero-risk.
+		# limit_slippage_cents stays NULL for pre-migration rows — not derivable
+		# without a stored limit; F's consumer-migration must coalesce.
+		#
+		# The `blended_entry IS NOT NULL` gate excludes empty-book-sentinel
+		# rows (paper converts blended_entry=0 → NULL on INSERT at :340) per
+		# spec §4.3 — those rows have no book to measure against, so
+		# market_impact_cents must stay NULL ("not measurable", never 0).
+		# Without this gate the backfill would actively undo PaperExecutor's
+		# new sentinel-path None-write on every startup.
+		self._conn.execute(
+			"UPDATE paper_trades SET market_impact_cents = CAST(slippage_cents AS INTEGER) "
+			"WHERE market_impact_cents IS NULL "
+			"AND slippage_cents IS NOT NULL "
+			"AND blended_entry IS NOT NULL"
+		)
 		self._conn.commit()
 
 	# -------------------------------------------------------------------------
@@ -294,6 +325,8 @@ class TradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id.
 
@@ -336,14 +369,16 @@ class TradeStore:
 				ticker, entry_price, entry_time, status,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,
-				fill_pct, slippage_cents, book_snapshot
-			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				fill_pct, slippage_cents, book_snapshot,
+				market_impact_cents, limit_slippage_cents
+			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			(
 				ticker, entry_price, entry_time_iso,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,  # blended_entry already sanitised above
 				fill_pct, slippage_cents, book_snapshot,
+				market_impact_cents, limit_slippage_cents,
 			),
 		)
 		self._conn.commit()
@@ -616,6 +651,8 @@ class InMemoryTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Mirror of SQLiteTradeStore.record_trade — see trade_store.py:106.
 		Computes entry_fee_cents internally using STANDARD_FEE. Raises
@@ -660,6 +697,11 @@ class InMemoryTradeStore:
 			"fill_pct": fill_pct,
 			"slippage_cents": slippage_cents,
 			"book_snapshot": book_snapshot,
+			# Dual-slippage diagnostic columns (spec §4.2 + §11) — round-trip
+			# through replay so paper-side parity is preserved when the in-memory
+			# store reads back rows seeded from a prior day's replay.
+			"market_impact_cents": market_impact_cents,
+			"limit_slippage_cents": limit_slippage_cents,
 			"status": "open",
 			"entry_time": entry_time_iso,
 			"exit_price": None,

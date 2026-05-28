@@ -60,6 +60,217 @@ def test_init_book_snapshot_column_present(store: TradeStore) -> None:
 	assert "book_snapshot" in cols
 
 
+# ---------------------------------------------------------------------------
+# Dual-slippage columns + backfill (spec §4.2)
+# ---------------------------------------------------------------------------
+
+
+def test_init_dual_slippage_columns_present(store: TradeStore) -> None:
+	"""Fresh paper_trades schema includes both diagnostic columns. INTEGER per
+	spec §4.2 — matches live_trades; deliberately differs from legacy
+	slippage_cents REAL.
+	"""
+	cols = {
+		row[1]: row[2]  # name → type
+		for row in store._conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+	}
+	assert "market_impact_cents" in cols, "spec §4.2 requires market_impact_cents on paper_trades"
+	assert "limit_slippage_cents" in cols, "spec §4.2 requires limit_slippage_cents on paper_trades"
+	assert cols["market_impact_cents"] == "INTEGER", "must be INTEGER per spec §4.2"
+	assert cols["limit_slippage_cents"] == "INTEGER", "must be INTEGER per spec §4.2"
+
+
+def test_migrate_adds_dual_slippage_to_pre_existing_db(tmp_path: Path) -> None:
+	"""An existing paper_trades DB without the dual-slippage columns must gain
+	them via _MIGRATION_COLUMNS when TradeStore opens it (spec §4.2). Mirrors
+	the existing fill_pct / slippage_cents ALTER pattern.
+	"""
+	import sqlite3
+	db_path = tmp_path / "preexisting.db"
+	# Create the OLD schema manually (no dual-slippage columns).
+	conn = sqlite3.connect(str(db_path))
+	conn.execute(
+		"CREATE TABLE paper_trades ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, "
+		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
+		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
+		"slippage_cents REAL)"
+	)
+	conn.commit()
+	conn.close()
+
+	# Open via TradeStore — triggers _migrate(); the new columns must appear.
+	store = TradeStore(db_path)
+	try:
+		cols = {
+			row[1]
+			for row in store._conn.execute("PRAGMA table_info(paper_trades)").fetchall()
+		}
+		assert "market_impact_cents" in cols
+		assert "limit_slippage_cents" in cols
+	finally:
+		store.close()
+
+
+def test_record_trade_persists_dual_slippage_metrics(store: TradeStore) -> None:
+	"""record_trade accepts + persists market_impact_cents and limit_slippage_cents.
+	PaperExecutor populates these on filled entries (spec §5.1); the store
+	rounds them in via INSERT."""
+	trade_id = store.record_trade(
+		ticker="T1", entry_price=50, strategy="test", side="yes",
+		series_ticker="SERIES",
+		now=_now(),
+		market_impact_cents=3,
+		limit_slippage_cents=-5,
+	)
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(trade_id,),
+	).fetchone()
+	assert row[0] == 3, f"market_impact_cents should be 3, got {row[0]}"
+	assert row[1] == -5, f"limit_slippage_cents should be -5, got {row[1]}"
+
+
+def test_record_trade_dual_slippage_default_NULL(store: TradeStore) -> None:
+	"""Omitting the dual-slippage kwargs leaves both columns NULL (PaperExecutor
+	default; preserves rows from non-paper test fixtures that don't set them)."""
+	trade_id = store.record_trade(
+		ticker="T2", entry_price=50, strategy="test", side="yes",
+		series_ticker="SERIES",
+		now=_now(),
+	)
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(trade_id,),
+	).fetchone()
+	assert row[0] is None
+	assert row[1] is None
+
+
+def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> None:
+	"""Per spec §4.2: paper's legacy slippage_cents IS vs-best market-impact
+	(identical value). Backfill: UPDATE paper_trades SET market_impact_cents =
+	slippage_cents WHERE market_impact_cents IS NULL AND blended_entry IS NOT
+	NULL. limit_slippage_cents stays NULL for pre-migration rows (not
+	derivable — no stored limit). The blended_entry gate excludes empty-book
+	sentinel rows per spec §4.3 (paper converts blended_entry=0 → NULL on
+	INSERT; "not measurable", never 0).
+	"""
+	import sqlite3
+	db_path = tmp_path / "preexisting.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.execute(
+		"CREATE TABLE paper_trades ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, "
+		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
+		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
+		"slippage_cents REAL, blended_entry INTEGER)"
+	)
+	# T1: real fill, slippage=7 → backfill to market_impact_cents=7.
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T1', 50, '2026-01-01T00:00:00Z', 7.0, 57)"
+	)
+	# T2: real fill, slippage=0 (filled exactly at best) → backfill to market_impact_cents=0.
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T2', 60, '2026-01-01T00:00:00Z', 0.0, 60)"
+	)
+	# T3: empty-book sentinel row (blended_entry NULL — paper writes
+	# blended_entry=None when fill.blended_price_cents==0). Backfill MUST
+	# SKIP this row — market_impact_cents stays NULL per spec §4.3 ("not
+	# measurable, never 0"). Pre-fix this row would have backfilled to 0.
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T3', 70, '2026-01-01T00:00:00Z', 0.0, NULL)"
+	)
+	conn.commit()
+	conn.close()
+
+	# Opening via TradeStore triggers the backfill.
+	store = TradeStore(db_path)
+	try:
+		rows = store._conn.execute(
+			"SELECT ticker, market_impact_cents, limit_slippage_cents, slippage_cents "
+			"FROM paper_trades ORDER BY id"
+		).fetchall()
+		assert rows[0][0] == "T1"
+		assert rows[0][1] == 7, f"T1 backfill expected 7, got {rows[0][1]}"
+		assert rows[0][2] is None, "limit_slippage_cents must remain NULL for pre-migration"
+		assert rows[1][1] == 0, f"T2 backfill (real fill at best) expected 0, got {rows[1][1]}"
+		assert rows[1][2] is None
+		# Sentinel row: backfill MUST NOT overwrite NULL (else it actively
+		# undoes PaperExecutor's new sentinel-path None-write on every startup).
+		assert rows[2][0] == "T3"
+		assert rows[2][1] is None, (
+			"T3 (blended_entry NULL → empty-book sentinel) must stay NULL per "
+			f"spec §4.3, NOT backfilled — got {rows[2][1]}. The backfill gate "
+			"`blended_entry IS NOT NULL` exists precisely to prevent this."
+		)
+		assert rows[2][2] is None
+	finally:
+		store.close()
+
+
+# ---------------------------------------------------------------------------
+# record_intent — Protocol surface + paper accept-and-ignore (spec §4.2/§9)
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_record_intent_includes_dual_slippage_refs() -> None:
+	"""Per spec §4.2 (Contract additions): TradeStoreProtocol.record_intent
+	gains entry_best_price_cents + entry_limit_price_cents (9 → 11 kwargs,
+	defaults None). Live persists these onto the pending row for
+	transition_pending_to_open to compute market_impact/limit_slippage at
+	fill; paper/in-memory accept-and-ignore. Defaults None so existing
+	record_intent(**_intent_kwargs()) sites in tests/dispatch keep working.
+	"""
+	import inspect
+
+	from edge_catcher.engine.trade_store import TradeStoreProtocol
+
+	sig = inspect.signature(TradeStoreProtocol.record_intent)
+	params = sig.parameters
+	assert "entry_best_price_cents" in params, (
+		"spec §4.2 requires entry_best_price_cents on Protocol.record_intent"
+	)
+	assert "entry_limit_price_cents" in params, (
+		"spec §4.2 requires entry_limit_price_cents on Protocol.record_intent"
+	)
+	assert params["entry_best_price_cents"].default is None, (
+		"default must be None so existing 9-kwarg call sites keep working"
+	)
+	assert params["entry_limit_price_cents"].default is None, (
+		"default must be None so existing 9-kwarg call sites keep working"
+	)
+	assert params["entry_best_price_cents"].kind is inspect.Parameter.KEYWORD_ONLY
+	assert params["entry_limit_price_cents"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_paper_record_intent_accepts_dual_slippage_refs(store: TradeStore) -> None:
+	"""Per spec §4.2 + §9: paper TradeStore.record_intent accepts (and ignores)
+	the two new reference kwargs. Paper has no pending state — synchronous
+	fills go straight to record_trade — so this remains a no-op, but the
+	kwargs must not raise so dispatch can call uniformly across paper/live.
+	"""
+	result = store.record_intent(
+		ticker="KXT",
+		series="KXT",
+		strategy="s",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="s-KXT-test-intent",
+		placed_at_utc="2026-01-01T00:00:00Z",
+		entry_best_price_cents=41,
+		entry_limit_price_cents=45,
+	)
+	assert result is None
+
+
 def test_record_trade_with_book_snapshot(store: TradeStore) -> None:
 	snapshot = '[[0.03, 12], [0.04, 25]]'
 	trade_id = store.record_trade(

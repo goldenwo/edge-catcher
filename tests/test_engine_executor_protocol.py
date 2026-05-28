@@ -148,6 +148,45 @@ def test_order_result_order_id_can_be_set() -> None:
 	assert r.order_id == "ord-abc123"
 
 
+# ---------------------------------------------------------------------------
+# Dual-slippage diagnostic fields — additive, default None per spec §4.2
+# ---------------------------------------------------------------------------
+
+
+def test_order_result_dual_slippage_fields_default_to_none() -> None:
+	"""market_impact_cents + limit_slippage_cents default to None so existing
+	call sites (every PaperExecutor pre-spec and every LiveExecutor path) remain
+	valid. PaperExecutor populates both on filled entries; LiveExecutor leaves
+	them None (live computes at transition_pending_to_open from persisted refs).
+	"""
+	r = OrderResult(
+		status="filled",
+		intended_size=1,
+		filled_size=1,
+		blended_entry_cents=50,
+		fill_pct=1.0,
+		slippage_cents=0,
+	)
+	assert r.market_impact_cents is None
+	assert r.limit_slippage_cents is None
+
+
+def test_order_result_dual_slippage_fields_can_be_set() -> None:
+	"""PaperExecutor sets both fields on filled-entry paths."""
+	r = OrderResult(
+		status="filled",
+		intended_size=1,
+		filled_size=1,
+		blended_entry_cents=50,
+		fill_pct=1.0,
+		slippage_cents=0,
+		market_impact_cents=3,
+		limit_slippage_cents=-5,
+	)
+	assert r.market_impact_cents == 3
+	assert r.limit_slippage_cents == -5
+
+
 def test_open_position_shape() -> None:
 	"""OpenPosition is a frozen+slots dataclass with 4 required fields."""
 	pos = OpenPosition(

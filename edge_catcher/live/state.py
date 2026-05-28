@@ -28,6 +28,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
+from edge_catcher.engine.fill_math import signed_slippage_cents
 from edge_catcher.storage.migrations import apply_migrations
 
 log = logging.getLogger(__name__)
@@ -158,12 +159,17 @@ def record_pending(
 	kalshi_order_id: str | None,
 	placed_at_utc: str,
 	rejection_reason: str | None = None,
+	entry_best_price_cents: int | None = None,
+	entry_limit_price_cents: int | None = None,
 ) -> int:
 	"""INSERT a new ``pending`` row. Called by dispatch.py on D's pending
-	OrderResult (NetworkError / malformed-fills / engine-timeout).
+	OrderResult (NetworkError / malformed-fills / engine-timeout) AND by
+	``SQLiteTradeStore.record_intent`` for the pre-place durability hook
+	(spec §3 / §4.2).
 
 	On INSERT: ``original_intended_size = intended_size``; ``fill_size = 0``;
-	``status = 'pending'``. ``kalshi_order_id`` may be NULL (NetworkError).
+	``status = 'pending'``. ``kalshi_order_id`` may be NULL (NetworkError or
+	pre-place intent).
 
 	Raises ``RecordPendingFailed`` (chained from the underlying
 	``sqlite3.Error``) on any DB failure — a silent INSERT failure here
@@ -179,6 +185,17 @@ def record_pending(
 	as the inert sentinel ``0`` so the NOT-NULL DDL column stays satisfied
 	(a pending row's entry_price_cents is overwritten by the real blended
 	fill on transition_pending_to_open, and pending rows never feed P&L).
+
+	``entry_best_price_cents`` and ``entry_limit_price_cents`` (spec §4.2)
+	are the dual-slippage references captured by dispatch at the pre-place
+	call site (top-of-book best snapshot × 100; the executor's actual
+	limit). Both columns are nullable INTEGER (added by migration 0004) and
+	default ``None``: ``None`` means "not measurable" per spec §4.3 (no book
+	snapshot, pre-0004 pending rows reconciling post-0004, etc.) —
+	transition_pending_to_open leaves the corresponding metric column NULL
+	on fill in that case. The dispatch pending-fallback path (D's
+	NetworkError / malformed-fills branches) does NOT have these refs and
+	relies on the defaults.
 	"""
 	try:
 		cur = conn.execute(
@@ -186,8 +203,9 @@ def record_pending(
 			"ticker, series, strategy, side, intended_size, "
 			"original_intended_size, fill_size, entry_price_cents, "
 			"stop_loss_distance_cents, status, client_order_id, "
-			"kalshi_order_id, placed_at_utc, rejection_reason"
-			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)",
+			"kalshi_order_id, placed_at_utc, rejection_reason, "
+			"entry_best_price_cents, entry_limit_price_cents"
+			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
 			(
 				ticker,
 				series,
@@ -204,6 +222,8 @@ def record_pending(
 				kalshi_order_id,
 				placed_at_utc,
 				rejection_reason,
+				entry_best_price_cents,
+				entry_limit_price_cents,
 			),
 		)
 		conn.commit()
@@ -875,7 +895,34 @@ def transition_pending_to_open(
 	``slippage_cents`` is consumed verbatim (from D's signed_slippage_cents);
 	never recomputed here. CAS precondition: status='pending'. A lost race is
 	a logged no-op.
+
+	Also computes dual-slippage metrics from refs persisted on the pending
+	row (spec §4.2 / §6); independent per-metric None-guard means a NULL
+	ref → NULL metric (§4.3). This is the §1 keystone single chokepoint for
+	all live entry-fill paths (sync record_trade + WS-handler + reconciler).
 	"""
+	# Read refs from the pending row (single shared connection — same
+	# write-serializing thread, no concurrent UPDATE between SELECT and
+	# the CAS below per spec §6).
+	ref_row = conn.execute(
+		"SELECT entry_best_price_cents, entry_limit_price_cents "
+		"FROM live_trades WHERE id = ?",
+		(row_id,),
+	).fetchone()
+	entry_best = ref_row[0] if ref_row is not None else None
+	entry_limit = ref_row[1] if ref_row is not None else None
+
+	# Per-metric None-guard (spec §4.3): NULL ref → NULL metric.
+	def _slip_or_none(ref: int | None) -> int | None:
+		if ref is None:
+			return None
+		return signed_slippage_cents(
+			blended=blended_entry_cents, limit=ref, action="buy"
+		)
+
+	market_impact = _slip_or_none(entry_best)
+	limit_slippage = _slip_or_none(entry_limit)
+
 	changed = _cas_update(
 		conn,
 		row_id=row_id,
@@ -884,7 +931,8 @@ def transition_pending_to_open(
 			"status = 'open', kalshi_order_id = ?, fill_size = ?, "
 			"blended_entry_cents = ?, slippage_cents = ?, fill_pct = ?, "
 			"entry_time = ?, entry_fee_cents = ?, "
-			"entry_fee_remaining_cents = ? "
+			"entry_fee_remaining_cents = ?, "
+			"market_impact_cents = ?, limit_slippage_cents = ? "
 			"WHERE id = ? AND status = 'pending'"
 		),
 		params=(
@@ -896,6 +944,8 @@ def transition_pending_to_open(
 			entry_time,
 			entry_fee_cents,
 			entry_fee_cents,
+			market_impact,
+			limit_slippage,
 			row_id,
 		),
 		transition="pending->open",
@@ -904,11 +954,14 @@ def transition_pending_to_open(
 	# already logged its WARNING in _cas_update — don't double-claim).
 	if changed:
 		log.info(
-			"live_trades id=%d pending→open kalshi_id=%s fill=%d blended=%dc",
+			"live_trades id=%d pending→open kalshi_id=%s fill=%d blended=%dc "
+			"market_impact=%s limit_slip=%s",
 			row_id,
 			kalshi_order_id,
 			fill_size,
 			blended_entry_cents,
+			market_impact,
+			limit_slippage,
 		)
 
 

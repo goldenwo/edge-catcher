@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS live_trades (
     fill_size INTEGER NOT NULL DEFAULT 0,      -- actual filled (current; decrements on partial-exit splits)
     entry_price_cents INTEGER NOT NULL,        -- Signal's entry_price intent
     blended_entry_cents INTEGER,               -- VWAP of fills; NULL until fill
-    slippage_cents INTEGER,                    -- signed: positive = worse than limit (any side)
+    slippage_cents INTEGER,                    -- DEPRECATED (spec §4.2 — use market_impact_cents + limit_slippage_cents); signed: positive = worse than limit (any side)
     fill_pct REAL,                             -- fill_size / intended_size
     stop_loss_distance_cents INTEGER,          -- from Signal; for reporting
 
