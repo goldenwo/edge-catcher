@@ -57,10 +57,17 @@ def _split_sql_statements(sql: str) -> list[str]:
 	"""Split a migration SQL body into individual statements.
 
 	Strips ``--`` line comments and splits on ``;``. Sufficient for the
-	DDL-only migrations shipped here (CREATE TABLE / ALTER TABLE) which
-	have no string literals containing ``;`` or ``--``. If a future
-	migration needs richer SQL (string-embedded semicolons, block
-	comments), swap this for sqlparse — YAGNI until then.
+	DDL-only migrations shipped here (CREATE TABLE, CREATE INDEX, DROP
+	VIEW, CREATE VIEW, ALTER TABLE ADD COLUMN).
+
+	Load-bearing invariant for migration authors: this splitter is
+	**naive about string literals and block comments**. A migration body
+	must not contain ``;`` or ``--`` inside a string literal (e.g.
+	``DEFAULT ';'`` or ``CHECK (col IN ('a--b'))``), nor ``/* ... */``
+	block comments. Both would mis-split today. CREATE TRIGGER bodies
+	(which require internal ``;`` separators) are also not supported.
+	If a future migration needs any of these, swap this for sqlparse and
+	delete this caveat — YAGNI until then.
 	"""
 	no_comments: list[str] = []
 	for line in sql.splitlines():
@@ -95,18 +102,23 @@ def apply_migrations(
 		FileNotFoundError: If *migrations_dir* does not exist.
 		sqlite3.DatabaseError: On any SQL error during migration execution.
 
-	**Atomicity warning for future DML migrations:** ``executescript`` issues
-	its own implicit COMMIT for the migration body, then the
-	``live_schema_migrations`` INSERT is committed by a second ``conn.commit()``.
-	If the process dies between those two commits, the migration body is
-	persisted but the tracking row is missing — the migration re-runs on
-	next startup. **This is safe today** because every Phase 1 migration is
-	idempotent ``CREATE TABLE IF NOT EXISTS`` DDL. **It is NOT safe for any
-	future DML migration** (``INSERT`` / ``UPDATE`` / ``DELETE``), which
-	would silently double-apply and corrupt data. Any such migration must
-	wrap its body in an explicit ``BEGIN; ... COMMIT;`` paired with the
-	tracking-row INSERT inside the same transaction. Until that's needed,
-	the YAGNI two-commit pattern stays.
+	**Atomicity warning for future DML migrations:** the body is split into
+	independent statements and each is dispatched via its own
+	``executescript`` call (so each DDL statement autocommits as SQLite
+	would normally). After the loop, the ``live_schema_migrations`` INSERT
+	is committed by a final ``conn.commit()``. If the process dies between
+	any body-statement commit and the tracking-row commit, the body is
+	fully (or partially, for multi-statement bodies) persisted but the
+	tracking row is missing — the migration re-runs on next startup.
+	**This is safe today** because every shipped migration is independently
+	idempotent (``CREATE TABLE IF NOT EXISTS``, ``CREATE INDEX IF NOT EXISTS``,
+	``DROP VIEW IF EXISTS`` + ``CREATE VIEW``, and ``ALTER TABLE ADD COLUMN``
+	tolerated via the per-statement ``duplicate column name`` swallow).
+	**It is NOT safe for any future DML migration** (``INSERT`` / ``UPDATE`` /
+	``DELETE``), which would silently double-apply and corrupt data. Any
+	such migration must wrap its body in an explicit ``BEGIN; ... COMMIT;``
+	paired with the tracking-row INSERT inside the same transaction. Until
+	that's needed, the YAGNI two-commit pattern stays.
 	"""
 	if migrations_dir is None:
 		migrations_dir = _DEFAULT_MIGRATIONS_DIR
