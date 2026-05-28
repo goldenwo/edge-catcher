@@ -496,9 +496,41 @@ def _assert_mode_coherence(config: dict) -> None:
 			)
 
 	# Checks 3/4/5 are LIVE-ONLY. For paper they are skipped entirely so
-	# the paper path is byte-unchanged (§9). Return now for paper.
+	# the paper path is byte-unchanged (§9). Return now for paper — AFTER
+	# validating the paper fill-model config (spec §4.6). Pure config reads +
+	# a read-only strategy discovery; consistent with this gate's
+	# no-network/no-DB posture.
 	if mode == "paper":
-		return
+		fill_model = config.get("paper_fill_model", "optimistic")
+		if fill_model not in ("optimistic", "fixed"):
+			raise _coherence_fail(
+				"paper_fill_model",
+				f"must be 'optimistic' or 'fixed'; got {fill_model!r}",
+			)
+		if fill_model != "optimistic":
+			hp = config.get("honest_paper")
+			if (
+				not isinstance(hp, dict)
+				or not isinstance(hp.get("default_slippage_cents"), int)
+				or isinstance(hp.get("default_slippage_cents"), bool)  # yaml `true` is an int subclass — reject
+				or not isinstance(hp.get("per_strategy"), dict)
+			):
+				raise _coherence_fail(
+					"honest_paper",
+					"paper_fill_model != 'optimistic' requires an honest_paper block "
+					"with int default_slippage_cents and a per_strategy mapping",
+				)
+			known = {s.name for s in discover_strategies()}
+			unknown = sorted(set(hp["per_strategy"]) - known)
+			if unknown:
+				raise _coherence_fail(
+					"honest_paper.per_strategy",
+					f"unknown strategy keys {unknown} — not in the paper-trader "
+					f"registry (engine/strategies_local.py via discover_strategies). "
+					f"A typo or renamed strategy would be silently dropped to "
+					f"default_slippage_cents.",
+				)
+		return  # the existing paper early-return, now after validation
 
 	notif_cfg = config.get("notifications", {}) or {}
 
