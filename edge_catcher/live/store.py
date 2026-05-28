@@ -429,45 +429,26 @@ class SQLiteTradeStore:
 	) -> None:
 		"""LIVE pre-place durability hook (spec §3 / §3.1 / §4.2).
 
-		Dispatch (E's later wiring) calls this UNCONDITIONALLY immediately
-		BEFORE ``await executor.place(req)``. On the live store it durably
-		INSERTs a ``pending`` row keyed by ``client_order_id`` BEFORE any
-		order is sent, so a severed place→persist is recoverable by B's
-		reconciler (it discriminates by ``client_order_id`` via Kalshi truth)
-		and there is never an untracked real-money position. An un-sent
-		order's row is indistinguishable-to-recovery from a never-received
-		one — both TTL-expire safely — so a pre-place INSERT preceding the
-		order is strictly safe (spec §4.2).
+		Dispatch calls this UNCONDITIONALLY immediately BEFORE
+		``await executor.place(req)``. The live store durably INSERTs a
+		``pending`` row keyed by ``client_order_id`` BEFORE any order is sent,
+		so a severed place→persist is recoverable by B's reconciler via
+		``client_order_id`` — there is never an untracked real-money position.
 
 		Pure delegation to :func:`live.state.record_pending` over the held
-		connection with ``kalshi_order_id=None`` (no order placed yet) and
-		``rejection_reason=None`` (no rejection — this is the intent, not a
-		terminal outcome). The 11-kwarg signature matches
-		``TradeStoreProtocol.record_intent`` verbatim (9 base + 2 dual-slippage
-		refs per spec §4.2); the post-place outcome (open / rejected /
-		pending-on-failure) is a later CAS transition on THIS row, not this
-		method's concern.
-
-		``entry_best_price_cents`` and ``entry_limit_price_cents`` (spec §4.2)
-		are dual-slippage references — dispatch captures the top-of-book best
-		snapshot and the executor's actual limit at the pre-place call site.
-		They are persisted onto the pending row here so
-		``live.state.transition_pending_to_open`` can compute
-		``market_impact_cents`` and ``limit_slippage_cents`` from them on
-		EVERY entry-fill path (sync ``record_trade`` + WS-handler +
-		reconciler). Defaults ``None`` keep the ~20 existing 9-kwarg
-		``record_intent(**_intent_kwargs())`` test sites unchanged.
+		connection with ``kalshi_order_id=None`` + ``rejection_reason=None``
+		(this is the intent, not a terminal outcome). The 11-kwarg signature
+		matches ``TradeStoreProtocol.record_intent`` verbatim (9 base + 2
+		dual-slippage refs per spec §4.2); the post-place outcome is a later
+		CAS transition on THIS row.
 
 		🚨 §3.1 NORMATIVE — FATAL on failure. ``live.state.record_pending``
-		raises :class:`RecordPendingFailed` (chained from the underlying
-		``sqlite3.Error``) on INSERT failure. There is intentionally **no**
-		try/except around this call: the exception propagates UNCAUGHT so the
-		entry aborts BEFORE ``place()`` (safe by construction — nothing was
-		sent, no money at risk) and the engine's three
-		``except RecordPendingFailed: raise`` ghost-reject clauses
-		(``dispatch.process_tick`` / ``engine._ws_loop`` / ``engine`` outer
-		reconnect) halt the engine rather than swallowing a failed
-		pre-place persistence.
+		raises :class:`RecordPendingFailed` on INSERT failure. There is
+		intentionally **no** try/except around this call: the exception
+		propagates UNCAUGHT so the entry aborts BEFORE ``place()`` (nothing
+		sent ⇒ nothing at risk) and the engine's
+		``except RecordPendingFailed: raise`` clauses halt rather than
+		swallowing a failed pre-place persistence.
 		"""
 		record_pending(
 			self._conn,
@@ -897,8 +878,14 @@ class SQLiteTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
-		market_impact_cents: Optional[int] = None,  # noqa: ARG002 — accept-and-ignore per spec §4.2
-		limit_slippage_cents: Optional[int] = None,  # noqa: ARG002 — accept-and-ignore per spec §4.2
+		# Dual-slippage diagnostics dispatch forwards uniformly. Intentionally
+		# unused here — live computes its own pair at transition_pending_to_open
+		# from the refs persisted on the pending row (spec §4.2 / §5.2), so
+		# the values supplied here would be redundant. Required in the
+		# signature to satisfy TradeStoreProtocol; the noqa silences the
+		# unused-arg lint.
+		market_impact_cents: Optional[int] = None,  # noqa: ARG002
+		limit_slippage_cents: Optional[int] = None,  # noqa: ARG002
 	) -> int:
 		"""LIVE filled-entry write — a CAS ``pending → open`` TRANSITION of
 		the C1 row, **NOT an insert** (spec §3 ``:400 filled`` row / §4.2 /

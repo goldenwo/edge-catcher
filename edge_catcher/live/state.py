@@ -896,20 +896,10 @@ def transition_pending_to_open(
 	never recomputed here. CAS precondition: status='pending'. A lost race is
 	a logged no-op.
 
-	This is the §1 keystone single chokepoint for ALL live entry-fill paths
-	(sync ``record_trade`` + WS-handler + reconciler). It is therefore the
-	canonical site to compute ``market_impact_cents`` and
-	``limit_slippage_cents`` (spec §4.2 / §6): it reads the two references
-	(``entry_best_price_cents`` + ``entry_limit_price_cents``) persisted on
-	the pending row by ``record_pending`` and applies
-	:func:`signed_slippage_cents` (action="buy" — entries are always buys)
-	to ``blended_entry_cents``. Each metric is independently None-guarded:
-	a NULL reference column → that metric stays NULL per spec §4.3 ("not
-	measurable", never 0). This covers pre-0004 pending rows that reconcile
-	post-0004 and the dispatch pending-fallback paths (NetworkError /
-	malformed-fills) that have no book snapshot at the pre-place call site.
-	The SELECT runs over the single shared connection (E's invariant) so
-	the read-then-CAS is race-free.
+	Also computes dual-slippage metrics from refs persisted on the pending
+	row (spec §4.2 / §6); independent per-metric None-guard means a NULL
+	ref → NULL metric (§4.3). This is the §1 keystone single chokepoint for
+	all live entry-fill paths (sync record_trade + WS-handler + reconciler).
 	"""
 	# Read refs from the pending row (single shared connection — same
 	# write-serializing thread, no concurrent UPDATE between SELECT and

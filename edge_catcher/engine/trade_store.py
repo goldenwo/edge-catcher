@@ -150,24 +150,16 @@ class TradeStoreProtocol(Protocol):
 	) -> None:
 		"""Pre-place durability hook (sub-project E / L1). Paper + InMemory =
 		no-op. Live = INSERT a `pending` row keyed by client_order_id BEFORE
-		the order is sent (spec §3/§3.1/§4.2). Additive — no member removed.
+		the order is sent (spec §3/§3.1/§4.2).
 
 		``entry_price_cents``/``stop_loss_distance_cents`` are ``int | None``
-		to match ``Signal`` (their only source) and the ``record_pending`` /
-		``record_rejected`` siblings — a ``None`` intent persists B's inert
-		sentinel; the real basis lands on fill (CAS ``pending→open``).
+		to match ``Signal``; a ``None`` intent persists the inert sentinel
+		(the real basis lands on fill via CAS ``pending→open``).
 
-		``entry_best_price_cents`` and ``entry_limit_price_cents`` (spec §4.2)
-		are dual-slippage REFERENCES captured by dispatch at the pre-place
-		call site: ``entry_best_price_cents`` is the top-of-book snapshot
-		(``ctx.orderbook`` best level × 100, ``None`` when the book is empty);
-		``entry_limit_price_cents`` is ``req.limit_price_cents`` (the executor's
-		actual limit). Live persists both onto the pending row so
-		``transition_pending_to_open`` can compute ``market_impact_cents`` and
-		``limit_slippage_cents`` from them on EVERY entry-fill path (sync +
-		WS-handler + reconciler). Paper/in-memory accept-and-ignore — they
-		have no pending row. Defaults ``None`` keep the ~20 existing
-		``record_intent(**_intent_kwargs())`` call sites working unchanged."""
+		``entry_best_price_cents`` + ``entry_limit_price_cents`` (spec §4.2)
+		are dual-slippage references — live persists them on the pending row;
+		paper/in-memory ignore. Defaults ``None`` keep existing call sites
+		unchanged."""
 		...
 
 	def get_open_trades(self) -> list[dict[str, Any]]: ...
