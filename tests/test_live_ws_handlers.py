@@ -214,6 +214,60 @@ async def test_22_fill_pending_to_open(
 
 
 @pytest.mark.asyncio
+async def test_22_fill_pending_to_open_computes_dual_slippage(
+	conn: sqlite3.Connection, cbs: StoreCallbacks, mock_kalshi_ws: MockKalshiWS
+) -> None:
+	"""Per spec §4.2 / §6 / §9: when the WS fill-handler drives
+	transition_pending_to_open, the dual-slippage metrics must be computed
+	from the references persisted on the pending row. End-to-end coverage
+	of the WS-handler → transition compute path (the §1 keystone) — the
+	single-method test (test_live_state.py) proves the compute logic; this
+	test proves the WS wiring actually reaches it."""
+	# Seed a pending row WITH the two dual-slippage refs (entry_best=38¢ top
+	# of book, entry_limit=41¢ post-taker-cap). Direct record_pending call
+	# so we can supply the refs (the _seed_pending helper omits them).
+	coid = "debut-fade-KXSOL15M-1700000000000-dualslip"
+	row_id = record_pending(
+		conn,
+		ticker="KXSOL15M-26MAY16H12",
+		series="KXSOL15M",
+		strategy="debut-fade",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=40,
+		stop_loss_distance_cents=None,
+		client_order_id=coid,
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		entry_best_price_cents=38,
+		entry_limit_price_cents=41,
+	)
+	_wire(mock_kalshi_ws, conn, cbs)
+
+	# Single-level fill at 40¢ — blended = 40.
+	await mock_kalshi_ws.emit_fill(
+		client_order_id=coid,
+		kalshi_order_id="kx-entry-22-ds",
+		filled_count=10,
+		fills=[{"price": 40, "size": 10}],
+		ticker="KXSOL15M-26MAY16H12",
+		side="yes",
+	)
+
+	row = _row(conn, row_id)
+	assert row["status"] == "open"
+	# Buy convention: blended - ref. market_impact = 40 - 38 = +2 (paid 2c
+	# above top of book — adverse impact). limit_slippage = 40 - 41 = -1
+	# (paid 1c below our limit — favorable).
+	assert row["market_impact_cents"] == 2, (
+		"WS-handler must drive transition compute: 40 - 38 = 2"
+	)
+	assert row["limit_slippage_cents"] == -1, (
+		"WS-handler must drive transition compute: 40 - 41 = -1"
+	)
+
+
+@pytest.mark.asyncio
 async def test_22_fill_after_concurrent_settlement_is_lost_race_noop(
 	conn: sqlite3.Connection,
 	cbs: StoreCallbacks,

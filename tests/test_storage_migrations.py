@@ -53,25 +53,26 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 def test_apply_migrations_creates_expected_tables() -> None:
 	"""Applying the shipped migrations creates kill_switch, risk_state, and
-	live_trades."""
+	live_trades (with 0004's columns added to live_trades)."""
 	conn = _open_mem()
 	applied = apply_migrations(conn, _MIGRATIONS_DIR)
 
 	assert 1 in applied, "migration 0001 should be applied"
 	assert 2 in applied, "migration 0002 should be applied"
 	assert 3 in applied, "migration 0003 should be applied"
+	assert 4 in applied, "migration 0004 should be applied (dual-slippage columns)"
 	assert _table_exists(conn, "kill_switch"), "kill_switch table must exist after 0001"
 	assert _table_exists(conn, "risk_state"), "risk_state table must exist after 0002"
 	assert _table_exists(conn, "live_trades"), "live_trades table must exist after 0003"
 
 
 def test_apply_migrations_records_versions() -> None:
-	"""live_schema_migrations has exactly 3 rows after applying shipped migrations."""
+	"""live_schema_migrations has exactly 4 rows after applying shipped migrations."""
 	conn = _open_mem()
 	apply_migrations(conn, _MIGRATIONS_DIR)
 
 	versions = _applied_versions(conn)
-	assert versions == [1, 2, 3], f"expected [1, 2, 3], got {versions}"
+	assert versions == [1, 2, 3, 4], f"expected [1, 2, 3, 4], got {versions}"
 
 
 def test_apply_migrations_idempotent() -> None:
@@ -80,9 +81,9 @@ def test_apply_migrations_idempotent() -> None:
 	first = apply_migrations(conn, _MIGRATIONS_DIR)
 	second = apply_migrations(conn, _MIGRATIONS_DIR)
 
-	assert first == [1, 2, 3], "first run should apply all shipped migrations"
+	assert first == [1, 2, 3, 4], "first run should apply all shipped migrations"
 	assert second == [], "second run should apply nothing"
-	assert _applied_versions(conn) == [1, 2, 3], "no duplicate rows"
+	assert _applied_versions(conn) == [1, 2, 3, 4], "no duplicate rows"
 
 
 def test_apply_migrations_missing_dir_raises() -> None:
@@ -176,8 +177,8 @@ def test_apply_migrations_does_not_collide_with_init_db(tmp_path: Path) -> None:
 	conn.row_factory = sqlite3.Row
 	try:
 		applied = apply_migrations(conn, _MIGRATIONS_DIR)
-		assert applied == [1, 2, 3], (
-			f"expected 0001+0002+0003 applied, got {applied} — collision likely"
+		assert applied == [1, 2, 3, 4], (
+			f"expected 0001-0004 applied, got {applied} — collision likely"
 		)
 		assert _table_exists(conn, "kill_switch"), (
 			"kill_switch table must exist; would not if 0001 was skipped"
@@ -185,6 +186,62 @@ def test_apply_migrations_does_not_collide_with_init_db(tmp_path: Path) -> None:
 		# Verify the runner's tracking table is separate from db.py's.
 		assert _table_exists(conn, "live_schema_migrations"), "runner tracking table must exist"
 		assert _table_exists(conn, "schema_migrations"), "db.py's tracking table also exists (decoupled)"
+	finally:
+		conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 0004 dual-slippage migration — per spec §4.2 + §11
+# ---------------------------------------------------------------------------
+
+
+def _columns_of(conn: sqlite3.Connection, table: str) -> set[str]:
+	"""Return the set of column names on ``table``."""
+	return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def test_0004_adds_dual_slippage_columns_to_live_trades() -> None:
+	"""Per spec §4.2: 0004 adds 4 columns to live_trades — two diagnostic metrics
+	(market_impact_cents, limit_slippage_cents) and two reference columns
+	(entry_best_price_cents, entry_limit_price_cents) for live to compute the
+	metrics at transition_pending_to_open."""
+	conn = _open_mem()
+	apply_migrations(conn, _MIGRATIONS_DIR)
+
+	cols = _columns_of(conn, "live_trades")
+	for col in (
+		"market_impact_cents",
+		"limit_slippage_cents",
+		"entry_best_price_cents",
+		"entry_limit_price_cents",
+	):
+		assert col in cols, f"0004 must add {col!r} to live_trades; got cols={sorted(cols)}"
+
+
+def test_0004_idempotent_on_crash_window_rerun(tmp_path: Path) -> None:
+	"""Per spec §11: SQLite ADD COLUMN is NOT idempotent — a crash between the
+	body commit and the tracking-row commit causes the body to re-run, which
+	raises 'duplicate column name'. The runner must tolerate that exactly
+	(swallow it, log a warning, and record the version so the migration never
+	re-runs again). Other OperationalErrors still propagate.
+
+	Setup: apply migrations once (records version=4), then DELETE the
+	live_schema_migrations row for version=4 to simulate the crash-window
+	state — body applied, tracking row missing. Re-run must succeed.
+	"""
+	db_path = tmp_path / "crash_window.db"
+	conn = sqlite3.connect(str(db_path))
+	conn.row_factory = sqlite3.Row
+	try:
+		apply_migrations(conn, _MIGRATIONS_DIR)
+		# Simulate the crash window — body committed, tracking row missing.
+		conn.execute("DELETE FROM live_schema_migrations WHERE version = 4")
+		conn.commit()
+
+		# Re-running must NOT raise — the runner tolerates 'duplicate column name'.
+		applied = apply_migrations(conn, _MIGRATIONS_DIR)
+		assert applied == [4], f"crash-window re-run should re-record version 4; got {applied}"
+		assert _applied_versions(conn) == [1, 2, 3, 4], "version 4 must be re-recorded"
 	finally:
 		conn.close()
 

@@ -668,6 +668,26 @@ async def _handle_enter(
 			client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
 		)
 
+	# Dual-slippage book-best reference (spec §4.2): top-of-book ASK in cents
+	# for the side being bought, persisted on the live pending row so
+	# transition_pending_to_open can compute market_impact_cents at fill.
+	# Empty levels / missing orderbook → None per §4.3 ("not measurable",
+	# never 0). The isinstance guard handles test ad-hoc ctx classes that
+	# omit `orderbook` or supply a MagicMock — production TickContext.orderbook
+	# is always a real OrderbookSnapshot. Reporting-only path; record_intent
+	# below stays fail-loud (§3.1 RecordPendingFailed).
+	_orderbook = getattr(ctx, "orderbook", None)
+	if isinstance(_orderbook, OrderbookSnapshot):
+		_side_levels = (
+			_orderbook.yes_levels if signal.side == "yes"
+			else _orderbook.no_levels
+		)
+		entry_best_price_cents: int | None = (
+			round(_side_levels[0][0] * 100) if _side_levels else None
+		)
+	else:
+		entry_best_price_cents = None
+
 	# Pre-place durability hook (sub-project E / L1; spec §3 keystone + §3.1).
 	# Called UNCONDITIONALLY — no mode branch. The TradeStoreProtocol absorbs
 	# the paper/live difference: paper + InMemory record_intent is a strict
@@ -694,6 +714,13 @@ async def _handle_enter(
 	# `now` is the threaded tick clock (module invariant L14-L18: handlers
 	# never read datetime.now()) so replay produces a byte-identical
 	# placed_at_utc to the original live execution.
+	# entry_best_price_cents + entry_limit_price_cents are dual-slippage
+	# references (spec §4.2) persisted on the live pending row; paper/in-
+	# memory ignore. entry_limit_price_cents = req.limit_price_cents — the
+	# executor's actually-offered limit after taker-cap slippage, NOT
+	# signal.entry_price_cents (which is the Signal's original intent).
+	# Pairing matters: market_impact uses entry_best (vs top-of-book);
+	# limit_slippage uses entry_limit (vs what we offered).
 	store.record_intent(
 		ticker=signal.ticker,
 		series=signal.series,
@@ -704,6 +731,8 @@ async def _handle_enter(
 		stop_loss_distance_cents=signal.stop_loss_distance_cents,
 		client_order_id=req.client_order_id,
 		placed_at_utc=now.isoformat(),
+		entry_best_price_cents=entry_best_price_cents,
+		entry_limit_price_cents=req.limit_price_cents,
 	)
 
 	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to
@@ -807,6 +836,13 @@ async def _handle_enter(
 				now=now,
 				client_order_id=req.client_order_id,
 				kalshi_order_id=_result.order_id,
+				# Dual-slippage diagnostics (spec §4.2 / §9). Paper persists
+				# both columns onto paper_trades (commit 023a9b5 + 27a7695);
+				# live's record_trade is the CAS to transition_pending_to_open
+				# which IGNORES both (live computes its own pair from the refs
+				# persisted on the pending row — Step 10).
+				market_impact_cents=_result.market_impact_cents,
+				limit_slippage_cents=_result.limit_slippage_cents,
 			)
 		return _result, _trade_id
 
