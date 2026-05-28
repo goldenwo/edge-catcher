@@ -268,3 +268,53 @@ def test_partial_migration_state(tmp_path: Path) -> None:
 	second = apply_migrations(conn, m_dir)
 	assert second == [2], f"only 0002 should be new, got {second}"
 	assert _applied_versions(conn) == [1, 2]
+
+
+def test_multi_statement_add_column_crash_window_completes(tmp_path: Path) -> None:
+	"""Per spec §11 (multi-statement crash-window): executescript() STOPS at the
+	first failing statement, so a 4-statement ADD COLUMN body that crashed after
+	statement 1 committed must NOT leave columns 2-4 missing on re-run.
+
+	Pre-bug behavior: executescript hits 'duplicate column name' on stmt 1, the
+	whole-body except clause swallows it, the migration is marked applied, and
+	columns from statements 2/3/4 NEVER get added — subsequent INSERTs that
+	reference them fail.
+
+	Fix: split SQL into individual statements, run each with its own try/except
+	so a per-statement 'duplicate column name' on stmt 1 still lets stmts 2/3/4
+	execute.
+
+	Setup: build a table with column `col_x` already present (the prior crashed
+	run's surviving column), then run a 4-statement migration that adds
+	col_x, col_y, col_z, col_w. Stmt 1 will raise 'duplicate column name';
+	stmts 2-4 must still apply.
+	"""
+	m_dir = tmp_path / "migrations"
+	m_dir.mkdir()
+
+	# Single migration with 4 independent ADD COLUMN statements (mirrors 0004).
+	(m_dir / "0001_add_four_cols.sql").write_text(
+		"ALTER TABLE existing_t ADD COLUMN col_x INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_y INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_z INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_w INTEGER;\n",
+		encoding="utf-8",
+	)
+
+	conn = _open_mem()
+	# Pre-existing table with col_x ALREADY present — simulates a prior run
+	# that crashed after the first ADD COLUMN committed.
+	conn.executescript(
+		"CREATE TABLE existing_t (id INTEGER PRIMARY KEY);\n"
+		"ALTER TABLE existing_t ADD COLUMN col_x INTEGER;\n"
+	)
+
+	applied = apply_migrations(conn, m_dir)
+
+	assert applied == [1], f"migration 0001 should record as applied, got {applied}"
+	cols = _columns_of(conn, "existing_t")
+	for col in ("col_x", "col_y", "col_z", "col_w"):
+		assert col in cols, (
+			f"{col!r} missing from existing_t after crash-window re-run; "
+			f"got cols={sorted(cols)} — multi-statement body did not complete"
+		)

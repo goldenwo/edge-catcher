@@ -53,6 +53,25 @@ def _extract_version(filename: str) -> int | None:
 	return int(m.group(1))
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+	"""Split a migration SQL body into individual statements.
+
+	Strips ``--`` line comments and splits on ``;``. Sufficient for the
+	DDL-only migrations shipped here (CREATE TABLE / ALTER TABLE) which
+	have no string literals containing ``;`` or ``--``. If a future
+	migration needs richer SQL (string-embedded semicolons, block
+	comments), swap this for sqlparse — YAGNI until then.
+	"""
+	no_comments: list[str] = []
+	for line in sql.splitlines():
+		idx = line.find("--")
+		if idx >= 0:
+			line = line[:idx]
+		no_comments.append(line)
+	cleaned = "\n".join(no_comments)
+	return [s for s in (stmt.strip() for stmt in cleaned.split(";")) if s]
+
+
 def apply_migrations(
 	conn: sqlite3.Connection,
 	migrations_dir: Path | None = None,
@@ -128,30 +147,34 @@ def apply_migrations(
 		sql = path.read_text(encoding="utf-8")
 		log.info("Applying migration %04d: %s", version, path.name)
 
-		# executescript() issues an implicit COMMIT before executing and
-		# commits after — same pattern as storage/db.py:init_db.
-		#
-		# Crash-window idempotency for additive ADD COLUMN migrations: the body
-		# commit (above) and the tracking-row commit (below) are separate, so a
-		# crash between them re-runs the body on the next boot. SQLite ADD COLUMN
-		# is not idempotent — a re-run raises "duplicate column name". Tolerate
-		# exactly that (the columns already exist from the crashed prior run) and
-		# fall through to record the version so it never re-runs again. Any OTHER
-		# OperationalError (a genuine SQL error) still propagates. NOTE: this
-		# tolerance assumes an all-or-nothing additive body (independent nullable
-		# ADD COLUMNs, as 0004 is). Keep future ADD COLUMN migrations independent
-		# + nullable so a crash-window re-run is always safe.
-		try:
-			conn.executescript(sql)
-		except sqlite3.OperationalError as exc:
-			if "duplicate column name" not in str(exc).lower():
-				raise
-			log.warning(
-				"Migration %04d: columns already present (crash-window re-run) "
-				"— recording version without re-applying: %s",
-				version,
-				exc,
-			)
+		# Crash-window idempotency for additive ADD COLUMN migrations: the
+		# per-statement commits (below) and the tracking-row commit (further
+		# below) are separate, so a crash between them re-runs the body on
+		# the next boot. SQLite ADD COLUMN is not idempotent — a re-run
+		# raises "duplicate column name". Tolerate exactly that PER STATEMENT
+		# (the column already exists from the crashed prior run) and fall
+		# through to the next statement; any OTHER OperationalError still
+		# propagates. Per-statement handling is required because
+		# ``executescript`` STOPS at the first failing statement — a single
+		# whole-body except would silently skip stmts 2..N after stmt 1
+		# raised duplicate-column. Each statement is dispatched via
+		# ``executescript`` so DDL receives the same implicit-commit
+		# semantics it had before. NOTE: tolerance assumes an all-or-nothing
+		# additive body (independent nullable ADD COLUMNs, as 0004 is); keep
+		# future ADD COLUMN migrations independent + nullable so a
+		# crash-window re-run is always safe.
+		for stmt in _split_sql_statements(sql):
+			try:
+				conn.executescript(stmt)
+			except sqlite3.OperationalError as exc:
+				if "duplicate column name" not in str(exc).lower():
+					raise
+				log.warning(
+					"Migration %04d: statement skipped (column already "
+					"present from crash-window re-run): %s",
+					version,
+					exc,
+				)
 
 		# Record the applied version.
 		conn.execute(
