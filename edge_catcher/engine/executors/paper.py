@@ -407,6 +407,15 @@ class PaperExecutor:
 		side_levels = (
 			snapshot.yes_levels if req.side == "yes" else snapshot.no_levels
 		)
+		# Reporting-only dual-slippage diagnostics (spec §5.1): market_impact is the
+		# vs-best value the book walk already produced (aliases legacy slippage_cents
+		# on the paper path); limit_slippage is the one new computation, vs the order's
+		# limit. Neither feeds cost basis / size / fees / pnl.
+		limit_slippage = signed_slippage_cents(
+			blended=fill.blended_price_cents,
+			limit=req.limit_price_cents,
+			action="buy",
+		)
 		return OrderResult(
 			status="filled",
 			intended_size=fill.intended_size,
@@ -416,4 +425,6 @@ class PaperExecutor:
 			slippage_cents=fill.slippage_cents,
 			book_depth=snapshot.depth,
 			book_snapshot=json.dumps(side_levels),
+			market_impact_cents=fill.slippage_cents,
+			limit_slippage_cents=limit_slippage,
 		)
