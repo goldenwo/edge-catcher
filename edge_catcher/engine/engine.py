@@ -53,6 +53,10 @@ from edge_catcher.engine.dispatch import (
 )
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
+from edge_catcher.engine.executors.honest_paper import (
+	FixedSlippageModel,
+	HonestPaperExecutor,
+)
 from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.notifications import configure_notify, notify
@@ -1193,6 +1197,32 @@ class _LiveRuntime:
 		self.db_conn = db_conn
 
 
+def _build_paper_executor(config: dict, market_state: MarketState) -> Executor:
+	"""Construct the paper-mode executor, honoring paper_fill_model (spec §4.6).
+
+	`paper_fill_model` is validated to {optimistic, fixed} + honest_paper block
+	shape by _assert_mode_coherence at boot (Task 4), so the `else` here is a
+	defensive backstop, not the primary guard.
+	"""
+	base = PaperExecutor(market_state=market_state, config=config)
+	fill_model = config.get("paper_fill_model", "optimistic")
+	if fill_model == "optimistic":
+		return base  # current behavior, byte-unchanged
+	if fill_model == "fixed":
+		return HonestPaperExecutor(
+			base=base,
+			model=FixedSlippageModel(
+				default_cents=config["honest_paper"]["default_slippage_cents"],
+				per_strategy=config["honest_paper"]["per_strategy"],
+			),
+			market_state=market_state,  # inject the in-scope market_state (Phase-2 model reads the book)
+		)
+	raise _coherence_fail(
+		"paper_fill_model",
+		f"unknown paper_fill_model: {fill_model!r} (expected 'optimistic' | 'fixed')",
+	)
+
+
 async def _compose_live(
 	config: dict,
 	config_path: Path,
@@ -1379,7 +1409,7 @@ async def run_engine(
 		# PaperExecutor takes (market_state, config) — fees compute inside
 		# trade_store.record_trade, so no fee_model parameter is required.
 		if executor is None:
-			executor = PaperExecutor(market_state=market_state, config=config)
+			executor = _build_paper_executor(config, market_state)
 
 	# Risk gate (Sub-project C/E) — Gate / BankrollCache / KillSwitch / etc.
 	# all live in engine/risk.py.  For live mode (executor_kind == "live"),
