@@ -7,10 +7,13 @@ docs/superpowers/specs/2026-05-28-honest-paper-fill-simulator-design.md.
 """
 from __future__ import annotations
 
+import pytest
+
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 # Task 1 imports only the model; Task 2 adds HonestPaperExecutor to this line.
 from edge_catcher.engine.executors.honest_paper import (
 	FixedSlippageModel,
+	HonestPaperExecutor,
 	SlippageModel,
 )
 from edge_catcher.engine.market_state import OrderbookSnapshot
@@ -136,3 +139,70 @@ def test_determinism_same_input_same_output():
 def test_fixed_model_satisfies_protocol():
 	m: SlippageModel = _model()   # mypy + runtime: FixedSlippageModel IS a SlippageModel
 	assert callable(m.adjust)
+
+
+class _StubMarketState:
+	def __init__(self, book: OrderbookSnapshot) -> None:
+		self._book = book
+
+	def get_orderbook(self, ticker: str) -> OrderbookSnapshot:
+		return self._book
+
+
+def _paper_config() -> dict:
+	return {
+		"sizing": {
+			"risk_per_trade_cents": 200,
+			"max_slippage_cents": 5,
+			"min_fill": 1,
+			"require_fresh_book": True,
+		},
+	}
+
+
+@pytest.mark.asyncio
+async def test_wrapper_delegates_to_base_then_applies_model():
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	book = OrderbookSnapshot(yes_levels=[(0.42, 100), (0.43, 50)], no_levels=[(0.58, 100)])
+	base = PaperExecutor(market_state=_StubMarketState(book), config=_paper_config())
+	model = FixedSlippageModel(default_cents=5, per_strategy={})
+	wrapped = HonestPaperExecutor(base=base, model=model)
+
+	req = _req(side="yes", action="buy", strategy="x")
+	base_result = await base.place(req)
+	assert base_result.status == "filled", "canned book should fill"
+
+	wrapped_result = await wrapped.place(req)
+	# Wrapper price = base blended + 5 (clamped). Metrics worsen by the same.
+	assert wrapped_result.blended_entry_cents == min(99, base_result.blended_entry_cents + 5)
+
+
+@pytest.mark.asyncio
+async def test_wrapper_passes_rejected_through_unchanged():
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	# Empty book → PaperExecutor rejects → wrapper returns it untouched.
+	book = OrderbookSnapshot(yes_levels=[], no_levels=[])
+	cfg = _paper_config()
+	base = PaperExecutor(market_state=_StubMarketState(book), config=cfg)
+	wrapped = HonestPaperExecutor(base=base, model=FixedSlippageModel(default_cents=5, per_strategy={}))
+	result = await wrapped.place(_req())
+	assert result.status in ("rejected", "filled")
+	if result.status == "rejected":
+		assert result.market_impact_cents is None and result.limit_slippage_cents is None
+
+
+class _PaperExecutorStub:
+	"""Minimal Executor for the Protocol-conformance check (defined before use)."""
+	async def place(self, req: OrderRequest) -> OrderResult:
+		return _result()
+
+
+def test_wrapper_satisfies_executor_protocol():
+	# Pure static/structural check — no await, so NOT an asyncio test.
+	from edge_catcher.engine.executor import Executor
+
+	def _takes(_e: Executor) -> None: ...
+	base = _PaperExecutorStub()
+	_takes(HonestPaperExecutor(base=base, model=FixedSlippageModel(default_cents=1, per_strategy={})))

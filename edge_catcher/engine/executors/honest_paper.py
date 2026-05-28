@@ -22,8 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Mapping, Protocol
 
-from edge_catcher.engine.executor import OrderRequest, OrderResult
-from edge_catcher.engine.market_state import OrderbookSnapshot
+from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 
 
 class SlippageModel(Protocol):
@@ -94,3 +94,40 @@ class FixedSlippageModel:
 				else None
 			),
 		)
+
+
+@dataclass(frozen=True)
+class HonestPaperExecutor:
+	"""Wraps a base PaperExecutor: optimistic fill, then pessimistic post-process.
+
+	Delegates the single Executor-Protocol method ``place`` to ``base`` (the real
+	orderbook walk), then runs the result through ``model.adjust``. Satisfies the
+	``Executor`` Protocol structurally (place() is the only method).
+
+	``market_state`` is passed in EXPLICITLY (not read off ``base``): PaperExecutor
+	stores it as the PRIVATE ``self._ms`` (paper.py:344), so reaching into ``base``
+	would couple to a private name. The composition root (Task 3) has ``market_state``
+	in scope and injects it. It is supplied to ``model.adjust`` as the ``orderbook``
+	source; Phase 1's FixedSlippageModel ignores the orderbook, but Phase 2's
+	conditional models need it — plumbing it now avoids a broken intermediate.
+	``market_state`` is Optional so the Protocol-conformance test can omit it.
+	"""
+
+	base: Executor
+	model: SlippageModel
+	market_state: MarketState | None = None
+
+	async def place(self, req: OrderRequest) -> OrderResult:
+		result = await self.base.place(req)
+		orderbook = self._orderbook_for(req)
+		return self.model.adjust(result, req, orderbook)
+
+	def _orderbook_for(self, req: OrderRequest) -> OrderbookSnapshot:
+		# Best-effort book snapshot for the model. If market_state was injected,
+		# read the current book; else hand the model an empty snapshot (Phase 1's
+		# model ignores it — never fail the fill on a missing book).
+		if self.market_state is not None:
+			book = self.market_state.get_orderbook(req.ticker)
+			if book is not None:
+				return book
+		return OrderbookSnapshot(yes_levels=[], no_levels=[])
