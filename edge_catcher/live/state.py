@@ -913,20 +913,15 @@ def transition_pending_to_open(
 	entry_limit = ref_row[1] if ref_row is not None else None
 
 	# Per-metric None-guard (spec §4.3): NULL ref → NULL metric.
-	market_impact = (
-		signed_slippage_cents(
-			blended=blended_entry_cents, limit=entry_best, action="buy"
+	def _slip_or_none(ref: int | None) -> int | None:
+		if ref is None:
+			return None
+		return signed_slippage_cents(
+			blended=blended_entry_cents, limit=ref, action="buy"
 		)
-		if entry_best is not None
-		else None
-	)
-	limit_slippage = (
-		signed_slippage_cents(
-			blended=blended_entry_cents, limit=entry_limit, action="buy"
-		)
-		if entry_limit is not None
-		else None
-	)
+
+	market_impact = _slip_or_none(entry_best)
+	limit_slippage = _slip_or_none(entry_limit)
 
 	changed = _cas_update(
 		conn,

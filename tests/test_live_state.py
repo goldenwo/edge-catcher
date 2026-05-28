@@ -454,6 +454,45 @@ def test_transition_pending_to_open_mixed_ref(
 	assert row["limit_slippage_cents"] is None
 
 
+def test_transition_pending_to_open_mixed_ref_limit_only(
+	conn: sqlite3.Connection,
+) -> None:
+	"""Symmetry mirror of test_transition_pending_to_open_mixed_ref: only
+	entry_limit persisted → limit_slippage computed, market_impact NULL.
+	Pins independent None-guards on each metric (a one-sided defect in the
+	guard logic would only surface on one of the two mirror configurations).
+	"""
+	rid = record_pending(
+		conn,
+		ticker="T",
+		series="S",
+		strategy="st",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="p2o-mix-limit",
+		kalshi_order_id=None,
+		placed_at_utc=_NOW_ISO,
+		entry_best_price_cents=None,
+		entry_limit_price_cents=45,
+	)
+	transition_pending_to_open(
+		conn,
+		rid,
+		kalshi_order_id="ord-kx-mix-l",
+		fill_size=10,
+		blended_entry_cents=42,
+		slippage_cents=0,
+		fill_pct=1.0,
+		entry_time=_NOW_ISO,
+		entry_fee_cents=17,
+	)
+	row = _row(conn, rid)
+	assert row["market_impact_cents"] is None
+	assert row["limit_slippage_cents"] == -3, "42 - 45 = -3 (paid 3c below limit)"
+
+
 # ---------------------------------------------------------------------------
 # #6 transition_pending_to_rejected (+ rejected_post_hoc TTL path)
 # ---------------------------------------------------------------------------

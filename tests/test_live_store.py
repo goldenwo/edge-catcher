@@ -1045,3 +1045,63 @@ def test_record_intent_default_dual_slippage_refs_null(
 	assert row["entry_limit_price_cents"] is None, (
 		"spec §4.3: default is NULL = 'not measurable', never 0"
 	)
+
+
+def test_record_trade_ignores_dual_slippage_kwargs_uses_refs_instead(
+	store: SQLiteTradeStore, db_path: Path
+) -> None:
+	"""Per spec §4.2 / §5.2 + simplicity/coverage review: live
+	SQLiteTradeStore.record_trade accepts the two metric kwargs uniformly
+	(so dispatch never branches paper-vs-live) but IGNORES them — live's
+	authoritative compute happens at transition_pending_to_open from the
+	refs persisted on the pending row.
+
+	Distinguishing test: pass a wrong sentinel value (999) as the kwarg —
+	the row must end up with the COMPUTED metrics (from refs), NOT the
+	kwarg sentinel. Proves both halves:
+	(1) live IGNORES the kwarg (else the row would carry 999), and
+	(2) live COMPUTES from refs at the transition (else the row would be NULL).
+	"""
+	coid = "debut_fade-KXSOL15M-26MAY16H12-ignore-kwarg"
+	# Seed pending row with refs: best=40, limit=45.
+	store.record_intent(
+		**_intent_kwargs(client_order_id=coid),
+		entry_best_price_cents=40,
+		entry_limit_price_cents=45,
+	)
+	# CAS to open with blended=42. Pass intentionally-wrong sentinels for the
+	# two metric kwargs to prove they're ignored.
+	store.record_trade(
+		ticker="KXSOL15M-26MAY16H12",
+		entry_price=42,
+		strategy="debut_fade",
+		side="yes",
+		series_ticker="KXSOL15M",
+		intended_size=10,
+		fill_size=10,
+		blended_entry=42,
+		fill_pct=1.0,
+		slippage_cents=2,
+		now=_NOW,
+		client_order_id=coid,
+		kalshi_order_id="ord-kx-ignore",
+		market_impact_cents=999,
+		limit_slippage_cents=999,
+	)
+	row = _query_one(
+		db_path,
+		"SELECT market_impact_cents, limit_slippage_cents "
+		"FROM live_trades WHERE client_order_id = ?",
+		(coid,),
+	)
+	assert row is not None
+	# buy convention: blended - ref. 42-40=+2, 42-45=-3.
+	assert row["market_impact_cents"] == 2, (
+		"live IGNORES the kwarg AND computes from refs at transition; "
+		"got %r — either the kwarg leaked through (broken §5.2) or the "
+		"compute was skipped (broken §6)" % row["market_impact_cents"]
+	)
+	assert row["limit_slippage_cents"] == -3, (
+		"live IGNORES the kwarg AND computes from refs at transition; "
+		"got %r" % row["limit_slippage_cents"]
+	)
