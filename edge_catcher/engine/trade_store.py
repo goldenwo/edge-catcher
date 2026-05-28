@@ -258,24 +258,48 @@ class TradeStore:
 	def __init__(self, db_path: Path) -> None:
 		db_path.parent.mkdir(parents=True, exist_ok=True)
 		self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-		self._conn.execute("PRAGMA journal_mode=WAL")
-		self._conn.executescript(_SCHEMA)
-		self._migrate()
+		try:
+			self._conn.execute("PRAGMA journal_mode=WAL")
+			# Ride out a transient lock (e.g. a concurrent boot) rather than
+			# raising immediately — mirrors the live store (live/state.py).
+			# Now that _migrate propagates a real OperationalError instead of
+			# swallowing every one, a momentary "database is locked" should
+			# wait-and-retry, not crash construction.
+			self._conn.execute("PRAGMA busy_timeout=5000")
+			self._conn.executescript(_SCHEMA)
+			self._migrate()
+		except Exception:
+			# Schema setup / _migrate can now raise on a genuine error; close
+			# the connection so a failed construction doesn't leak the SQLite
+			# handle (and its WAL/-shm files) on the way out.
+			self._conn.close()
+			raise
 
 	# -------------------------------------------------------------------------
 	# Migration
 	# -------------------------------------------------------------------------
 
 	def _migrate(self) -> None:
-		"""Safe ALTER TABLE migrations for pre-existing databases."""
+		"""Safe ALTER TABLE migrations for pre-existing databases.
+
+		Each ADD COLUMN is tolerated only when it fails with ``duplicate
+		column name`` (the documented "column already exists" path on a
+		re-opened DB). Any OTHER ``OperationalError`` — a typo in
+		``_MIGRATION_COLUMNS``, a malformed column def, disk-full,
+		permission errors — propagates so genuine bugs are not silently
+		absorbed. Same narrow-swallow contract as
+		``edge_catcher/storage/migrations.apply_migrations``.
+		"""
 		for col_name, col_def in _MIGRATION_COLUMNS:
 			try:
 				self._conn.execute(
 					f"ALTER TABLE paper_trades ADD COLUMN {col_name} {col_def}"
 				)
 				self._conn.commit()
-			except sqlite3.OperationalError:
-				pass  # Column already exists
+			except sqlite3.OperationalError as exc:
+				if "duplicate column name" not in str(exc).lower():
+					raise
+				# Column already exists — pre-existing DB or crash-window re-run.
 
 		# Backfill NULLs introduced by the migration
 		self._conn.execute(
