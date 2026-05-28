@@ -30,6 +30,15 @@ def test_fixed_with_malformed_block_fails_boot():
 		_assert_mode_coherence(cfg)
 
 
+def test_fixed_with_bool_slippage_fails_boot():
+	# yaml `true` parses to a bool, an int subclass — must be rejected (spec §4.6
+	# footgun) so `default_slippage_cents: true` never silently becomes a 1c penalty.
+	cfg = {**_paper_base(), "paper_fill_model": "fixed",
+	       "honest_paper": {"default_slippage_cents": True, "per_strategy": {}}}
+	with pytest.raises(RuntimeError, match="honest_paper"):
+		_assert_mode_coherence(cfg)
+
+
 def test_fixed_with_unknown_per_strategy_key_fails_boot(monkeypatch):
 	# Force a known-strategy set so the test is independent of strategies_local.py.
 	import edge_catcher.engine.engine as eng
