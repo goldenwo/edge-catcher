@@ -195,6 +195,63 @@ def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> 
 		store.close()
 
 
+# ---------------------------------------------------------------------------
+# record_intent — Protocol surface + paper accept-and-ignore (spec §4.2/§9)
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_record_intent_includes_dual_slippage_refs() -> None:
+	"""Per spec §4.2 (Contract additions): TradeStoreProtocol.record_intent
+	gains entry_best_price_cents + entry_limit_price_cents (9 → 11 kwargs,
+	defaults None). Live persists these onto the pending row for
+	transition_pending_to_open to compute market_impact/limit_slippage at
+	fill; paper/in-memory accept-and-ignore. Defaults None so existing
+	record_intent(**_intent_kwargs()) sites in tests/dispatch keep working.
+	"""
+	import inspect
+
+	from edge_catcher.engine.trade_store import TradeStoreProtocol
+
+	sig = inspect.signature(TradeStoreProtocol.record_intent)
+	params = sig.parameters
+	assert "entry_best_price_cents" in params, (
+		"spec §4.2 requires entry_best_price_cents on Protocol.record_intent"
+	)
+	assert "entry_limit_price_cents" in params, (
+		"spec §4.2 requires entry_limit_price_cents on Protocol.record_intent"
+	)
+	assert params["entry_best_price_cents"].default is None, (
+		"default must be None so existing 9-kwarg call sites keep working"
+	)
+	assert params["entry_limit_price_cents"].default is None, (
+		"default must be None so existing 9-kwarg call sites keep working"
+	)
+	assert params["entry_best_price_cents"].kind is inspect.Parameter.KEYWORD_ONLY
+	assert params["entry_limit_price_cents"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_paper_record_intent_accepts_dual_slippage_refs(store: TradeStore) -> None:
+	"""Per spec §4.2 + §9: paper TradeStore.record_intent accepts (and ignores)
+	the two new reference kwargs. Paper has no pending state — synchronous
+	fills go straight to record_trade — so this remains a no-op, but the
+	kwargs must not raise so dispatch can call uniformly across paper/live.
+	"""
+	result = store.record_intent(
+		ticker="KXT",
+		series="KXT",
+		strategy="s",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="s-KXT-test-intent",
+		placed_at_utc="2026-01-01T00:00:00Z",
+		entry_best_price_cents=41,
+		entry_limit_price_cents=45,
+	)
+	assert result is None
+
+
 def test_record_trade_with_book_snapshot(store: TradeStore) -> None:
 	snapshot = '[[0.03, 12], [0.04, 25]]'
 	trade_id = store.record_trade(

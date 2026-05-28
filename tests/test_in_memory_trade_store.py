@@ -364,3 +364,26 @@ def test_in_memory_dual_slippage_kwargs_accepted_default_None(
 	assert row is not None
 	assert row.get("market_impact_cents") is None
 	assert row.get("limit_slippage_cents") is None
+
+
+def test_in_memory_record_intent_accepts_dual_slippage_refs(
+	in_memory_store: InMemoryTradeStore,
+) -> None:
+	"""Per spec §4.2 + §9: InMemoryTradeStore.record_intent accepts (and ignores)
+	the two new reference kwargs. Replay has no pending state — fills go
+	straight to record_trade — so this remains a no-op. Mirror of paper's
+	test_paper_record_intent_accepts_dual_slippage_refs."""
+	result = in_memory_store.record_intent(
+		ticker="KXT",
+		series="KXT",
+		strategy="s",
+		side="yes",
+		intended_size=10,
+		entry_price_cents=42,
+		stop_loss_distance_cents=8,
+		client_order_id="s-KXT-test-intent",
+		placed_at_utc="2026-01-01T00:00:00Z",
+		entry_best_price_cents=41,
+		entry_limit_price_cents=45,
+	)
+	assert result is None
