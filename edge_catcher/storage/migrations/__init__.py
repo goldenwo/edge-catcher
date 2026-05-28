@@ -156,7 +156,10 @@ def apply_migrations(
 			log.debug("Migration %04d already applied — skipping", version)
 			continue
 
-		sql = path.read_text(encoding="utf-8")
+		# utf-8-sig strips a leading BOM if a migration file was saved by a
+		# Windows editor with one — otherwise the BOM rides onto the first
+		# statement and SQLite rejects it ("unrecognized token").
+		sql = path.read_text(encoding="utf-8-sig")
 		log.info("Applying migration %04d: %s", version, path.name)
 
 		# Crash-window idempotency for additive ADD COLUMN migrations: the
