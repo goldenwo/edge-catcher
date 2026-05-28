@@ -258,9 +258,22 @@ class TradeStore:
 	def __init__(self, db_path: Path) -> None:
 		db_path.parent.mkdir(parents=True, exist_ok=True)
 		self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-		self._conn.execute("PRAGMA journal_mode=WAL")
-		self._conn.executescript(_SCHEMA)
-		self._migrate()
+		try:
+			self._conn.execute("PRAGMA journal_mode=WAL")
+			# Ride out a transient lock (e.g. a concurrent boot) rather than
+			# raising immediately — mirrors the live store (live/state.py).
+			# Now that _migrate propagates a real OperationalError instead of
+			# swallowing every one, a momentary "database is locked" should
+			# wait-and-retry, not crash construction.
+			self._conn.execute("PRAGMA busy_timeout=5000")
+			self._conn.executescript(_SCHEMA)
+			self._migrate()
+		except Exception:
+			# Schema setup / _migrate can now raise on a genuine error; close
+			# the connection so a failed construction doesn't leak the SQLite
+			# handle (and its WAL/-shm files) on the way out.
+			self._conn.close()
+			raise
 
 	# -------------------------------------------------------------------------
 	# Migration

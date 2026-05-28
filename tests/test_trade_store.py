@@ -623,31 +623,59 @@ def test_migrate_propagates_non_duplicate_column_errors(
 	with pytest.raises(sqlite3.OperationalError) as exc_info:
 		TradeStore(tmp_path / "typo.db")
 
+	msg = str(exc_info.value).lower()
 	# Contract: the swallow filter must be specific to 'duplicate column name'.
 	# A different OperationalError must surface with its original message.
-	assert "duplicate column name" not in str(exc_info.value).lower(), (
+	assert "duplicate column name" not in msg, (
 		"non-dup-column error was silently rewritten or masked"
+	)
+	# Positive contract: the genuine SQLite error surfaces verbatim so an
+	# operator can diagnose the real cause — not a generic wrapped error. A
+	# refactor that swallows-then-reraises a synthesized error would fail here.
+	assert "unique" in msg, (
+		f"expected the original 'Cannot add a UNIQUE column' error to surface "
+		f"verbatim; got: {exc_info.value!r}"
 	)
 
 
 def test_migrate_idempotent_on_reopen(tmp_path: Path) -> None:
-	"""Re-running ``_migrate`` on a DB whose columns already exist is the
-	"Column already exists" path — every shipped column raises
-	``duplicate column name`` and is swallowed exactly. The fix must NOT
-	break this path.
+	"""The crash-window / re-open path: re-running ``_migrate`` on an
+	already-migrated DB must be a no-op (every ALTER raises
+	``duplicate column name``, swallowed exactly).
+
+	Starts from an OLD-schema DB that is MISSING the dual-slippage columns,
+	so the first construction genuinely exercises BOTH paths — adding the
+	missing columns (real ALTER) and swallowing dup-column on the columns
+	the old schema already had (strategy / side / slippage_cents). The
+	second construction then hits dup-column on EVERY column and must not
+	raise. This is mutation-resistant: a no-op ``_migrate`` would fail to
+	add the dual-slippage columns (first assert), and a ``_migrate`` that
+	re-raised on dup-column would crash the first construction.
 	"""
 	db_path = tmp_path / "reopen.db"
 
-	# First construction: writes _SCHEMA + runs every ALTER once.
+	# Old schema: has strategy/side/slippage_cents, MISSING dual-slippage cols.
+	seed = sqlite3.connect(str(db_path))
+	seed.execute(
+		"CREATE TABLE paper_trades ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT, "
+		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
+		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
+		"slippage_cents REAL)"
+	)
+	seed.commit()
+	seed.close()
+
+	# First open: ADDs the dual-slippage columns AND swallows dup-column on
+	# strategy/side/slippage_cents.
 	store1 = TradeStore(db_path)
 	store1.close()
 
-	# Second construction on the same file: _SCHEMA's CREATE TABLE IF NOT
-	# EXISTS is a no-op; every _migrate ALTER raises duplicate-column.
-	# Must NOT raise — that's the whole point of the swallow.
+	# Second open: every _MIGRATION_COLUMNS ALTER now hits dup-column — the
+	# pure crash-window re-run path. Must NOT raise.
 	store2 = TradeStore(db_path)
 	try:
-		# All migration columns must still be present after the re-open.
 		cols = {
 			row[1]
 			for row in store2._conn.execute(
@@ -656,7 +684,7 @@ def test_migrate_idempotent_on_reopen(tmp_path: Path) -> None:
 		}
 		for col_name, _col_def in trade_store_mod._MIGRATION_COLUMNS:
 			assert col_name in cols, (
-				f"migration column {col_name!r} disappeared on reopen; "
+				f"migration column {col_name!r} missing after reopen; "
 				f"got cols={sorted(cols)}"
 			)
 	finally:
