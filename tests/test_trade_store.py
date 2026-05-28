@@ -113,6 +113,41 @@ def test_migrate_adds_dual_slippage_to_pre_existing_db(tmp_path: Path) -> None:
 		store.close()
 
 
+def test_record_trade_persists_dual_slippage_metrics(store: TradeStore) -> None:
+	"""record_trade accepts + persists market_impact_cents and limit_slippage_cents.
+	PaperExecutor populates these on filled entries (spec §5.1); the store
+	rounds them in via INSERT."""
+	trade_id = store.record_trade(
+		ticker="T1", entry_price=50, strategy="test", side="yes",
+		series_ticker="SERIES",
+		now=_now(),
+		market_impact_cents=3,
+		limit_slippage_cents=-5,
+	)
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(trade_id,),
+	).fetchone()
+	assert row[0] == 3, f"market_impact_cents should be 3, got {row[0]}"
+	assert row[1] == -5, f"limit_slippage_cents should be -5, got {row[1]}"
+
+
+def test_record_trade_dual_slippage_default_NULL(store: TradeStore) -> None:
+	"""Omitting the dual-slippage kwargs leaves both columns NULL (PaperExecutor
+	default; preserves rows from non-paper test fixtures that don't set them)."""
+	trade_id = store.record_trade(
+		ticker="T2", entry_price=50, strategy="test", side="yes",
+		series_ticker="SERIES",
+		now=_now(),
+	)
+	row = store._conn.execute(
+		"SELECT market_impact_cents, limit_slippage_cents FROM paper_trades WHERE id=?",
+		(trade_id,),
+	).fetchone()
+	assert row[0] is None
+	assert row[1] is None
+
+
 def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> None:
 	"""Per spec §4.2: paper's legacy slippage_cents IS vs-best market-impact
 	(identical value). Backfill: UPDATE paper_trades SET market_impact_cents =

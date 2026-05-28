@@ -321,3 +321,46 @@ def test_get_open_trades_for_parameter_is_strategy(in_memory_store: InMemoryTrad
 	# Must work with the keyword name `strategy=`
 	rows = in_memory_store.get_open_trades_for(strategy="target", ticker="KXT")
 	assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Dual-slippage round-trip — spec §11 implementation note
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_dual_slippage_round_trips_through_row(
+	in_memory_store: InMemoryTradeStore,
+) -> None:
+	"""Per spec §11: InMemoryTradeStore builds rows from a fixed key set (not
+	**kwargs). Adding the two new kwargs to the row dict is required so the
+	metric values round-trip through replay — G-parity comparison excludes
+	the new columns, but the values must still be visible to a row read so
+	replay-based diagnostic queries see them."""
+	now = datetime(2026, 4, 14, 12, 0, 0, tzinfo=timezone.utc)
+	trade_id = in_memory_store.record_trade(
+		ticker="KXT", entry_price=50, strategy="s", side="yes",
+		series_ticker="KXT", now=now,
+		market_impact_cents=3,
+		limit_slippage_cents=-5,
+	)
+	row = in_memory_store.get_trade_by_id(trade_id)
+	assert row is not None
+	assert row.get("market_impact_cents") == 3
+	assert row.get("limit_slippage_cents") == -5
+
+
+def test_in_memory_dual_slippage_kwargs_accepted_default_None(
+	in_memory_store: InMemoryTradeStore,
+) -> None:
+	"""Omitting the kwargs results in NULL values in the row — preserves all
+	existing call sites including the dispatch filled branch when LiveExecutor
+	leaves both at None."""
+	now = datetime(2026, 4, 14, 12, 0, 0, tzinfo=timezone.utc)
+	trade_id = in_memory_store.record_trade(
+		ticker="KXT", entry_price=50, strategy="s", side="yes",
+		series_ticker="KXT", now=now,
+	)
+	row = in_memory_store.get_trade_by_id(trade_id)
+	assert row is not None
+	assert row.get("market_impact_cents") is None
+	assert row.get("limit_slippage_cents") is None

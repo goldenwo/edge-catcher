@@ -39,6 +39,8 @@ class TradeStoreProtocol(Protocol):
 		now: datetime,
 		client_order_id: Optional[str] = ...,
 		kalshi_order_id: Optional[str] = ...,
+		market_impact_cents: Optional[int] = ...,
+		limit_slippage_cents: Optional[int] = ...,
 	) -> int:
 		"""Record a filled entry; return the trade row id.
 
@@ -308,6 +310,8 @@ class TradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Insert a new open trade and return its row id.
 
@@ -350,14 +354,16 @@ class TradeStore:
 				ticker, entry_price, entry_time, status,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,
-				fill_pct, slippage_cents, book_snapshot
-			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				fill_pct, slippage_cents, book_snapshot,
+				market_impact_cents, limit_slippage_cents
+			) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			""",
 			(
 				ticker, entry_price, entry_time_iso,
 				strategy, side, series_ticker, entry_fee_cents,
 				intended_size, fill_size, blended_entry, book_depth,  # blended_entry already sanitised above
 				fill_pct, slippage_cents, book_snapshot,
+				market_impact_cents, limit_slippage_cents,
 			),
 		)
 		self._conn.commit()
@@ -630,6 +636,8 @@ class InMemoryTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,
+		limit_slippage_cents: Optional[int] = None,
 	) -> int:
 		"""Mirror of SQLiteTradeStore.record_trade — see trade_store.py:106.
 		Computes entry_fee_cents internally using STANDARD_FEE. Raises
@@ -674,6 +682,11 @@ class InMemoryTradeStore:
 			"fill_pct": fill_pct,
 			"slippage_cents": slippage_cents,
 			"book_snapshot": book_snapshot,
+			# Dual-slippage diagnostic columns (spec §4.2 + §11) — round-trip
+			# through replay so paper-side parity is preserved when the in-memory
+			# store reads back rows seeded from a prior day's replay.
+			"market_impact_cents": market_impact_cents,
+			"limit_slippage_cents": limit_slippage_cents,
 			"status": "open",
 			"entry_time": entry_time_iso,
 			"exit_price": None,
