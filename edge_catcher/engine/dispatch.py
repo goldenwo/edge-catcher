@@ -716,7 +716,11 @@ async def _handle_enter(
 	# placed_at_utc to the original live execution.
 	# entry_best_price_cents + entry_limit_price_cents are dual-slippage
 	# references (spec §4.2) persisted on the live pending row; paper/in-
-	# memory ignore.
+	# memory ignore. entry_limit_price_cents = req.limit_price_cents — the
+	# executor's actually-offered limit after taker-cap slippage, NOT
+	# signal.entry_price_cents (which is the Signal's original intent).
+	# Pairing matters: market_impact uses entry_best (vs top-of-book);
+	# limit_slippage uses entry_limit (vs what we offered).
 	store.record_intent(
 		ticker=signal.ticker,
 		series=signal.series,

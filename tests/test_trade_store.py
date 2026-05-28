@@ -151,8 +151,11 @@ def test_record_trade_dual_slippage_default_NULL(store: TradeStore) -> None:
 def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> None:
 	"""Per spec §4.2: paper's legacy slippage_cents IS vs-best market-impact
 	(identical value). Backfill: UPDATE paper_trades SET market_impact_cents =
-	slippage_cents WHERE market_impact_cents IS NULL. limit_slippage_cents
-	stays NULL for pre-migration rows (not derivable — no stored limit).
+	slippage_cents WHERE market_impact_cents IS NULL AND blended_entry IS NOT
+	NULL. limit_slippage_cents stays NULL for pre-migration rows (not
+	derivable — no stored limit). The blended_entry gate excludes empty-book
+	sentinel rows per spec §4.3 (paper converts blended_entry=0 → NULL on
+	INSERT; "not measurable", never 0).
 	"""
 	import sqlite3
 	db_path = tmp_path / "preexisting.db"
@@ -163,16 +166,25 @@ def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> 
 		"ticker TEXT NOT NULL, entry_price INTEGER NOT NULL, "
 		"entry_time TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
 		"strategy TEXT NOT NULL DEFAULT 'unknown', side TEXT NOT NULL DEFAULT 'yes', "
-		"slippage_cents REAL)"
+		"slippage_cents REAL, blended_entry INTEGER)"
 	)
-	# Pre-seed rows with non-NULL slippage_cents values.
+	# T1: real fill, slippage=7 → backfill to market_impact_cents=7.
 	conn.execute(
-		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents) "
-		"VALUES ('T1', 50, '2026-01-01T00:00:00Z', 7.0)"
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T1', 50, '2026-01-01T00:00:00Z', 7.0, 57)"
 	)
+	# T2: real fill, slippage=0 (filled exactly at best) → backfill to market_impact_cents=0.
 	conn.execute(
-		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents) "
-		"VALUES ('T2', 60, '2026-01-01T00:00:00Z', 0.0)"
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T2', 60, '2026-01-01T00:00:00Z', 0.0, 60)"
+	)
+	# T3: empty-book sentinel row (blended_entry NULL — paper writes
+	# blended_entry=None when fill.blended_price_cents==0). Backfill MUST
+	# SKIP this row — market_impact_cents stays NULL per spec §4.3 ("not
+	# measurable, never 0"). Pre-fix this row would have backfilled to 0.
+	conn.execute(
+		"INSERT INTO paper_trades (ticker, entry_price, entry_time, slippage_cents, blended_entry) "
+		"VALUES ('T3', 70, '2026-01-01T00:00:00Z', 0.0, NULL)"
 	)
 	conn.commit()
 	conn.close()
@@ -184,13 +196,20 @@ def test_migrate_backfills_market_impact_from_slippage_cents(tmp_path: Path) -> 
 			"SELECT ticker, market_impact_cents, limit_slippage_cents, slippage_cents "
 			"FROM paper_trades ORDER BY id"
 		).fetchall()
-		# Both rows should have market_impact_cents == slippage_cents (backfilled);
-		# limit_slippage_cents stays NULL (not derivable for pre-migration rows).
 		assert rows[0][0] == "T1"
-		assert rows[0][1] == 7, f"market_impact_cents backfill expected 7, got {rows[0][1]}"
+		assert rows[0][1] == 7, f"T1 backfill expected 7, got {rows[0][1]}"
 		assert rows[0][2] is None, "limit_slippage_cents must remain NULL for pre-migration"
-		assert rows[1][1] == 0, f"market_impact_cents backfill expected 0, got {rows[1][1]}"
+		assert rows[1][1] == 0, f"T2 backfill (real fill at best) expected 0, got {rows[1][1]}"
 		assert rows[1][2] is None
+		# Sentinel row: backfill MUST NOT overwrite NULL (else it actively
+		# undoes PaperExecutor's new sentinel-path None-write on every startup).
+		assert rows[2][0] == "T3"
+		assert rows[2][1] is None, (
+			"T3 (blended_entry NULL → empty-book sentinel) must stay NULL per "
+			f"spec §4.3, NOT backfilled — got {rows[2][1]}. The backfill gate "
+			"`blended_entry IS NOT NULL` exists precisely to prevent this."
+		)
+		assert rows[2][2] is None
 	finally:
 		store.close()
 

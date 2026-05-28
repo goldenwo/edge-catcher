@@ -288,9 +288,18 @@ class TradeStore:
 		# vs-best market-impact (identical value), so the alias is zero-risk.
 		# limit_slippage_cents stays NULL for pre-migration rows — not derivable
 		# without a stored limit; F's consumer-migration must coalesce.
+		#
+		# The `blended_entry IS NOT NULL` gate excludes empty-book-sentinel
+		# rows (paper converts blended_entry=0 → NULL on INSERT at :340) per
+		# spec §4.3 — those rows have no book to measure against, so
+		# market_impact_cents must stay NULL ("not measurable", never 0).
+		# Without this gate the backfill would actively undo PaperExecutor's
+		# new sentinel-path None-write on every startup.
 		self._conn.execute(
 			"UPDATE paper_trades SET market_impact_cents = CAST(slippage_cents AS INTEGER) "
-			"WHERE market_impact_cents IS NULL AND slippage_cents IS NOT NULL"
+			"WHERE market_impact_cents IS NULL "
+			"AND slippage_cents IS NOT NULL "
+			"AND blended_entry IS NOT NULL"
 		)
 		self._conn.commit()
 
