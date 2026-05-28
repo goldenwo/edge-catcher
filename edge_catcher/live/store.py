@@ -897,6 +897,8 @@ class SQLiteTradeStore:
 		now: datetime,
 		client_order_id: Optional[str] = None,
 		kalshi_order_id: Optional[str] = None,
+		market_impact_cents: Optional[int] = None,  # noqa: ARG002 — accept-and-ignore per spec §4.2
+		limit_slippage_cents: Optional[int] = None,  # noqa: ARG002 — accept-and-ignore per spec §4.2
 	) -> int:
 		"""LIVE filled-entry write — a CAS ``pending → open`` TRANSITION of
 		the C1 row, **NOT an insert** (spec §3 ``:400 filled`` row / §4.2 /
