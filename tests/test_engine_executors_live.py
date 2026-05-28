@@ -215,6 +215,20 @@ async def test_place_happy_path_single_fill():
 	assert result.slippage_cents == 0
 	assert result.rejection_reason is None
 	assert result.order_id == "ord-kx-abc-123"
+	# Spec §4.2 / §5.2 / §9 — LiveExecutor leaves both dual-slippage diagnostic
+	# fields at None; the live path computes its own pair at
+	# transition_pending_to_open from the references persisted on the pending
+	# row (paper computes inline in place(); see test_engine_paper_executor_wrap).
+	# Asserting on the happy-path filled return is sufficient — the fields are
+	# additive defaults on OrderResult and LiveExecutor never sets them.
+	assert result.market_impact_cents is None, (
+		"LiveExecutor MUST leave market_impact_cents=None — live computes at "
+		"transition_pending_to_open, not in place() (spec §5.2)"
+	)
+	assert result.limit_slippage_cents is None, (
+		"LiveExecutor MUST leave limit_slippage_cents=None — live computes at "
+		"transition_pending_to_open, not in place() (spec §5.2)"
+	)
 
 
 # ---------------------------------------------------------------------------
