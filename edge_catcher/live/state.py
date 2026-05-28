@@ -158,12 +158,17 @@ def record_pending(
 	kalshi_order_id: str | None,
 	placed_at_utc: str,
 	rejection_reason: str | None = None,
+	entry_best_price_cents: int | None = None,
+	entry_limit_price_cents: int | None = None,
 ) -> int:
 	"""INSERT a new ``pending`` row. Called by dispatch.py on D's pending
-	OrderResult (NetworkError / malformed-fills / engine-timeout).
+	OrderResult (NetworkError / malformed-fills / engine-timeout) AND by
+	``SQLiteTradeStore.record_intent`` for the pre-place durability hook
+	(spec §3 / §4.2).
 
 	On INSERT: ``original_intended_size = intended_size``; ``fill_size = 0``;
-	``status = 'pending'``. ``kalshi_order_id`` may be NULL (NetworkError).
+	``status = 'pending'``. ``kalshi_order_id`` may be NULL (NetworkError or
+	pre-place intent).
 
 	Raises ``RecordPendingFailed`` (chained from the underlying
 	``sqlite3.Error``) on any DB failure — a silent INSERT failure here
@@ -179,6 +184,17 @@ def record_pending(
 	as the inert sentinel ``0`` so the NOT-NULL DDL column stays satisfied
 	(a pending row's entry_price_cents is overwritten by the real blended
 	fill on transition_pending_to_open, and pending rows never feed P&L).
+
+	``entry_best_price_cents`` and ``entry_limit_price_cents`` (spec §4.2)
+	are the dual-slippage references captured by dispatch at the pre-place
+	call site (top-of-book best snapshot × 100; the executor's actual
+	limit). Both columns are nullable INTEGER (added by migration 0004) and
+	default ``None``: ``None`` means "not measurable" per spec §4.3 (no book
+	snapshot, pre-0004 pending rows reconciling post-0004, etc.) —
+	transition_pending_to_open leaves the corresponding metric column NULL
+	on fill in that case. The dispatch pending-fallback path (D's
+	NetworkError / malformed-fills branches) does NOT have these refs and
+	relies on the defaults.
 	"""
 	try:
 		cur = conn.execute(
@@ -186,8 +202,9 @@ def record_pending(
 			"ticker, series, strategy, side, intended_size, "
 			"original_intended_size, fill_size, entry_price_cents, "
 			"stop_loss_distance_cents, status, client_order_id, "
-			"kalshi_order_id, placed_at_utc, rejection_reason"
-			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)",
+			"kalshi_order_id, placed_at_utc, rejection_reason, "
+			"entry_best_price_cents, entry_limit_price_cents"
+			") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
 			(
 				ticker,
 				series,
@@ -204,6 +221,8 @@ def record_pending(
 				kalshi_order_id,
 				placed_at_utc,
 				rejection_reason,
+				entry_best_price_cents,
+				entry_limit_price_cents,
 			),
 		)
 		conn.commit()

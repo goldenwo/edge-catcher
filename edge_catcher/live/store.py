@@ -424,6 +424,8 @@ class SQLiteTradeStore:
 		stop_loss_distance_cents: Optional[int],
 		client_order_id: str,
 		placed_at_utc: str,
+		entry_best_price_cents: Optional[int] = None,
+		entry_limit_price_cents: Optional[int] = None,
 	) -> None:
 		"""LIVE pre-place durability hook (spec §3 / §3.1 / §4.2).
 
@@ -440,10 +442,21 @@ class SQLiteTradeStore:
 		Pure delegation to :func:`live.state.record_pending` over the held
 		connection with ``kalshi_order_id=None`` (no order placed yet) and
 		``rejection_reason=None`` (no rejection — this is the intent, not a
-		terminal outcome). The 9-kwarg signature matches
-		``TradeStoreProtocol.record_intent`` verbatim; the post-place outcome
-		(open / rejected / pending-on-failure) is a later CAS transition on
-		THIS row, not this method's concern.
+		terminal outcome). The 11-kwarg signature matches
+		``TradeStoreProtocol.record_intent`` verbatim (9 base + 2 dual-slippage
+		refs per spec §4.2); the post-place outcome (open / rejected /
+		pending-on-failure) is a later CAS transition on THIS row, not this
+		method's concern.
+
+		``entry_best_price_cents`` and ``entry_limit_price_cents`` (spec §4.2)
+		are dual-slippage references — dispatch captures the top-of-book best
+		snapshot and the executor's actual limit at the pre-place call site.
+		They are persisted onto the pending row here so
+		``live.state.transition_pending_to_open`` can compute
+		``market_impact_cents`` and ``limit_slippage_cents`` from them on
+		EVERY entry-fill path (sync ``record_trade`` + WS-handler +
+		reconciler). Defaults ``None`` keep the ~20 existing 9-kwarg
+		``record_intent(**_intent_kwargs())`` test sites unchanged.
 
 		🚨 §3.1 NORMATIVE — FATAL on failure. ``live.state.record_pending``
 		raises :class:`RecordPendingFailed` (chained from the underlying
@@ -469,6 +482,8 @@ class SQLiteTradeStore:
 			kalshi_order_id=None,
 			placed_at_utc=placed_at_utc,
 			rejection_reason=None,
+			entry_best_price_cents=entry_best_price_cents,
+			entry_limit_price_cents=entry_limit_price_cents,
 		)
 
 	def record_pending(
