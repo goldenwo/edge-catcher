@@ -106,11 +106,28 @@ async def test_blended_zero_sentinel_preserved():
 			"path — blended_entry_cents MUST round-trip as 0 so the trade "
 			"store's close-time fallback to entry_price fires correctly"
 		)
+		# Spec §4.3 + §5.1: even on the filled-with-zero sentinel branch, the
+		# dual-slippage metrics must be None ("not measurable") — the empty-book
+		# fallback has no book best to measure against. NEVER set them to 0
+		# (that would imply "filled exactly at best").
+		assert result.market_impact_cents is None, (
+			"filled-with-blended==0 sentinel must leave market_impact_cents=None "
+			"per spec §4.3 (no book to measure against → 'not measurable', "
+			"never 0)"
+		)
+		assert result.limit_slippage_cents is None, (
+			"filled-with-blended==0 sentinel must leave limit_slippage_cents=None"
+		)
 	elif result.status == "rejected":
 		assert result.rejection_reason in {"stale_book", "empty_book"}, (
 			f"empty yes_levels rejection must surface a defined reason — "
 			f"got {result.rejection_reason!r}"
 		)
+		# Rejected path also leaves both metrics None per §5.1 (already covered
+		# by test_rejected_entry_leaves_dual_slippage_None — re-asserted here
+		# for symmetry with the filled branch above).
+		assert result.market_impact_cents is None
+		assert result.limit_slippage_cents is None
 	else:
 		raise AssertionError(
 			f"PaperExecutor MUST return filled or rejected for this input — "
