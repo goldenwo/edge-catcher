@@ -67,11 +67,22 @@ class OrderResult:
 	filled_size: int
 	blended_entry_cents: int      # 0-sentinel preserved from FillResult.blended_price_cents
 	fill_pct: float
-	slippage_cents: int
+	slippage_cents: int            # DEPRECATED — see market_impact_cents / limit_slippage_cents below
 	book_depth: int | None = None
 	book_snapshot: str | None = None
 	rejection_reason: str | None = None
 	order_id: str | None = None
+	# Dual-slippage diagnostics (additive, reporting-only — never feed cost basis /
+	# size / fees / pnl). Per spec §4.2:
+	#   market_impact_cents  : signed slippage vs top-of-book best (vs-best).
+	#                          Equals legacy slippage_cents on the paper path.
+	#   limit_slippage_cents : signed slippage vs the order's limit (vs-limit).
+	#                          Equals legacy slippage_cents on the live path.
+	# PaperExecutor populates both on filled entries. LiveExecutor leaves both
+	# None — live computes at transition_pending_to_open from persisted references
+	# so the diagnostic inputs never enter the order-placement path.
+	market_impact_cents: int | None = None
+	limit_slippage_cents: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
