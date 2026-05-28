@@ -1,11 +1,13 @@
 """Tests for edge_catcher.engine.trade_store."""
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from edge_catcher.engine import trade_store as trade_store_mod
 from edge_catcher.engine.trade_store import TradeStore
 
 
@@ -585,3 +587,77 @@ def test_load_all_states(store: TradeStore) -> None:
 def test_load_all_states_empty(store: TradeStore) -> None:
 	all_states = store.load_all_states()
 	assert all_states == {}
+
+
+# ---------------------------------------------------------------------------
+# Migration safety — _migrate must only swallow 'duplicate column name',
+# not every OperationalError. Same bug class as storage/migrations PR #55.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_propagates_non_duplicate_column_errors(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""A typo in `_MIGRATION_COLUMNS` (e.g. an invalid column type) must
+	propagate as ``sqlite3.OperationalError`` instead of being silently
+	swallowed by the migration's duplicate-column tolerance.
+
+	Pre-fix: ``except sqlite3.OperationalError: pass`` absorbed EVERY
+	``OperationalError`` — typos, disk-full, malformed column defs — and
+	left the comment "Column already exists" as a wishful claim. A bug
+	in the migration list would be invisible until something downstream
+	tried to read the missing column.
+	"""
+	# Single bogus entry. INTEGER UNIQUE is explicitly forbidden by SQLite's
+	# ALTER TABLE ADD COLUMN ("Cannot add a UNIQUE column" — per SQLite docs),
+	# so the failure is deterministic and is NOT "duplicate column name".
+	# (Plain typos in the type like 'INTEGEER' do NOT work as a test signal
+	# because SQLite's type-affinity system happily accepts arbitrary type
+	# identifiers; the same goes for unquoted whitespace in column names.)
+	monkeypatch.setattr(
+		trade_store_mod,
+		"_MIGRATION_COLUMNS",
+		[("uniq_col", "INTEGER UNIQUE")],
+	)
+
+	with pytest.raises(sqlite3.OperationalError) as exc_info:
+		TradeStore(tmp_path / "typo.db")
+
+	# Contract: the swallow filter must be specific to 'duplicate column name'.
+	# A different OperationalError must surface with its original message.
+	assert "duplicate column name" not in str(exc_info.value).lower(), (
+		"non-dup-column error was silently rewritten or masked"
+	)
+
+
+def test_migrate_idempotent_on_reopen(tmp_path: Path) -> None:
+	"""Re-running ``_migrate`` on a DB whose columns already exist is the
+	"Column already exists" path — every shipped column raises
+	``duplicate column name`` and is swallowed exactly. The fix must NOT
+	break this path.
+	"""
+	db_path = tmp_path / "reopen.db"
+
+	# First construction: writes _SCHEMA + runs every ALTER once.
+	store1 = TradeStore(db_path)
+	store1.close()
+
+	# Second construction on the same file: _SCHEMA's CREATE TABLE IF NOT
+	# EXISTS is a no-op; every _migrate ALTER raises duplicate-column.
+	# Must NOT raise — that's the whole point of the swallow.
+	store2 = TradeStore(db_path)
+	try:
+		# All migration columns must still be present after the re-open.
+		cols = {
+			row[1]
+			for row in store2._conn.execute(
+				"PRAGMA table_info(paper_trades)"
+			).fetchall()
+		}
+		for col_name, _col_def in trade_store_mod._MIGRATION_COLUMNS:
+			assert col_name in cols, (
+				f"migration column {col_name!r} disappeared on reopen; "
+				f"got cols={sorted(cols)}"
+			)
+	finally:
+		store2.close()

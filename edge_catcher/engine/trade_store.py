@@ -267,15 +267,26 @@ class TradeStore:
 	# -------------------------------------------------------------------------
 
 	def _migrate(self) -> None:
-		"""Safe ALTER TABLE migrations for pre-existing databases."""
+		"""Safe ALTER TABLE migrations for pre-existing databases.
+
+		Each ADD COLUMN is tolerated only when it fails with ``duplicate
+		column name`` (the documented "column already exists" path on a
+		re-opened DB). Any OTHER ``OperationalError`` — a typo in
+		``_MIGRATION_COLUMNS``, a malformed column def, disk-full,
+		permission errors — propagates so genuine bugs are not silently
+		absorbed. Same narrow-swallow contract as
+		``edge_catcher/storage/migrations.apply_migrations``.
+		"""
 		for col_name, col_def in _MIGRATION_COLUMNS:
 			try:
 				self._conn.execute(
 					f"ALTER TABLE paper_trades ADD COLUMN {col_name} {col_def}"
 				)
 				self._conn.commit()
-			except sqlite3.OperationalError:
-				pass  # Column already exists
+			except sqlite3.OperationalError as exc:
+				if "duplicate column name" not in str(exc).lower():
+					raise
+				# Column already exists — pre-existing DB or crash-window re-run.
 
 		# Backfill NULLs introduced by the migration
 		self._conn.execute(
