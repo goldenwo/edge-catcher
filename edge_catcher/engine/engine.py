@@ -520,6 +520,21 @@ def _assert_mode_coherence(config: dict) -> None:
 					"paper_fill_model != 'optimistic' requires an honest_paper block "
 					"with int default_slippage_cents and a per_strategy mapping",
 				)
+			# per_strategy VALUES must be non-bool ints (same rule as
+			# default_slippage_cents). A str override would TypeError, and a
+			# float would silently corrupt the int cents domain, at FILL time —
+			# both defeat this boot gate's purpose, so reject here.
+			bad_values = sorted(
+				k for k, v in hp["per_strategy"].items()
+				if not isinstance(v, int) or isinstance(v, bool)
+			)
+			if bad_values:
+				raise _coherence_fail(
+					"honest_paper.per_strategy",
+					f"per_strategy slippage values must be non-bool ints; "
+					f"offending keys {bad_values} (a non-int override would "
+					f"TypeError or silently corrupt cents at fill time).",
+				)
 			known = {s.name for s in discover_strategies()}
 			unknown = sorted(set(hp["per_strategy"]) - known)
 			if unknown:

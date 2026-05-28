@@ -53,6 +53,23 @@ def test_fixed_with_unknown_per_strategy_key_fails_boot(monkeypatch):
 		_assert_mode_coherence(cfg)
 
 
+def test_fixed_with_non_int_per_strategy_value_fails_boot(monkeypatch):
+	# per_strategy VALUES must be non-bool ints. Monkeypatch so the key is KNOWN,
+	# isolating the value check from the unknown-key check: a str override would
+	# TypeError and a float would silently corrupt cents at fill time.
+	import edge_catcher.engine.engine as eng
+
+	class _S:
+		def __init__(self, name): self.name = name
+
+	monkeypatch.setattr(eng, "discover_strategies", lambda: [_S("debut_fade")])
+	for bad in ("five", 1.5, True):
+		hp = {"default_slippage_cents": 2, "per_strategy": {"debut_fade": bad}}
+		cfg = {**_paper_base(), "paper_fill_model": "fixed", "honest_paper": hp}
+		with pytest.raises(RuntimeError, match="per_strategy"):
+			_assert_mode_coherence(cfg)
+
+
 def test_fixed_with_valid_config_passes(monkeypatch):
 	import edge_catcher.engine.engine as eng
 
