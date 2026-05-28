@@ -188,9 +188,9 @@ async def test_wrapper_passes_rejected_through_unchanged():
 	base = PaperExecutor(market_state=_StubMarketState(book), config=cfg)
 	wrapped = HonestPaperExecutor(base=base, model=FixedSlippageModel(default_cents=5, per_strategy={}))
 	result = await wrapped.place(_req())
-	assert result.status in ("rejected", "filled")
-	if result.status == "rejected":
-		assert result.market_impact_cents is None and result.limit_slippage_cents is None
+	# Empty book + require_fresh_book → PaperExecutor deterministically rejects.
+	assert result.status == "rejected"
+	assert result.market_impact_cents is None and result.limit_slippage_cents is None
 
 
 class _PaperExecutorStub:
@@ -206,3 +206,51 @@ def test_wrapper_satisfies_executor_protocol():
 	def _takes(_e: Executor) -> None: ...
 	base = _PaperExecutorStub()
 	_takes(HonestPaperExecutor(base=base, model=FixedSlippageModel(default_cents=1, per_strategy={})))
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_known_book_produces_expected_adjusted_fill():
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	# Single-level book at 42c yes; FixedSlippageModel default 3.
+	book = OrderbookSnapshot(yes_levels=[(0.42, 500)], no_levels=[(0.58, 500)])
+	cfg = _paper_config()
+	base = PaperExecutor(market_state=_StubMarketState(book), config=cfg)
+	wrapped = HonestPaperExecutor(
+		base=base, model=FixedSlippageModel(default_cents=3, per_strategy={}),
+	)
+	req = _req(side="yes", action="buy", strategy="anything")
+	base_result = await base.place(req)
+	wrapped_result = await wrapped.place(req)
+	assert wrapped_result.blended_entry_cents == min(99, base_result.blended_entry_cents + 3)
+	# Metrics: if base produced non-None, they worsened by the effective delta.
+	if base_result.market_impact_cents is not None:
+		assert wrapped_result.market_impact_cents == base_result.market_impact_cents + (
+			wrapped_result.blended_entry_cents - base_result.blended_entry_cents
+		)
+
+
+@pytest.mark.asyncio
+async def test_injected_market_state_book_reaches_model():
+	# When market_state is injected, _orderbook_for reads the REAL book and hands
+	# it to model.adjust — the Phase-2 contract Task 3's composition wiring relies
+	# on. (Phase-1 FixedSlippageModel ignores the book, so a recording spy model
+	# is the only way to observe this path.)
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	book = OrderbookSnapshot(yes_levels=[(0.42, 100)], no_levels=[(0.58, 100)])
+	ms = _StubMarketState(book)
+	base = PaperExecutor(market_state=ms, config=_paper_config())
+
+	class _RecordingModel:
+		def __init__(self) -> None:
+			self.seen_orderbook: OrderbookSnapshot | None = None
+
+		def adjust(self, result: OrderResult, request: OrderRequest, orderbook: OrderbookSnapshot) -> OrderResult:
+			self.seen_orderbook = orderbook
+			return result
+
+	model = _RecordingModel()
+	wrapped = HonestPaperExecutor(base=base, model=model, market_state=ms)
+	await wrapped.place(_req(action="buy"))
+	assert model.seen_orderbook is book   # the injected market_state's book reached the model
