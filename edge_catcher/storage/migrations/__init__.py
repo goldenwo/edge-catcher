@@ -53,6 +53,32 @@ def _extract_version(filename: str) -> int | None:
 	return int(m.group(1))
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+	"""Split a migration SQL body into individual statements.
+
+	Strips ``--`` line comments and splits on ``;``. Sufficient for the
+	DDL-only migrations shipped here (CREATE TABLE, CREATE INDEX, DROP
+	VIEW, CREATE VIEW, ALTER TABLE ADD COLUMN).
+
+	Load-bearing invariant for migration authors: this splitter is
+	**naive about string literals and block comments**. A migration body
+	must not contain ``;`` or ``--`` inside a string literal (e.g.
+	``DEFAULT ';'`` or ``CHECK (col IN ('a--b'))``), nor ``/* ... */``
+	block comments. Both would mis-split today. CREATE TRIGGER bodies
+	(which require internal ``;`` separators) are also not supported.
+	If a future migration needs any of these, swap this for sqlparse and
+	delete this caveat — YAGNI until then.
+	"""
+	no_comments: list[str] = []
+	for line in sql.splitlines():
+		idx = line.find("--")
+		if idx >= 0:
+			line = line[:idx]
+		no_comments.append(line)
+	cleaned = "\n".join(no_comments)
+	return [s for s in (stmt.strip() for stmt in cleaned.split(";")) if s]
+
+
 def apply_migrations(
 	conn: sqlite3.Connection,
 	migrations_dir: Path | None = None,
@@ -76,18 +102,23 @@ def apply_migrations(
 		FileNotFoundError: If *migrations_dir* does not exist.
 		sqlite3.DatabaseError: On any SQL error during migration execution.
 
-	**Atomicity warning for future DML migrations:** ``executescript`` issues
-	its own implicit COMMIT for the migration body, then the
-	``live_schema_migrations`` INSERT is committed by a second ``conn.commit()``.
-	If the process dies between those two commits, the migration body is
-	persisted but the tracking row is missing — the migration re-runs on
-	next startup. **This is safe today** because every Phase 1 migration is
-	idempotent ``CREATE TABLE IF NOT EXISTS`` DDL. **It is NOT safe for any
-	future DML migration** (``INSERT`` / ``UPDATE`` / ``DELETE``), which
-	would silently double-apply and corrupt data. Any such migration must
-	wrap its body in an explicit ``BEGIN; ... COMMIT;`` paired with the
-	tracking-row INSERT inside the same transaction. Until that's needed,
-	the YAGNI two-commit pattern stays.
+	**Atomicity warning for future DML migrations:** the body is split into
+	independent statements and each is dispatched via its own
+	``executescript`` call (so each DDL statement autocommits as SQLite
+	would normally). After the loop, the ``live_schema_migrations`` INSERT
+	is committed by a final ``conn.commit()``. If the process dies between
+	any body-statement commit and the tracking-row commit, the body is
+	fully (or partially, for multi-statement bodies) persisted but the
+	tracking row is missing — the migration re-runs on next startup.
+	**This is safe today** because every shipped migration is independently
+	idempotent (``CREATE TABLE IF NOT EXISTS``, ``CREATE INDEX IF NOT EXISTS``,
+	``DROP VIEW IF EXISTS`` + ``CREATE VIEW``, and ``ALTER TABLE ADD COLUMN``
+	tolerated via the per-statement ``duplicate column name`` swallow).
+	**It is NOT safe for any future DML migration** (``INSERT`` / ``UPDATE`` /
+	``DELETE``), which would silently double-apply and corrupt data. Any
+	such migration must wrap its body in an explicit ``BEGIN; ... COMMIT;``
+	paired with the tracking-row INSERT inside the same transaction. Until
+	that's needed, the YAGNI two-commit pattern stays.
 	"""
 	if migrations_dir is None:
 		migrations_dir = _DEFAULT_MIGRATIONS_DIR
@@ -125,33 +156,40 @@ def apply_migrations(
 			log.debug("Migration %04d already applied — skipping", version)
 			continue
 
-		sql = path.read_text(encoding="utf-8")
+		# utf-8-sig strips a leading BOM if a migration file was saved by a
+		# Windows editor with one — otherwise the BOM rides onto the first
+		# statement and SQLite rejects it ("unrecognized token").
+		sql = path.read_text(encoding="utf-8-sig")
 		log.info("Applying migration %04d: %s", version, path.name)
 
-		# executescript() issues an implicit COMMIT before executing and
-		# commits after — same pattern as storage/db.py:init_db.
-		#
-		# Crash-window idempotency for additive ADD COLUMN migrations: the body
-		# commit (above) and the tracking-row commit (below) are separate, so a
-		# crash between them re-runs the body on the next boot. SQLite ADD COLUMN
-		# is not idempotent — a re-run raises "duplicate column name". Tolerate
-		# exactly that (the columns already exist from the crashed prior run) and
-		# fall through to record the version so it never re-runs again. Any OTHER
-		# OperationalError (a genuine SQL error) still propagates. NOTE: this
-		# tolerance assumes an all-or-nothing additive body (independent nullable
-		# ADD COLUMNs, as 0004 is). Keep future ADD COLUMN migrations independent
-		# + nullable so a crash-window re-run is always safe.
-		try:
-			conn.executescript(sql)
-		except sqlite3.OperationalError as exc:
-			if "duplicate column name" not in str(exc).lower():
-				raise
-			log.warning(
-				"Migration %04d: columns already present (crash-window re-run) "
-				"— recording version without re-applying: %s",
-				version,
-				exc,
-			)
+		# Crash-window idempotency for additive ADD COLUMN migrations: the
+		# per-statement commits (below) and the tracking-row commit (further
+		# below) are separate, so a crash between them re-runs the body on
+		# the next boot. SQLite ADD COLUMN is not idempotent — a re-run
+		# raises "duplicate column name". Tolerate exactly that PER STATEMENT
+		# (the column already exists from the crashed prior run) and fall
+		# through to the next statement; any OTHER OperationalError still
+		# propagates. Per-statement handling is required because
+		# ``executescript`` STOPS at the first failing statement — a single
+		# whole-body except would silently skip stmts 2..N after stmt 1
+		# raised duplicate-column. Each statement is dispatched via
+		# ``executescript`` so DDL receives the same implicit-commit
+		# semantics it had before. NOTE: tolerance assumes an all-or-nothing
+		# additive body (independent nullable ADD COLUMNs, as 0004 is); keep
+		# future ADD COLUMN migrations independent + nullable so a
+		# crash-window re-run is always safe.
+		for stmt in _split_sql_statements(sql):
+			try:
+				conn.executescript(stmt)
+			except sqlite3.OperationalError as exc:
+				if "duplicate column name" not in str(exc).lower():
+					raise
+				log.warning(
+					"Migration %04d: statement skipped (column already "
+					"present from crash-window re-run): %s",
+					version,
+					exc,
+				)
 
 		# Record the applied version.
 		conn.execute(

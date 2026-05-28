@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from edge_catcher.storage.migrations import apply_migrations
+from edge_catcher.storage.migrations import apply_migrations, _split_sql_statements
 
 # Path to the real migrations directory shipped with the package.
 _MIGRATIONS_DIR = Path(__file__).parent.parent / "edge_catcher" / "storage" / "migrations"
@@ -268,3 +268,206 @@ def test_partial_migration_state(tmp_path: Path) -> None:
 	second = apply_migrations(conn, m_dir)
 	assert second == [2], f"only 0002 should be new, got {second}"
 	assert _applied_versions(conn) == [1, 2]
+
+
+def test_multi_statement_add_column_crash_window_completes(tmp_path: Path) -> None:
+	"""Per spec §11 (multi-statement crash-window): executescript() STOPS at the
+	first failing statement, so a 4-statement ADD COLUMN body that crashed after
+	statement 1 committed must NOT leave columns 2-4 missing on re-run.
+
+	Pre-bug behavior: executescript hits 'duplicate column name' on stmt 1, the
+	whole-body except clause swallows it, the migration is marked applied, and
+	columns from statements 2/3/4 NEVER get added — subsequent INSERTs that
+	reference them fail.
+
+	Fix: split SQL into individual statements, run each with its own try/except
+	so a per-statement 'duplicate column name' on stmt 1 still lets stmts 2/3/4
+	execute.
+
+	Setup: build a table with column `col_x` already present (the prior crashed
+	run's surviving column), then run a 4-statement migration that adds
+	col_x, col_y, col_z, col_w. Stmt 1 will raise 'duplicate column name';
+	stmts 2-4 must still apply.
+	"""
+	m_dir = tmp_path / "migrations"
+	m_dir.mkdir()
+
+	# Single migration with 4 independent ADD COLUMN statements (mirrors 0004).
+	(m_dir / "0001_add_four_cols.sql").write_text(
+		"ALTER TABLE existing_t ADD COLUMN col_x INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_y INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_z INTEGER;\n"
+		"ALTER TABLE existing_t ADD COLUMN col_w INTEGER;\n",
+		encoding="utf-8",
+	)
+
+	conn = _open_mem()
+	# Pre-existing table with col_x ALREADY present — simulates a prior run
+	# that crashed after the first ADD COLUMN committed.
+	conn.executescript(
+		"CREATE TABLE existing_t (id INTEGER PRIMARY KEY);\n"
+		"ALTER TABLE existing_t ADD COLUMN col_x INTEGER;\n"
+	)
+
+	applied = apply_migrations(conn, m_dir)
+
+	assert applied == [1], f"migration 0001 should record as applied, got {applied}"
+	cols = _columns_of(conn, "existing_t")
+	for col in ("col_x", "col_y", "col_z", "col_w"):
+		assert col in cols, (
+			f"{col!r} missing from existing_t after crash-window re-run; "
+			f"got cols={sorted(cols)} — multi-statement body did not complete"
+		)
+
+
+# ---------------------------------------------------------------------------
+# _split_sql_statements — direct unit tests (PR #55 review c1)
+# ---------------------------------------------------------------------------
+
+
+def test_split_empty_and_comment_only_yield_no_statements() -> None:
+	"""Empty, whitespace-only, and comment-only bodies split to []."""
+	assert _split_sql_statements("") == []
+	assert _split_sql_statements("   \n\t  \n") == []
+	assert _split_sql_statements("-- just a comment\n-- another\n") == []
+
+
+def test_split_basic_multi_statement() -> None:
+	"""Two statements split into two stripped fragments; the trailing
+	semicolon does not produce an empty element."""
+	sql = "CREATE TABLE a (id INTEGER);\nCREATE TABLE b (id INTEGER);\n"
+	assert _split_sql_statements(sql) == [
+		"CREATE TABLE a (id INTEGER)",
+		"CREATE TABLE b (id INTEGER)",
+	]
+
+
+def test_split_strips_inline_and_trailing_comments() -> None:
+	"""`--` line comments are removed before splitting, including a comment
+	trailing a statement on the same line."""
+	sql = (
+		"-- header comment\n"
+		"ALTER TABLE t ADD COLUMN a INTEGER; -- adds a\n"
+		"ALTER TABLE t ADD COLUMN b INTEGER;\n"
+	)
+	assert _split_sql_statements(sql) == [
+		"ALTER TABLE t ADD COLUMN a INTEGER",
+		"ALTER TABLE t ADD COLUMN b INTEGER",
+	]
+
+
+def test_split_handles_crlf_line_endings() -> None:
+	"""A migration saved with Windows CRLF endings splits the same as LF."""
+	sql = "CREATE TABLE a (id INTEGER);\r\nCREATE TABLE b (id INTEGER);\r\n"
+	assert _split_sql_statements(sql) == [
+		"CREATE TABLE a (id INTEGER)",
+		"CREATE TABLE b (id INTEGER)",
+	]
+
+
+def test_split_is_idempotent() -> None:
+	"""Re-splitting the `;`-joined fragments yields the same list — the
+	splitter has no order/position dependence."""
+	sql = (
+		"CREATE TABLE a (id INTEGER);\n"
+		"CREATE INDEX ix ON a (id);\n"
+		"ALTER TABLE a ADD COLUMN b INTEGER;\n"
+	)
+	once = _split_sql_statements(sql)
+	twice = _split_sql_statements(";\n".join(once) + ";\n")
+	assert once == twice
+
+
+# ---------------------------------------------------------------------------
+# Shipped-migration crash-window idempotency guard (PR #55 review c2 + c5)
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_migrations_are_crash_window_idempotent() -> None:
+	"""Every shipped migration must be safe to fully re-apply (the crash-window
+	re-run path): apply all, drop the tracking rows, re-apply — the second pass
+	must NOT raise.
+
+	This is a machine check for the docstring's "independently idempotent"
+	claim. It fails if a future migration:
+	- adds a bare ``CREATE INDEX/TABLE/VIEW`` without ``IF NOT EXISTS`` (the
+	  re-run raises ``... already exists``, which is NOT the tolerated
+	  ``duplicate column name``), or
+	- contains SQL the naive ``_split_sql_statements`` mis-splits (re-run
+	  raises a syntax error).
+	"""
+	conn = _open_mem()
+	first = apply_migrations(conn, _MIGRATIONS_DIR)
+	assert first == [1, 2, 3, 4]
+
+	# Simulate a crash-window where the bodies persisted but every tracking
+	# row was lost — forces a full re-application of all four bodies.
+	conn.execute("DELETE FROM live_schema_migrations")
+	conn.commit()
+
+	# Must not raise — every shipped statement is idempotent (IF NOT EXISTS,
+	# DROP+CREATE VIEW, or ADD COLUMN tolerated via the dup-column swallow).
+	second = apply_migrations(conn, _MIGRATIONS_DIR)
+	assert second == [1, 2, 3, 4], f"re-apply should re-record all, got {second}"
+
+
+# ---------------------------------------------------------------------------
+# Non-duplicate-column OperationalError propagates (PR #55 review c3)
+# ---------------------------------------------------------------------------
+
+
+def test_non_duplicate_column_error_propagates_and_is_not_recorded(
+	tmp_path: Path,
+) -> None:
+	"""A genuine SQL error mid-body (NOT 'duplicate column name') must
+	propagate, and the migration version must NOT be recorded — so the
+	operator sees the failure and the migration re-runs after a fix.
+
+	Guards the narrow-swallow filter: a refactor that broadens it (e.g.
+	swallowing any OperationalError again) would let this pass silently.
+	"""
+	m_dir = tmp_path / "migrations"
+	m_dir.mkdir()
+
+	# Stmt 2 is a deliberate syntax error — not a duplicate-column condition.
+	(m_dir / "0001_has_a_syntax_error.sql").write_text(
+		"CREATE TABLE t_ok (id INTEGER);\n"
+		"THIS IS NOT VALID SQL;\n"
+		"CREATE TABLE t_never (id INTEGER);\n",
+		encoding="utf-8",
+	)
+
+	conn = _open_mem()
+	with pytest.raises(sqlite3.OperationalError) as exc_info:
+		apply_migrations(conn, m_dir)
+
+	assert "duplicate column name" not in str(exc_info.value).lower()
+	# Version not recorded — the migration will be retried after the fix.
+	assert _applied_versions(conn) == [], "failed migration must not be recorded"
+	# stmt 3 never ran (loop aborted on stmt 2).
+	assert not _table_exists(conn, "t_never"), "statement after the error must not run"
+
+
+# ---------------------------------------------------------------------------
+# UTF-8 BOM tolerance (PR #55 review c6)
+# ---------------------------------------------------------------------------
+
+
+def test_bom_prefixed_migration_applies_cleanly(tmp_path: Path) -> None:
+	"""A migration file saved with a UTF-8 BOM (common from Windows editors)
+	must apply — the runner reads with utf-8-sig so the BOM never rides onto
+	the first statement (which SQLite would reject as 'unrecognized token')."""
+	m_dir = tmp_path / "migrations"
+	m_dir.mkdir()
+
+	# encoding='utf-8-sig' on write prepends the BOM bytes to the file.
+	(m_dir / "0001_bom.sql").write_text(
+		"CREATE TABLE bom_t (id INTEGER PRIMARY KEY);\n",
+		encoding="utf-8-sig",
+	)
+
+	conn = _open_mem()
+	applied = apply_migrations(conn, m_dir)
+
+	assert applied == [1], f"BOM-prefixed migration should apply, got {applied}"
+	assert _table_exists(conn, "bom_t"), "table from BOM-prefixed migration must exist"
