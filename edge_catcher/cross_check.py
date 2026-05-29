@@ -205,6 +205,18 @@ def reconcile(
 	return CrossCheckReport(findings=findings, n_tickers=len(tickers))
 
 
+# Terminal db statuses with NO Kalshi settlement counterpart (0003 DDL enum) —
+# expected operational states, never treated as won/lost disagreements (spec §5.3).
+_EXPECTED_NO_SETTLEMENT = frozenset({"cancelled", "rejected_post_hoc", "lost_truth"})
+
+
+def _kalshi_blended_cents(buy: Mapping[str, Any]) -> int:
+	fills = _num(buy.get("fill_count_fp"))
+	if fills <= 0:
+		return 0
+	return round((_num(buy.get("taker_fill_cost_dollars")) / fills) * 100)
+
+
 def _compare_fields(
 	row: Mapping[str, Any],
 	buy: Mapping[str, Any],
@@ -213,5 +225,60 @@ def _compare_fields(
 	has_dual_slippage: bool,
 	thresholds: Mapping[str, int],
 ) -> Finding:
-	# Task 4 fills this in; for now a matched row is clean.
-	return Finding(row["ticker"], Outcome.MATCHED, False, "matched")
+	"""Compare a MATCHED+settled db row against Kalshi-derived ground truth (spec §5.3/§5.4).
+
+	``exits`` = the ticker's SELL orders, categorized for the §7 exit-fill-quality report
+	and to annotate the #51/#52 exit-phantom cause onto a terminal disagreement.
+	"""
+	t = row["ticker"]
+	diffs: dict[str, tuple[Any, Any]] = {}
+	material = False
+	partial = 0 < _num(buy.get("fill_count_fp")) < _num(buy.get("initial_count_fp"))
+
+	# Entry: blended (threshold) + fill_size (any mismatch). Partial entries compare
+	# against the PARTIAL fill (taker_fill_cost / fill_count already reflects it).
+	k_blended = _kalshi_blended_cents(buy)
+	db_blended = row.get("blended_entry_cents")
+	if db_blended is not None and abs(int(db_blended) - k_blended) > thresholds["blended_entry_cents"]:
+		diffs["blended_entry_cents"] = (db_blended, k_blended)
+		material = True
+	k_fill = int(round(_num(buy.get("fill_count_fp"))))
+	if row.get("fill_size") is not None and int(row["fill_size"]) != k_fill:
+		diffs["fill_size"] = (row.get("fill_size"), k_fill)
+		material = True
+
+	# Terminal: pnl is the truth-signal; status is structural only (spec §5.3).
+	status = row.get("status")
+	if status not in _EXPECTED_NO_SETTLEMENT:
+		if status == "rejected":
+			diffs["status"] = ("rejected", "filled-BUY-exists")
+			material = True
+		else:
+			true_pnl = sum(true_pnl_cents(s) for s in setts)
+			db_pnl = row.get("pnl_cents")
+			if db_pnl is not None and abs(int(db_pnl) - true_pnl) >= thresholds["pnl_cents"]:
+				diffs["pnl_cents"] = (db_pnl, true_pnl)
+				material = True
+
+	# Dual-slippage (Phase-2 model-input fields): present only when the column exists
+	# (PRAGMA decided once by the caller). Per spec §10 today's db lacks these columns,
+	# so the numeric recompute-vs-Kalshi-refs is deferred until live produces them —
+	# intentional no-op gate, pinned by test_dual_slippage_present_is_noop_today.
+	if has_dual_slippage:
+		pass
+
+	# Exit-fill quality (spec §7) + exit-phantom annotation (§5.3): categorize the
+	# ticker's SELL IOCs. The #51/#52 phantom shows as a pnl disagreement on a row that
+	# booked an exit whose SELL actually zero-filled / canceled — surface that cause.
+	exit_quality = tuple(categorize_exit(o) for o in exits)
+
+	# Tag persists whether or not the partial was mis-booked (#52 re-cert path).
+	tag = " (partial_entry)" if partial else ""
+	if diffs:
+		detail = "field disagreement" + tag + ": " + ", ".join(diffs)
+	else:
+		detail = "matched" + tag
+	bad_exits = sorted({c for c in exit_quality if c in ("zero_fill", "canceled", "partial")})
+	if diffs and bad_exits:
+		detail += f" [exit IOC: {', '.join(bad_exits)}]"
+	return Finding(t, Outcome.MATCHED, material, detail, fields=diffs, exit_quality=exit_quality)

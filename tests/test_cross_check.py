@@ -188,3 +188,149 @@ def test_stray_settlement_without_order_or_row_is_ignored():
 	t = "KXTEST15M-Z"
 	rep = reconcile([], [], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
 	assert rep.findings == []
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — _compare_fields: field disagreements + material classification
+# ---------------------------------------------------------------------------
+
+def _finding_for(rep, ticker):
+	return {f.ticker: f for f in rep.findings}[ticker]
+
+
+def test_blended_entry_disagreement_is_material():
+	t = "KXTEST15M-A"
+	# Kalshi blended = 150c cost / 3 fills = 50c; db says 60c -> 10c diff > 1c threshold.
+	rep = reconcile([_row(t, blended_entry_cents=60)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "blended_entry_cents" in f.fields
+
+
+def test_blended_within_threshold_is_noise():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, blended_entry_cents=51)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is False  # 1c diff is not > 1c
+
+
+def test_pnl_disagreement_is_material():
+	t = "KXTEST15M-A"
+	# true pnl = 147c; db says 0 -> phantom-exit class.
+	rep = reconcile([_row(t, pnl_cents=0)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "pnl_cents" in f.fields
+
+
+def test_fill_size_any_mismatch_material():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, fill_size=2)], [_buy(t, fill=3)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert _finding_for(rep, t).material is True
+
+
+def _settle_partial(ticker):
+	"""Settlement for a 1-contract YES win: true_pnl = 100 - 50 cost - 3 fee = 47c."""
+	return {"ticker": ticker, "market_result": "yes", "yes_count_fp": 1, "no_count_fp": 0,
+	        "value": 100, "yes_total_cost_dollars": 0.50, "no_total_cost_dollars": 0.0, "fee_cost": 0.03}
+
+
+def test_partial_entry_reconciles_against_partial_fill():
+	t = "KXTEST15M-A"
+	# Partial BUY: 1 of 3 filled, cost 0.50 -> blended 50c, fill_size 1; 1-contract
+	# settlement -> true_pnl 47c. db records the partial correctly -> clean, tagged.
+	buy = _buy(t, fill=1, initial=3)
+	buy["taker_fill_cost_dollars"] = 0.50
+	rep = reconcile([_row(t, fill_size=1, blended_entry_cents=50, pnl_cents=47)],
+	                [buy], [_settle_partial(t)], in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is False and "partial_entry" in f.detail
+
+
+def test_db_rejected_with_filled_buy_is_material():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="rejected", pnl_cents=None)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "status" in f.fields
+
+
+def test_expected_no_settlement_status_skipped():
+	t = "KXTEST15M-A"
+	# lost_truth is an expected operational state; pnl not compared -> clean.
+	rep = reconcile([_row(t, status="lost_truth", pnl_cents=-25)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert _finding_for(rep, t).material is False
+
+
+def test_dual_slippage_skipped_when_absent():
+	t = "KXTEST15M-A"
+	row = _row(t)  # no market_impact_cents key (pre-#54 db)
+	rep = reconcile([row], [_buy(t)], [_settle(t)], in_scope_series=SERIES,
+	                expected_strategy="s", has_dual_slippage=False)
+	assert _finding_for(rep, t).material is False
+
+
+def test_misbooked_partial_is_material_and_still_tagged():
+	t = "KXTEST15M-A"
+	# 1-of-3 partial, but the db mis-books fill_size=3 -> material AND still tagged
+	# partial_entry (the #52 re-certification path; the tag must survive a disagreement).
+	buy = _buy(t, fill=1, initial=3)
+	buy["taker_fill_cost_dollars"] = 0.50
+	rep = reconcile([_row(t, fill_size=3, blended_entry_cents=50, pnl_cents=47)],
+	                [buy], [_settle_partial(t)], in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "partial_entry" in f.detail and "fill_size" in f.fields
+
+
+def test_dual_slippage_present_is_noop_today():
+	t = "KXTEST15M-A"
+	# Row carries the Phase-2 columns + has_dual_slippage=True. Per spec §10 the
+	# present-path recompute is deferred, so this is a no-op gate -> clean.
+	row = _row(t, market_impact_cents=2, limit_slippage_cents=3)
+	rep = reconcile([row], [_buy(t)], [_settle(t)], in_scope_series=SERIES,
+	                expected_strategy="s", has_dual_slippage=True)
+	assert _finding_for(rep, t).material is False
+
+
+def test_blended_none_skips_entry_comparison():
+	t = "KXTEST15M-A"
+	# A settled matched row with blended_entry_cents=None must skip the blended leg
+	# cleanly (the is-not-None guard is load-bearing) -> clean.
+	rep = reconcile([_row(t, blended_entry_cents=None)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert _finding_for(rep, t).material is False
+
+
+def test_exit_phantom_annotated_with_categorized_sell():
+	t = "KXTEST15M-A"
+	# pnl disagreement (db 0 vs true 147) on a row that booked an exit whose SELL
+	# actually zero-filled -> material, annotated with the exit cause (#51/#52 signature).
+	sell = {"ticker": t, "action": "sell", "side": "yes", "initial_count_fp": 3,
+	        "fill_count_fp": 0, "status": "expired", "taker_fill_cost_dollars": 0.0}
+	rep = reconcile([_row(t, pnl_cents=0, exit_reason="ws_exit_fill")],
+	                [_buy(t), sell], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "zero_fill" in f.exit_quality and "exit IOC" in f.detail
+	# NOTE: the "Exit-fill quality in to_markdown()" rendering assertion is deferred to
+	# Task 5 (to_markdown is implemented there).
+
+
+def test_zero_fill_buy_creates_no_entry():
+	t = "KXTEST15M-A"
+	# A 0-fill BUY (IOC that never entered) must NOT become MISSING/MATCHED (spec §5.1;
+	# _filled_buy requires fill>0). No db row + no filled BUY -> empty universe -> no finding.
+	rep = reconcile([], [_buy(t, fill=0)], [], in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []
+
+
+def test_multi_entry_via_multiple_db_rows():
+	t = "KXTEST15M-A"
+	# MULTI_ENTRY precedence via the >1-db-row leg of the guard (Task 3's committed test
+	# only exercised >1 BUY). spec §5.1.
+	rep = reconcile([_row(t), _row(t)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.outcome == Outcome.MULTI_ENTRY and f.material is True
