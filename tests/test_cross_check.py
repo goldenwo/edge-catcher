@@ -95,3 +95,96 @@ def test_report_counts_by_outcome():
 		n_tickers=3,
 	)
 	assert rep.counts() == {"matched": 2, "phantom": 1}
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — reconcile() structural outcome tests
+# ---------------------------------------------------------------------------
+from edge_catcher.cross_check import reconcile  # noqa: E402
+
+SERIES = frozenset({"KXTEST15M"})
+
+
+def _buy(ticker, fill=3, initial=3, coid="bot-1"):
+	return {"ticker": ticker, "action": "buy", "side": "yes", "fill_count_fp": fill,
+	        "initial_count_fp": initial, "taker_fill_cost_dollars": 1.50,
+	        "taker_fees_dollars": 0.03, "client_order_id": coid, "status": "executed"}
+
+
+def _settle(ticker, result="yes"):
+	return {"ticker": ticker, "market_result": result, "yes_count_fp": 3, "no_count_fp": 0,
+	        "value": 100, "yes_total_cost_dollars": 1.50, "no_total_cost_dollars": 0.0, "fee_cost": 0.03}
+
+
+def _row(ticker, **kw):
+	base = {"ticker": ticker, "series": "KXTEST15M", "strategy": "s", "side": "yes",
+	        "fill_size": 3, "blended_entry_cents": 50, "status": "won", "pnl_cents": 147,
+	        "exit_reason": "settlement", "client_order_id": "bot-1"}
+	base.update(kw)
+	return base
+
+
+def _outcomes(rep):
+	return {f.ticker: f.outcome for f in rep.findings}
+
+
+def test_matched_clean():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t)], [_buy(t)], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	assert _outcomes(rep)[t] == Outcome.MATCHED
+
+
+def test_phantom_db_row_no_kalshi_buy():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t)], [], [], in_scope_series=SERIES, expected_strategy="s")
+	f = {x.ticker: x for x in rep.findings}[t]
+	assert f.outcome == Outcome.PHANTOM and f.material is True
+
+
+def test_missing_kalshi_buy_no_db_row_when_strategy_scoped():
+	t = "KXTEST15M-A"
+	rep = reconcile([], [_buy(t)], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	f = {x.ticker: x for x in rep.findings}[t]
+	assert f.outcome == Outcome.MISSING and f.material is True
+
+
+def test_unattributed_when_no_strategy_scope():
+	t = "KXTEST15M-A"
+	rep = reconcile([], [_buy(t)], [_settle(t)], in_scope_series=SERIES, expected_strategy=None)
+	f = {x.ticker: x for x in rep.findings}[t]
+	assert f.outcome == Outcome.UNATTRIBUTED and f.material is False
+
+
+def test_out_of_scope_ticker_excluded():
+	rep = reconcile([], [_buy("KXOTHER-A")], [], in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []
+
+
+def test_multi_entry_flagged():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t)], [_buy(t, coid="bot-1"), _buy(t, coid="bot-2")],
+	                [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	f = {x.ticker: x for x in rep.findings}[t]
+	assert f.outcome == Outcome.MULTI_ENTRY and f.material is True
+
+
+def test_unsettled_when_no_settlement():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="open", pnl_cents=None)], [_buy(t)], [],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = {x.ticker: x for x in rep.findings}[t]
+	assert f.outcome == Outcome.UNSETTLED and f.material is False
+
+
+def test_empty_inputs_are_clean():
+	rep = reconcile([], [], [], in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == [] and rep.is_clean is True and rep.exit_code == 0
+
+
+def test_stray_settlement_without_order_or_row_is_ignored():
+	# A settlement for an in-scope ticker with no filled BUY and no db row contributes
+	# no finding (tickers are built from rows ∪ filled-BUYs only — intentional, no
+	# PHANTOM_SETTLEMENT class). Documents the §5.2 window-edge behavior.
+	t = "KXTEST15M-Z"
+	rep = reconcile([], [], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []

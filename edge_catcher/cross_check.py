@@ -19,7 +19,7 @@ Generalizes the proven P1 prototype (analyze_debut_fade_verdict.py).
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
@@ -121,3 +121,97 @@ class CrossCheckReport:
 	def counts(self) -> dict[str, int]:
 		"""Count of findings per outcome value (for the report summary)."""
 		return dict(Counter(f.outcome.value for f in self.findings))
+
+
+def _in_scope(ticker: str, series: frozenset[str]) -> bool:
+	return any(ticker.startswith(s) for s in series)
+
+
+def _filled_buy(order: Mapping[str, Any]) -> bool:
+	return order.get("action") == "buy" and _num(order.get("fill_count_fp")) > 0
+
+
+def reconcile(
+	live_rows: list[Mapping[str, Any]],
+	orders: list[Mapping[str, Any]],
+	settlements: list[Mapping[str, Any]],
+	*,
+	in_scope_series: frozenset[str],
+	expected_strategy: str | None = None,
+	has_dual_slippage: bool = False,
+	thresholds: Mapping[str, int] | None = None,
+) -> CrossCheckReport:
+	"""Reconcile live_trades rows against Kalshi orders + settlements (spec §5).
+
+	All inputs are plain dict/row lists (no I/O here). ``in_scope_series`` defines the
+	ticker universe (e.g. {"KXETH15M"}); out-of-scope tickers are ignored. When
+	``expected_strategy`` is set, an in-scope filled BUY with no db row is MISSING;
+	otherwise UNATTRIBUTED (can't assert bot ownership). ``has_dual_slippage`` is
+	decided once by the caller via PRAGMA table_info (Task 4 uses it).
+	"""
+	thresholds = thresholds or DEFAULT_THRESHOLDS
+
+	# Bucket db rows + filled BUYs by ticker, scoped.
+	rows_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+	for r in live_rows:
+		if _in_scope(r["ticker"], in_scope_series):
+			rows_by_ticker[r["ticker"]].append(r)
+	buys_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+	for o in orders:
+		if _filled_buy(o) and _in_scope(o.get("ticker", ""), in_scope_series):
+			buys_by_ticker[o["ticker"]].append(o)
+	setts_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+	for s in settlements:
+		if _in_scope(s.get("ticker", ""), in_scope_series):
+			setts_by_ticker[s["ticker"]].append(s)
+	sells_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+	for o in orders:
+		if o.get("action") == "sell" and _in_scope(o.get("ticker", ""), in_scope_series):
+			sells_by_ticker[o["ticker"]].append(o)
+
+	findings: list[Finding] = []
+	tickers = sorted(set(rows_by_ticker) | set(buys_by_ticker))
+	for t in tickers:
+		rows = rows_by_ticker.get(t, [])
+		buys = buys_by_ticker.get(t, [])
+		setts = setts_by_ticker.get(t, [])
+
+		if len(rows) > 1 or len(buys) > 1:
+			findings.append(Finding(t, Outcome.MULTI_ENTRY, True,
+				f"{len(rows)} db rows / {len(buys)} filled BUYs — one-entry-per-ticker assumption broke"))
+			continue
+		if rows and not buys:
+			findings.append(Finding(t, Outcome.PHANTOM, True, "db row asserts a fill with no filled Kalshi BUY"))
+			continue
+		if buys and not rows:
+			if expected_strategy is not None:
+				findings.append(Finding(t, Outcome.MISSING, True,
+					"filled Kalshi BUY with no live_trades row (eyeball for a manual trade on a bot series)"))
+			else:
+				findings.append(Finding(t, Outcome.UNATTRIBUTED, False,
+					"in-series filled BUY, no db row, no --strategy to attribute it to the bot"))
+			continue
+		# Matched: one row + one filled BUY.
+		settled = any((s.get("market_result") not in ("", None)) for s in setts)
+		if not settled:
+			findings.append(Finding(t, Outcome.UNSETTLED, False,
+				"filled BUY present, no settled Kalshi result yet — terminal fields not compared"))
+			continue
+		# MATCHED + settled: field comparison is added in Task 4.
+		findings.append(_compare_fields(
+			rows[0], buys[0], setts, sells_by_ticker.get(t, []), has_dual_slippage, thresholds,
+		))
+
+	return CrossCheckReport(findings=findings, n_tickers=len(tickers))
+
+
+def _compare_fields(
+	row: Mapping[str, Any],
+	buy: Mapping[str, Any],
+	setts: list[Mapping[str, Any]],
+	exits: list[Mapping[str, Any]],
+	has_dual_slippage: bool,
+	thresholds: Mapping[str, int],
+) -> Finding:
+	# Task 4 fills this in; for now a matched row is clean.
+	return Finding(row["ticker"], Outcome.MATCHED, False, "matched")
