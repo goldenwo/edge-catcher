@@ -38,7 +38,17 @@ All four v1.0.x items shipped between v1.0.0 and the next tag — see the [CHANG
 
 Two patch releases the same day. v1.3.0 closed out the recommended-order infra/adapters/docs backlog (previously listed under "v1.1 candidates"): **Polymarket adapter** (second exchange under the registry pattern, validating the dispatch-by-`AdapterMeta` design with a real second exchange; public-API only, no auth), **mypy zero-tolerance CI gate** (`Type-check (mypy)` step between Lint and Test, 63 pre-existing errors cleared at the source), **Docker deployment path** (`Dockerfile` + `docker-compose.yml` + ~280-line VPS walkthrough at [docs/deployment-docker.md](deployment-docker.md)), **`docs/tutorial.md`** (30-minute build-your-first-strategy walkthrough), **`docs/llm-providers.md`** (~225-line multi-provider deep-dive), and the **public reporting-module delegation pattern** ([docs/reporting.md](reporting.md) "Wiring up delivery" section). v1.3.1 followed up with Polymarket adapter pagination + 404 robustness surfaced by a live-API smoke (`dry_run` honored, 422 at offset > 0 treated as natural end-of-pagination, CLOB 404 treated as no-trades), CLI `download` multi-exchange dispatch (Polymarket joins Kalshi as a first-class CLI exchange), `monitors/auth.py` `isinstance` narrowing on `load_pem_private_key` (drops the per-module mypy override; survives cryptography library's expanding union return type across versions), and `TradeStoreProtocol` extracted in `monitors/trade_store.py` (drops `# type: ignore` in replay backtester). See [CHANGELOG.md](../CHANGELOG.md) `[1.3.0]` + `[1.3.1]` for full details.
 
-## v1.4 candidates — UI parity for v1.1.0 + v1.2.0 features
+## Live-execution cycle — shipped 2026-05 (internally "v1.6.0"; tag pending)
+
+After v1.3.1 the project's actual direction was **live order execution** — not the UI-parity / desktop-app cycles sketched below (v1.4–v1.6+ candidates), which were written before this pivot and are **deferred** (still valid future directions). Shipped on `main`, pending a `v1.6.0` tag — see [CHANGELOG.md](../CHANGELOG.md) `[Unreleased]`:
+
+- **Order path** — `LiveExecutor`, order builders, `fill_math`, and an order state machine over a `live_trades` store with reconciliation + ghost-reject handling, all behind the existing `Executor` Protocol; async engine refactor so live HTTP calls run inside `place()`.
+- **Risk + safety** — risk gates, a fail-closed mode-coherence boot gate, a live-only spread-aware entry gate, and a venue-neutral `LiveVenueClient` contract.
+- **Fidelity tooling** — dual-slippage diagnostics (`market_impact` + `limit_slippage`) and an **opt-in honest paper fill model (Phase 1)** that applies a pessimistic slippage penalty to narrow the optimistic executor's over-promise vs live fills. **Phase 2** — `EmpiricalSlippageModel` fit to validated live data — is the next step here.
+
+Paper behavior stays byte-unchanged (G-parity 11/11) unless a feature is explicitly opted into; `executor: live|paper` is the mode of record.
+
+## v1.4 candidates (deferred) — UI parity for v1.1.0 + v1.2.0 features
 
 The UI (React + Vite + FastAPI under `ui/` and `api/`) currently surfaces only research / backtest / hypothesis flows. None of the v1.1.0 / v1.2.0 operational surface (notifications layer, reporting CLI flags, rich P&L formatter, paper-trader state) has a UI today. Adding it is the natural next cycle — public users get a one-stop interface that matches what's now available on the CLI side.
 
