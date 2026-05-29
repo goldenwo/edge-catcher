@@ -122,6 +122,42 @@ class CrossCheckReport:
 		"""Count of findings per outcome value (for the report summary)."""
 		return dict(Counter(f.outcome.value for f in self.findings))
 
+	def to_markdown(self) -> str:
+		verdict = "CLEAN" if self.is_clean else "NEEDS-REVISION"
+		lines = [
+			"# Live-Execution Cross-Check",
+			"",
+			f"Verdict: **{verdict}** (exit code {self.exit_code}) — {self.n_tickers} in-scope tickers.",
+			"Ground truth: Kalshi `/portfolio/orders` + `/portfolio/settlements` (read-only).",
+			"",
+			"## Outcome counts",
+			"",
+			"| Outcome | Count |",
+			"|---|---|",
+		]
+		for outcome, n in sorted(self.counts().items()):
+			lines.append(f"| {outcome} | {n} |")
+		material = [f for f in self.findings if f.material]
+		lines += ["", f"## Material findings ({len(material)})", ""]
+		if not material:
+			lines.append("_None — db reconciles with Kalshi ground truth._")
+		else:
+			lines += ["| Ticker | Outcome | Detail | Fields (db → kalshi) |", "|---|---|---|---|"]
+			for f in material:
+				flds = "; ".join(f"{k}: {v[0]}→{v[1]}" for k, v in f.fields.items()) or "—"
+				lines.append(f"| {f.ticker} | {f.outcome.value} | {f.detail} | {flds} |")
+		informational = [f for f in self.findings if not f.material and f.outcome is not Outcome.MATCHED]
+		if informational:
+			lines += ["", f"## Informational ({len(informational)})", ""]
+			for f in informational:
+				lines.append(f"- `{f.ticker}` **{f.outcome.value}** — {f.detail}")
+		exit_cats = Counter(c for f in self.findings for c in f.exit_quality)
+		if exit_cats:
+			lines += ["", "## Exit-fill quality (IOC SELLs)", "", "| Outcome | Count |", "|---|---|"]
+			for cat, n in sorted(exit_cats.items()):
+				lines.append(f"| {cat} | {n} |")
+		return "\n".join(lines)
+
 
 def _in_scope(ticker: str, series: frozenset[str]) -> bool:
 	return any(ticker.startswith(s) for s in series)

@@ -334,3 +334,37 @@ def test_multi_entry_via_multiple_db_rows():
 	                in_scope_series=SERIES, expected_strategy="s")
 	f = _finding_for(rep, t)
 	assert f.outcome == Outcome.MULTI_ENTRY and f.material is True
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — to_markdown: report rendering
+# ---------------------------------------------------------------------------
+
+def test_to_markdown_contains_verdict_and_counts():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, pnl_cents=0)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	md = rep.to_markdown()
+	assert "# Live-Execution Cross-Check" in md
+	assert "NEEDS-REVISION" in md  # material finding present
+	assert "pnl_cents" in md       # the disagreeing field is shown
+	assert "matched" in md         # outcome counts table
+
+
+def test_to_markdown_clean_verdict():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t)], [_buy(t)], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	assert "CLEAN" in rep.to_markdown()
+
+
+def test_to_markdown_renders_exit_fill_quality_section():
+	t = "KXTEST15M-A"
+	# Re-homed from Task 4: an exit-phantom (pnl disagree + zero-fill SELL) must render
+	# the §7 "Exit-fill quality" section once to_markdown exists.
+	sell = {"ticker": t, "action": "sell", "side": "yes", "initial_count_fp": 3,
+	        "fill_count_fp": 0, "status": "expired", "taker_fill_cost_dollars": 0.0}
+	rep = reconcile([_row(t, pnl_cents=0, exit_reason="ws_exit_fill")],
+	                [_buy(t), sell], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
+	md = rep.to_markdown()
+	assert "Exit-fill quality" in md
+	assert "zero_fill" in md
