@@ -24,6 +24,20 @@ sizing:
   max_slippage_cents: 2        # stop filling beyond best + 2c
   min_fill: 3                  # skip if < 3 contracts fillable
 
+# Paper fill model — picks how the paper executor fills orders. The penalties
+# below are hand-tuned starting values, not fitted: treat them as conservative
+# guesses pending empirical calibration against live fills.
+#   optimistic — (default) walk the visible book at quoted prices. Byte-identical
+#                to historical behavior; omit this key entirely to keep it.
+#   fixed      — wrap the optimistic fill with a pessimistic per-strategy slippage
+#                penalty so paper stops over-promising real-money fill quality.
+#                Requires the honest_paper block below.
+paper_fill_model: optimistic
+# honest_paper:                 # required ONLY when paper_fill_model: fixed
+#   default_slippage_cents: 2   # int cents added to each fill (worse for the taker)
+#   per_strategy:               # optional overrides; keys must be real strategy names
+#     my-strategy: 5
+
 # Orderbook capture pipeline — tees engine input events to disk for
 # offline replay. Default disabled; flip to true on the Pi once R2
 # credentials are configured. See docs/superpowers/specs/2026-04-14-
