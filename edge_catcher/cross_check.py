@@ -15,7 +15,7 @@ DISTINCT from edge_catcher.live.reconciliation (real-time pending-order reconcil
 during trading). This is OFFLINE db-vs-exchange validation; its report type is
 CrossCheckReport (cf. live.reconciliation.StartupReconcileReport).
 
-Generalizes the proven P1 prototype (analyze_debut_fade_verdict.py).
+Generalizes the proven P1 verdict prototype.
 """
 from __future__ import annotations
 
@@ -180,10 +180,10 @@ def reconcile(
 	"""Reconcile live_trades rows against Kalshi orders + settlements (spec §5).
 
 	All inputs are plain dict/row lists (no I/O here). ``in_scope_series`` defines the
-	ticker universe (e.g. {"KXETH15M"}); out-of-scope tickers are ignored. When
+	ticker universe (e.g. {"KXTEST15M"}); out-of-scope tickers are ignored. When
 	``expected_strategy`` is set, an in-scope filled BUY with no db row is MISSING;
 	otherwise UNATTRIBUTED (can't assert bot ownership). ``has_dual_slippage`` is
-	decided once by the caller via PRAGMA table_info (Task 4 uses it).
+	decided once by the caller via PRAGMA table_info; consumed by the dual-slippage gate.
 	"""
 	thresholds = thresholds or DEFAULT_THRESHOLDS
 
@@ -233,7 +233,7 @@ def reconcile(
 			findings.append(Finding(t, Outcome.UNSETTLED, False,
 				"filled BUY present, no settled Kalshi result yet — terminal fields not compared"))
 			continue
-		# MATCHED + settled: field comparison is added in Task 4.
+		# MATCHED + settled: reconcile entry/terminal fields against Kalshi ground truth.
 		findings.append(_compare_fields(
 			rows[0], buys[0], setts, sells_by_ticker.get(t, []), has_dual_slippage, thresholds,
 		))
