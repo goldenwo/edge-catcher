@@ -1,8 +1,8 @@
 """Honest paper fill simulator — Phase 1 (fixed-slippage stub).
 
-WHY: P1's strat-34 verdict found Gap-1 — the optimistic PaperExecutor reported
-a 53.1% paper win-rate vs the strategy's true 22.2% live win-rate on the same
-window (non-overlapping 95% CIs). The optimistic executor walks the book the bot
+WHY: P1's strat-34 verdict found Gap-1 — the optimistic PaperExecutor's paper
+win-rate materially overstated the strategy's true live win-rate on the same
+window. The optimistic executor walks the book the bot
 sees and assumes that liquidity is available at quoted prices; live IOCs slip,
 partially fill, or miss. This wrapper applies a pessimistic per-strategy slippage
 penalty on top of the optimistic fill so paper stops over-promising.
