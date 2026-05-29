@@ -15,6 +15,13 @@ This runbook ties together the two artifacts shipped by sub-project E
 **v1.6.0-PR6 / sub-project E delivers cutover-INFRASTRUCTURE-readiness — NOT
 order-placing live trading.**
 
+> **Update — v1.6.0 released 2026-05-29.** The two post-E prerequisites called
+> out below (the dispatch sizing wire and the CR-5 parity gate) have since landed
+> within the v1.6.0 cycle, so the full live order path now exists in the shipped
+> code. This runbook documents sub-project E's cutover infrastructure **as
+> originally delivered**; standing up real-money trading remains an explicit,
+> separate operator decision.
+
 What is functional at the end of E:
 
 - The live daemon boots, connects to the Kalshi WebSocket feed, and runs the
