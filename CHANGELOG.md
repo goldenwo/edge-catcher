@@ -5,9 +5,9 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.0] — 2026-05-29
 
-The **live-execution cycle** (internally scoped as v1.6.0, sub-projects A–F) lands here: the paper-only engine grows a real-money order path — `LiveExecutor`, an order state machine with reconciliation, risk gates, and a live-only entry gate — all behind the same `Executor` Protocol the paper trader already used. Plus dual-slippage diagnostics, an opt-in honest paper fill model (Phase 1), and migration-safety + parsing hardening. `executor: live|paper` is the mode of record; paper behavior is byte-unchanged (G-parity 11/11) unless a feature is explicitly opted into. No version tag is cut yet — promoting this to `## [1.6.0] — <date>` is the operator's release step.
+The **live-execution cycle** (sub-projects A–F) lands in this release: the paper-only engine grows a real-money order path — `LiveExecutor`, an order state machine with reconciliation, risk gates, and a live-only entry gate — all behind the same `Executor` Protocol the paper trader already used. Plus dual-slippage diagnostics, an opt-in honest paper fill model (Phase 1), and migration-safety + parsing hardening. `executor: live|paper` is the mode of record; paper behavior is byte-unchanged (G-parity 11/11) unless a feature is explicitly opted into.
 
 ### Added
 
