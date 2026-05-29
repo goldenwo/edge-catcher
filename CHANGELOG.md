@@ -5,6 +5,45 @@ All notable changes to edge-catcher are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The **live-execution cycle** (internally scoped as v1.6.0, sub-projects A–F) lands here: the paper-only engine grows a real-money order path — `LiveExecutor`, an order state machine with reconciliation, risk gates, and a live-only entry gate — all behind the same `Executor` Protocol the paper trader already used. Plus dual-slippage diagnostics, an opt-in honest paper fill model (Phase 1), and migration-safety + parsing hardening. `executor: live|paper` is the mode of record; paper behavior is byte-unchanged (G-parity 11/11) unless a feature is explicitly opted into. No version tag is cut yet — promoting this to `## [1.6.0] — <date>` is the operator's release step.
+
+### Added
+
+- **Live execution (sub-projects A–F, "v1.6.0" PRs 1–6).** `LiveExecutor` + order builders + `fill_math` + a dispatch pending-branch (#37); an order state machine over a `live_trades` store with reconciliation + ghost-reject handling (#39); risk gates + migration runner + dispatch wiring (#36); live engine wiring + cutover (#40); sizing-wire for live order placement — gate + builder + freshness (#41); additive `Signal`/`Executor`/`OpenPosition` fields preserving the protocol-growth invariant (#35).
+- **Live-only spread-aware entry gate (#50)** — rejects entries whose book spread would cross the strategy's protective stop; paper/replay paths unaffected.
+- **Dual-slippage diagnostics (#54)** — reporting-only `market_impact_cents` (vs top-of-book) and `limit_slippage_cents` (vs the order's limit), persisted on filled entries; additive `OrderResult` fields + migration `0004`.
+- **Honest paper fill simulator — Phase 1 (#57)** — opt-in `paper_fill_model: "fixed"` wraps `PaperExecutor` with a `HonestPaperExecutor` + `FixedSlippageModel` applying a hand-tuned pessimistic per-strategy slippage penalty, narrowing the optimistic executor's over-promise vs live fills. Default `"optimistic"` is byte-unchanged (G-parity 11/11); fail-closed config validation at the boot gate. Phase 2 (`EmpiricalSlippageModel` fit to live data) is the empirical follow-up.
+- **Python 3.13 added to the CI test matrix (#48).**
+
+### Changed
+
+- **Async engine refactor ("v1.6.0" PR 1/6, #30)** — `KalshiOrderClient` + `Executor` + dispatch became async so `LiveExecutor` can issue awaited HTTP calls inside `place()`; replay parity preserved (the async dispatch is still driven deterministically by the captured WS stream).
+- **Venue-neutral live contract (#47)** — extracted a `LiveVenueClient` Protocol so the live path isn't hard-coupled to Kalshi.
+- **Order audit-write off-loaded to the executor (#34)** with a platform-aware test threshold.
+
+### Fixed
+
+- **Kalshi fill/order parsing + replay/reconcile hardening (#43).**
+- **Live entry price/stop derivation for real-strategy orders (#42).**
+- **Absent-ticker open rows resolved by settlement result + expiration (C2, #45).**
+- **Live exit close booked only on a venue-confirmed full fill (#51, #52)** — previously a 0-fill IOC could book a phantom exit at the WS bid.
+- **Cutover beacon reports the active executor (#49)** so a real-money boot never mislabels itself.
+- **Audit-write exceptions guarded in `_request` (#33)** — order responses preserved on a disk-write failure.
+- **Migration safety (#55, #56)** — migration SQL split per statement for crash-window safety; paper `_migrate` narrowed to tolerate only duplicate-column errors instead of swallowing genuine SQL errors.
+- **Flaky `test_rotation_callback` threading race (#58)** — poll the mock's `call_args` (assigned last) instead of `call_count` to avoid a background-thread race.
+
+### Security
+
+- **`client_order_id` charset + length validation on `OrderRequest` (#28).**
+- **Discord `allowed_mentions` defanged (#29)** to neutralize strategy-name-driven mention injection in notifications.
+
+### Docs
+
+- **Honest-paper config documented (#59)** — `paper_fill_model` / `honest_paper` in the paper-trader config example, architecture, and README.
+- **Replay parity gate (#31)** gained a skip-list + non-strict warning banner for legacy OLD_FAIL bundles.
+
 ## [1.5.0] — 2026-05-08
 
 This release contains the foundation for the live-execution cycle: sub-project A (order placement primitive in PR #24), an auth-signing hardening (PR #25), and sub-project G (paper migration onto a unified engine in PR #26). Together they relocate kalshi auth out of the paper-trader namespace into a shared adapters location, fix a query-string-signing edge case before live trading depends on it, and stand up the `edge_catcher.engine` package + Executor Protocol that B/C/D/E/F will extend.
