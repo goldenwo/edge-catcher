@@ -53,6 +53,10 @@ from edge_catcher.engine.dispatch import (
 )
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
+from edge_catcher.engine.executors.honest_paper import (
+	FixedSlippageModel,
+	HonestPaperExecutor,
+)
 from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.notifications import configure_notify, notify
@@ -492,9 +496,56 @@ def _assert_mode_coherence(config: dict) -> None:
 			)
 
 	# Checks 3/4/5 are LIVE-ONLY. For paper they are skipped entirely so
-	# the paper path is byte-unchanged (§9). Return now for paper.
+	# the paper path is byte-unchanged (§9). Return now for paper — AFTER
+	# validating the paper fill-model config (spec §4.6). Pure config reads +
+	# a read-only strategy discovery; consistent with this gate's
+	# no-network/no-DB posture.
 	if mode == "paper":
-		return
+		fill_model = config.get("paper_fill_model", "optimistic")
+		if fill_model not in ("optimistic", "fixed"):
+			raise _coherence_fail(
+				"paper_fill_model",
+				f"must be 'optimistic' or 'fixed'; got {fill_model!r}",
+			)
+		if fill_model != "optimistic":
+			hp = config.get("honest_paper")
+			if (
+				not isinstance(hp, dict)
+				or not isinstance(hp.get("default_slippage_cents"), int)
+				or isinstance(hp.get("default_slippage_cents"), bool)  # yaml `true` is an int subclass — reject
+				or not isinstance(hp.get("per_strategy"), dict)
+			):
+				raise _coherence_fail(
+					"honest_paper",
+					"paper_fill_model != 'optimistic' requires an honest_paper block "
+					"with int default_slippage_cents and a per_strategy mapping",
+				)
+			# per_strategy VALUES must be non-bool ints (same rule as
+			# default_slippage_cents). A str override would TypeError, and a
+			# float would silently corrupt the int cents domain, at FILL time —
+			# both defeat this boot gate's purpose, so reject here.
+			bad_values = sorted(
+				k for k, v in hp["per_strategy"].items()
+				if not isinstance(v, int) or isinstance(v, bool)
+			)
+			if bad_values:
+				raise _coherence_fail(
+					"honest_paper.per_strategy",
+					f"per_strategy slippage values must be non-bool ints; "
+					f"offending keys {bad_values} (a non-int override would "
+					f"TypeError or silently corrupt cents at fill time).",
+				)
+			known = {s.name for s in discover_strategies()}
+			unknown = sorted(set(hp["per_strategy"]) - known)
+			if unknown:
+				raise _coherence_fail(
+					"honest_paper.per_strategy",
+					f"unknown strategy keys {unknown} — not in the paper-trader "
+					f"registry (engine/strategies_local.py via discover_strategies). "
+					f"A typo or renamed strategy would be silently dropped to "
+					f"default_slippage_cents.",
+				)
+		return  # the existing paper early-return, now after validation
 
 	notif_cfg = config.get("notifications", {}) or {}
 
@@ -1193,6 +1244,32 @@ class _LiveRuntime:
 		self.db_conn = db_conn
 
 
+def _build_paper_executor(config: dict, market_state: MarketState) -> Executor:
+	"""Construct the paper-mode executor, honoring paper_fill_model (spec §4.6).
+
+	`paper_fill_model` is validated to {optimistic, fixed} + honest_paper block
+	shape by _assert_mode_coherence at boot (Task 4), so the `else` here is a
+	defensive backstop, not the primary guard.
+	"""
+	base = PaperExecutor(market_state=market_state, config=config)
+	fill_model = config.get("paper_fill_model", "optimistic")
+	if fill_model == "optimistic":
+		return base  # current behavior, byte-unchanged
+	if fill_model == "fixed":
+		return HonestPaperExecutor(
+			base=base,
+			model=FixedSlippageModel(
+				default_cents=config["honest_paper"]["default_slippage_cents"],
+				per_strategy=config["honest_paper"]["per_strategy"],
+			),
+			market_state=market_state,  # inject the in-scope market_state (Phase-2 model reads the book)
+		)
+	raise _coherence_fail(
+		"paper_fill_model",
+		f"unknown paper_fill_model: {fill_model!r} (expected 'optimistic' | 'fixed')",
+	)
+
+
 async def _compose_live(
 	config: dict,
 	config_path: Path,
@@ -1379,7 +1456,7 @@ async def run_engine(
 		# PaperExecutor takes (market_state, config) — fees compute inside
 		# trade_store.record_trade, so no fee_model parameter is required.
 		if executor is None:
-			executor = PaperExecutor(market_state=market_state, config=config)
+			executor = _build_paper_executor(config, market_state)
 
 	# Risk gate (Sub-project C/E) — Gate / BankrollCache / KillSwitch / etc.
 	# all live in engine/risk.py.  For live mode (executor_kind == "live"),
