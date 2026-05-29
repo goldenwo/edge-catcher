@@ -106,7 +106,11 @@ def test_rotation_callback_uploads_via_transport_when_provided(
 	)
 
 	cb(date(2026, 4, 14))
-	assert _wait_for(lambda: transport.upload_bundle.call_count == 1), "upload_bundle never called"
+	# Poll call_args (assigned AFTER call_count inside unittest.mock) rather than
+	# call_count: the upload runs on a background thread, so polling call_count can
+	# observe ==1 in the window before call_args is set, racing the unpack below on
+	# a None call_args (intermittent CI failure: "cannot unpack non-iterable NoneType").
+	assert _wait_for(lambda: transport.upload_bundle.call_args is not None), "upload_bundle never called"
 	args, _kwargs = transport.upload_bundle.call_args
 	assert args[0] == stub_bundle_path
 	assert args[1] == "kalshi/2026-04-14"
