@@ -196,18 +196,21 @@ def reconcile(
 	for r in live_rows:
 		if _in_scope(r["ticker"], in_scope_series):
 			rows_by_ticker[r["ticker"]].append(r)
+	# Bucket filled BUYs + SELLs in ONE pass over orders (one _in_scope check per order).
 	buys_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+	sells_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
 	for o in orders:
-		if _filled_buy(o) and _in_scope(o.get("ticker", ""), in_scope_series):
-			buys_by_ticker[o["ticker"]].append(o)
+		ot = o.get("ticker", "")
+		if not _in_scope(ot, in_scope_series):
+			continue
+		if _filled_buy(o):
+			buys_by_ticker[ot].append(o)
+		elif o.get("action") == "sell":
+			sells_by_ticker[ot].append(o)
 	setts_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
 	for s in settlements:
 		if _in_scope(s.get("ticker", ""), in_scope_series):
 			setts_by_ticker[s["ticker"]].append(s)
-	sells_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-	for o in orders:
-		if o.get("action") == "sell" and _in_scope(o.get("ticker", ""), in_scope_series):
-			sells_by_ticker[o["ticker"]].append(o)
 
 	findings: list[Finding] = []
 	tickers = sorted(set(rows_by_ticker) | set(buys_by_ticker))
@@ -249,6 +252,13 @@ def reconcile(
 # expected operational states, never treated as won/lost disagreements (spec §5.3).
 _EXPECTED_NO_SETTLEMENT = frozenset({"cancelled", "rejected_post_hoc", "lost_truth"})
 
+# Non-terminal db statuses (0003 DDL): on a SETTLED market a row still in one of these
+# never advanced — a recording failure the cross-check must surface (the #51/#52 class).
+_NON_TERMINAL_STATUSES = frozenset({"pending", "open", "exit_pending"})
+
+# IOC exit outcomes that indicate a problem worth surfacing (parallel to the sets above).
+_BAD_IOC_EXIT_OUTCOMES = frozenset({"zero_fill", "canceled", "partial"})
+
 
 def _kalshi_blended_cents(buy: Mapping[str, Any]) -> int:
 	fills = _num(buy.get("fill_count_fp"))
@@ -289,12 +299,19 @@ def _compare_fields(
 
 	# Terminal: pnl is the truth-signal; status is structural only (spec §5.3).
 	status = row.get("status")
-	if status not in _EXPECTED_NO_SETTLEMENT:
+	if status in _NON_TERMINAL_STATUSES:
+		# Settled market but the db row never reached a terminal state — a recording
+		# failure (the #51/#52 class) the tool exists to surface.
+		diffs["status"] = (status, "settled-market-but-row-non-terminal")
+		material = True
+	elif status not in _EXPECTED_NO_SETTLEMENT:
 		if status == "rejected":
 			diffs["status"] = ("rejected", "filled-BUY-exists")
 			material = True
 		else:
-			true_pnl = sum(true_pnl_cents(s) for s in setts)
+			# Sum only YES/NO legs: a void/scalar settlement is a refund, not a realized
+			# loss, so it must not contribute its cost as negative P&L (else a false diff).
+			true_pnl = sum(true_pnl_cents(s) for s in setts if s.get("market_result") in ("yes", "no"))
 			db_pnl = row.get("pnl_cents")
 			if db_pnl is not None and abs(int(db_pnl) - true_pnl) >= thresholds["pnl_cents"]:
 				diffs["pnl_cents"] = (db_pnl, true_pnl)
@@ -304,6 +321,10 @@ def _compare_fields(
 	# (PRAGMA decided once by the caller). Per spec §10 today's db lacks these columns,
 	# so the numeric recompute-vs-Kalshi-refs is deferred until live produces them —
 	# intentional no-op gate, pinned by test_dual_slippage_present_is_noop_today.
+	# FAIL-LOUD CONTRACT: when the columns DO appear, this MUST be implemented before
+	# is_clean can be trusted for them — do NOT leave as `pass`. The wrapper warns the
+	# operator (stderr) whenever has_dual_slippage is True, so a present-but-unchecked
+	# run is never silently certified clean.
 	if has_dual_slippage:
 		pass
 
@@ -318,7 +339,7 @@ def _compare_fields(
 		detail = "field disagreement" + tag + ": " + ", ".join(diffs)
 	else:
 		detail = "matched" + tag
-	bad_exits = sorted({c for c in exit_quality if c in ("zero_fill", "canceled", "partial")})
+	bad_exits = sorted(set(exit_quality) & _BAD_IOC_EXIT_OUTCOMES)
 	if diffs and bad_exits:
 		detail += f" [exit IOC: {', '.join(bad_exits)}]"
 	return Finding(t, Outcome.MATCHED, material, detail, fields=diffs, exit_quality=exit_quality)

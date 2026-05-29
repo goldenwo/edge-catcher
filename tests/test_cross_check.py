@@ -32,7 +32,9 @@ def test_categorize_exit():
 	assert categorize_exit({"initial_count_fp": 3, "fill_count_fp": 3, "status": "executed"}) == "filled"
 	assert categorize_exit({"initial_count_fp": 3, "fill_count_fp": 1, "status": "canceled"}) == "partial"
 	assert categorize_exit({"initial_count_fp": 3, "fill_count_fp": 0, "status": "canceled"}) == "canceled"
-	assert categorize_exit({"initial_count_fp": 3, "fill_count_fp": 0, "status": "expired"}) == "zero_fill"
+	# Defensive fallback: a 0-fill with no cancel signal. Real REST 0-fill IOCs come back
+	# status="canceled" (the case above); "zero_fill" guards an unexpected/absent status.
+	assert categorize_exit({"initial_count_fp": 3, "fill_count_fp": 0, "status": ""}) == "zero_fill"
 
 
 def test_core_imports_no_order_client():
@@ -315,16 +317,43 @@ def test_blended_none_skips_entry_comparison():
 	assert _finding_for(rep, t).material is False
 
 
+def test_non_terminal_status_on_settled_market_is_material():
+	t = "KXTEST15M-A"
+	# A settled+MATCHED row stuck at a non-terminal status (open/pending/exit_pending)
+	# with pnl never written is a recording failure (#51/#52 class) the tool must surface
+	# — not a silent CLEAN. (review C6)
+	rep = reconcile([_row(t, status="open", pnl_cents=None)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "status" in f.fields
+
+
+def _settle_void(ticker):
+	"""A void (refunded) settlement leg: market_result='void', cost present, no payout."""
+	return {"ticker": ticker, "market_result": "void", "yes_count_fp": 0, "no_count_fp": 0,
+	        "value": 100, "yes_total_cost_dollars": 1.50, "no_total_cost_dollars": 0.0, "fee_cost": 0.0}
+
+
+def test_void_leg_excluded_from_true_pnl():
+	t = "KXTEST15M-A"
+	# A winning YES leg (true_pnl 147) PLUS a void leg (a refund, not a -150 loss) must
+	# reconcile to 147, not 147-150 — only YES/NO legs contribute realized P&L. (review C10/void)
+	rep = reconcile([_row(t, pnl_cents=147)], [_buy(t)], [_settle(t), _settle_void(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert _finding_for(rep, t).material is False
+
+
 def test_exit_phantom_annotated_with_categorized_sell():
 	t = "KXTEST15M-A"
 	# pnl disagreement (db 0 vs true 147) on a row that booked an exit whose SELL
-	# actually zero-filled -> material, annotated with the exit cause (#51/#52 signature).
+	# actually 0-filled -> material, annotated with the exit cause (#51/#52 signature).
+	# Real REST 0-fill IOC SELLs come back status="canceled" (not the FIX-only "expired").
 	sell = {"ticker": t, "action": "sell", "side": "yes", "initial_count_fp": 3,
-	        "fill_count_fp": 0, "status": "expired", "taker_fill_cost_dollars": 0.0}
+	        "fill_count_fp": 0, "status": "canceled", "taker_fill_cost_dollars": 0.0}
 	rep = reconcile([_row(t, pnl_cents=0, exit_reason="ws_exit_fill")],
 	                [_buy(t), sell], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
 	f = _finding_for(rep, t)
-	assert f.material is True and "zero_fill" in f.exit_quality and "exit IOC" in f.detail
+	assert f.material is True and "canceled" in f.exit_quality and "exit IOC" in f.detail
 	# NOTE: the "Exit-fill quality in to_markdown()" rendering assertion is deferred to
 	# Task 5 (to_markdown is implemented there).
 
@@ -373,9 +402,9 @@ def test_to_markdown_renders_exit_fill_quality_section():
 	# Re-homed from Task 4: an exit-phantom (pnl disagree + zero-fill SELL) must render
 	# the §7 "Exit-fill quality" section once to_markdown exists.
 	sell = {"ticker": t, "action": "sell", "side": "yes", "initial_count_fp": 3,
-	        "fill_count_fp": 0, "status": "expired", "taker_fill_cost_dollars": 0.0}
+	        "fill_count_fp": 0, "status": "canceled", "taker_fill_cost_dollars": 0.0}
 	rep = reconcile([_row(t, pnl_cents=0, exit_reason="ws_exit_fill")],
 	                [_buy(t), sell], [_settle(t)], in_scope_series=SERIES, expected_strategy="s")
 	md = rep.to_markdown()
 	assert "Exit-fill quality" in md
-	assert "zero_fill" in md
+	assert "canceled" in md
