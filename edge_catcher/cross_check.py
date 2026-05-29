@@ -160,7 +160,11 @@ class CrossCheckReport:
 
 
 def _in_scope(ticker: str, series: frozenset[str]) -> bool:
-	return any(ticker.startswith(s) for s in series)
+	# Match the series as a COMPLETE leading segment, not a bare char-prefix. Kalshi
+	# tickers are "<SERIES>-<EVENT>-<OUTCOME>", and distinct series share leading chars
+	# (e.g. KXXRP vs KXXRPD vs KXXRP15M, or KXBTC vs KXBTC15M), so a plain startswith
+	# would over-scope a different series and manufacture spurious MISSING/UNATTRIBUTED.
+	return any(ticker == s or ticker.startswith(f"{s}-") for s in series)
 
 
 def _filled_buy(order: Mapping[str, Any]) -> bool:

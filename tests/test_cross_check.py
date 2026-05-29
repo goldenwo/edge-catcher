@@ -160,6 +160,17 @@ def test_out_of_scope_ticker_excluded():
 	assert rep.findings == []
 
 
+def test_in_scope_excludes_prefix_sharing_longer_series():
+	# Regression: a DISTINCT longer series that shares the in-scope series' leading
+	# chars (the real KXXRP vs KXXRPD/KXXRP15M collision) must be excluded — a bare
+	# startswith would over-scope it and emit a spurious MISSING. spec §5.2.
+	t_in = "KXTEST15M-26MAY241600-T1"
+	t_out = "KXTEST15MAX-26MAY241600-T1"  # different series, shares the KXTEST15M prefix
+	rep = reconcile([], [_buy(t_in), _buy(t_out)], [], in_scope_series=SERIES, expected_strategy="s")
+	tickers = {f.ticker for f in rep.findings}
+	assert t_in in tickers and t_out not in tickers
+
+
 def test_multi_entry_flagged():
 	t = "KXTEST15M-A"
 	rep = reconcile([_row(t)], [_buy(t, coid="bot-1"), _buy(t, coid="bot-2")],
