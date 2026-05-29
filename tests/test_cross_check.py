@@ -1,7 +1,7 @@
 import subprocess
 import sys
 
-from edge_catcher.cross_check import _num, categorize_exit, true_pnl_cents
+from edge_catcher.cross_check import CrossCheckReport, Finding, Outcome, _num, categorize_exit, true_pnl_cents
 
 
 def test_num_coerces_and_defaults():
@@ -73,3 +73,25 @@ def test_sqlite_readonly_mode_blocks_writes(tmp_path):
 	with pytest.raises(sqlite3.OperationalError):
 		ro.execute("INSERT INTO t(x) VALUES (1)")
 	ro.close()
+
+
+def _f(outcome, material, ticker="KXTEST15M-A", detail="x"):
+	return Finding(ticker=ticker, outcome=outcome, material=material, detail=detail)
+
+
+def test_report_is_clean_and_exit_code():
+	clean = CrossCheckReport(findings=[_f(Outcome.UNATTRIBUTED, False), _f(Outcome.UNSETTLED, False)], n_tickers=2)
+	assert clean.is_clean is True
+	assert clean.exit_code == 0
+
+	dirty = CrossCheckReport(findings=[_f(Outcome.PHANTOM, True)], n_tickers=1)
+	assert dirty.is_clean is False
+	assert dirty.exit_code == 1
+
+
+def test_report_counts_by_outcome():
+	rep = CrossCheckReport(
+		findings=[_f(Outcome.MATCHED, False), _f(Outcome.MATCHED, False), _f(Outcome.PHANTOM, True)],
+		n_tickers=3,
+	)
+	assert rep.counts() == {"matched": 2, "phantom": 1}

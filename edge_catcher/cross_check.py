@@ -19,6 +19,8 @@ Generalizes the proven P1 prototype (analyze_debut_fade_verdict.py).
 """
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
@@ -83,3 +85,39 @@ DEFAULT_THRESHOLDS: Mapping[str, int] = {
 	"blended_entry_cents": 1,
 	"pnl_cents": 5,
 }
+
+
+@dataclass(frozen=True)
+class Finding:
+	"""One reconciliation finding for a ticker.
+
+	``fields`` maps a field name to (db_value, kalshi_value) for field-disagreement
+	findings; empty for structural outcomes. ``material`` drives is_clean (spec §5.4).
+	"""
+
+	ticker: str
+	outcome: Outcome
+	material: bool
+	detail: str
+	fields: Mapping[str, tuple[Any, Any]] = field(default_factory=dict)
+	exit_quality: tuple[str, ...] = ()  # categorize_exit() per SELL IOC (§7 report + §5.3 annotation)
+
+
+@dataclass(frozen=True)
+class CrossCheckReport:
+	findings: list[Finding]
+	n_tickers: int
+
+	@property
+	def is_clean(self) -> bool:
+		"""True iff no MATERIAL finding (spec §5.4). UNATTRIBUTED/UNSETTLED/noise are not material."""
+		return not any(f.material for f in self.findings)
+
+	@property
+	def exit_code(self) -> int:
+		"""Derived (single source of truth): 0 iff clean."""
+		return 0 if self.is_clean else 1
+
+	def counts(self) -> dict[str, int]:
+		"""Count of findings per outcome value (for the report summary)."""
+		return dict(Counter(f.outcome.value for f in self.findings))
