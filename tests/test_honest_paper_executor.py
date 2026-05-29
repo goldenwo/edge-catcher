@@ -1,8 +1,9 @@
 """Honest paper fill simulator — Phase 1 (FixedSlippageModel + HonestPaperExecutor).
 
-WHY this exists: P1's debut-fade verdict found Gap-1 — paper win-rate 53.1% vs
-live 22.2% on the same window. The optimistic PaperExecutor over-promises. This
-wraps it with a pessimistic slippage penalty. See
+WHY this exists: P1's debut-fade verdict found Gap-1 — the optimistic
+PaperExecutor's paper win-rate materially overstated live performance on the
+same window, i.e. it over-promises. This wraps it with a pessimistic slippage
+penalty. See
 docs/superpowers/specs/2026-05-28-honest-paper-fill-simulator-design.md.
 """
 from __future__ import annotations
