@@ -8,6 +8,7 @@ import functools
 import json
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -821,6 +822,7 @@ async def _settlement_poller(
 	metrics: Metrics | None = None,
 	interval: int = 60,
 	capture_writer: RawFrameWriter | None = None,
+	record_close_hook: Callable[[datetime], Awaitable[None]] | None = None,
 ) -> None:
 	"""Periodically check open trades for settlement.
 
@@ -867,6 +869,13 @@ async def _settlement_poller(
 					# SC-D3 note); settlement has NO executor leg — it is purely
 					# this store-shaped resolution.
 					store.settle_trade(trade["id"], result, now=now)
+					# Ratchet the closed-equity peak at this CONFIRMED
+					# settlement close (spec §3.3a). None in paper (no risk
+					# module); live builds it over the gate + ctx provider.
+					# record_trade_close is fail-soft internally; the poller's
+					# broad except is the outer backstop.
+					if record_close_hook is not None:
+						await record_close_hook(now)
 					# Read back PnL from DB (settle_trade computes it including fees)
 					settled = store.get_trade_by_id(trade["id"])
 					# Branch settlement counters on DB 'status' (won/lost only),
@@ -1607,11 +1616,45 @@ async def run_engine(
 		# 6. Start background tasks
 		ws_ref: list[Any] = [None]
 		dirty_strategies: set[str] = set()
+
+		# Drawdown-gate (spec §3.3a) + G1: build the risk gate, its per-signal
+		# context provider, and the settlement close-hook BEFORE the tasks list
+		# so the settlement poller can receive the hook. LIVE only — paper leaves
+		# all three None (poller gets record_close_hook=None; the WS-loop gate
+		# short-circuits → byte-exact G-parity).
+		risk: "Gate | None" = None
+		risk_ctx_provider: "RiskContextProvider | None" = None
+		record_close_hook: Callable[[datetime], Awaitable[None]] | None = None
+		if live_runtime is not None:
+			from edge_catcher.engine.risk_context_provider import (  # noqa: PLC0415
+				RiskContextProvider,
+			)
+			risk = live_runtime.gate
+			risk_ctx_provider = RiskContextProvider(
+				conn=live_runtime.db_conn,
+				operator_kill=_OPERATOR_KILL,
+				market_state=market_state,
+			)
+			# Non-Optional locals for the closure (provably set in this branch).
+			_gate_for_close = risk
+			_provider_for_close = risk_ctx_provider
+
+			async def record_close_hook(  # noqa: F811 - single definition (live branch)
+				now: datetime,
+			) -> None:
+				# Build a FRESH post-close context (provider.build does fresh DB
+				# reads) so open_positions excludes the just-closed trade — no
+				# over-count. signal is unused by build (typed ``object``).
+				_gate_for_close.record_trade_close(
+					_provider_for_close.build(None, now)
+				)
+
 		tasks = [
 			asyncio.create_task(
 				_settlement_poller(
 					store, client, strategies, pending_states,
 					metrics=metrics, capture_writer=capture_writer,
+					record_close_hook=record_close_hook,
 				),
 				name="settlement_poller",
 			),
@@ -1648,8 +1691,7 @@ async def run_engine(
 		# G1: the risk gate + its per-signal context provider threaded into the
 		# WS loop (LIVE only). Paper/replay leave both None ⇒ the dispatch gate
 		# short-circuits and the WS path stays byte-identical (§9 G-parity).
-		risk: "Gate | None" = None
-		risk_ctx_provider: "RiskContextProvider | None" = None
+		# risk/risk_ctx_provider are built above (before tasks list) for §3.3a.
 		if live_runtime is not None:
 			from edge_catcher.live.reconciliation import (  # noqa: PLC0415
 				poll_pending_rows_loop,
@@ -1670,15 +1712,7 @@ async def run_engine(
 			# → `_handle_signal` so EVERY live entry is gated on the real WS
 			# feed. Without this the live engine sized every entry 0 and
 			# LiveExecutor rejected it (a silent no-op — zero real orders).
-			from edge_catcher.engine.risk_context_provider import (  # noqa: PLC0415
-				RiskContextProvider,
-			)
-			risk = live_runtime.gate
-			risk_ctx_provider = RiskContextProvider(
-				conn=live_runtime.db_conn,
-				operator_kill=_OPERATOR_KILL,
-				market_state=market_state,
-			)
+			# risk + risk_ctx_provider built above the tasks list (§3.3a reorder).
 
 			# §5.1 bankroll refresh (LIVE only). Keeps the gate's bankroll cache
 			# fresh on a period of bankroll_ttl_seconds/2 so STALE_BANKROLL never
