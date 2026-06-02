@@ -1395,3 +1395,50 @@ class TestDrawdownGateEndToEnd:
 		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
 			f"expected drawdown trip, got {decision.reason}"
 		)
+
+	@pytest.mark.asyncio
+	async def test_ratcheted_peak_then_drawdown_trips(self, tmp_path: Path) -> None:
+		"""FULL production loop (spec §3.1→§3.2→§6): seed → ratchet UP on a
+		winning close → a later drawdown from the RATCHETED peak trips
+		KILL_AUTO_DRAWDOWN. Proves record_trade_close's ratchet actually feeds
+		the gate (not just the boot seed). Without the ratchet, peak stays 20_000
+		→ threshold 19_000 → equity 28_000 would NOT trip."""
+		from edge_catcher.engine.risk import Reject, build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=20000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)  # peak seeded to 20_000
+
+		# A winning close lifts equity to 30_000 → peak ratchets UP to 30_000.
+		gate._bankroll._cash_cents = 30000
+		gate.record_trade_close(_make_ctx(open_positions=[]))
+		assert gate._peak_tracker.peak_cents() == 30000, "ratchet must lift the peak"
+
+		# Equity then falls to 28_000 (< int(30_000 * 0.95) = 28_500) → trips.
+		gate._bankroll._cash_cents = 28000
+		decision = gate.gate_entry(_make_signal(), _make_ctx(open_positions=[]))
+
+		assert isinstance(decision, Reject)
+		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
+			f"ratcheted-peak drawdown must trip, got {decision.reason}"
+		)
