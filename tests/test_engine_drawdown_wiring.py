@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import edge_catcher.engine.engine as engmod
+from edge_catcher.engine.dispatch import _handle_exit
 from edge_catcher.engine.engine import _settlement_poller
+from edge_catcher.engine.executor import OrderResult
 
 
 @pytest.mark.asyncio
@@ -58,9 +60,6 @@ async def test_settlement_poller_awaits_close_hook_after_settle(monkeypatch) -> 
 # ---------------------------------------------------------------------------
 # Task 4: _handle_exit return-bool + _handle_signal ratchet (spec §3.3b)
 # ---------------------------------------------------------------------------
-
-from edge_catcher.engine.dispatch import _handle_exit
-from edge_catcher.engine.executor import OrderResult
 
 
 def _exit_signal():
