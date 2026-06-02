@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -53,3 +53,72 @@ async def test_settlement_poller_awaits_close_hook_after_settle(monkeypatch) -> 
 
 	assert len(hook_calls) == 1, "hook must be awaited once per confirmed settle"
 	assert store.settle_trade.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4: _handle_exit return-bool + _handle_signal ratchet (spec §3.3b)
+# ---------------------------------------------------------------------------
+
+from edge_catcher.engine.dispatch import _handle_exit
+from edge_catcher.engine.executor import OrderResult
+
+
+def _exit_signal():
+	from edge_catcher.engine.strategy_base import Signal
+	return Signal(
+		action="exit", ticker="KXTEST15M-T50", side="yes", series="KXTEST15M",
+		strategy="s", reason="stop_loss", trade_id=1,
+	)
+
+
+class _TickStub:
+	yes_bid = 50
+	no_bid = 50
+
+
+@pytest.mark.asyncio
+async def test_handle_exit_returns_true_on_confirmed_full_fill() -> None:
+	store = MagicMock()
+	store.get_trade_by_id.return_value = {
+		"fill_size": 3, "blended_entry": 50, "entry_price": 50,
+		"pnl_cents": 30, "entry_fee_cents": 0,
+	}
+	store.exit_trade = MagicMock()
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=OrderResult(
+		status="filled", intended_size=3, filled_size=3,
+		blended_entry_cents=50, fill_pct=1.0, slippage_cents=0,
+	))
+	closed = await _handle_exit(
+		_exit_signal(), _TickStub(), store, "🔵",
+		now=datetime.now(timezone.utc), executor=executor, config={},
+	)
+	assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_handle_exit_returns_false_on_partial_fill() -> None:
+	store = MagicMock()
+	store.get_trade_by_id.return_value = {"fill_size": 3, "blended_entry": 50}
+	executor = MagicMock()
+	executor.place = AsyncMock(return_value=OrderResult(
+		status="filled", intended_size=3, filled_size=1,  # 1 < 3 → partial
+		blended_entry_cents=50, fill_pct=0.34, slippage_cents=0,
+	))
+	closed = await _handle_exit(
+		_exit_signal(), _TickStub(), store, "🔵",
+		now=datetime.now(timezone.utc), executor=executor, config={},
+	)
+	assert closed is False
+
+
+@pytest.mark.asyncio
+async def test_handle_exit_returns_false_on_missing_trade_id() -> None:
+	from edge_catcher.engine.strategy_base import Signal
+	sig = Signal(reason="stop_loss", strategy="s", ticker="KXTEST15M-T50", series="KXTEST15M",
+	             side="yes", action="exit", trade_id=None)
+	closed = await _handle_exit(
+		sig, _TickStub(), MagicMock(), "🔵",
+		now=datetime.now(timezone.utc), executor=MagicMock(), config={},
+	)
+	assert closed is False
