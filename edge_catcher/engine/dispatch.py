@@ -494,9 +494,8 @@ async def _handle_signal(
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
-	`_handle_enter` is async (awaits the executor's network call); `_handle_exit`
-	stays sync (no I/O — pure store mutation + log). Calling a sync function
-	from this async dispatcher is intentional and idiomatic.
+	`_handle_enter` and `_handle_exit` are both async — each awaits the
+	executor's `place()` network call (the §1 executor seam).
 
 	Gate consultation (Sub-project C, wired by C3):
 	  Entry signals are gated BEFORE building/placing the order. `risk` is the
@@ -1242,7 +1241,7 @@ async def _handle_exit(
 	exited = store.get_trade_by_id(signal.trade_id)
 	if exited is None:
 		log.warning("EXIT: trade id=%d not found post-exit_trade", signal.trade_id)
-		return True  # store.exit_trade already persisted the close (:1230); only readback failed
+		return True  # store.exit_trade above already persisted the close; only readback failed
 	pnl = exited.get("pnl_cents") or 0
 	outcome, _ = _pnl_label(pnl)
 	blended = exited.get("blended_entry") or 0
@@ -1274,8 +1273,8 @@ async def _handle_exit(
 	)
 	log.info(log_line)
 	notify(notify_line)
-	# Reached only via the confirmed_full_fill path (store.exit_trade persisted
-	# the close at :1230). Signal a confirmed close so _handle_signal ratchets
+	# Reached only via the confirmed_full_fill path (store.exit_trade above
+	# persisted the close). Signal a confirmed close so _handle_signal ratchets
 	# the drawdown peak (spec §3.3b).
 	return True
 
