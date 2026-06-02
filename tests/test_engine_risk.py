@@ -1454,3 +1454,29 @@ class TestDrawdownGateEndToEnd:
 		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
 			f"ratcheted-peak drawdown must trip, got {decision.reason}"
 		)
+
+	def test_gate_entry_reseeds_zero_peak_then_drawdown_is_live(self) -> None:
+		"""Failed-boot-seed recovery (review Finding 1): a boot bankroll-refresh
+		failure can persist peak=0; once a later refresh recovers cash, gate_entry
+		must lazily re-seed the peak from cash so the drawdown gate is LIVE from
+		the first entry — NOT silently disabled until the first confirmed close.
+		FAILS pre-fix: gate_entry never re-seeds → peak stays 0 → threshold 0 →
+		KILL_AUTO_DRAWDOWN never trips for a funded account."""
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(0, now)  # failed-boot seed persisted peak=0
+		assert peak.peak_cents() == 0
+		gate = Gate(cfg, _make_bankroll(cfg, cents=17000), KillSwitch(conn), peak)
+
+		# First entry after cash recovered: re-seeds peak from cash, allows entry.
+		d1 = gate.gate_entry(_make_signal(), _make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 17000, "zero peak must be re-seeded from cash"
+		assert isinstance(d1, Allow)
+
+		# A real drawdown >5% below the re-seeded peak now trips (gate is live).
+		gate._bankroll._cash_cents = 16000  # < int(17000 * 0.95) = 16150
+		d2 = gate.gate_entry(_make_signal(), _make_ctx(now=now, open_positions=[]))
+		assert isinstance(d2, Reject)
+		assert d2.reason == "KILL_AUTO_DRAWDOWN"

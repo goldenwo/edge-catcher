@@ -606,6 +606,20 @@ class PeakTracker:
 			self._persist(now)
 			log.info("PeakTracker updated: new_peak=%dc", self._cached_peak_cents)
 
+	def reseed_if_zero(self, equity_cents: int, now: datetime) -> None:
+		"""Establish the peak from ``equity_cents`` ONLY if it is currently 0.
+
+		Recovers from a failed boot seed: if ``build_risk_module``'s startup
+		bankroll refresh failed (Kalshi unreachable), ``initialize_if_unset``
+		persisted peak=0; once cash later becomes available, ``gate_entry`` calls
+		this to lift the peak so the drawdown gate goes live. No-op once a real
+		(>0) peak exists, so it NEVER lowers a ratcheted peak (review Finding 1).
+		"""
+		if self._cached_peak_cents == 0 and equity_cents > 0:
+			self._cached_peak_cents = equity_cents
+			self._persist(now)
+			log.info("PeakTracker re-seeded from 0: peak=%dc", self._cached_peak_cents)
+
 	def _persist(self, now: datetime) -> None:
 		value_json = json.dumps({"cents": self._cached_peak_cents})
 		self._conn.execute(
@@ -766,6 +780,25 @@ class Gate:
 
 		# 4. Drawdown from closed-equity peak — first-trip branch
 		peak_cents = self._peak_tracker.peak_cents()
+		if peak_cents == 0:
+			# Lazy re-seed (review Finding 1): a boot bankroll-refresh failure
+			# can leave peak=0; once a later refresh recovers cash (we are past
+			# STALE_BANKROLL + the panic floor here, so cash is real + funded)
+			# establish the peak from cash NOW so the drawdown gate is live from
+			# THIS entry — otherwise it stays 0 (threshold 0, never trips) until
+			# the first confirmed close. Fail-soft: a persist error is swallowed
+			# (peak is monitoring-only; the next entry retries). Cash-based to
+			# mirror the boot seed (closed-equity semantics, excludes MTM).
+			try:
+				self._peak_tracker.reseed_if_zero(
+					self._bankroll.cash_cents(), ctx.now_utc
+				)
+			except sqlite3.Error:
+				log.warning(
+					"lazy peak re-seed failed (ignored — monitoring-only, "
+					"retries next entry)", exc_info=True,
+				)
+			peak_cents = self._peak_tracker.peak_cents()
 		drawdown_threshold_cents = int(peak_cents * (1.0 - self._cfg.drawdown_pct))
 		if equity_cents <= drawdown_threshold_cents:
 			detail = (
@@ -1054,8 +1087,10 @@ async def build_risk_module(
 	# At boot the live account is flat (CR-3) so equity == cash. INSERT OR
 	# IGNORE: seeds a fresh DB, no-op when a peak row already exists (restart-
 	# safe). If the pre-refresh failed (Kalshi unreachable at boot) cash is 0
-	# and this seeds peak=0 — benign + self-healing (STALE_BANKROLL gates all
-	# entries; the first real close ratchets up). See spec §8 Gap-A.
+	# and this seeds peak=0; gate_entry's lazy reseed_if_zero then lifts the
+	# peak from cash on the first entry after a refresh recovers — STALE_BANKROLL
+	# only gates entries UNTIL that recovery, so the lazy reseed (NOT "self-
+	# healing on first close") is what closes the gap (review Finding 1, spec §8).
 	peak_tracker.initialize_if_unset(bankroll.cash_cents(), datetime.now(timezone.utc))
 
 	return Gate(
