@@ -1044,7 +1044,7 @@ async def build_risk_module(
 	# logged); only the post-Gate refresh path can trip via _emit_trip_fn.
 	await bankroll.refresh()
 
-	# Seed the closed-equity peak from the pre-refreshed cash (spec §3.1).
+	# Seed the closed-equity peak from the cash just refreshed above (spec §3.1).
 	# At boot the live account is flat (CR-3) so equity == cash. INSERT OR
 	# IGNORE: seeds a fresh DB, no-op when a peak row already exists (restart-
 	# safe). If the pre-refresh failed (Kalshi unreachable at boot) cash is 0
