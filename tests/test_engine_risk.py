@@ -997,6 +997,18 @@ class TestRiskConfig:
 		with pytest.raises(ValueError, match="bankroll_failures_until_kill"):
 			_phase1_cfg(bankroll_failures_until_kill=0)
 
+	def test_from_dict_rejects_non_positive_drawdown_pct(self) -> None:
+		"""dd=0 USED to mean "no drawdown gate" when PeakTracker was inert (peak
+		always 0 → threshold 0 → never tripped). The gate is now WIRED (peak
+		seeded + ratcheted), so dd=0 → threshold == peak → KILL_AUTO_DRAWDOWN
+		trips on ANY non-gain (equity <= peak), silently halting trading.
+		Negative dd makes threshold > peak → trips even on gains. Reject both;
+		a genuinely disabled gate needs a separate switch, not a footgun value."""
+		with pytest.raises(ValueError, match="drawdown_pct"):
+			_phase1_cfg(drawdown_pct=0.0)
+		with pytest.raises(ValueError, match="drawdown_pct"):
+			_phase1_cfg(drawdown_pct=-0.01)
+
 
 # ===========================================================================
 # 11. Replay / paper path guard
