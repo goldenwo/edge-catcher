@@ -828,6 +828,29 @@ class Gate:
 		)
 		return Allow(size_contracts=position_size, sizing_breakdown=breakdown)
 
+	def record_trade_close(self, ctx: RiskContext) -> None:
+		"""Ratchet the closed-equity peak at a CONFIRMED trade close (spec §3.2).
+
+		Samples the SAME conservative-MTM equity the drawdown gate compares
+		against (``_compute_equity``) and offers it to the peak (ratchets up
+		only). Caller MUST invoke this only after a close has persisted
+		(settlement, or a confirmed-full-fill exit) — never on a partial/no-fill,
+		which would inflate the peak on a non-close and cause a premature halt.
+
+		Fail-soft: a peak-persist DB error logs and continues — the peak is a
+		monitoring value, NOT a money gate. This is DELIBERATELY OPPOSITE
+		``_emit_trip`` (a failed kill-write is fatal, C-spec L214). A stale-low
+		peak self-heals on the next successful close.
+		"""
+		try:
+			equity = self._compute_equity(ctx)
+			self._peak_tracker.on_trade_close(equity, ctx.now_utc)
+		except sqlite3.Error:
+			log.warning(
+				"record_trade_close: peak persist failed (ignored — peak is "
+				"monitoring-only, self-heals next close)", exc_info=True,
+			)
+
 	# ------------------------------------------------------------------
 	# Internal helpers
 	# ------------------------------------------------------------------

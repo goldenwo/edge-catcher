@@ -1309,3 +1309,42 @@ class TestBuildRiskModulePreRefresh:
 		)
 		# Persisted: a fresh PeakTracker over the same conn sees the seed.
 		assert PeakTracker(conn).peak_cents() == 17000
+
+
+# ===========================================================================
+# Gate.record_trade_close — closed-equity peak ratchet
+# ===========================================================================
+
+class TestRecordTradeClose:
+	def test_ratchets_peak_up_to_equity_at_close(self) -> None:
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(20_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=25_000), KillSwitch(conn), peak)
+		# No open positions → equity == cash == 25_000 > peak 20_000.
+		gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 25_000
+
+	def test_noop_when_equity_below_peak(self) -> None:
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(30_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=25_000), KillSwitch(conn), peak)
+		gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 30_000  # unchanged
+
+	def test_fail_soft_swallows_persist_error(self) -> None:
+		import unittest.mock as _m
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(20_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=99_000), KillSwitch(conn), peak)
+		with _m.patch.object(peak, "_persist", side_effect=sqlite3.Error("boom")):
+			# Must NOT raise — peak is monitoring-only, fail-soft (spec §5).
+			gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
