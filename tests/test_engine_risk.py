@@ -1272,3 +1272,40 @@ class TestBuildRiskModulePreRefresh:
 			"refresh failure leaves cache at 0 — the existing trip-on-first-"
 			"signal behaviour handles the unreachable-Kalshi case"
 		)
+
+	@pytest.mark.asyncio
+	async def test_build_risk_module_seeds_peak_from_cash(self, tmp_path: Path) -> None:
+		"""build_risk_module seeds the closed-equity peak from the pre-refreshed
+		cash, so the drawdown gate is calibrated from boot (spec §3.1). FAILS
+		pre-fix: the seed is never called, so risk_state stays empty (peak=0)."""
+		from edge_catcher.engine.risk import PeakTracker, build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=17000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)
+
+		assert gate._peak_tracker.peak_cents() == 17000, (
+			"seed must set the peak to the pre-refreshed cash"
+		)
+		# Persisted: a fresh PeakTracker over the same conn sees the seed.
+		assert PeakTracker(conn).peak_cents() == 17000
