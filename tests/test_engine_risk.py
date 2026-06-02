@@ -1348,3 +1348,50 @@ class TestRecordTradeClose:
 		with _m.patch.object(peak, "_persist", side_effect=sqlite3.Error("boom")):
 			# Must NOT raise — peak is monitoring-only, fail-soft (spec §5).
 			gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+
+
+# ===========================================================================
+# End-to-end regression anchor — drawdown gate fires after peak seed
+# ===========================================================================
+
+class TestDrawdownGateEndToEnd:
+	@pytest.mark.asyncio
+	async def test_drawdown_trips_after_seed_when_equity_falls(self, tmp_path: Path) -> None:
+		"""REGRESSION ANCHOR (spec §6): with the seed wired, an account whose
+		equity falls >5% below the boot peak trips KILL_AUTO_DRAWDOWN. FAILS
+		pre-fix: peak never seeded → peak=0 → threshold=0 → drawdown never fires."""
+		from edge_catcher.engine.risk import build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=20000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)
+		# Peak seeded to 20_000. Simulate a realized drawdown: cash falls to
+		# 18_000 (< 20_000 * 0.95 = 19_000); no open positions → equity == cash.
+		gate._bankroll._cash_cents = 18000
+
+		decision = gate.gate_entry(_make_signal(), _make_ctx(open_positions=[]))
+
+		assert isinstance(decision, Reject)
+		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
+			f"expected drawdown trip, got {decision.reason}"
+		)
