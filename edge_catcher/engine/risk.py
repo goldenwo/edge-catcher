@@ -197,9 +197,15 @@ class RiskConfig:
 		if not (0 < cfg.daily_loss_pct < 1):
 			# 0 = trips on any loss (engine never trades); 1+ = never trips.
 			raise ValueError(f"daily_loss_pct must be in (0, 1), got {cfg.daily_loss_pct}")
-		if not (0 <= cfg.drawdown_pct < 1):
-			# 0 = no drawdown gate (allowed); 1+ = liquidation cap collapses to 0.
-			raise ValueError(f"drawdown_pct must be in [0, 1), got {cfg.drawdown_pct}")
+		if not (0 < cfg.drawdown_pct < 1):
+			# 0 USED to mean "no drawdown gate" when PeakTracker was inert (peak
+			# stayed 0 → threshold 0 → never tripped). The gate is now WIRED
+			# (peak seeded + ratcheted), so dd=0 → threshold == peak → trips
+			# KILL_AUTO_DRAWDOWN on ANY non-gain (equity <= peak), silently
+			# halting trading; negative dd → threshold > peak → trips even on
+			# gains. Reject both — a genuinely disabled gate needs a separate
+			# switch, not a footgun value. 1+ = liquidation cap collapses to 0.
+			raise ValueError(f"drawdown_pct must be in (0, 1), got {cfg.drawdown_pct}")
 		if cfg.max_open < 1:
 			# 0 max_open would block every entry; surface as config error
 			# instead of letting the engine boot and silently no-op.
