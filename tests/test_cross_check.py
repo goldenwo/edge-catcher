@@ -313,6 +313,17 @@ def test_rejected_zero_fill_with_filled_buy_still_material():
 	assert f.material is True and "status" in f.fields
 
 
+def test_rejected_null_fill_row_no_buy_is_not_phantom():
+	# A rejected entry may record fill_size=NULL (not 0) depending on the recording
+	# path; it still asserts no position. Locks the _asserts_fill contract against a
+	# regression like `fill_size != 0` (which would treat NULL as a claimed fill).
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="rejected", fill_size=None, pnl_cents=None)], [], [],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []
+	assert rep.is_clean is True
+
+
 def test_dual_slippage_skipped_when_absent():
 	t = "KXTEST15M-A"
 	row = _row(t)  # no market_impact_cents key (pre-#54 db)
