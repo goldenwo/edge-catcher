@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
-from edge_catcher.live.venue import Order, Position
+from edge_catcher.live.venue import Order, Position, sanitize_client_order_id_component
 from edge_catcher.live.state import (
 	mark_lost_truth,
 	record_open,
@@ -943,8 +943,17 @@ def _orphan_coid(pos: Position) -> str:
 	on re-run; this id keeps the UNIQUE constraint satisfied and the row
 	self-describing as reconcile-sourced). NOT POSTed to Kalshi — orphan
 	rows are recovery records, never re-placed (locked PR #38 read-only-id
-	contract; this id never reaches ``KalshiOrderClient.place``)."""
-	return f"reconcile-orphan-{pos.ticker}-{pos.side}"
+	contract; this id never reaches ``KalshiOrderClient.place``).
+
+	The ticker is charset-sanitized via
+	``sanitize_client_order_id_component`` so a scalar/range market's decimal
+	strike (e.g. ``KXXRP-26JUN0223-B0.6099500``) yields a URL-safe id. The
+	placement path can't introduce such a ticker (``OrderRequest`` rejects an
+	out-of-charset id), but orphan rows are written via ``record_open``, which
+	bypasses that gate — so the id must be sanitized here. The substitution is
+	deterministic, so the exact-string idempotency match on re-run is
+	preserved."""
+	return f"{_ORPHAN_STRATEGY}-{sanitize_client_order_id_component(pos.ticker)}-{pos.side}"
 
 
 # ---------------------------------------------------------------------------
