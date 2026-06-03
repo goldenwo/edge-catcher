@@ -997,6 +997,18 @@ class TestRiskConfig:
 		with pytest.raises(ValueError, match="bankroll_failures_until_kill"):
 			_phase1_cfg(bankroll_failures_until_kill=0)
 
+	def test_from_dict_rejects_non_positive_drawdown_pct(self) -> None:
+		"""dd=0 USED to mean "no drawdown gate" when PeakTracker was inert (peak
+		always 0 → threshold 0 → never tripped). The gate is now WIRED (peak
+		seeded + ratcheted), so dd=0 → threshold == peak → KILL_AUTO_DRAWDOWN
+		trips on ANY non-gain (equity <= peak), silently halting trading.
+		Negative dd makes threshold > peak → trips even on gains. Reject both;
+		a genuinely disabled gate needs a separate switch, not a footgun value."""
+		with pytest.raises(ValueError, match="drawdown_pct"):
+			_phase1_cfg(drawdown_pct=0.0)
+		with pytest.raises(ValueError, match="drawdown_pct"):
+			_phase1_cfg(drawdown_pct=-0.01)
+
 
 # ===========================================================================
 # 11. Replay / paper path guard
@@ -1272,3 +1284,199 @@ class TestBuildRiskModulePreRefresh:
 			"refresh failure leaves cache at 0 — the existing trip-on-first-"
 			"signal behaviour handles the unreachable-Kalshi case"
 		)
+
+	@pytest.mark.asyncio
+	async def test_build_risk_module_seeds_peak_from_cash(self, tmp_path: Path) -> None:
+		"""build_risk_module seeds the closed-equity peak from the pre-refreshed
+		cash, so the drawdown gate is calibrated from boot (spec §3.1). FAILS
+		pre-fix: the seed is never called, so risk_state stays empty (peak=0)."""
+		from edge_catcher.engine.risk import PeakTracker, build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=17000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)
+
+		assert gate._peak_tracker.peak_cents() == 17000, (
+			"seed must set the peak to the pre-refreshed cash"
+		)
+		# Persisted: a fresh PeakTracker over the same conn sees the seed.
+		assert PeakTracker(conn).peak_cents() == 17000
+
+
+# ===========================================================================
+# Gate.record_trade_close — closed-equity peak ratchet
+# ===========================================================================
+
+class TestRecordTradeClose:
+	def test_ratchets_peak_up_to_equity_at_close(self) -> None:
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(20_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=25_000), KillSwitch(conn), peak)
+		# No open positions → equity == cash == 25_000 > peak 20_000.
+		gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 25_000
+
+	def test_noop_when_equity_below_peak(self) -> None:
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(30_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=25_000), KillSwitch(conn), peak)
+		gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 30_000  # unchanged
+
+	def test_fail_soft_swallows_persist_error(self) -> None:
+		import unittest.mock as _m
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(20_000, now)
+		gate = Gate(cfg, _make_bankroll(cfg, cents=99_000), KillSwitch(conn), peak)
+		with _m.patch.object(peak, "_persist", side_effect=sqlite3.Error("boom")):
+			# Must NOT raise — peak is monitoring-only, fail-soft (spec §5).
+			gate.record_trade_close(_make_ctx(now=now, open_positions=[]))
+
+
+# ===========================================================================
+# End-to-end regression anchor — drawdown gate fires after peak seed
+# ===========================================================================
+
+class TestDrawdownGateEndToEnd:
+	@pytest.mark.asyncio
+	async def test_drawdown_trips_after_seed_when_equity_falls(self, tmp_path: Path) -> None:
+		"""REGRESSION ANCHOR (spec §6): with the seed wired, an account whose
+		equity falls >5% below the boot peak trips KILL_AUTO_DRAWDOWN. FAILS
+		pre-fix: peak never seeded → peak=0 → threshold=0 → drawdown never fires."""
+		from edge_catcher.engine.risk import build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=20000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)
+		# Peak seeded to 20_000. Simulate a realized drawdown: cash falls to
+		# 18_000 (< 20_000 * 0.95 = 19_000); no open positions → equity == cash.
+		gate._bankroll._cash_cents = 18000
+
+		decision = gate.gate_entry(_make_signal(), _make_ctx(open_positions=[]))
+
+		assert isinstance(decision, Reject)
+		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
+			f"expected drawdown trip, got {decision.reason}"
+		)
+
+	@pytest.mark.asyncio
+	async def test_ratcheted_peak_then_drawdown_trips(self, tmp_path: Path) -> None:
+		"""FULL production loop (spec §3.1→§3.2→§6): seed → ratchet UP on a
+		winning close → a later drawdown from the RATCHETED peak trips
+		KILL_AUTO_DRAWDOWN. Proves record_trade_close's ratchet actually feeds
+		the gate (not just the boot seed). Without the ratchet, peak stays 20_000
+		→ threshold 19_000 → equity 28_000 would NOT trip."""
+		from edge_catcher.engine.risk import Reject, build_risk_module
+
+		db_path = tmp_path / "live_trades.db"
+		conn = sqlite3.connect(str(db_path))
+		conn.executescript("""
+			CREATE TABLE kill_switch (
+				id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT NOT NULL,
+				detail TEXT NOT NULL, tripped_at TEXT NOT NULL,
+				cleared_at TEXT, cleared_by TEXT
+			);
+			CREATE TABLE risk_state (
+				key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+			);
+		""")
+		fake_client = MagicMock()
+		fake_client.balance = AsyncMock(return_value=MagicMock(balance_cents=20000))
+		config = {"risk": {
+			"sizing_pct": 0.005, "daily_loss_pct": 0.02, "drawdown_pct": 0.05,
+			"max_open": 5, "min_fill_contracts": 3,
+			"absolute_panic_floor_cents": 3000, "absolute_max_cents": 5000,
+			"kelly_shrinkage": 0.5, "bankroll_ttl_seconds": 300.0,
+			"bankroll_failures_until_kill": 2,
+		}}
+
+		gate = await build_risk_module(config, conn, fake_client)  # peak seeded to 20_000
+
+		# A winning close lifts equity to 30_000 → peak ratchets UP to 30_000.
+		gate._bankroll._cash_cents = 30000
+		gate.record_trade_close(_make_ctx(open_positions=[]))
+		assert gate._peak_tracker.peak_cents() == 30000, "ratchet must lift the peak"
+
+		# Equity then falls to 28_000 (< int(30_000 * 0.95) = 28_500) → trips.
+		gate._bankroll._cash_cents = 28000
+		decision = gate.gate_entry(_make_signal(), _make_ctx(open_positions=[]))
+
+		assert isinstance(decision, Reject)
+		assert decision.reason == "KILL_AUTO_DRAWDOWN", (
+			f"ratcheted-peak drawdown must trip, got {decision.reason}"
+		)
+
+	def test_gate_entry_reseeds_zero_peak_then_drawdown_is_live(self) -> None:
+		"""Failed-boot-seed recovery (review Finding 1): a boot bankroll-refresh
+		failure can persist peak=0; once a later refresh recovers cash, gate_entry
+		must lazily re-seed the peak from cash so the drawdown gate is LIVE from
+		the first entry — NOT silently disabled until the first confirmed close.
+		FAILS pre-fix: gate_entry never re-seeds → peak stays 0 → threshold 0 →
+		KILL_AUTO_DRAWDOWN never trips for a funded account."""
+		conn = _make_conn()
+		cfg = _phase1_cfg()
+		peak = PeakTracker(conn)
+		now = datetime.now(timezone.utc)
+		peak.initialize_if_unset(0, now)  # failed-boot seed persisted peak=0
+		assert peak.peak_cents() == 0
+		gate = Gate(cfg, _make_bankroll(cfg, cents=17000), KillSwitch(conn), peak)
+
+		# First entry after cash recovered: re-seeds peak from cash, allows entry.
+		d1 = gate.gate_entry(_make_signal(), _make_ctx(now=now, open_positions=[]))
+		assert peak.peak_cents() == 17000, "zero peak must be re-seeded from cash"
+		assert isinstance(d1, Allow)
+
+		# A real drawdown >5% below the re-seeded peak now trips (gate is live).
+		gate._bankroll._cash_cents = 16000  # < int(17000 * 0.95) = 16150
+		d2 = gate.gate_entry(_make_signal(), _make_ctx(now=now, open_positions=[]))
+		assert isinstance(d2, Reject)
+		assert d2.reason == "KILL_AUTO_DRAWDOWN"
