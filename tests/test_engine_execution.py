@@ -613,7 +613,7 @@ def test_make_client_order_id_format_matches_kalshi_regex() -> None:
 	"""Failure mode: a stray space or punctuation slips into the format,
 	and Kalshi's POST /orders 4xx-rejects on client_order_id validation.
 	Asserts the value matches the {1,80}-char URL-safe regex pinned in
-	live/client.py:_CLIENT_ORDER_ID_PATTERN."""
+	live/venue.py:_CLIENT_ORDER_ID_PATTERN."""
 	sig = _entry_signal()
 	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
 	# Mirrors live.venue._CLIENT_ORDER_ID_PATTERN. fullmatch, not match — re's
