@@ -494,9 +494,8 @@ async def _handle_signal(
 ) -> None:
 	"""Dispatch a single signal — enter or exit.
 
-	`_handle_enter` is async (awaits the executor's network call); `_handle_exit`
-	stays sync (no I/O — pure store mutation + log). Calling a sync function
-	from this async dispatcher is intentional and idiomatic.
+	`_handle_enter` and `_handle_exit` are both async — each awaits the
+	executor's `place()` network call (the §1 executor seam).
 
 	Gate consultation (Sub-project C, wired by C3):
 	  Entry signals are gated BEFORE building/placing the order. `risk` is the
@@ -581,10 +580,19 @@ async def _handle_signal(
 			assert rctx is not None  # invariant: set above whenever risk is not None
 			if _consult_exit_gate(risk, signal, rctx):
 				return  # operator-kill full-stop (spec §6): exit blocked
-		await _handle_exit(
+		closed = await _handle_exit(
 			signal, ctx, store, bullet, now=now,
 			executor=executor, config=config,
 		)
+		# Ratchet the closed-equity peak ONLY on a CONFIRMED persisted close
+		# (spec §3.3b). Build a FRESH post-close context so open_positions
+		# excludes the just-closed trade (no over-count). LIVE only (risk is
+		# None in paper/replay → no-op, byte-exact G-parity). _handle_exit
+		# returns False on partial/no-fill/timeout (row left open) — no
+		# ratchet on a non-close (the B2 guard).
+		if closed and risk is not None:
+			assert risk_ctx_provider is not None
+			risk.record_trade_close(risk_ctx_provider.build(None, now))
 	else:
 		log.warning("Unknown signal action '%s' from %s", signal.action, signal.strategy)
 
@@ -1054,7 +1062,7 @@ async def _handle_exit(
 	now: datetime,
 	executor: Executor,
 	config: dict,
-) -> None:
+) -> bool:
 	"""Process an exit signal: place the exit via the executor, then close.
 
 	SC-D3 (spec §10 / §3 `:534/:537` / §1 keystone — E3's deliverable, the
@@ -1093,7 +1101,7 @@ async def _handle_exit(
 			"Exit signal from %s for %s has no trade_id — skipping",
 			signal.strategy, signal.ticker,
 		)
-		return
+		return False
 
 	# Selling hits the bid, not the ask
 	exit_price = ctx.yes_bid if signal.side == "yes" else ctx.no_bid
@@ -1219,7 +1227,7 @@ async def _handle_exit(
 				signal.strategy, signal.ticker, signal.trade_id,
 				exit_result.status if exit_result is not None else "timeout/none",
 			)
-		return
+		return False
 
 	# Mode-agnostic FULL close (§1). PAPER: authoritative close (byte-EXACT —
 	# paper TradeStore.exit_trade does won/lost/scratch + pnl + fee
@@ -1233,7 +1241,7 @@ async def _handle_exit(
 	exited = store.get_trade_by_id(signal.trade_id)
 	if exited is None:
 		log.warning("EXIT: trade id=%d not found post-exit_trade", signal.trade_id)
-		return
+		return True  # store.exit_trade above already persisted the close; only readback failed
 	pnl = exited.get("pnl_cents") or 0
 	outcome, _ = _pnl_label(pnl)
 	blended = exited.get("blended_entry") or 0
@@ -1265,6 +1273,10 @@ async def _handle_exit(
 	)
 	log.info(log_line)
 	notify(notify_line)
+	# Reached only via the confirmed_full_fill path (store.exit_trade above
+	# persisted the close). Signal a confirmed close so _handle_signal ratchets
+	# the drawdown peak (spec §3.3b).
+	return True
 
 
 # ---------------------------------------------------------------------------
