@@ -39,6 +39,39 @@ TimeInForce = Literal["gtc", "ioc", "fok"]
 # producer above.
 _CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}\Z")
 
+# Inverse of the charset above: matches any single character NOT permitted in a
+# client_order_id. A producer that assembles an id from venue-supplied text runs
+# each dynamic component through ``sanitize_client_order_id_component`` so the
+# result satisfies ``_CLIENT_ORDER_ID_PATTERN`` — a Kalshi scalar/range ticker
+# carries a decimal strike (e.g. ``KXXRP-26JUN0223-B0.6099500``) whose ``.`` is
+# otherwise illegal. The placement path never needs it (``OrderRequest`` rejects
+# an out-of-charset id outright, so a dotted ticker can't be ordered); the
+# reconciler's orphan-recovery id does, because orphan rows are written straight
+# to ``live_trades`` via ``record_open``, bypassing that gate. venue.py is the
+# natural shared home as the leaf that already owns this charset contract.
+#
+# Collision note: the substitution is many-to-one (every illegal char → ``-``),
+# so id-uniqueness relies on the venue never minting two ids that differ ONLY in
+# an illegal char where the other has a literal ``-``. Holds for Kalshi — distinct
+# strikes differ in the numeric value (``B0.60``→``B0-60`` vs ``B0.61``→``B0-61``),
+# never ``.``-vs-``-`` — but a venue that breaks that needs a 1:1 scheme (e.g.
+# percent-encoding) here instead.
+_CLIENT_ORDER_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def sanitize_client_order_id_component(component: str) -> str:
+	"""Make ``component`` safe to embed in a ``client_order_id`` by replacing
+	every character outside the ``[A-Za-z0-9_-]`` charset with ``-``.
+
+	The replacement char is itself in the charset, so the result always
+	satisfies :data:`_CLIENT_ORDER_ID_PATTERN`'s charset (total length stays
+	the assembling caller's concern). Deterministic and idempotent on clean
+	input: a component with no disallowed characters is returned unchanged, so
+	a caller that compares the result against a previously stored id — e.g. the
+	reconciler's orphan-idempotency no-op — stays stable across runs.
+	"""
+	return _CLIENT_ORDER_ID_DISALLOWED.sub("-", component)
+
 
 @dataclass
 class OrderRequest:

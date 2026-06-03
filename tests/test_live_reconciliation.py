@@ -23,7 +23,7 @@ import pytest
 
 from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
 from edge_catcher.live import reconciliation as recon
-from edge_catcher.live.venue import Order, Position
+from edge_catcher.live.venue import _CLIENT_ORDER_ID_PATTERN, Order, Position
 from edge_catcher.live.reconciliation import (
 	_RECONCILE_LOOKBACK_SECONDS,
 	StartupReconcileReport,
@@ -301,6 +301,146 @@ async def test_15_startup_kalshi_position_no_local_row_inserts_open(
 	assert any(
 		"orphan" in r.message.lower() for r in caplog.records
 	), "expected an orphan-recovery alert log"
+
+
+# ---------------------------------------------------------------------------
+# #15b — orphan recovery for a decimal-strike (scalar/range) market: the
+# synthetic client_order_id must be charset-sanitized, like a placed id
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_coid_sanitizes_decimal_strike_ticker() -> None:
+	"""Kalshi scalar/range tickers carry a decimal strike (e.g.
+	``KXXRP-26JUN0223-B0.6099500``); the ``.`` is outside the client_order_id
+	charset. ``_orphan_coid`` must replace it so the synthetic id is URL-safe,
+	while staying deterministic, since it is compared exact-string against
+	itself for the orphan-idempotency no-op. (The placement path rejects such
+	tickers outright; orphan recovery is the only path that can introduce one,
+	since ``record_open`` bypasses the ``OrderRequest`` charset gate.)"""
+	pos = Position(
+		ticker="KXXRP-26JUN0223-B0.6099500",
+		side="yes",
+		count=3,
+		average_price_cents=44,
+		raw={},
+	)
+	coid = recon._orphan_coid(pos)
+	assert "." not in coid, coid
+	# Satisfies the venue's actual client_order_id contract (charset + length).
+	assert _CLIENT_ORDER_ID_PATTERN.match(coid), coid
+	# Deterministic: same position → identical id every pass (idempotency).
+	assert coid == recon._orphan_coid(pos)
+	# Pin the exact form so the sanitization + prefix/side layout cannot drift.
+	assert coid == "reconcile-orphan-KXXRP-26JUN0223-B0-6099500-yes"
+
+
+def test_orphan_coid_distinct_strikes_do_not_collide() -> None:
+	"""Sanitization is many-to-one (every illegal char → ``-``), so guard the
+	property the ``client_order_id`` UNIQUE constraint + idempotency SELECT rely
+	on: two positions on adjacent decimal strikes must yield DISTINCT synthetic
+	ids. Distinct Kalshi strikes differ in the numeric value (``B0.60`` vs
+	``B0.61``), so they stay distinct after ``.``→``-`` — they never alias onto
+	one coid (which would make recovering one orphan a false no-op against the
+	other, or trip the UNIQUE constraint → false engine halt)."""
+	lo = Position(ticker="KXXRP-26JUN0223-B0.60", side="yes", count=1,
+		average_price_cents=30, raw={})
+	hi = Position(ticker="KXXRP-26JUN0223-B0.61", side="yes", count=1,
+		average_price_cents=30, raw={})
+	assert recon._orphan_coid(lo) != recon._orphan_coid(hi)
+	# Honesty check: the safety above rests on Kalshi's GRAMMAR, not on the
+	# sanitizer being injective — it is many-to-one, so a (hypothetical) ticker
+	# whose strike already used a dash where another uses the decimal point WOULD
+	# alias onto one coid. Pin that boundary so the venue.py collision note stays
+	# truthful: if a future venue ever minted such a sibling, THIS is the case
+	# that collides (and would need a 1:1 scheme instead).
+	dotted = Position(ticker="KXXRP-26JUN0223-B0.60", side="yes", count=1,
+		average_price_cents=30, raw={})
+	dashed = Position(ticker="KXXRP-26JUN0223-B0-60", side="yes", count=1,
+		average_price_cents=30, raw={})
+	assert recon._orphan_coid(dotted) == recon._orphan_coid(dashed)
+
+
+@pytest.mark.asyncio
+async def test_orphan_decimal_strike_recovery_reuses_sanitized_coid_no_halt(
+	conn: sqlite3.Connection,
+) -> None:
+	"""The decimal-strike analogue of the orphan false-halt guard, exercising the
+	exact-string coid SELECT specifically. Recover a dotted-ticker orphan, then
+	CLOSE the row (status leaves 'open') while Kalshi still reports the position —
+	so pass 2 skips the ``local_open_tickers`` ticker short-circuit and reaches the
+	``client_order_id``-exists guard. That SELECT must re-match the SAME sanitized
+	coid `_orphan_coid` recomputes, making pass 2 a pure no-op (no duplicate, no
+	UNIQUE-violation halt). This is the only test that proves a *sanitized*
+	(``.``→``-``) id survives the store→recompute→SELECT round-trip deterministically."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	client = FakeClient(positions=[Position(
+		ticker=ticker, side="yes", count=3, average_price_cents=44, raw={})])
+
+	# Pass 1: recover the orphan (stores the sanitized coid).
+	r1 = await startup_reconcile(client, conn, FakeBankrollCache())
+	assert r1.orphan_positions_recovered == 1
+	orphan = conn.execute(
+		"SELECT id FROM live_trades WHERE ticker = ?", (ticker,)
+	).fetchone()
+	assert orphan is not None
+	orphan_id = int(orphan[0])
+
+	# Operator closes the recovered orphan — its ticker drops out of the 'open'
+	# set, so pass 2 cannot short-circuit on ticker and must consult the
+	# synthetic-coid existence guard instead.
+	conn.execute(
+		"UPDATE live_trades SET status='won', exit_price_cents=100, "
+		"pnl_cents=280, exit_time=? WHERE id=?",
+		(_NOW.isoformat(), orphan_id),
+	)
+	conn.commit()
+
+	# Pass 2: Kalshi STILL reports the dotted position. The coid SELECT must
+	# re-match the sanitized id → no-op, no re-INSERT, no halt.
+	r2 = await startup_reconcile(client, conn, FakeBankrollCache())
+	assert r2.orphan_positions_recovered == 0
+	rows = conn.execute(
+		"SELECT id, status FROM live_trades WHERE ticker = ?", (ticker,)
+	).fetchall()
+	assert len(rows) == 1
+	assert rows[0][1] == "won"  # still closed, NOT re-opened
+
+
+@pytest.mark.asyncio
+async def test_15b_startup_orphan_decimal_strike_stores_urlsafe_coid(
+	conn: sqlite3.Connection,
+) -> None:
+	"""End-to-end: recovering an orphan for a decimal-strike market stores a
+	URL-safe ``client_order_id`` *and* ``kalshi_order_id``. The orphan row is
+	written via ``record_open`` — which bypasses venue's ``OrderRequest``
+	charset gate — so the sanitization must live in ``_orphan_coid``, not be
+	assumed from the wire layer. The ``ticker`` column still holds the real
+	(dotted) Kalshi ticker; only the id is sanitized."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	client = FakeClient(
+		positions=[
+			Position(
+				ticker=ticker,
+				side="yes",
+				count=3,
+				average_price_cents=44,
+				raw={},
+			)
+		]
+	)
+	report = await startup_reconcile(client, conn, FakeBankrollCache())
+	assert report.orphan_positions_recovered == 1
+	rows = conn.execute(
+		"SELECT id FROM live_trades WHERE ticker = ?", (ticker,)
+	).fetchall()
+	assert len(rows) == 1
+	row = _row(conn, int(rows[0][0]))
+	coid = row["client_order_id"]
+	assert isinstance(coid, str)
+	assert "." not in coid, coid
+	assert _CLIENT_ORDER_ID_PATTERN.match(coid), coid
+	# Orphan rows mirror the synthetic id into kalshi_order_id — same gate.
+	assert row["kalshi_order_id"] == coid
 
 
 # ---------------------------------------------------------------------------
