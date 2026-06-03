@@ -22,6 +22,17 @@ order-placing live trading.**
 > originally delivered**; standing up real-money trading remains an explicit,
 > separate operator decision.
 
+> **Update — 2026-06-03.** Since the above: the live daemon **has been run** (the
+> 2026-05-25 cutover test placed real sized orders), so the E-era notes in the
+> body below — "sizing not yet wired", "order placement not verified",
+> "`size_contracts=0` placeholder" — are **historical**: real sized orders DO
+> transmit now (sizing wired in PR #41). And the **5%-drawdown-from-peak kill is
+> now wired + live** (PR #65 → `main@001028d`): the closed-equity peak is seeded
+> at boot, lazily re-seeded if the boot bankroll refresh failed, and ratcheted on
+> every confirmed close — previously it was **inert** (peak stayed 0, threshold 0,
+> never tripped). Read the body's "deferred sizing" framing as a record of E's
+> original scope, not the current shipped state.
+
 What is functional at the end of E:
 
 - The live daemon boots, connects to the Kalshi WebSocket feed, and runs the
