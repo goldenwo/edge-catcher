@@ -31,7 +31,13 @@ TimeInForce = Literal["gtc", "ioc", "fok"]
 # ``edge_catcher/engine/execution.py:_make_client_order_id`` which charset- and
 # length-validates against this same regex before assembly, so a 4xx from a
 # venue would indicate a strategy/ticker that bypassed the builder.
-_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+#
+# Anchored with ``\Z`` (not ``$``): in Python ``$`` also matches just before a
+# trailing newline, so ``$`` would accept an id ending in "\n". ``\Z`` matches
+# only the true end of string, keeping this defense-in-depth gate airtight for
+# any caller that hand-builds a client_order_id without going through the
+# producer above.
+_CLIENT_ORDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}\Z")
 
 
 @dataclass
