@@ -616,8 +616,9 @@ def test_make_client_order_id_format_matches_kalshi_regex() -> None:
 	live/client.py:_CLIENT_ORDER_ID_PATTERN."""
 	sig = _entry_signal()
 	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
-	# Mirrors live.client._CLIENT_ORDER_ID_PATTERN.
-	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+	# Mirrors live.venue._CLIENT_ORDER_ID_PATTERN. fullmatch, not match — re's
+	# `$` also matches before a trailing "\n", so .match would miss that case.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
 		f"client_order_id {oid!r} fails Kalshi-side regex"
 	)
 
@@ -744,7 +745,8 @@ def test_make_client_order_id_sanitizes_decimal_strike_ticker() -> None:
 	ticker = "KXXRP-26JUN0223-B0.6099500"
 	oid = _make_client_order_id("debut_fade", ticker, _NOW)
 	# The binding invariant: Kalshi-side / venue-side URL-safe charset + length.
-	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+	# fullmatch, not match — re's `$` also matches before a trailing "\n".
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
 		f"sanitized client_order_id {oid!r} still fails the URL-safe charset"
 	)
 	# The decimal point became '-': the strike stays legible for audit grep,
@@ -764,6 +766,7 @@ def test_make_client_order_id_sanitizes_decimal_strike_ticker() -> None:
 		("KX.SOL15M", "KX-SOL15M"),        # dot
 		("KX SOL15M", "KX-SOL15M"),        # space
 		("KX/SOL15M", "KX-SOL15M"),        # slash
+		("KX..SOL15M", "KX--SOL15M"),      # consecutive disallowed -> NOT collapsed (1:1)
 		# Real Kalshi scalar/range market id with a decimal strike.
 		("KXXRP-26JUN0223-B0.6099500", "KXXRP-26JUN0223-B0-6099500"),
 	],
@@ -780,7 +783,9 @@ def test_make_client_order_id_sanitizes_disallowed_chars_in_ticker(
 	binding charset — rejecting instead would silently drop every order on such
 	a market via dispatch's catch-all."""
 	oid = _make_client_order_id("debut_fade", raw_ticker, _NOW)
-	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+	# fullmatch (not match): re's `$` also matches before a trailing newline, so
+	# `.match(...$)` would pass an id ending in "\n"; fullmatch pins the whole id.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
 		f"sanitized client_order_id {oid!r} fails the URL-safe charset"
 	)
 	assert oid.startswith(f"debut_fade-{expected_stem}-")
@@ -793,6 +798,43 @@ def test_make_client_order_id_rejects_empty_ticker() -> None:
 	ticker-less id."""
 	with pytest.raises(ValueError, match=r"ticker must be non-empty"):
 		_make_client_order_id("debut_fade", "", _NOW)
+
+
+# --------------------------------------------------------------------------
+# Builder-level integration — decimal-strike ticker through the PUBLIC builders.
+# The live incident fired through dispatch -> build_entry_order ->
+# _make_client_order_id, NOT a direct helper call. These pin the real path:
+# a ticker charset check re-introduced at the builder / engine OrderRequest
+# level would regress live placement while the helper-level tests stay green.
+# --------------------------------------------------------------------------
+
+
+def test_build_entry_order_decimal_ticker_keeps_raw_body_valid_id() -> None:
+	"""Failure mode (the real live incident path): an enter signal on a Kalshi
+	decimal-strike market crashed in ``build_entry_order``. The order body MUST
+	carry the RAW ticker (it is the market id Kalshi resolves) while the
+	``client_order_id`` is sanitized to the URL-safe charset."""
+	sig = _entry_signal(ticker="KXXRP-26JUN0223-B0.6099500", series="KXXRP")
+	req = build_entry_order(sig, allowed_size=3, cfg=_exec_cfg(), now=_NOW)
+	# Order body keeps the raw decimal ticker — it identifies the Kalshi market.
+	assert req.ticker == "KXXRP-26JUN0223-B0.6099500"
+	# Idempotency key is sanitized and passes the binding URL-safe invariant.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", req.client_order_id)
+	assert req.client_order_id.startswith("debut_fade-KXXRP-26JUN0223-B0-6099500-")
+
+
+def test_build_exit_order_decimal_ticker_keeps_raw_body_valid_id() -> None:
+	"""Exit-path mirror: ``build_exit_order`` builds the id from ``pos.ticker``
+	— a distinct code path from entry. A decimal-strike position must produce a
+	valid, URL-safe ``client_order_id`` while the order body keeps the raw
+	ticker."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	pos = OpenPosition(ticker=ticker, side="yes", fill_size=5, blended_entry_cents=42)
+	sig = _exit_signal(ticker=ticker, target_price_cents=50, exit_kind="take_profit")
+	req = build_exit_order(pos, sig, _exec_cfg(tp=2), _NOW)
+	assert req.ticker == ticker
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", req.client_order_id)
+	assert req.client_order_id.startswith("debut_fade-KXXRP-26JUN0223-B0-6099500-")
 
 
 def test_make_client_order_id_rejects_oversized_assembled_id() -> None:
