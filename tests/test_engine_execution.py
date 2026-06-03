@@ -613,11 +613,12 @@ def test_make_client_order_id_format_matches_kalshi_regex() -> None:
 	"""Failure mode: a stray space or punctuation slips into the format,
 	and Kalshi's POST /orders 4xx-rejects on client_order_id validation.
 	Asserts the value matches the {1,80}-char URL-safe regex pinned in
-	live/client.py:_CLIENT_ORDER_ID_PATTERN."""
+	live/venue.py:_CLIENT_ORDER_ID_PATTERN."""
 	sig = _entry_signal()
 	oid = _make_client_order_id(sig.strategy, sig.ticker, _NOW)
-	# Mirrors live.client._CLIENT_ORDER_ID_PATTERN.
-	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+	# Mirrors live.venue._CLIENT_ORDER_ID_PATTERN. fullmatch, not match — re's
+	# `$` also matches before a trailing "\n", so .match would miss that case.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
 		f"client_order_id {oid!r} fails Kalshi-side regex"
 	)
 
@@ -725,22 +726,115 @@ def test_make_client_order_id_rejects_strategy_with_invalid_charset(bad_strategy
 		_make_client_order_id(bad_strategy, "KXTEST15M-26MAY09H06", _NOW)
 
 
+def test_make_client_order_id_sanitizes_decimal_strike_ticker() -> None:
+	"""Failure mode (live paper-trader crash 2026-06-02; CR-5 smoke 2026-05-24):
+	Kalshi scalar/range markets encode the decimal strike directly in the
+	ticker, e.g. ``KXXRP-26JUN0223-B0.6099500``. The ``.`` is outside the
+	self-imposed URL-safe client_order_id charset, so the builder USED to
+	raise ``ValueError`` — and dispatch's catch-all then silently dropped
+	every enter signal on such a market (131+ swallowed errors in the log).
+
+	The ticker is NOT a charset error to reject: it reaches Kalshi raw in the
+	order body (it IS the market id; ``client._build_place_body`` never
+	charset-checks it). Only the client_order_id must be URL-safe, so the
+	ticker is sanitized for the id (disallowed chars -> ``-``) rather than
+	rejecting the whole order.
+
+	Asserts a VALID, UNIQUE id is produced that still matches the binding
+	``live.venue._CLIENT_ORDER_ID_PATTERN`` invariant."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	oid = _make_client_order_id("strat_34", ticker, _NOW)
+	# The binding invariant: Kalshi-side / venue-side URL-safe charset + length.
+	# fullmatch, not match — re's `$` also matches before a trailing "\n".
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
+		f"sanitized client_order_id {oid!r} still fails the URL-safe charset"
+	)
+	# The decimal point became '-': the strike stays legible for audit grep,
+	# and the prefix still embeds strategy + ticker for log correlation.
+	assert oid.startswith("strat_34-KXXRP-26JUN0223-B0-6099500-")
+	assert "." not in oid
+	# Collision-safety is preserved for decimal tickers too (uuid4 suffix).
+	other = _make_client_order_id("strat_34", ticker, _NOW)
+	assert oid != other, (
+		"decimal-strike tickers must still get a unique id per call (uuid suffix)"
+	)
+
+
 @pytest.mark.parametrize(
-	"bad_ticker",
+	"raw_ticker,expected_stem",
 	[
-		"KX.SOL15M",       # dot
-		"KX SOL15M",       # space
-		"KX/SOL15M",       # slash
-		"",                # empty
+		("KX.SOL15M", "KX-SOL15M"),        # dot
+		("KX SOL15M", "KX-SOL15M"),        # space
+		("KX/SOL15M", "KX-SOL15M"),        # slash
+		("KX..SOL15M", "KX--SOL15M"),      # consecutive disallowed -> NOT collapsed (1:1)
+		# Real Kalshi scalar/range market id with a decimal strike.
+		("KXXRP-26JUN0223-B0.6099500", "KXXRP-26JUN0223-B0-6099500"),
 	],
 )
-def test_make_client_order_id_rejects_ticker_with_invalid_charset(bad_ticker: str) -> None:
-	"""Mirror of the strategy charset test for the ticker side. A future
-	venue's ticker scheme using punctuation (e.g. Polymarket's ``0x…``
-	addresses if ever exposed) would silently 4xx; loud builder-side
-	failure beats opaque post-place reject."""
-	with pytest.raises(ValueError, match=r"ticker must match"):
-		_make_client_order_id("strat_34", bad_ticker, _NOW)
+def test_make_client_order_id_sanitizes_disallowed_chars_in_ticker(
+	raw_ticker: str, expected_stem: str
+) -> None:
+	"""New contract (previously: reject). The ticker is VENUE-supplied — a
+	future venue's punctuation-bearing scheme (e.g. Polymarket ``0x…``
+	addresses) or Kalshi's own decimal-strike markets must NOT be rejected: the
+	raw ticker is the market id and reaches the venue in the order body
+	untouched, so only the URL-safe client_order_id needs the disallowed chars
+	replaced. Asserts each disallowed char becomes ``-`` and the id matches the
+	binding charset — rejecting instead would silently drop every order on such
+	a market via dispatch's catch-all."""
+	oid = _make_client_order_id("strat_34", raw_ticker, _NOW)
+	# fullmatch (not match): re's `$` also matches before a trailing newline, so
+	# `.match(...$)` would pass an id ending in "\n"; fullmatch pins the whole id.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", oid), (
+		f"sanitized client_order_id {oid!r} fails the URL-safe charset"
+	)
+	assert oid.startswith(f"strat_34-{expected_stem}-")
+
+
+def test_make_client_order_id_rejects_empty_ticker() -> None:
+	"""An empty ticker is not a charset issue to sanitize — it means there is
+	no market to target (the order body's ticker would be empty too and Kalshi
+	would reject). Preserve the loud builder-side failure rather than emit a
+	ticker-less id."""
+	with pytest.raises(ValueError, match=r"ticker must be non-empty"):
+		_make_client_order_id("strat_34", "", _NOW)
+
+
+# --------------------------------------------------------------------------
+# Builder-level integration — decimal-strike ticker through the PUBLIC builders.
+# The live incident fired through dispatch -> build_entry_order ->
+# _make_client_order_id, NOT a direct helper call. These pin the real path:
+# a ticker charset check re-introduced at the builder / engine OrderRequest
+# level would regress live placement while the helper-level tests stay green.
+# --------------------------------------------------------------------------
+
+
+def test_build_entry_order_decimal_ticker_keeps_raw_body_valid_id() -> None:
+	"""Failure mode (the real live incident path): an enter signal on a Kalshi
+	decimal-strike market crashed in ``build_entry_order``. The order body MUST
+	carry the RAW ticker (it is the market id Kalshi resolves) while the
+	``client_order_id`` is sanitized to the URL-safe charset."""
+	sig = _entry_signal(ticker="KXXRP-26JUN0223-B0.6099500", series="KXXRP")
+	req = build_entry_order(sig, allowed_size=3, cfg=_exec_cfg(), now=_NOW)
+	# Order body keeps the raw decimal ticker — it identifies the Kalshi market.
+	assert req.ticker == "KXXRP-26JUN0223-B0.6099500"
+	# Idempotency key is sanitized and passes the binding URL-safe invariant.
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", req.client_order_id)
+	assert req.client_order_id.startswith("strat_34-KXXRP-26JUN0223-B0-6099500-")
+
+
+def test_build_exit_order_decimal_ticker_keeps_raw_body_valid_id() -> None:
+	"""Exit-path mirror: ``build_exit_order`` builds the id from ``pos.ticker``
+	— a distinct code path from entry. A decimal-strike position must produce a
+	valid, URL-safe ``client_order_id`` while the order body keeps the raw
+	ticker."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	pos = OpenPosition(ticker=ticker, side="yes", fill_size=5, blended_entry_cents=42)
+	sig = _exit_signal(ticker=ticker, target_price_cents=50, exit_kind="take_profit")
+	req = build_exit_order(pos, sig, _exec_cfg(tp=2), _NOW)
+	assert req.ticker == ticker
+	assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", req.client_order_id)
+	assert req.client_order_id.startswith("strat_34-KXXRP-26JUN0223-B0-6099500-")
 
 
 def test_make_client_order_id_rejects_oversized_assembled_id() -> None:
