@@ -725,22 +725,74 @@ def test_make_client_order_id_rejects_strategy_with_invalid_charset(bad_strategy
 		_make_client_order_id(bad_strategy, "KXTEST15M-26MAY09H06", _NOW)
 
 
+def test_make_client_order_id_sanitizes_decimal_strike_ticker() -> None:
+	"""Failure mode (live paper-trader crash 2026-06-02; CR-5 smoke 2026-05-24):
+	Kalshi scalar/range markets encode the decimal strike directly in the
+	ticker, e.g. ``KXXRP-26JUN0223-B0.6099500``. The ``.`` is outside the
+	self-imposed URL-safe client_order_id charset, so the builder USED to
+	raise ``ValueError`` — and dispatch's catch-all then silently dropped
+	every enter signal on such a market (131+ swallowed errors in the log).
+
+	The ticker is NOT a charset error to reject: it reaches Kalshi raw in the
+	order body (it IS the market id; ``client._build_place_body`` never
+	charset-checks it). Only the client_order_id must be URL-safe, so the
+	ticker is sanitized for the id (disallowed chars -> ``-``) rather than
+	rejecting the whole order.
+
+	Asserts a VALID, UNIQUE id is produced that still matches the binding
+	``live.venue._CLIENT_ORDER_ID_PATTERN`` invariant."""
+	ticker = "KXXRP-26JUN0223-B0.6099500"
+	oid = _make_client_order_id("debut_fade", ticker, _NOW)
+	# The binding invariant: Kalshi-side / venue-side URL-safe charset + length.
+	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+		f"sanitized client_order_id {oid!r} still fails the URL-safe charset"
+	)
+	# The decimal point became '-': the strike stays legible for audit grep,
+	# and the prefix still embeds strategy + ticker for log correlation.
+	assert oid.startswith("debut_fade-KXXRP-26JUN0223-B0-6099500-")
+	assert "." not in oid
+	# Collision-safety is preserved for decimal tickers too (uuid4 suffix).
+	other = _make_client_order_id("debut_fade", ticker, _NOW)
+	assert oid != other, (
+		"decimal-strike tickers must still get a unique id per call (uuid suffix)"
+	)
+
+
 @pytest.mark.parametrize(
-	"bad_ticker",
+	"raw_ticker,expected_stem",
 	[
-		"KX.SOL15M",       # dot
-		"KX SOL15M",       # space
-		"KX/SOL15M",       # slash
-		"",                # empty
+		("KX.SOL15M", "KX-SOL15M"),        # dot
+		("KX SOL15M", "KX-SOL15M"),        # space
+		("KX/SOL15M", "KX-SOL15M"),        # slash
+		# Real Kalshi scalar/range market id with a decimal strike.
+		("KXXRP-26JUN0223-B0.6099500", "KXXRP-26JUN0223-B0-6099500"),
 	],
 )
-def test_make_client_order_id_rejects_ticker_with_invalid_charset(bad_ticker: str) -> None:
-	"""Mirror of the strategy charset test for the ticker side. A future
-	venue's ticker scheme using punctuation (e.g. Polymarket's ``0x…``
-	addresses if ever exposed) would silently 4xx; loud builder-side
-	failure beats opaque post-place reject."""
-	with pytest.raises(ValueError, match=r"ticker must match"):
-		_make_client_order_id("debut_fade", bad_ticker, _NOW)
+def test_make_client_order_id_sanitizes_disallowed_chars_in_ticker(
+	raw_ticker: str, expected_stem: str
+) -> None:
+	"""New contract (previously: reject). The ticker is VENUE-supplied — a
+	future venue's punctuation-bearing scheme (e.g. Polymarket ``0x…``
+	addresses) or Kalshi's own decimal-strike markets must NOT be rejected: the
+	raw ticker is the market id and reaches the venue in the order body
+	untouched, so only the URL-safe client_order_id needs the disallowed chars
+	replaced. Asserts each disallowed char becomes ``-`` and the id matches the
+	binding charset — rejecting instead would silently drop every order on such
+	a market via dispatch's catch-all."""
+	oid = _make_client_order_id("debut_fade", raw_ticker, _NOW)
+	assert re.match(r"^[A-Za-z0-9_-]{1,80}$", oid), (
+		f"sanitized client_order_id {oid!r} fails the URL-safe charset"
+	)
+	assert oid.startswith(f"debut_fade-{expected_stem}-")
+
+
+def test_make_client_order_id_rejects_empty_ticker() -> None:
+	"""An empty ticker is not a charset issue to sanitize — it means there is
+	no market to target (the order body's ticker would be empty too and Kalshi
+	would reject). Preserve the loud builder-side failure rather than emit a
+	ticker-less id."""
+	with pytest.raises(ValueError, match=r"ticker must be non-empty"):
+		_make_client_order_id("debut_fade", "", _NOW)
 
 
 def test_make_client_order_id_rejects_oversized_assembled_id() -> None:

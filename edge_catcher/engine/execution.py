@@ -82,13 +82,22 @@ def _series_of(ticker: str) -> str:
 	return ticker.split("-", 1)[0]
 
 
-# Charset + length contract for Kalshi's client_order_id field. Mirrors the
-# regex enforced by ``KalshiOrderClient.OrderRequest.__post_init__`` so a
-# strategy/ticker that would 4xx-reject on the wire fails loudly here at
-# signal-generation time instead — and we get a useful error string rather
-# than ``unexpected_exception:ValueError`` from the catch-all in
-# ``LiveExecutor.place``.
+# Charset + length contract for the client_order_id field. This is a
+# SELF-IMPOSED URL-safe invariant (mirrored by
+# ``live.venue._CLIENT_ORDER_ID_PATTERN``), NOT a Kalshi requirement — Kalshi's
+# create-order API documents no charset/length constraint on client_order_id
+# (its canonical value is a uuid4, and the client's own fallback is
+# ``str(uuid.uuid4())``). We keep ids URL-safe so they survive JSON encoding,
+# log rendering, and the audit trail unambiguously.
+#
+# ``_CLIENT_ORDER_ID_CHARSET`` validates the in-repo ``strategy`` component (a
+# disallowed char there is OUR bug -> reject loudly). The VENUE-supplied
+# ``ticker`` is instead sanitized via ``_CLIENT_ORDER_ID_DISALLOWED`` (Kalshi
+# scalar/range markets legitimately encode a decimal strike, e.g.
+# ``B0.6099500``) so the order stays placeable instead of dying in dispatch's
+# catch-all.
 _CLIENT_ORDER_ID_CHARSET = re.compile(r"[A-Za-z0-9_-]+")
+_CLIENT_ORDER_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")
 _CLIENT_ORDER_ID_MAX_LEN = 80
 
 
@@ -118,24 +127,37 @@ def _make_client_order_id(strategy: str, ticker: str, now: datetime) -> str:
 	IDs must mock ``uuid.uuid4`` — production code MUST NOT rely on determinism.
 
 	Raises:
-		ValueError: when ``strategy`` or ``ticker`` contains a character
-			outside ``[A-Za-z0-9_-]``, or when the assembled ID exceeds 80
-			characters. Defense in depth: ``KalshiOrderClient`` will also
-			reject these, but failing here surfaces the offending strategy
-			name in the log instead of an opaque ``ValueError`` propagating
-			through ``LiveExecutor.place``'s catch-all.
+		ValueError: when ``strategy`` contains a character outside
+			``[A-Za-z0-9_-]``, when ``ticker`` is empty, or when the assembled
+			ID exceeds 80 characters. The ``ticker`` is otherwise SANITIZED
+			(disallowed chars -> ``-``), NOT rejected: Kalshi scalar/range
+			markets carry a decimal strike (e.g. ``KXXRP-26JUN0223-B0.6099500``)
+			and the raw ticker still reaches the venue in the order body — only
+			the URL-safe id needs the substitution. Rejecting it would silently
+			drop every order on such a market via dispatch's catch-all.
 	"""
 	if not _CLIENT_ORDER_ID_CHARSET.fullmatch(strategy):
+		# Strategy names are authored in-repo: a disallowed char is OUR bug, so
+		# reject loudly rather than mangle the operator-facing identifier.
+		# (Tickers, sanitized below, come from the venue — not our call to fix.)
 		raise ValueError(
 			f"_make_client_order_id: strategy must match [A-Za-z0-9_-]+, "
 			f"got {strategy!r}"
 		)
-	if not _CLIENT_ORDER_ID_CHARSET.fullmatch(ticker):
-		raise ValueError(
-			f"_make_client_order_id: ticker must match [A-Za-z0-9_-]+, "
-			f"got {ticker!r}"
-		)
-	oid = f"{strategy}-{ticker}-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
+	if not ticker:
+		# An empty ticker means there is no market to target — a genuine
+		# upstream bug (the order body's ticker would be empty too and Kalshi
+		# would reject). Surface it rather than build a ticker-less id.
+		raise ValueError("_make_client_order_id: ticker must be non-empty")
+	# Tickers come from the VENUE, not from us. Kalshi scalar/range markets
+	# legitimately encode a decimal strike in the ticker (e.g.
+	# ``KXXRP-26JUN0223-B0.6099500``); the raw ticker still reaches Kalshi in
+	# the order body (the wire layer never charset-checks it — it IS the market
+	# id), so only the URL-safe client_order_id needs the dot gone. Sanitize
+	# disallowed chars to ``-`` so the order stays placeable; the uuid4 suffix
+	# below keeps the id unique even if two tickers sanitize to the same stem.
+	safe_ticker = _CLIENT_ORDER_ID_DISALLOWED.sub("-", ticker)
+	oid = f"{strategy}-{safe_ticker}-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 	if len(oid) > _CLIENT_ORDER_ID_MAX_LEN:
 		raise ValueError(
 			f"_make_client_order_id: assembled id length {len(oid)} > "
