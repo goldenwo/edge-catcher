@@ -278,6 +278,52 @@ def test_expected_no_settlement_status_skipped():
 	assert _finding_for(rep, t).material is False
 
 
+# ---------------------------------------------------------------------------
+# Rejected / 0-fill rows must not be mistaken for PHANTOM (spec §5.3).
+# debut-fade is an IOC taker; an IOC that fills 0 is correctly recorded
+# status='rejected', fill_size=0 — it asserts NO position, so with no filled
+# Kalshi BUY the db and exchange AGREE. Flagging it PHANTOM is a false positive.
+# ---------------------------------------------------------------------------
+
+def test_rejected_zero_fill_row_no_buy_is_not_phantom():
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="rejected", fill_size=0, pnl_cents=None)], [], [],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []
+	assert rep.is_clean is True
+
+
+def test_fill_claiming_row_no_buy_is_still_phantom():
+	# Regression guard: a row that CLAIMS a position (fill_size>0) with no filled
+	# Kalshi BUY is still a real PHANTOM (a recorded position that doesn't exist).
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, fill_size=3)], [], [], in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.outcome == Outcome.PHANTOM and f.material is True
+
+
+def test_rejected_zero_fill_with_filled_buy_still_material():
+	# The fill-parse #43 signature (status='rejected', fill_size=0) but Kalshi DID
+	# fill must still be flagged — it routes to the matched path (buy present), not
+	# the phantom branch, so the fix above must not swallow it.
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="rejected", fill_size=0, pnl_cents=None)], [_buy(t)], [_settle(t)],
+	                in_scope_series=SERIES, expected_strategy="s")
+	f = _finding_for(rep, t)
+	assert f.material is True and "status" in f.fields
+
+
+def test_rejected_null_fill_row_no_buy_is_not_phantom():
+	# A rejected entry may record fill_size=NULL (not 0) depending on the recording
+	# path; it still asserts no position. Locks the _asserts_fill contract against a
+	# regression like `fill_size != 0` (which would treat NULL as a claimed fill).
+	t = "KXTEST15M-A"
+	rep = reconcile([_row(t, status="rejected", fill_size=None, pnl_cents=None)], [], [],
+	                in_scope_series=SERIES, expected_strategy="s")
+	assert rep.findings == []
+	assert rep.is_clean is True
+
+
 def test_dual_slippage_skipped_when_absent():
 	t = "KXTEST15M-A"
 	row = _row(t)  # no market_impact_cents key (pre-#54 db)
