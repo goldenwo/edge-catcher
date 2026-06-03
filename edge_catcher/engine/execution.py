@@ -32,6 +32,7 @@ from typing import Literal, Mapping, cast, get_args
 
 from edge_catcher.engine.executor import OpenPosition, OrderRequest
 from edge_catcher.engine.strategy_base import ExitKind, Signal
+from edge_catcher.live.venue import sanitize_client_order_id_component
 
 # Re-export so callers can ``from edge_catcher.engine.execution import OpenPosition``
 # alongside the builders that consume it. The canonical definition lives in
@@ -92,12 +93,12 @@ def _series_of(ticker: str) -> str:
 #
 # ``_CLIENT_ORDER_ID_CHARSET`` validates the in-repo ``strategy`` component (a
 # disallowed char there is OUR bug -> reject loudly). The VENUE-supplied
-# ``ticker`` is instead sanitized via ``_CLIENT_ORDER_ID_DISALLOWED`` (Kalshi
-# scalar/range markets legitimately encode a decimal strike, e.g.
-# ``B0.6099500``) so the order stays placeable instead of dying in dispatch's
-# catch-all.
+# ``ticker`` is instead SANITIZED via the shared
+# ``live.venue.sanitize_client_order_id_component`` helper (Kalshi scalar/range
+# markets legitimately encode a decimal strike, e.g. ``B0.6099500``) so the order
+# stays placeable instead of dying in dispatch's catch-all. The reconciler's
+# orphan-recovery id uses that same helper — one charset definition, two callers.
 _CLIENT_ORDER_ID_CHARSET = re.compile(r"[A-Za-z0-9_-]+")
-_CLIENT_ORDER_ID_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")
 _CLIENT_ORDER_ID_MAX_LEN = 80
 
 
@@ -153,10 +154,11 @@ def _make_client_order_id(strategy: str, ticker: str, now: datetime) -> str:
 	# legitimately encode a decimal strike in the ticker (e.g.
 	# ``KXXRP-26JUN0223-B0.6099500``); the raw ticker still reaches Kalshi in
 	# the order body (the wire layer never charset-checks it — it IS the market
-	# id), so only the URL-safe client_order_id needs the dot gone. Sanitize
-	# disallowed chars to ``-`` so the order stays placeable; the uuid4 suffix
-	# below keeps the id unique even if two tickers sanitize to the same stem.
-	safe_ticker = _CLIENT_ORDER_ID_DISALLOWED.sub("-", ticker)
+	# id), so only the URL-safe client_order_id needs the dot gone. The shared
+	# venue helper substitutes disallowed chars with ``-`` so the order stays
+	# placeable; the uuid4 suffix below keeps the id unique even if two tickers
+	# sanitize to the same stem.
+	safe_ticker = sanitize_client_order_id_component(ticker)
 	oid = f"{strategy}-{safe_ticker}-{int(now.timestamp() * 1000)}-{uuid.uuid4().hex[:8]}"
 	if len(oid) > _CLIENT_ORDER_ID_MAX_LEN:
 		raise ValueError(
