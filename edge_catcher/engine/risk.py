@@ -906,28 +906,26 @@ class Gate:
 	def _mark_position_cents(self, pos: OpenPosition, ms: MarketState) -> int:
 		"""Conservative-side mark of one open position.
 
-		Long marks at bid (yes_levels[0]), short marks at ask (no_levels[0]).
+		Long-yes marks at best YES bid; no-side marks at best NO bid.
 		Falls back to cost basis when the book is empty or missing.
 
 		Prices enter as ``(price_dollars: float, size: int)`` tuples per
-		``OrderbookSnapshot``'s shape.  We convert to cents at every read
-		boundary via ``round(level[0] * 100)`` — no float-cent values flow
+		``OrderbookSnapshot``'s shape.  ``best_yes_bid``/``best_no_bid``
+		convert to cents at the read boundary — no float-cent values flow
 		inside C's logic.
 		"""
 		book = ms.get_orderbook(pos.ticker)
 		if book is None:
 			return pos.fill_size * pos.blended_entry_cents
 
-		# Long=yes buys at ask (yes_ask = yes_levels best offer price)
-		# Conservative mark for a long position is the current bid (what we
-		# could sell at) = best level on the YES side.
-		# Short=no: conservative mark is the best level on the NO side.
-		levels = book.yes_levels if pos.side == "yes" else book.no_levels
-		if not levels:
-			return pos.fill_size * pos.blended_entry_cents
-
-		best_cents = round(levels[0][0] * 100)
-		if best_cents <= 0:
+		# Conservative mark for a long position is what we could sell at:
+		# the best (highest) resting bid on the position's OWN side.
+		# yes_levels/no_levels are resting bids ascending — never read
+		# levels[0] (the penny floor) as a price.
+		best_cents = (
+			book.best_yes_bid if pos.side == "yes" else book.best_no_bid
+		)
+		if best_cents is None or best_cents <= 0:
 			return pos.fill_size * pos.blended_entry_cents
 
 		return pos.fill_size * best_cents
