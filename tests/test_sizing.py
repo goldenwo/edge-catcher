@@ -41,10 +41,10 @@ class TestComputeRawSize:
 
 class TestWalkBookWithCeiling:
 	def test_fills_within_ceiling(self) -> None:
-		"""Book at 3c, 4c, 5c, 6c with ceiling 2c — fills up to 5c only."""
+		"""Implied asks at 3c, 4c, 5c, 6c with ceiling 2c — fills up to 5c only."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 10), (0.04, 10), (0.05, 10), (0.06, 10)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.94, 10), (0.95, 10), (0.96, 10), (0.97, 10)],
 		)
 		fill = walk_book_with_ceiling(book, "yes", 40, max_slippage_cents=2)
 		assert fill.fill_size == 30  # 10+10+10, stops before 6c
@@ -55,8 +55,8 @@ class TestWalkBookWithCeiling:
 	def test_zero_ceiling_only_best_level(self) -> None:
 		"""Ceiling 0c — only the best price level fills."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 5), (0.04, 20)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.96, 20), (0.97, 5)],
 		)
 		fill = walk_book_with_ceiling(book, "yes", 20, max_slippage_cents=0)
 		assert fill.fill_size == 5
@@ -70,10 +70,10 @@ class TestWalkBookWithCeiling:
 		assert fill.fill_pct == 0.0
 
 	def test_no_side(self) -> None:
-		"""Walking the no side uses no_levels."""
+		"""Walking the no side consumes implied asks from yes_levels."""
 		book = OrderbookSnapshot(
-			yes_levels=[],
-			no_levels=[(0.05, 10), (0.06, 10)],
+			yes_levels=[(0.94, 10), (0.95, 10)],
+			no_levels=[],
 		)
 		fill = walk_book_with_ceiling(book, "no", 20, max_slippage_cents=1)
 		assert fill.fill_size == 20
@@ -81,8 +81,8 @@ class TestWalkBookWithCeiling:
 	def test_partial_fill_at_boundary(self) -> None:
 		"""Size exceeds book depth — partial fill."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 5)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.97, 5)],
 		)
 		fill = walk_book_with_ceiling(book, "yes", 20, max_slippage_cents=5)
 		assert fill.fill_size == 5
@@ -92,8 +92,8 @@ class TestWalkBookWithCeiling:
 	def test_all_levels_beyond_ceiling(self) -> None:
 		"""Best is 10c, next is 15c, ceiling 2c — only fills best level."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.10, 5), (0.15, 50)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.85, 50), (0.90, 5)],
 		)
 		fill = walk_book_with_ceiling(book, "yes", 30, max_slippage_cents=2)
 		assert fill.fill_size == 5
@@ -147,8 +147,8 @@ class TestResolveFill:
 
 	def test_happy_path(self, config) -> None:
 		book = OrderbookSnapshot(
-			yes_levels=[(0.05, 20), (0.06, 20)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.94, 20), (0.95, 20)],
 		)
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert fill is not None
@@ -210,10 +210,11 @@ class TestResolveFill:
 				"require_fresh_book": False,
 			}
 		}
-		# Book has real liquidity at 1c but strategy sees entry_price=42
+		# Book has real implied-NO-ask liquidity at 1c (YES bids at 99c)
+		# but strategy sees entry_price=42
 		book = OrderbookSnapshot(
-			yes_levels=[],
-			no_levels=[(0.01, 500), (0.02, 100)],
+			yes_levels=[(0.98, 100), (0.99, 500)],
+			no_levels=[],
 		)
 		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
 		assert fill is not None
@@ -224,7 +225,7 @@ class TestResolveFill:
 		"""Flag should default True — stale books must be skipped by default."""
 		config = {"sizing": {"risk_per_trade_cents": 200, "max_slippage_cents": 2, "min_fill": 3}}
 		# Note: no require_fresh_book key at all
-		book = OrderbookSnapshot(yes_levels=[], no_levels=[(0.01, 500)])
+		book = OrderbookSnapshot(yes_levels=[(0.99, 500)], no_levels=[])
 		result = resolve_fill(config, entry_price_cents=42, side="no", book=book)
 		# Default is now True → stale book → FillSkip(reason="stale_book")
 		assert isinstance(result, FillSkip)
@@ -247,8 +248,8 @@ class TestResolveFill:
 			}
 		}
 		book = OrderbookSnapshot(
-			yes_levels=[],
-			no_levels=[(0.01, 500), (0.02, 100)],
+			yes_levels=[(0.98, 100), (0.99, 500)],
+			no_levels=[],
 		)
 		fill = resolve_fill(config, entry_price_cents=42, side="no", book=book)
 		assert isinstance(fill, FillSkip), "stale populated book must be skipped when require_fresh_book is set"
@@ -278,8 +279,8 @@ class TestResolveFill:
 	def test_min_fill_gate(self, config) -> None:
 		"""Book has only 2 contracts, min_fill is 3 → FillSkip."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.05, 2)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.95, 2)],
 		)
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert isinstance(fill, FillSkip)
@@ -287,8 +288,8 @@ class TestResolveFill:
 	def test_slippage_caps_fill(self, config) -> None:
 		"""Book has 100 contracts but spread across wide prices."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.05, 10), (0.06, 10), (0.07, 10), (0.08, 10), (0.10, 60)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.90, 60), (0.92, 10), (0.93, 10), (0.94, 10), (0.95, 10)],
 		)
 		fill = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert fill is not None
@@ -306,8 +307,8 @@ class TestResolveFill:
 
 	def test_no_side(self, config) -> None:
 		book = OrderbookSnapshot(
-			yes_levels=[],
-			no_levels=[(0.03, 50)],
+			yes_levels=[(0.97, 50)],
+			no_levels=[],
 		)
 		fill = resolve_fill(config, entry_price_cents=3, side="no", book=book)
 		assert fill is not None
@@ -325,8 +326,8 @@ class TestResolveFill:
 			},
 		}
 		book = OrderbookSnapshot(
-			yes_levels=[],
-			no_levels=[(0.01, 500)],
+			yes_levels=[(0.99, 500)],
+			no_levels=[],
 		)
 		result = resolve_fill(config, entry_price_cents=42, side="no", book=book)
 		assert isinstance(result, FillSkip)
@@ -345,8 +346,8 @@ class TestResolveFill:
 	def test_fillskip_below_min_fill_walk_book(self, config) -> None:
 		"""Walked fill below min_fill → FillSkip(below_min_fill)."""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.05, 2)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.95, 2)],
 		)
 		result = resolve_fill(config, entry_price_cents=5, side="yes", book=book)
 		assert isinstance(result, FillSkip)
@@ -388,12 +389,13 @@ class TestResolveFill:
 		assert result.reason == "empty_book"
 
 	def test_empty_book_side_asymmetric_is_skipped(self) -> None:
-		"""Empty fill side skipped even if the OTHER side has depth.
+		"""Empty implied-ask ladder skipped even if the book has depth.
 
-		strategy_a's is_first_observation can fire when YES side is populated
-		but NO side has no real asks (or vice versa). The fill side's depth is
-		what matters — ctx.orderbook.depth sums both sides and would incorrectly
-		let one-sided books through."""
+		strategy_a's is_first_observation can fire when one side has resting
+		bids but nobody is offering the side we want to buy (the opposite
+		side's bids are the implied asks). The fill side's implied liquidity
+		is what matters — ctx.orderbook.depth sums both sides and would
+		incorrectly let one-sided books through."""
 		config = {
 			"sizing": {
 				"risk_per_trade_cents": 200,
@@ -402,8 +404,9 @@ class TestResolveFill:
 				"require_fresh_book": True,
 			}
 		}
-		# Deep YES side, empty NO side. Strategy wants to buy NO.
-		book = OrderbookSnapshot(yes_levels=[(0.95, 500)], no_levels=[])
+		# Deep NO-bid side, but NO implied asks (yes_levels empty → nobody
+		# is offering NO). Strategy wants to buy NO.
+		book = OrderbookSnapshot(yes_levels=[], no_levels=[(0.05, 500)])
 		result = resolve_fill(config, entry_price_cents=5, side="no", book=book)
 		assert isinstance(result, FillSkip)
 		assert result.reason == "empty_book"
@@ -425,8 +428,8 @@ class TestResolveFill:
 			}
 		}
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 30), (0.04, 100)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.96, 100), (0.97, 30)],
 		)
 		result = resolve_fill(config, entry_price_cents=2, side="yes", book=book)
 		# Must be a FillResult (proceed), NOT FillSkip.
@@ -457,8 +460,8 @@ class TestRiskBudgetCap:
 		With the cap, total cost is strictly ≤ 200c.
 		"""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 30), (0.04, 100)],   # best=3c; 2c signal ≠ book best
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.96, 100), (0.97, 30)],   # implied asks 3c/4c; 2c signal ≠ book best
 		)
 		fill = resolve_fill(config, entry_price_cents=2, side="yes", book=book)
 		assert isinstance(fill, FillResult)
@@ -479,8 +482,8 @@ class TestRiskBudgetCap:
 		cap is not load-bearing and the walker fills the full raw_size.
 		"""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.50, 100)],   # plenty of depth at best
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.50, 100)],   # implied yes ask 50c, plenty of depth at best
 		)
 		fill = resolve_fill(config, entry_price_cents=50, side="yes", book=book)
 		assert isinstance(fill, FillResult)
@@ -500,8 +503,8 @@ class TestRiskBudgetCap:
 		# 200c budget only fits 2 contracts at the walked price:
 		# 200c // 99c = 2 (below min_fill=3).
 		book = OrderbookSnapshot(
-			yes_levels=[(0.90, 100)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.10, 100)],
 		)
 		# Signal at 90c matches book (no divergence). raw_size = 200//90 = 2.
 		# Walker fills 2@90c = 180c (under budget). But 2 < min_fill=3.
@@ -514,8 +517,8 @@ class TestRiskBudgetCap:
 		can omit max_cost_cents to get the unbounded pre-fix behavior.
 		"""
 		book = OrderbookSnapshot(
-			yes_levels=[(0.03, 30), (0.04, 100)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.96, 100), (0.97, 30)],
 		)
 		fill = walk_book_with_ceiling(book, "yes", 100, max_slippage_cents=2)
 		# Unbounded walker fills 30@3 + 70@4 = 370c cost, 100 contracts
@@ -524,3 +527,61 @@ class TestRiskBudgetCap:
 		# (this is exactly the amount the resolve_fill cap prevents —
 		# the caller is responsible for enforcing budget at a higher layer
 		# if they don't pass max_cost_cents)
+
+
+class TestImpliedAskFillPath:
+	"""Corrected bid/ask semantics (spec §3.2): the walker and gates read
+	the implied-ask ladder, not the same-side penny-floor bids."""
+
+	def _config(self) -> dict:
+		return {"sizing": {
+			"risk_per_trade_cents": 100,
+			"max_slippage_cents": 3,
+			"min_fill": 1,
+		}}
+
+	def test_walk_book_with_ceiling_on_implied_asks(self):
+		# NO bids 0.75×2 (→ask 25¢ best), 0.73×10 (→27¢), 0.70×10 (→30¢).
+		# Ceiling 25+3=28 admits 25 and 27 but not 30.
+		# Want 5: 2@25 + 3@27 = 131 → blended round(131/5)=26, slip +1.
+		book = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.70, 10), (0.73, 10), (0.75, 2)],
+		)
+		fill = walk_book_with_ceiling(book, "yes", 5, max_slippage_cents=3)
+		assert fill.fill_size == 5
+		assert fill.blended_price_cents == 26
+		assert fill.slippage_cents == 1
+
+	def test_resolve_fill_fills_realistic_book_no_stale_skip(self):
+		# THE Gap-1 regression lock.  A realistic book (penny floors on
+		# both sides, real top-of-book) with entry at the implied ask must
+		# FILL.  Pre-fix: best_book_cents read the 1¢ floor, |1−25|=24>10
+		# → ~95% of paper entries skipped as stale_book.
+		book = OrderbookSnapshot(
+			yes_levels=[(0.01, 1000), (0.20, 50)],
+			no_levels=[(0.01, 800), (0.75, 40)],
+		)
+		result = resolve_fill(self._config(), entry_price_cents=25, side="yes", book=book)
+		assert not isinstance(result, FillSkip)
+		assert result.blended_price_cents == 25
+		assert result.fill_size == 4  # 100¢ budget // 25¢
+
+	def test_resolve_fill_opposite_empty_is_empty_book(self):
+		# Reclassification (spec §5.4): own side populated, opposite empty
+		# was stale-checked pre-fix; now empty_book — no implied liquidity
+		# to cross.  Correct, not a regression.
+		book = OrderbookSnapshot(yes_levels=[(0.50, 10)], no_levels=[])
+		result = resolve_fill(self._config(), entry_price_cents=50, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "empty_book"
+
+	def test_resolve_fill_still_skips_genuine_divergence(self):
+		# Stale gate retained: implied ask 25¢ vs entry 60¢ diverges > 10¢.
+		book = OrderbookSnapshot(
+			yes_levels=[(0.01, 1000)],
+			no_levels=[(0.01, 800), (0.75, 40)],
+		)
+		result = resolve_fill(self._config(), entry_price_cents=60, side="yes", book=book)
+		assert isinstance(result, FillSkip)
+		assert result.reason == "stale_book"
