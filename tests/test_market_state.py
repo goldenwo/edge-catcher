@@ -369,3 +369,43 @@ class TestMarketStateBidAskAccessors:
 		))
 		assert ms.get_yes_ask("T") is None
 		assert ms.get_yes_bid("T") == 87
+
+
+class TestLiveFillReproduction:
+	"""Acceptance gate (spec §5.3): corrected book reads must reproduce REAL
+	Kalshi fills from the June 2026 debut-fade live run exactly.
+
+	Provenance: reports/slippage-fidelity-findings-202606.md (§Mechanism) +
+	reports/slippage_table_v2_20260610.csv.  Prices are from the live data;
+	depths are representative except where noted.
+	"""
+
+	def test_trade_96_no_side_fill_at_25c(self):
+		# Trade 96 (KXSOL15M-26JUN062015-15, side=no, kalshi_verified):
+		# best_yes_bid=75¢ → implied NO ask 100−75=25¢; Kalshi blended
+		# fill was exactly 25¢ × 1 contract.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 1000), (0.75, 40)],
+			no_levels=[(0.01, 800), (0.20, 25)],
+		)
+		assert snap.best_no_ask == 25
+		fill = snap.walk_book("no", 1)
+		assert fill.fill_size == 1
+		assert fill.blended_price_cents == 25
+		assert fill.slippage_cents == 0
+
+	def test_trade_98_no_side_fill_at_13c(self):
+		# Trade 98 (KXSOL15M-26JUN062045-45, side=no, recon_reason=ok):
+		# reconstructed best_yes_bid=87¢ (real top depth 497),
+		# best_no_bid=12¢ → real spread 1¢; implied NO ask 13¢;
+		# Kalshi blended fill was exactly 13¢ × 2 contracts, slippage 0.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+		assert snap.best_no_ask == 13
+		assert snap.spread == 1
+		fill = snap.walk_book("no", 2)
+		assert fill.fill_size == 2
+		assert fill.blended_price_cents == 13
+		assert fill.slippage_cents == 0
