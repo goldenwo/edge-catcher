@@ -335,3 +335,37 @@ class TestBestAccessors:
 		assert snap.best_no_ask is None     # needs yes_levels
 		assert snap.best_no_bid == 12
 		assert snap.best_yes_ask == 88
+
+
+class TestMarketStateBidAskAccessors:
+	def _seeded(self) -> MarketState:
+		ms = MarketState()
+		ms.register_ticker("T")
+		ms.seed_orderbook("T", OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		))
+		return ms
+
+	def test_get_yes_ask_is_implied_from_best_no_bid(self):
+		# Pre-fix this returned yes_levels[0] = the 1¢ penny floor — the
+		# root cause of the entry_best=1 recording corruption.
+		assert self._seeded().get_yes_ask("T") == 88
+
+	def test_get_yes_bid_is_best_own_side_bid(self):
+		# Pre-fix this returned 100 − no_levels[0] ≈ 99.
+		assert self._seeded().get_yes_bid("T") == 87
+
+	def test_unknown_ticker_returns_none(self):
+		ms = MarketState()
+		assert ms.get_yes_ask("X") is None
+		assert ms.get_yes_bid("X") is None
+
+	def test_empty_no_side_means_no_yes_ask(self):
+		ms = MarketState()
+		ms.register_ticker("T")
+		ms.seed_orderbook("T", OrderbookSnapshot(
+			yes_levels=[(0.87, 497)], no_levels=[],
+		))
+		assert ms.get_yes_ask("T") is None
+		assert ms.get_yes_bid("T") == 87
