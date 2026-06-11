@@ -104,15 +104,17 @@ class OrderbookSnapshot:
 
 	@property
 	def spread(self) -> int:
-		"""Bid-ask spread in cents: best_yes_ask + best_no_ask - 100.
+		"""Bid-ask spread in cents: best_yes_ask + best_no_ask − 100.
 
-		Returns 0 if either side is empty.
+		Equivalently 100 − (best_yes_bid + best_no_bid): the no-arb gap
+		between the implied asks.  Non-negative on a sane book.
+		Returns 0 if either side is empty (unknown, prior sentinel kept).
 		"""
-		if not self.yes_levels or not self.no_levels:
+		yes_bid = self.best_yes_bid
+		no_bid = self.best_no_bid
+		if yes_bid is None or no_bid is None:
 			return 0
-		best_yes_ask = round(self.yes_levels[0][0] * 100)
-		best_no_ask = round(self.no_levels[0][0] * 100)
-		return best_yes_ask + best_no_ask - 100
+		return 100 - (yes_bid + no_bid)
 
 	def walk_book(self, side: str, size: int) -> FillResult:
 		"""Walk the book for *side* ('yes' or 'no'), accumulating fills.

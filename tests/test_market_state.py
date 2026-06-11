@@ -25,12 +25,14 @@ class TestOrderbookSnapshotDepth:
 
 class TestOrderbookSnapshotSpread:
 	def test_spread_with_levels(self):
-		# yes_ask=50, no_ask=45, spread = 50+45-100 = -5
+		# best_yes_bid=87, best_no_bid=12 → spread = 100 − (87+12) = 1.
+		# (Pre-fix this read the penny floors as asks and returned −98-ish
+		# garbage — the live spread gate could never fire on it.)
 		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[(0.45, 10)],
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
 		)
-		assert snap.spread == -5
+		assert snap.spread == 1
 
 	def test_spread_empty_book(self):
 		snap = OrderbookSnapshot(yes_levels=[], no_levels=[])
