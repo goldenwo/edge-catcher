@@ -797,8 +797,13 @@ class TestHandleTradeMsg:
 		strat_by_series["KXBTC15M"] = [check_strat]
 		pending_states["bid-check"] = {}
 
-		# Fixture orderbook: yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)]
-		# Expected ctx quotes: yes_ask=50, no_ask=45, yes_bid=100-45=55, no_bid=100-50=50.
+		# Fixture orderbook: levels are resting BIDS (dollars, best last).
+		# Best YES bid 0.45, best NO bid 0.50 (sane: 45 + 50 <= 100).
+		# Expected ctx quotes: yes_bid=45, no_bid=50, yes_ask=100-50=50, no_ask=100-45=55.
+		ms.seed_orderbook("KXBTC15M-26APR10-T100", OrderbookSnapshot(
+			yes_levels=[(0.45, 20)], no_levels=[(0.50, 20)],
+		))
+
 		# Trade reports yes_price=0.30, no_price=0.60 — both off-book. Must be ignored for quotes.
 		msg = self._make_trade_msg(
 			"KXBTC15M-26APR10-T100", yes_price=0.30, no_price=0.60, taker_side="yes",
@@ -809,10 +814,10 @@ class TestHandleTradeMsg:
 		)
 
 		assert check_strat.seen_ctx is not None
-		assert check_strat.seen_ctx.yes_ask == 50
-		assert check_strat.seen_ctx.no_ask == 45
-		assert check_strat.seen_ctx.yes_bid == 55  # 100 - best no_ask
-		assert check_strat.seen_ctx.no_bid == 50   # 100 - best yes_ask
+		assert check_strat.seen_ctx.yes_ask == 50  # 100 - best no_bid
+		assert check_strat.seen_ctx.no_ask == 55   # 100 - best yes_bid
+		assert check_strat.seen_ctx.yes_bid == 45  # best yes_bid
+		assert check_strat.seen_ctx.no_bid == 50   # best no_bid
 
 	@pytest.mark.asyncio
 	async def test_skips_strategy_when_orderbook_not_populated(self, setup):
