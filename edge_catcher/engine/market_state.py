@@ -61,6 +61,47 @@ class OrderbookSnapshot:
 		"""Total resting quantity across both sides."""
 		return sum(q for _, q in self.yes_levels) + sum(q for _, q in self.no_levels)
 
+	def implied_asks(self, side: str) -> list[tuple[int, int]]:
+		"""Implied ask ladder (price_cents, qty) to BUY *side*, cheapest first.
+
+		yes_levels/no_levels hold resting BIDS (Kalshi wire shape, dollars,
+		ascending — best bid LAST).  Buying side S crosses the OPPOSITE
+		side's bids: an opposite bid at price p implies an ask at 100 − p,
+		so the cheapest ask comes from the highest opposite bid.  Empty
+		opposite side ⇒ no implied liquidity ⇒ [].
+		"""
+		opposite = self.no_levels if side == "yes" else self.yes_levels
+		return [
+			(100 - round(p * 100), q)
+			for p, q in sorted(opposite, key=lambda lvl: lvl[0], reverse=True)
+		]
+
+	@property
+	def best_yes_bid(self) -> int | None:
+		"""Best (highest) resting YES bid in cents, or None if side empty."""
+		if not self.yes_levels:
+			return None
+		return round(max(p for p, _ in self.yes_levels) * 100)
+
+	@property
+	def best_no_bid(self) -> int | None:
+		"""Best (highest) resting NO bid in cents, or None if side empty."""
+		if not self.no_levels:
+			return None
+		return round(max(p for p, _ in self.no_levels) * 100)
+
+	@property
+	def best_yes_ask(self) -> int | None:
+		"""Best implied YES ask in cents (100 − best NO bid), or None."""
+		no_bid = self.best_no_bid
+		return None if no_bid is None else 100 - no_bid
+
+	@property
+	def best_no_ask(self) -> int | None:
+		"""Best implied NO ask in cents (100 − best YES bid), or None."""
+		yes_bid = self.best_yes_bid
+		return None if yes_bid is None else 100 - yes_bid
+
 	@property
 	def spread(self) -> int:
 		"""Bid-ask spread in cents: best_yes_ask + best_no_ask - 100.

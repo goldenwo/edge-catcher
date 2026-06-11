@@ -270,3 +270,69 @@ class TestClearResetsFirstSeen:
 		assert ms.update_price("KXFOO-T1", 52) is True, (
 			"post-clear, the ticker must be treated as first-seen again"
 		)
+
+
+class TestImpliedAsks:
+	"""implied_asks: the single source of truth for crossing the book.
+
+	yes_levels/no_levels are resting BIDS (Kalshi wire shape, ascending).
+	Buying side S crosses the OPPOSITE side's bids: a bid at p implies an
+	ask at 100−p, so the cheapest ask comes from the HIGHEST opposite bid.
+	"""
+
+	def test_yes_asks_derived_from_no_bids_cheapest_first(self):
+		# NO bids: penny floor 1¢×500, best 45¢×8.
+		# Implied YES asks: 100−45=55¢×8 (cheapest), then 100−1=99¢×500.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.50, 10)],
+			no_levels=[(0.01, 500), (0.45, 8)],
+		)
+		assert snap.implied_asks("yes") == [(55, 8), (99, 500)]
+
+	def test_no_asks_derived_from_yes_bids(self):
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.50, 10)],
+			no_levels=[(0.45, 8)],
+		)
+		assert snap.implied_asks("no") == [(50, 10), (99, 900)]
+
+	def test_unsorted_input_still_cheapest_first(self):
+		# Defensive: implied_asks must sort, not trust input order.
+		snap = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.45, 8), (0.01, 500)],
+		)
+		assert snap.implied_asks("yes") == [(55, 8), (99, 500)]
+
+	def test_empty_opposite_side_no_implied_liquidity(self):
+		snap = OrderbookSnapshot(yes_levels=[(0.50, 10)], no_levels=[])
+		assert snap.implied_asks("yes") == []
+		# the populated YES side still implies NO asks
+		assert snap.implied_asks("no") == [(50, 10)]
+
+
+class TestBestAccessors:
+	def _two_sided(self) -> OrderbookSnapshot:
+		# Real shape from the June 2026 live run (trade 98 reconstruction):
+		# best_yes_bid=87 (depth 497), best_no_bid=12 → spread 1¢.
+		return OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+
+	def test_best_bids_are_highest_own_side(self):
+		snap = self._two_sided()
+		assert snap.best_yes_bid == 87
+		assert snap.best_no_bid == 12
+
+	def test_best_asks_are_implied_from_opposite(self):
+		snap = self._two_sided()
+		assert snap.best_yes_ask == 88   # 100 − best_no_bid(12)
+		assert snap.best_no_ask == 13    # 100 − best_yes_bid(87)
+
+	def test_empty_sides_return_none(self):
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.12, 60)])
+		assert snap.best_yes_bid is None    # own side empty
+		assert snap.best_no_ask is None     # needs yes_levels
+		assert snap.best_no_bid == 12
+		assert snap.best_yes_ask == 88
