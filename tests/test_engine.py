@@ -134,7 +134,9 @@ class TestProcessTick:
 	@pytest.mark.asyncio
 	async def test_enter_signal_records_trade(self, store, config):
 		"""StubStrategy fires on first observation, trade is recorded."""
-		ob = OrderbookSnapshot(yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)])
+		# NO bid 0.50×20 = implied YES ask 50¢×20 (fillable at the ctx ask);
+		# YES bid 0.48 matches ctx yes_bid.
+		ob = OrderbookSnapshot(yes_levels=[(0.48, 20)], no_levels=[(0.50, 20)])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
 
@@ -1003,7 +1005,8 @@ class TestProcessTickMetrics:
 		"""Happy path: a fillable entry bumps attempted and filled by one each."""
 		metrics = Metrics()
 		config["_metrics"] = metrics
-		ob = OrderbookSnapshot(yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)])
+		# NO bid 0.50×20 = implied YES ask 50¢×20 (fillable at the ctx ask).
+		ob = OrderbookSnapshot(yes_levels=[(0.48, 20)], no_levels=[(0.50, 20)])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
 
@@ -1022,8 +1025,9 @@ class TestProcessTickMetrics:
 		config["_metrics"] = metrics
 		# Opt into the fresh-book gate so divergence becomes a hard skip
 		config["sizing"] = {**config["sizing"], "require_fresh_book": True}
-		# Best yes level (80c) diverges from entry_price (50c) by >10c → stale
-		ob = OrderbookSnapshot(yes_levels=[(0.80, 20)], no_levels=[(0.45, 20)])
+		# Best implied YES ask (100−20=80c) diverges from entry_price (50c)
+		# by >10c → stale
+		ob = OrderbookSnapshot(yes_levels=[(0.55, 20)], no_levels=[(0.20, 20)])
 		ctx = _make_ctx(ob, is_first=True, yes_ask=50, yes_bid=48)
 		strategies = [StubStrategy()]
 
