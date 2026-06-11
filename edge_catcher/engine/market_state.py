@@ -117,10 +117,11 @@ class OrderbookSnapshot:
 		return 100 - (yes_bid + no_bid)
 
 	def walk_book(self, side: str, size: int) -> FillResult:
-		"""Walk the book for *side* ('yes' or 'no'), accumulating fills.
+		"""Walk the implied-ask ladder for *side*, accumulating fills.
 
-		Levels are consumed best-to-worst.  Returns a FillResult describing
-		the simulated fill.  If the book is empty returns fill_size=0.
+		Consumes ``implied_asks(side)`` cheapest-first (the opposite side's
+		resting bids, converted at 100 − p).  Returns a FillResult in cents.
+		If there is no implied liquidity returns fill_size=0.
 
 		Args:
 			side: 'yes' or 'no'
@@ -129,7 +130,7 @@ class OrderbookSnapshot:
 		Returns:
 			FillResult with fill details in cents.
 		"""
-		levels = self.yes_levels if side == "yes" else self.no_levels
+		levels = self.implied_asks(side)
 		if not levels:
 			return FillResult(
 				fill_size=0,
@@ -139,15 +140,14 @@ class OrderbookSnapshot:
 				intended_size=size,
 			)
 
-		best_price_cents = round(levels[0][0] * 100)
+		best_price_cents = levels[0][0]
 		remaining = size
 		total_cost_cents = 0
 		total_filled = 0
 
-		for price_dollars, qty in levels:
+		for price_cents, qty in levels:
 			if remaining <= 0:
 				break
-			price_cents = round(price_dollars * 100)
 			take = min(qty, remaining)
 			total_cost_cents += take * price_cents
 			total_filled += take

@@ -48,24 +48,28 @@ class TestOrderbookSnapshotSpread:
 
 
 class TestOrderbookSnapshotWalkBook:
+	"""walk_book consumes IMPLIED asks (opposite side's bids at 100−p).
+
+	Rewritten 2026-06-11 (spec §5.7): the original suite walked same-side
+	ladders as asks, encoding the bids-as-asks bug.  Each original case is
+	preserved on a corrected two-sided ladder: the opposite bid p' = 1 − ask
+	reproduces the same expected prices.
+	"""
+
 	def test_walk_book_full_fill_single_level(self):
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[],
-		)
+		# NO bid 0.50×10 implies YES ask 50¢×10.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 10)])
 		result = snap.walk_book("yes", 5)
 		assert result.fill_size == 5
 		assert result.blended_price_cents == 50
 		assert result.slippage_cents == 0
 
 	def test_walk_book_crossing_levels(self):
-		# 3@0.50 + 2@0.55, want 5
-		# cost = 3*50 + 2*55 = 150 + 110 = 260
-		# blended = 260/5 = 52
-		# slippage = 52 - 50 = 2
+		# NO bids 0.45×10 (→ask 55¢), 0.50×3 (→ask 50¢, best).
+		# Walk 5: 3@50 + 2@55 = 260 → blended 52, slippage +2.
 		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 3), (0.55, 10)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.45, 10), (0.50, 3)],
 		)
 		result = snap.walk_book("yes", 5)
 		assert result.fill_size == 5
@@ -73,11 +77,8 @@ class TestOrderbookSnapshotWalkBook:
 		assert result.slippage_cents == 2
 
 	def test_walk_book_partial_fill(self):
-		# only 3 available, want 10
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 3)],
-			no_levels=[],
-		)
+		# Only 3 implied-ask contracts available, want 10.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 3)])
 		result = snap.walk_book("yes", 10)
 		assert result.fill_size == 3
 		assert pytest.approx(result.fill_pct, abs=0.01) == 0.3
@@ -88,21 +89,17 @@ class TestOrderbookSnapshotWalkBook:
 		assert result.fill_size == 0
 		assert result.blended_price_cents == 0
 
-	def test_walk_book_no_side(self):
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[],
-		)
+	def test_walk_book_empty_opposite_side(self):
+		# Buying NO crosses YES bids; none resting → no implied liquidity,
+		# even though the NO side itself has resting bids.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 10)])
 		result = snap.walk_book("no", 5)
 		assert result.fill_size == 0
 		assert result.blended_price_cents == 0
 
 	def test_walk_book_float_price_rounding(self):
-		# 0.29 * 100 = 28.999... should round to 29
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.29, 10)],
-			no_levels=[],
-		)
+		# NO bid 0.71 → implied YES ask 100 − round(71.0) = 29¢.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.71, 10)])
 		result = snap.walk_book("yes", 5)
 		assert result.blended_price_cents == 29
 
