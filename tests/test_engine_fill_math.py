@@ -134,13 +134,15 @@ def _equivalent_fills(
 	ceiling_cents: int,
 	max_cost_cents: int | None = None,
 ) -> list[FillEvent]:
-	"""Walk the same levels paper walks; emit FillEvent rows that match
+	"""Walk the same ask ladder paper walks; emit FillEvent rows that match
 	exactly what fill_math would receive if paper called it. The math
 	below MUST mirror paper.walk_book_with_ceiling step-for-step, otherwise
 	the byte-exact assertion below is vacuous.
 
-	Mirrors the cents conversion (``round(price_dollars * 100)``), the
-	ceiling check, and the budget-aware ``take`` clamp.
+	Takes the ask ladder in DOLLARS and converts via ``round(p * 100)`` —
+	byte-identical to the cents ladder ``implied_asks`` hands the walker
+	when the opposite side rests bids at ``(100 − a)/100`` — then mirrors
+	the ceiling check and the budget-aware ``take`` clamp.
 	"""
 	out: list[FillEvent] = []
 	remaining = size_target
@@ -200,7 +202,10 @@ def test_blended_price_paper_byte_exact_equivalence(
 	If this test ever fails, agent 3b.C's planned paper-refactor to call
 	fill_math would break replay parity. Gating for the consolidation.
 	"""
-	book = _book(yes=yes_levels)
+	# yes_levels parametrizes the YES *ask ladder* (dollars). Under the
+	# corrected bid/ask semantics the walker consumes implied asks, so the
+	# book rests the equivalent NO bids at (100 − a)/100 with the same qty.
+	book = _book(no=[((100 - round(p * 100)) / 100, q) for p, q in yes_levels])
 	# Run paper's walker.
 	paper_result = walk_book_with_ceiling(book, "yes", size, max_slippage, max_cost)
 	# If paper produced no fill (filtered to 0 by min-blended guard or
@@ -272,13 +277,15 @@ def test_paper_slippage_routes_through_signed_slippage_helper() -> None:
 	# = 425/10 = 42.5 → banker's round → 42. slippage = 42 - 42 = 0 here, so
 	# use an asymmetric book that produces a non-zero slippage to make the
 	# assertion meaningful.
-	yes_levels = [(0.42, 3), (0.45, 100)]   # best=42; 3@42 + 7@45 = 441/10 → 44
-	book = _book(yes=yes_levels)
+	# NO bids 0.58×3 (→implied ask 42¢ best), 0.55×100 (→45¢):
+	# 3@42 + 7@45 = 441/10 → 44.
+	no_levels = [(0.55, 100), (0.58, 3)]
+	book = _book(no=no_levels)
 	# Positional signature: (book, side, size, max_slippage_cents, max_cost_cents)
 	paper_result = walk_book_with_ceiling(book, "yes", 10, 5, None)
 	assert paper_result.fill_size > 0, "test setup: walker must produce a fill"
 
-	best_cents = round(yes_levels[0][0] * 100)   # 42
+	best_cents = 100 - round(max(p for p, _ in no_levels) * 100)   # 42
 	expected = signed_slippage_cents(
 		blended=paper_result.blended_price_cents, limit=best_cents, action="buy"
 	)

@@ -676,22 +676,21 @@ async def _handle_enter(
 			client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
 		)
 
-	# Dual-slippage book-best reference (spec §4.2): top-of-book ASK in cents
-	# for the side being bought, persisted on the live pending row so
-	# transition_pending_to_open can compute market_impact_cents at fill.
-	# Empty levels / missing orderbook → None per §4.3 ("not measurable",
-	# never 0). The isinstance guard handles test ad-hoc ctx classes that
-	# omit `orderbook` or supply a MagicMock — production TickContext.orderbook
-	# is always a real OrderbookSnapshot. Reporting-only path; record_intent
-	# below stays fail-loud (§3.1 RecordPendingFailed).
+	# Dual-slippage book-best reference (spec §4.2): top-of-book implied
+	# ASK in cents for the side being bought (100 − best opposite-side
+	# bid — yes_levels/no_levels are resting BIDS), persisted on the live
+	# pending row so transition_pending_to_open can compute
+	# market_impact_cents at fill.  Empty opposite side / missing
+	# orderbook → None per §4.3 ("not measurable", never 0).  The
+	# isinstance guard handles test ad-hoc ctx classes that omit
+	# `orderbook` or supply a MagicMock — production TickContext.orderbook
+	# is always a real OrderbookSnapshot.  Reporting-only path;
+	# record_intent below stays fail-loud (§3.1 RecordPendingFailed).
 	_orderbook = getattr(ctx, "orderbook", None)
 	if isinstance(_orderbook, OrderbookSnapshot):
-		_side_levels = (
-			_orderbook.yes_levels if signal.side == "yes"
-			else _orderbook.no_levels
-		)
 		entry_best_price_cents: int | None = (
-			round(_side_levels[0][0] * 100) if _side_levels else None
+			_orderbook.best_yes_ask if signal.side == "yes"
+			else _orderbook.best_no_ask
 		)
 	else:
 		entry_best_price_cents = None

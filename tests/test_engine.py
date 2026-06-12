@@ -134,7 +134,9 @@ class TestProcessTick:
 	@pytest.mark.asyncio
 	async def test_enter_signal_records_trade(self, store, config):
 		"""StubStrategy fires on first observation, trade is recorded."""
-		ob = OrderbookSnapshot(yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)])
+		# NO bid 0.50×20 = implied YES ask 50¢×20 (fillable at the ctx ask);
+		# YES bid 0.48 matches ctx yes_bid.
+		ob = OrderbookSnapshot(yes_levels=[(0.48, 20)], no_levels=[(0.50, 20)])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
 
@@ -795,8 +797,13 @@ class TestHandleTradeMsg:
 		strat_by_series["KXBTC15M"] = [check_strat]
 		pending_states["bid-check"] = {}
 
-		# Fixture orderbook: yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)]
-		# Expected ctx quotes: yes_ask=50, no_ask=45, yes_bid=100-45=55, no_bid=100-50=50.
+		# Fixture orderbook: levels are resting BIDS (dollars, best last).
+		# Best YES bid 0.45, best NO bid 0.50 (sane: 45 + 50 <= 100).
+		# Expected ctx quotes: yes_bid=45, no_bid=50, yes_ask=100-50=50, no_ask=100-45=55.
+		ms.seed_orderbook("KXBTC15M-26APR10-T100", OrderbookSnapshot(
+			yes_levels=[(0.45, 20)], no_levels=[(0.50, 20)],
+		))
+
 		# Trade reports yes_price=0.30, no_price=0.60 — both off-book. Must be ignored for quotes.
 		msg = self._make_trade_msg(
 			"KXBTC15M-26APR10-T100", yes_price=0.30, no_price=0.60, taker_side="yes",
@@ -807,10 +814,10 @@ class TestHandleTradeMsg:
 		)
 
 		assert check_strat.seen_ctx is not None
-		assert check_strat.seen_ctx.yes_ask == 50
-		assert check_strat.seen_ctx.no_ask == 45
-		assert check_strat.seen_ctx.yes_bid == 55  # 100 - best no_ask
-		assert check_strat.seen_ctx.no_bid == 50   # 100 - best yes_ask
+		assert check_strat.seen_ctx.yes_ask == 50  # 100 - best no_bid
+		assert check_strat.seen_ctx.no_ask == 55   # 100 - best yes_bid
+		assert check_strat.seen_ctx.yes_bid == 45  # best yes_bid
+		assert check_strat.seen_ctx.no_bid == 50   # best no_bid
 
 	@pytest.mark.asyncio
 	async def test_skips_strategy_when_orderbook_not_populated(self, setup):
@@ -1003,7 +1010,8 @@ class TestProcessTickMetrics:
 		"""Happy path: a fillable entry bumps attempted and filled by one each."""
 		metrics = Metrics()
 		config["_metrics"] = metrics
-		ob = OrderbookSnapshot(yes_levels=[(0.50, 20)], no_levels=[(0.45, 20)])
+		# NO bid 0.50×20 = implied YES ask 50¢×20 (fillable at the ctx ask).
+		ob = OrderbookSnapshot(yes_levels=[(0.48, 20)], no_levels=[(0.50, 20)])
 		ctx = _make_ctx(ob, is_first=True)
 		strategies = [StubStrategy()]
 
@@ -1022,8 +1030,9 @@ class TestProcessTickMetrics:
 		config["_metrics"] = metrics
 		# Opt into the fresh-book gate so divergence becomes a hard skip
 		config["sizing"] = {**config["sizing"], "require_fresh_book": True}
-		# Best yes level (80c) diverges from entry_price (50c) by >10c → stale
-		ob = OrderbookSnapshot(yes_levels=[(0.80, 20)], no_levels=[(0.45, 20)])
+		# Best implied YES ask (100−20=80c) diverges from entry_price (50c)
+		# by >10c → stale
+		ob = OrderbookSnapshot(yes_levels=[(0.55, 20)], no_levels=[(0.20, 20)])
 		ctx = _make_ctx(ob, is_first=True, yes_ask=50, yes_bid=48)
 		strategies = [StubStrategy()]
 

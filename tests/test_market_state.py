@@ -25,12 +25,14 @@ class TestOrderbookSnapshotDepth:
 
 class TestOrderbookSnapshotSpread:
 	def test_spread_with_levels(self):
-		# yes_ask=50, no_ask=45, spread = 50+45-100 = -5
+		# best_yes_bid=87, best_no_bid=12 → spread = 100 − (87+12) = 1.
+		# (Pre-fix this read the penny floors as asks and returned −98-ish
+		# garbage — the live spread gate could never fire on it.)
 		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[(0.45, 10)],
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
 		)
-		assert snap.spread == -5
+		assert snap.spread == 1
 
 	def test_spread_empty_book(self):
 		snap = OrderbookSnapshot(yes_levels=[], no_levels=[])
@@ -46,24 +48,28 @@ class TestOrderbookSnapshotSpread:
 
 
 class TestOrderbookSnapshotWalkBook:
+	"""walk_book consumes IMPLIED asks (opposite side's bids at 100−p).
+
+	Rewritten 2026-06-11 (spec §5.7): the original suite walked same-side
+	ladders as asks, encoding the bids-as-asks bug.  Each original case is
+	preserved on a corrected two-sided ladder: the opposite bid p' = 1 − ask
+	reproduces the same expected prices.
+	"""
+
 	def test_walk_book_full_fill_single_level(self):
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[],
-		)
+		# NO bid 0.50×10 implies YES ask 50¢×10.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 10)])
 		result = snap.walk_book("yes", 5)
 		assert result.fill_size == 5
 		assert result.blended_price_cents == 50
 		assert result.slippage_cents == 0
 
 	def test_walk_book_crossing_levels(self):
-		# 3@0.50 + 2@0.55, want 5
-		# cost = 3*50 + 2*55 = 150 + 110 = 260
-		# blended = 260/5 = 52
-		# slippage = 52 - 50 = 2
+		# NO bids 0.45×10 (→ask 55¢), 0.50×3 (→ask 50¢, best).
+		# Walk 5: 3@50 + 2@55 = 260 → blended 52, slippage +2.
 		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 3), (0.55, 10)],
-			no_levels=[],
+			yes_levels=[],
+			no_levels=[(0.45, 10), (0.50, 3)],
 		)
 		result = snap.walk_book("yes", 5)
 		assert result.fill_size == 5
@@ -71,11 +77,8 @@ class TestOrderbookSnapshotWalkBook:
 		assert result.slippage_cents == 2
 
 	def test_walk_book_partial_fill(self):
-		# only 3 available, want 10
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 3)],
-			no_levels=[],
-		)
+		# Only 3 implied-ask contracts available, want 10.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 3)])
 		result = snap.walk_book("yes", 10)
 		assert result.fill_size == 3
 		assert pytest.approx(result.fill_pct, abs=0.01) == 0.3
@@ -86,21 +89,17 @@ class TestOrderbookSnapshotWalkBook:
 		assert result.fill_size == 0
 		assert result.blended_price_cents == 0
 
-	def test_walk_book_no_side(self):
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.50, 10)],
-			no_levels=[],
-		)
+	def test_walk_book_empty_opposite_side(self):
+		# Buying NO crosses YES bids; none resting → no implied liquidity,
+		# even though the NO side itself has resting bids.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.50, 10)])
 		result = snap.walk_book("no", 5)
 		assert result.fill_size == 0
 		assert result.blended_price_cents == 0
 
 	def test_walk_book_float_price_rounding(self):
-		# 0.29 * 100 = 28.999... should round to 29
-		snap = OrderbookSnapshot(
-			yes_levels=[(0.29, 10)],
-			no_levels=[],
-		)
+		# NO bid 0.71 → implied YES ask 100 − round(71.0) = 29¢.
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.71, 10)])
 		result = snap.walk_book("yes", 5)
 		assert result.blended_price_cents == 29
 
@@ -270,3 +269,143 @@ class TestClearResetsFirstSeen:
 		assert ms.update_price("KXFOO-T1", 52) is True, (
 			"post-clear, the ticker must be treated as first-seen again"
 		)
+
+
+class TestImpliedAsks:
+	"""implied_asks: the single source of truth for crossing the book.
+
+	yes_levels/no_levels are resting BIDS (Kalshi wire shape, ascending).
+	Buying side S crosses the OPPOSITE side's bids: a bid at p implies an
+	ask at 100−p, so the cheapest ask comes from the HIGHEST opposite bid.
+	"""
+
+	def test_yes_asks_derived_from_no_bids_cheapest_first(self):
+		# NO bids: penny floor 1¢×500, best 45¢×8.
+		# Implied YES asks: 100−45=55¢×8 (cheapest), then 100−1=99¢×500.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.50, 10)],
+			no_levels=[(0.01, 500), (0.45, 8)],
+		)
+		assert snap.implied_asks("yes") == [(55, 8), (99, 500)]
+
+	def test_no_asks_derived_from_yes_bids(self):
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.50, 10)],
+			no_levels=[(0.45, 8)],
+		)
+		assert snap.implied_asks("no") == [(50, 10), (99, 900)]
+
+	def test_unsorted_input_still_cheapest_first(self):
+		# Defensive: implied_asks must sort, not trust input order.
+		snap = OrderbookSnapshot(
+			yes_levels=[],
+			no_levels=[(0.45, 8), (0.01, 500)],
+		)
+		assert snap.implied_asks("yes") == [(55, 8), (99, 500)]
+
+	def test_empty_opposite_side_no_implied_liquidity(self):
+		snap = OrderbookSnapshot(yes_levels=[(0.50, 10)], no_levels=[])
+		assert snap.implied_asks("yes") == []
+		# the populated YES side still implies NO asks
+		assert snap.implied_asks("no") == [(50, 10)]
+
+
+class TestBestAccessors:
+	def _two_sided(self) -> OrderbookSnapshot:
+		# Real shape from the June 2026 live run (trade 98 reconstruction):
+		# best_yes_bid=87 (depth 497), best_no_bid=12 → spread 1¢.
+		return OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+
+	def test_best_bids_are_highest_own_side(self):
+		snap = self._two_sided()
+		assert snap.best_yes_bid == 87
+		assert snap.best_no_bid == 12
+
+	def test_best_asks_are_implied_from_opposite(self):
+		snap = self._two_sided()
+		assert snap.best_yes_ask == 88   # 100 − best_no_bid(12)
+		assert snap.best_no_ask == 13    # 100 − best_yes_bid(87)
+
+	def test_empty_sides_return_none(self):
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.12, 60)])
+		assert snap.best_yes_bid is None    # own side empty
+		assert snap.best_no_ask is None     # needs yes_levels
+		assert snap.best_no_bid == 12
+		assert snap.best_yes_ask == 88
+
+
+class TestMarketStateBidAskAccessors:
+	def _seeded(self) -> MarketState:
+		ms = MarketState()
+		ms.register_ticker("T")
+		ms.seed_orderbook("T", OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		))
+		return ms
+
+	def test_get_yes_ask_is_implied_from_best_no_bid(self):
+		# Pre-fix this returned yes_levels[0] = the 1¢ penny floor — the
+		# root cause of the entry_best=1 recording corruption.
+		assert self._seeded().get_yes_ask("T") == 88
+
+	def test_get_yes_bid_is_best_own_side_bid(self):
+		# Pre-fix this returned 100 − no_levels[0] ≈ 99.
+		assert self._seeded().get_yes_bid("T") == 87
+
+	def test_unknown_ticker_returns_none(self):
+		ms = MarketState()
+		assert ms.get_yes_ask("X") is None
+		assert ms.get_yes_bid("X") is None
+
+	def test_empty_no_side_means_no_yes_ask(self):
+		ms = MarketState()
+		ms.register_ticker("T")
+		ms.seed_orderbook("T", OrderbookSnapshot(
+			yes_levels=[(0.87, 497)], no_levels=[],
+		))
+		assert ms.get_yes_ask("T") is None
+		assert ms.get_yes_bid("T") == 87
+
+
+class TestLiveFillReproduction:
+	"""Acceptance gate (spec §5.3): corrected book reads must reproduce REAL
+	Kalshi fills from the June 2026 debut-fade live run exactly.
+
+	Provenance: reports/slippage-fidelity-findings-202606.md (§Mechanism) +
+	reports/slippage_table_v2_20260610.csv.  Prices are from the live data;
+	depths are representative except where noted.
+	"""
+
+	def test_trade_96_no_side_fill_at_25c(self):
+		# Trade 96 (KXSOL15M-26JUN062015-15, side=no, kalshi_verified):
+		# best_yes_bid=75¢ → implied NO ask 100−75=25¢; Kalshi blended
+		# fill was exactly 25¢ × 1 contract.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 1000), (0.75, 40)],
+			no_levels=[(0.01, 800), (0.20, 25)],
+		)
+		assert snap.best_no_ask == 25
+		fill = snap.walk_book("no", 1)
+		assert fill.fill_size == 1
+		assert fill.blended_price_cents == 25
+		assert fill.slippage_cents == 0
+
+	def test_trade_98_no_side_fill_at_13c(self):
+		# Trade 98 (KXSOL15M-26JUN062045-45, side=no, recon_reason=ok):
+		# reconstructed best_yes_bid=87¢ (real top depth 497),
+		# best_no_bid=12¢ → real spread 1¢; implied NO ask 13¢;
+		# Kalshi blended fill was exactly 13¢ × 2 contracts, slippage 0.
+		snap = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+		assert snap.best_no_ask == 13
+		assert snap.spread == 1
+		fill = snap.walk_book("no", 2)
+		assert fill.fill_size == 2
+		assert fill.blended_price_cents == 13
+		assert fill.slippage_cents == 0
