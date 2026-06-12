@@ -2,9 +2,10 @@
 
 Pins the two dispatch wire-up obligations:
 
-1. Pre-place ``store.record_intent`` receives the top-of-book best snapshot
-   (in cents) for the side being bought, plus the OrderRequest's actual
-   ``limit_price_cents``. Empty levels → ``entry_best_price_cents=None``
+1. Pre-place ``store.record_intent`` receives the top-of-book implied ASK
+   (in cents) for the side being bought — ``100 − best opposite-side bid``
+   (yes_levels/no_levels are resting BIDS) — plus the OrderRequest's actual
+   ``limit_price_cents``. Empty OPPOSITE side → ``entry_best_price_cents=None``
    (spec §4.3 "not measurable", never 0).
 2. The filled branch forwards ``_result.market_impact_cents`` and
    ``_result.limit_slippage_cents`` from the executor through to
@@ -128,9 +129,11 @@ class _CapturingStore:
 
 @pytest.mark.asyncio
 async def test_record_intent_receives_yes_book_best_in_cents() -> None:
-	"""yes-side entry → entry_best_price_cents from yes_levels[0][0] in cents
-	(int(round(dollars * 100))). The reference lands on the pending row so
-	transition_pending_to_open can compute market_impact_cents at fill."""
+	"""yes-side entry → entry_best_price_cents = best implied YES ask in
+	cents: 100 − best NO bid (no_levels are resting BIDS; default fixture
+	best NO bid = 58 → implied ask 42). The reference lands on the pending
+	row so transition_pending_to_open can compute market_impact_cents at
+	fill."""
 	store = _CapturingStore()
 
 	async def _fake_place(req: OrderRequest) -> OrderResult:
@@ -149,15 +152,17 @@ async def test_record_intent_receives_yes_book_best_in_cents() -> None:
 		allowed_size=7,
 	)
 
-	assert store.intent_kwargs.get("entry_best_price_cents") == 41, (
-		"yes-side entry must capture top-of-book yes_levels[0][0] × 100 (41c)"
+	assert store.intent_kwargs.get("entry_best_price_cents") == 42, (
+		"yes-side entry must capture the implied YES ask: 100 − best NO "
+		"bid (58c) = 42c — NOT the same-side penny floor"
 	)
 
 
 @pytest.mark.asyncio
 async def test_record_intent_receives_no_book_best_in_cents() -> None:
-	"""no-side entry → entry_best_price_cents from no_levels[0][0] in cents.
-	Independent of yes-side (which is irrelevant for a NO buy's reference)."""
+	"""no-side entry → entry_best_price_cents = best implied NO ask in
+	cents: 100 − best YES bid (default fixture best YES bid = 41 → implied
+	ask 59). A NO buy crosses the YES side's resting bids."""
 	store = _CapturingStore()
 
 	async def _fake_place(req: OrderRequest) -> OrderResult:
@@ -176,14 +181,17 @@ async def test_record_intent_receives_no_book_best_in_cents() -> None:
 		allowed_size=7,
 	)
 
-	assert store.intent_kwargs.get("entry_best_price_cents") == 57
+	assert store.intent_kwargs.get("entry_best_price_cents") == 59
 
 
 @pytest.mark.asyncio
-async def test_record_intent_empty_levels_yields_none() -> None:
-	"""Empty book levels → entry_best_price_cents=None per spec §4.3
-	("not measurable", NEVER 0). Covers any path where the orderbook is
-	thin / missing at the pre-place call moment."""
+async def test_record_intent_empty_opposite_levels_yields_none() -> None:
+	"""Empty OPPOSITE-side levels → entry_best_price_cents=None per spec
+	§4.3 ("not measurable", NEVER 0). The implied ask for a yes-side buy
+	comes from the NO side's resting bids (100 − best NO bid), so the
+	trigger condition is the OPPOSITE side being empty — an empty same
+	side is irrelevant. Covers any path where the orderbook is thin /
+	missing at the pre-place call moment."""
 	store = _CapturingStore()
 
 	async def _fake_place(req: OrderRequest) -> OrderResult:
@@ -194,7 +202,7 @@ async def test_record_intent_empty_levels_yields_none() -> None:
 
 	await _handle_enter(
 		_entry_signal(side="yes"),
-		_ctx_with_orderbook(yes_levels=[]),  # empty yes book
+		_ctx_with_orderbook(no_levels=[]),  # empty OPPOSITE (no) book
 		store,
 		{"_metrics": Metrics(), "_exec_cfg": _exec_cfg()},
 		executor,
@@ -206,6 +214,36 @@ async def test_record_intent_empty_levels_yields_none() -> None:
 		"record_intent must always be called with the kwarg present"
 	)
 	assert store.intent_kwargs["entry_best_price_cents"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_intent_spec_worked_example_deep_no_book() -> None:
+	"""Spec worked example: yes-side entry against
+	no_levels=[(0.01, 800), (0.75, 40)] → best NO bid is 75c (best bid is
+	the HIGHEST, i.e. the LAST ascending level — never levels[0], the
+	penny floor) → implied YES ask = 100 − 75 = 25."""
+	store = _CapturingStore()
+
+	async def _fake_place(req: OrderRequest) -> OrderResult:
+		return _filled_result()
+
+	executor = MagicMock()
+	executor.place = _fake_place
+
+	await _handle_enter(
+		_entry_signal(side="yes"),
+		_ctx_with_orderbook(no_levels=[(0.01, 800), (0.75, 40)]),
+		store,
+		{"_metrics": Metrics(), "_exec_cfg": _exec_cfg()},
+		executor,
+		now=_NOW,
+		allowed_size=7,
+	)
+
+	assert store.intent_kwargs.get("entry_best_price_cents") == 25, (
+		"implied YES ask must come from the HIGHEST NO bid (75c → 25c), "
+		"not the 1c penny floor (which would imply 99c)"
+	)
 
 
 @pytest.mark.asyncio

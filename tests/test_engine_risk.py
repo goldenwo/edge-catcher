@@ -845,6 +845,41 @@ class TestEquityComputation:
 		mtm = gate._mark_position_cents(pos, ms)
 		assert mtm == 5 * 55  # 275c
 
+	def test_mark_position_at_best_own_side_bid(self) -> None:
+		# A long-yes position marks at the BEST yes bid (87¢), not the 1¢
+		# penny floor (pre-fix levels[0] read).  Conservative = what we
+		# could sell at = highest resting own-side bid.
+		ticker = "T"
+		ms = MarketState()
+		book = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+		ms.seed_orderbook(ticker, book)
+
+		pos = OpenPosition(ticker=ticker, side="yes", fill_size=2, blended_entry_cents=13)
+		conn = _make_conn()
+		gate, _, _, _ = _make_gate(cash_cents=0, conn=conn)
+
+		assert gate._mark_position_cents(pos, ms) == 2 * 87
+
+	def test_mark_no_position_at_best_no_bid(self) -> None:
+		# Symmetric no-side case: same book, marks at the best NO bid
+		# (12¢), not the 0.01 penny floor.
+		ticker = "T"
+		ms = MarketState()
+		book = OrderbookSnapshot(
+			yes_levels=[(0.01, 900), (0.87, 497)],
+			no_levels=[(0.01, 500), (0.12, 60)],
+		)
+		ms.seed_orderbook(ticker, book)
+
+		pos = OpenPosition(ticker=ticker, side="no", fill_size=2, blended_entry_cents=13)
+		conn = _make_conn()
+		gate, _, _, _ = _make_gate(cash_cents=0, conn=conn)
+
+		assert gate._mark_position_cents(pos, ms) == 2 * 12
+
 	def test_fallback_to_cost_basis_when_book_empty(self) -> None:
 		ticker = "TEST-T50"
 		ms = MarketState()

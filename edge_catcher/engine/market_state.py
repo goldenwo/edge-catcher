@@ -49,9 +49,10 @@ class FillResult:
 class OrderbookSnapshot:
 	"""Snapshot of a market's orderbook.
 
-	Levels are (price_dollars: float, quantity: int) tuples sorted from
-	best (lowest ask) to worst.  All prices in dollars to match Kalshi API
-	format; `walk_book` converts to cents internally.
+	Levels are (price_dollars: float, quantity: int) resting BIDS per side
+	(Kalshi wire shape), sorted ascending — the BEST bid is the LAST
+	element; levels[0] is the penny floor.  Never read levels[0] as an
+	ask: cross the book via implied_asks()/best_* accessors.
 	"""
 	yes_levels: list[tuple[float, int]]
 	no_levels: list[tuple[float, int]]
@@ -61,23 +62,67 @@ class OrderbookSnapshot:
 		"""Total resting quantity across both sides."""
 		return sum(q for _, q in self.yes_levels) + sum(q for _, q in self.no_levels)
 
+	def implied_asks(self, side: str) -> list[tuple[int, int]]:
+		"""Implied ask ladder (price_cents, qty) to BUY *side*, cheapest first.
+
+		yes_levels/no_levels hold resting BIDS (Kalshi wire shape, dollars,
+		ascending — best bid LAST).  Buying side S crosses the OPPOSITE
+		side's bids: an opposite bid at price p implies an ask at 100 − p,
+		so the cheapest ask comes from the highest opposite bid.  Empty
+		opposite side ⇒ no implied liquidity ⇒ [].
+		"""
+		opposite = self.no_levels if side == "yes" else self.yes_levels
+		return [
+			(100 - round(p * 100), q)
+			for p, q in sorted(opposite, key=lambda lvl: lvl[0], reverse=True)
+		]
+
+	@property
+	def best_yes_bid(self) -> int | None:
+		"""Best (highest) resting YES bid in cents, or None if side empty."""
+		if not self.yes_levels:
+			return None
+		return round(max(p for p, _ in self.yes_levels) * 100)
+
+	@property
+	def best_no_bid(self) -> int | None:
+		"""Best (highest) resting NO bid in cents, or None if side empty."""
+		if not self.no_levels:
+			return None
+		return round(max(p for p, _ in self.no_levels) * 100)
+
+	@property
+	def best_yes_ask(self) -> int | None:
+		"""Best implied YES ask in cents (100 − best NO bid), or None."""
+		no_bid = self.best_no_bid
+		return None if no_bid is None else 100 - no_bid
+
+	@property
+	def best_no_ask(self) -> int | None:
+		"""Best implied NO ask in cents (100 − best YES bid), or None."""
+		yes_bid = self.best_yes_bid
+		return None if yes_bid is None else 100 - yes_bid
+
 	@property
 	def spread(self) -> int:
-		"""Bid-ask spread in cents: best_yes_ask + best_no_ask - 100.
+		"""Bid-ask spread in cents: best_yes_ask + best_no_ask − 100.
 
-		Returns 0 if either side is empty.
+		Equivalently 100 − (best_yes_bid + best_no_bid): the no-arb gap
+		between the implied asks.  Non-negative on a sane book.
+		Returns 0 if either side is empty (unknown, prior sentinel kept).
 		"""
-		if not self.yes_levels or not self.no_levels:
+		yes_bid = self.best_yes_bid
+		no_bid = self.best_no_bid
+		if yes_bid is None or no_bid is None:
 			return 0
-		best_yes_ask = round(self.yes_levels[0][0] * 100)
-		best_no_ask = round(self.no_levels[0][0] * 100)
-		return best_yes_ask + best_no_ask - 100
+		return 100 - (yes_bid + no_bid)
 
 	def walk_book(self, side: str, size: int) -> FillResult:
-		"""Walk the book for *side* ('yes' or 'no'), accumulating fills.
+		"""Walk the implied-ask ladder for *side*, accumulating fills.
 
-		Levels are consumed best-to-worst.  Returns a FillResult describing
-		the simulated fill.  If the book is empty returns fill_size=0.
+		Consumes ``implied_asks(side)`` cheapest-first (the opposite side's
+		resting bids, converted at 100 − p).  Returns a FillResult in cents.
+		If there is no implied liquidity returns fill_size=0.
 
 		Args:
 			side: 'yes' or 'no'
@@ -86,7 +131,7 @@ class OrderbookSnapshot:
 		Returns:
 			FillResult with fill details in cents.
 		"""
-		levels = self.yes_levels if side == "yes" else self.no_levels
+		levels = self.implied_asks(side)
 		if not levels:
 			return FillResult(
 				fill_size=0,
@@ -96,15 +141,14 @@ class OrderbookSnapshot:
 				intended_size=size,
 			)
 
-		best_price_cents = round(levels[0][0] * 100)
+		best_price_cents = levels[0][0]
 		remaining = size
 		total_cost_cents = 0
 		total_filled = 0
 
-		for price_dollars, qty in levels:
+		for price_cents, qty in levels:
 			if remaining <= 0:
 				break
-			price_cents = round(price_dollars * 100)
 			take = min(qty, remaining)
 			total_cost_cents += take * price_cents
 			total_filled += take
@@ -263,21 +307,21 @@ class MarketState:
 		return self._orderbooks.get(ticker)
 
 	def get_yes_ask(self, ticker: str) -> int | None:
-		"""Best YES ask in cents from the current orderbook, or None if unknown.
+		"""Best implied YES ask in cents (100 − best NO bid), or None if unknown.
 
 		Preferred over reading trade WS `yes_price` — trade messages carry the
 		executed price of a completed trade, which can be off-book."""
 		ob = self._orderbooks.get(ticker)
-		if ob is None or not ob.yes_levels:
+		if ob is None:
 			return None
-		return round(ob.yes_levels[0][0] * 100)
+		return ob.best_yes_ask
 
 	def get_yes_bid(self, ticker: str) -> int | None:
-		"""Best YES bid in cents (derived from best NO ask), or None if unknown."""
+		"""Best resting YES bid in cents, or None if unknown."""
 		ob = self._orderbooks.get(ticker)
-		if ob is None or not ob.no_levels:
+		if ob is None:
 			return None
-		return 100 - round(ob.no_levels[0][0] * 100)
+		return ob.best_yes_bid
 
 	def apply_orderbook_delta(
 		self,
@@ -290,7 +334,7 @@ class MarketState:
 
 		Adds *delta* to the quantity at *price* on *side* ('yes' or 'no').
 		Levels with quantity <= 0 are removed.  Levels are kept sorted
-		best-to-worst (ascending price for asks).
+		(ascending price; resting bids — best bid last).
 
 		Args:
 			ticker: Market ticker.
@@ -325,7 +369,7 @@ class MarketState:
 		if not updated and delta > 0:
 			new_levels.append((price, delta))
 
-		# Sort ascending (best ask first)
+		# Sort ascending (wire shape: bids low→high, best bid last)
 		new_levels.sort(key=lambda x: x[0])
 
 		if side == "yes":

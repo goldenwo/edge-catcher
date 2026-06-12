@@ -59,11 +59,13 @@ def walk_book_with_ceiling(
 	max_slippage_cents: int,
 	max_cost_cents: int | None = None,
 ) -> FillResult:
-	"""Walk the book with a slippage ceiling.
+	"""Walk the implied-ask ladder with a slippage ceiling.
 
-	Same as OrderbookSnapshot.walk_book but stops consuming levels once
-	the price exceeds best_price + max_slippage_cents.  The ceiling is
-	inclusive — the best price is always eligible.
+	Same as OrderbookSnapshot.walk_book: consumes the implied asks for
+	*side* (the OPPOSITE side's resting bids at 100 − p) but stops
+	consuming levels once the price exceeds best_price +
+	max_slippage_cents.  The ceiling is inclusive — the best price is
+	always eligible.
 
 	Args:
 		book:               Orderbook snapshot.
@@ -83,7 +85,7 @@ def walk_book_with_ceiling(
 	Returns:
 		FillResult with intended_size set to *size*.
 	"""
-	levels = book.yes_levels if side == "yes" else book.no_levels
+	levels = book.implied_asks(side)
 	if not levels or size <= 0:
 		return FillResult(
 			fill_size=0,
@@ -93,7 +95,7 @@ def walk_book_with_ceiling(
 			intended_size=size,
 		)
 
-	best_price_cents = round(levels[0][0] * 100)
+	best_price_cents = levels[0][0]
 	ceiling_cents = best_price_cents + max_slippage_cents
 	remaining = size
 	remaining_budget = max_cost_cents  # None = unlimited
@@ -107,12 +109,11 @@ def walk_book_with_ceiling(
 	fills: list[FillEvent] = []
 	total_filled = 0
 
-	for price_dollars, qty in levels:
+	for price_cents, qty in levels:
 		if remaining <= 0:
 			break
 		if remaining_budget is not None and remaining_budget <= 0:
 			break
-		price_cents = round(price_dollars * 100)
 		if price_cents > ceiling_cents:
 			break
 		take = min(qty, remaining)
@@ -220,7 +221,9 @@ def resolve_fill(
 	    from entry_price (see two-gate stale-book rule below).
 
 	Three fill-gate cases:
-	  1. Empty fill side → no one is offering on the side we want to buy.
+	  1. Empty implied-ask ladder for the fill side (the OPPOSITE side has
+	     no resting bids at 100 − p) → no one is offering on the side we
+	     want to buy.
 	     Skipped as FillSkip("empty_book") when require_fresh_book=True.
 	     Reason: the "entry_price fallback" path produces phantom fills when
 	     the ticker's reported yes_ask is a derived/estimated value not a
@@ -245,11 +248,11 @@ def resolve_fill(
 		log.debug("Skip: budget %dc too small for %dc entry", risk_cents, entry_price_cents)
 		return FillSkip(reason="budget_too_small")
 
-	levels = book.yes_levels if side == "yes" else book.no_levels
+	levels = book.implied_asks(side)
 	book_empty = not levels
 	book_populated_but_stale = False
 	if not book_empty:
-		best_book_cents = round(levels[0][0] * 100)
+		best_book_cents = levels[0][0]
 		# Simple absolute threshold: best price > 10c from entry_price = stale.
 		# A tighter relative-divergence gate was tried but regressed legitimate
 		# walker-walks-down-to-real-book opportunities; the absolute 10c rule

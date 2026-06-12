@@ -1,2 +1,2 @@
-{"recv_seq": 1, "recv_ts": "2026-04-15T12:00:00+00:00", "source": "ws", "payload": {"type": "orderbook_snapshot", "msg": {"market_ticker": "SYN-TEST-T1", "yes": [["0.50", 100]], "no": [["0.48", 50]]}}}
+{"recv_seq": 1, "recv_ts": "2026-04-15T12:00:00+00:00", "source": "ws", "payload": {"type": "orderbook_snapshot", "msg": {"market_ticker": "SYN-TEST-T1", "yes": [["0.48", 50]], "no": [["0.50", 100]]}}}
 {"recv_seq": 2, "recv_ts": "2026-04-15T12:00:01+00:00", "source": "ws", "payload": {"type": "ticker", "msg": {"market_ticker": "SYN-TEST-T1", "yes_ask_dollars": "0.5000", "yes_bid_dollars": "0.4800"}}}

@@ -86,14 +86,15 @@ async def test_blended_zero_sentinel_preserved():
 	0-sentinel to fall back to entry_price at close time.
 
 	Previously this test asserted the sentinel only inside ``if result.status
-	== "filled"`` — a refactor that made the executor always reject on empty
-	yes_levels would let the test pass vacuously (no assertion runs). Now
-	BOTH branches assert: filled MUST be 0; rejected MUST carry an expected
-	reason. Any other status (e.g. pending — a LIVE-only outcome) fails.
+	== "filled"`` — a refactor that made the executor always reject on an
+	empty implied-ask ladder would let the test pass vacuously (no assertion
+	runs). Now BOTH branches assert: filled MUST be 0; rejected MUST carry an
+	expected reason. Any other status (e.g. pending — a LIVE-only outcome) fails.
 	"""
 	cfg = _canned_config()
 	cfg["sizing"]["require_fresh_book"] = False
-	book = _canned_book(yes_levels=[])
+	# Empty NO side = no implied YES asks = nobody offering the side we buy.
+	book = _canned_book(no_levels=[])
 	ms = _StubMarketState(book)
 	req = _canned_request(side="yes", limit=42)
 
@@ -120,7 +121,7 @@ async def test_blended_zero_sentinel_preserved():
 		)
 	elif result.status == "rejected":
 		assert result.rejection_reason in {"stale_book", "empty_book"}, (
-			f"empty yes_levels rejection must surface a defined reason — "
+			f"empty implied-ask-ladder rejection must surface a defined reason — "
 			f"got {result.rejection_reason!r}"
 		)
 		# Rejected path also leaves both metrics None per §5.1 (already covered
@@ -138,7 +139,8 @@ async def test_blended_zero_sentinel_preserved():
 @pytest.mark.asyncio
 async def test_FillSkip_translates_to_rejected_with_reason():
 	cfg = _canned_config()
-	book = _canned_book(yes_levels=[])
+	# Empty NO side = no implied YES asks → FillSkip(empty_book).
+	book = _canned_book(no_levels=[])
 	ms = _StubMarketState(book)
 	req = _canned_request(side="yes", limit=42)
 
@@ -196,7 +198,8 @@ async def test_rejected_entry_leaves_dual_slippage_None():
 	"""When place() rejects (FillSkip → rejected), both new fields remain None.
 	Covers stale-book / empty-book / below-min via the FillSkip codepath."""
 	cfg = _canned_config()
-	book = _canned_book(yes_levels=[])
+	# Empty NO side = no implied YES asks → FillSkip(empty_book).
+	book = _canned_book(no_levels=[])
 	ms = _StubMarketState(book)
 	req = _canned_request(side="yes", limit=42)
 

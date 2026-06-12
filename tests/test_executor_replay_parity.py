@@ -430,24 +430,26 @@ def _reconstruct_fills(
 ) -> list[dict[str, int]]:
 	"""Reproduce the per-level fills ``walk_book_with_ceiling`` consumed.
 
-	Walks the same side's levels FIFO taking ``min(level_qty, remaining)``
-	until ``fill_size`` is satisfied — the exact consumption order
-	``walk_book_with_ceiling`` uses. Prices are in cents (``round(p*100)``),
-	matching the FillEvent shape Kalshi returns and ``blended_price_cents``
-	consumes. Asserts the reconstructed fills re-blend to the SAME blended
-	price the book-walk produced (defence: a reconstruction that diverged
-	would silently feed the live run a different market).
+	Walks the side's implied-ask ladder (``snapshot.implied_asks`` — the
+	opposite side's resting bids at 100 − p, already in cents, cheapest
+	first) FIFO taking ``min(level_qty, remaining)`` until ``fill_size`` is
+	satisfied — the exact consumption order ``walk_book_with_ceiling``
+	uses. Prices match the FillEvent shape Kalshi returns and
+	``blended_price_cents`` consumes. Asserts the reconstructed fills
+	re-blend to the SAME blended price the book-walk produced (defence: a
+	reconstruction that diverged would silently feed the live run a
+	different market).
 	"""
-	levels = snapshot.yes_levels if side == "yes" else snapshot.no_levels
+	levels = snapshot.implied_asks(side)
 	fills: list[dict[str, int]] = []
 	remaining = fill_size
-	for price_dollars, qty in levels:
+	for price_cents, qty in levels:
 		if remaining <= 0:
 			break
 		take = min(qty, remaining)
 		if take <= 0:
 			continue
-		fills.append({"price": round(price_dollars * 100), "size": take})
+		fills.append({"price": price_cents, "size": take})
 		remaining -= take
 	from edge_catcher.engine.fill_math import blended_price_cents
 
