@@ -895,7 +895,7 @@ class Gate:
 	# ------------------------------------------------------------------
 
 	def _compute_equity(self, ctx: RiskContext) -> int:
-		"""Cash + conservative MTM of open positions (long@bid, short@ask)."""
+		"""Cash + conservative MTM of open positions (marked at best own-side bid)."""
 		cash = self._bankroll.cash_cents()
 		mtm = sum(
 			self._mark_position_cents(pos, ctx.market_state)

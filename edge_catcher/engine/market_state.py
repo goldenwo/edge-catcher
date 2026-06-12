@@ -49,9 +49,10 @@ class FillResult:
 class OrderbookSnapshot:
 	"""Snapshot of a market's orderbook.
 
-	Levels are (price_dollars: float, quantity: int) tuples sorted from
-	best (lowest ask) to worst.  All prices in dollars to match Kalshi API
-	format; `walk_book` converts to cents internally.
+	Levels are (price_dollars: float, quantity: int) resting BIDS per side
+	(Kalshi wire shape), sorted ascending — the BEST bid is the LAST
+	element; levels[0] is the penny floor.  Never read levels[0] as an
+	ask: cross the book via implied_asks()/best_* accessors.
 	"""
 	yes_levels: list[tuple[float, int]]
 	no_levels: list[tuple[float, int]]
@@ -333,7 +334,7 @@ class MarketState:
 
 		Adds *delta* to the quantity at *price* on *side* ('yes' or 'no').
 		Levels with quantity <= 0 are removed.  Levels are kept sorted
-		best-to-worst (ascending price for asks).
+		(ascending price; resting bids — best bid last).
 
 		Args:
 			ticker: Market ticker.
@@ -368,7 +369,7 @@ class MarketState:
 		if not updated and delta > 0:
 			new_levels.append((price, delta))
 
-		# Sort ascending (best ask first)
+		# Sort ascending (wire shape: bids low→high, best bid last)
 		new_levels.sort(key=lambda x: x[0])
 
 		if side == "yes":
