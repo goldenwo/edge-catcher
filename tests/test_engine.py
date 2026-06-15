@@ -773,6 +773,101 @@ class TestHandleTradeMsg:
 		assert strat.observed[0] == ("no", 136)
 
 	@pytest.mark.asyncio
+	@pytest.mark.parametrize(
+		"msg_data, expected",
+		[
+			pytest.param(
+				{
+					"market_ticker": "KXBTC15M-26APR10-T100",
+					"yes_price_dollars": "0.60",
+					"count_fp": "3.00",
+					"taker_side": "yes",
+				},
+				("yes", 3),
+				id="v2-dollar-keys",
+			),
+			pytest.param(
+				{
+					"market_ticker": "KXBTC15M-26APR10-T100",
+					"yes_price": 0.60,
+					"count": 3,
+					"taker_side": "yes",
+				},
+				("yes", 3),
+				id="legacy-keys",
+			),
+			pytest.param(
+				{
+					"market_ticker": "KXBTC15M-26APR10-T100",
+					"yes_price_dollars": "0.50",
+					"count_fp": "1.99",
+					"taker_side": "yes",
+				},
+				("yes", 1),
+				id="v2-fractional-count-fp-truncates",
+			),
+		],
+	)
+	async def test_handles_v2_and_legacy_price_count_keys(self, setup, msg_data, expected):
+		"""Trade-tick fires for BOTH the current Kalshi v2 frame shape
+		(`yes_price_dollars` dollar-string + `count_fp` fixed-point string) and
+		the legacy shape (`yes_price` float + `count` int).
+
+		Regression: _handle_trade_msg read only the legacy `yes_price` / `count`
+		keys, so every v2 frame — which carries `yes_price_dollars` / `count_fp`
+		and NO `yes_price` — hit the `yes_price_raw is None` guard and returned.
+		The trade-tick path never ran, so taker_side-gated strategies received
+		ZERO trade ticks in replay AND the live paper trader. The fix mirrors the
+		already-migrated _handle_ticker_msg (`yes_ask_dollars or yes_ask`).
+		"""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg = {"type": "trade", "msg": msg_data}
+
+		await _handle_trade_msg(
+			msg, config, ms, store, strategies, strat_by_series, pending_states, set(),
+			PaperExecutor(market_state=ms, config=config), now=_now(),
+		)
+
+		assert len(strat.observed) == 1
+		assert strat.observed[0] == expected
+
+	@pytest.mark.asyncio
+	@pytest.mark.parametrize(
+		"field, expected",
+		[
+			pytest.param("yes_price_dollars", [], id="price-overflow-skipped"),
+			pytest.param("count_fp", [("yes", None)], id="count-overflow-none"),
+		],
+	)
+	async def test_overflow_values_are_caught_not_raised(self, setup, field, expected):
+		"""A crafted/garbage v2 string like "1e999" parses to inf; int(round(inf*100))
+		(price) and int(inf) (count) raise OverflowError, which is NOT a subclass of
+		(TypeError, ValueError). WS frame fields are externally controlled and v2
+		string fields now reach this parse, so the guards must catch OverflowError
+		and degrade gracefully at the parse site — rather than let it fall through to
+		dispatch's broad handler (per-frame log.exception noise, and a recoverable
+		trade with a valid price silently dropped). Price overflow → frame skipped;
+		count overflow is non-fatal → tick fires with trade_count=None.
+		"""
+		ms, store, strategies, strat_by_series, pending_states, config, strat = setup
+		msg_data = {
+			"market_ticker": "KXBTC15M-26APR10-T100",
+			"yes_price_dollars": "0.50",
+			"count_fp": "1.00",
+			"taker_side": "yes",
+		}
+		msg_data[field] = "1e999"
+		msg = {"type": "trade", "msg": msg_data}
+
+		# Must NOT raise OverflowError.
+		await _handle_trade_msg(
+			msg, config, ms, store, strategies, strat_by_series, pending_states, set(),
+			PaperExecutor(market_state=ms, config=config), now=_now(),
+		)
+
+		assert strat.observed == expected
+
+	@pytest.mark.asyncio
 	async def test_bid_ask_sourced_from_orderbook_not_trade(self, setup):
 		"""TickContext bid/ask come from the orderbook, not the trade price.
 

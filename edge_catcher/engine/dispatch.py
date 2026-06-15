@@ -1454,22 +1454,32 @@ async def _handle_trade_msg(
 	if market_state.get_price_history(ticker) is None:
 		return
 
-	yes_price_raw = data.get("yes_price")
+	# Kalshi WS sends the executed trade price as 'yes_price_dollars' (dollar
+	# string, e.g. "0.7000") or 'yes_price' (legacy float). Mirror the v2/legacy
+	# fallback in _handle_ticker_msg so current v2 trade frames aren't dropped.
+	yes_price_raw = data.get("yes_price_dollars") or data.get("yes_price")
 	if yes_price_raw is None:
 		return
 
 	try:
+		# OverflowError guards a crafted/garbage "1e999"-style value: float() yields
+		# inf and int(round(inf)) raises OverflowError, which is NOT a subclass of
+		# (TypeError, ValueError). WS fields are externally controlled; catching here
+		# skips the bad frame cleanly instead of letting it fall to dispatch's broad
+		# handler (per-frame log.exception noise + dropping a recoverable trade).
 		trade_price_cents = int(round(float(yes_price_raw) * 100))
-	except (TypeError, ValueError):
+	except (TypeError, ValueError, OverflowError):
 		return
 	if not (1 <= trade_price_cents <= 99):
 		return
 
 	taker_side = data.get("taker_side")
-	count_raw = data.get("count")
+	# 'count_fp' is the v2 fixed-point count string (e.g. "1.39"); 'count' is the
+	# legacy int. The int(float(...)) parse below handles both shapes.
+	count_raw = data.get("count_fp") or data.get("count")
 	try:
 		trade_count = int(float(count_raw)) if count_raw is not None else None
-	except (TypeError, ValueError):
+	except (TypeError, ValueError, OverflowError):  # inf from "1e999"-style count
 		trade_count = None
 
 	# Record the trade price in history (legitimate event data) before the
