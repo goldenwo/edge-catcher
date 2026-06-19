@@ -1564,6 +1564,9 @@ async def run_engine(
 	# build_ohlc_provider returns None and every strategy.ohlc is left exactly as
 	# constructed (§9 G-parity). Built AFTER the no-strategies early return above
 	# so it never leaks on that path; closed in the shutdown finally (step 6).
+	# Not closed if run_recovery/startup_reconcile raises before the WS try below —
+	# same lifecycle as store/capture_writer above; a crashing boot leaks one
+	# lazily-opened read-only SQLite handle, which is acceptable.
 	ohlc_provider = build_ohlc_provider(config)
 	if ohlc_provider is not None:
 		for strat in strategies:
