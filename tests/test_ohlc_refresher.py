@@ -158,3 +158,27 @@ def test_cli_load_config_disabled_returns_none(tmp_path):
 	cfg_file = tmp_path / "c.yaml"
 	cfg_file.write_text(yaml.safe_dump({"ohlc_refresh": {"enabled": False}}), encoding="utf-8")
 	assert cli_refresh._load_config(str(cfg_file)) is None
+
+
+def test_refresh_once_future_bar_not_counted_as_fresh(caplog):
+	import logging
+	now = 1781895455  # minute 1781895420
+	# Coinbase returns a bar dated in the FUTURE relative to local now (clock-skew simulation)
+	fa = FakeAdapter("ETH-USD", [_raw(1781895360, 100.0), _raw(1781895480, 101.0)])  # 1781895480 > now
+	conn = _conn()
+	with caplog.at_level(logging.WARNING):
+		freshness = refresh_once(fa, conn, now, _cfg())
+	# The future bar (1781895480) must NOT be returned as freshness; only bars <= now count.
+	# With carry_forward=True and now=1781895455 (35s into cur_min=1781895420),
+	# the future bar satisfies timestamp==cur_min? No: 1781895480 != 1781895420.
+	# So carry-forward MAY fire (1781895420 absent) and write synth bar @ 1781895420.
+	# Either way freshness must be <= now.
+	assert freshness is not None
+	assert freshness <= now
+	assert any("clock-skew" in r.message for r in caplog.records)
+
+
+def test_from_yaml_missing_key_raises_clear_error():
+	import pytest
+	with pytest.raises(ValueError, match="db_path"):
+		RefreshConfig.from_yaml({"ohlc_refresh": {"enabled": True, "products": ["ETH-USD"]}})

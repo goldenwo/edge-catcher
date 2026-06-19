@@ -30,6 +30,9 @@ class RefreshConfig:
 		block = (config or {}).get("ohlc_refresh") or {}
 		if not block.get("enabled"):
 			return None
+		for k in ("db_path", "products"):
+			if k not in block:
+				raise ValueError(f"ohlc_refresh.enabled is true but required key '{k}' is missing")
 		return cls(
 			db_path=block["db_path"],
 			products=list(block["products"]),
@@ -43,8 +46,15 @@ class RefreshConfig:
 def refresh_once(adapter, conn, now: int, cfg: RefreshConfig) -> int | None:
 	"""One poll cycle for one product. Fetch last ~3 min, upsert; carry-forward a
 	synthetic current-minute bar if the forming bar is absent past _CARRY_FORWARD_AFTER_S.
-	Returns the newest bar timestamp in the DB, or None."""
+	Returns the newest bar timestamp in the DB at-or-before now, or None."""
 	candles = adapter.fetch_candles(now - 180, now + 60)
+
+	if candles:
+		max_raw = max(int(c["start"]) for c in candles)
+		if max_raw > now:
+			logger.warning("clock-skew %s: Coinbase bar @%d is ahead of local now=%d (offset~%ds)",
+				adapter.table_name, max_raw, now, max_raw - now)
+
 	adapter.upsert_candles([_candle_to_row(c) for c in candles], conn)
 
 	cur_min = (now // 60) * 60
@@ -58,10 +68,15 @@ def refresh_once(adapter, conn, now: int, cfg: RefreshConfig) -> int | None:
 			"ORDER BY timestamp DESC LIMIT 1", (cur_min,)
 		).fetchone()
 		if last is not None:
+			# A no-trade minute genuinely has ~0 price movement, so a flat synthetic
+			# bar (high=low=close, vol=0) is an honest spot AND vol input; the real
+			# forming bar overwrites it on the next poll once a trade prints.
 			adapter.upsert_candles([(cur_min, last[0], last[0], last[0], last[0], 0.0)], conn)
 			logger.info("carry-forward %s: synth bar @%d close=%.6f", adapter.table_name, cur_min, last[0])
 
-	return conn.execute(f"SELECT MAX(timestamp) FROM {adapter.table_name}").fetchone()[0]
+	return conn.execute(
+		f"SELECT MAX(timestamp) FROM {adapter.table_name} WHERE timestamp <= ?", (now,)
+	).fetchone()[0]
 
 
 def backfill(adapter, conn, now: int, lookback_s: int) -> int:
@@ -95,25 +110,35 @@ def run_refresher(cfg: RefreshConfig, *, _max_cycles: int | None = None) -> None
 	Idempotent upsert + Restart=always => a hard SIGKILL is safe (no drain)."""
 	conn = get_connection(Path(cfg.db_path))  # applies PRAGMA journal_mode=WAL
 	adapters = {p: CoinbaseAdapter(p) for p in cfg.products}
-	for a in adapters.values():
-		init_ohlc_table(conn, a.table_name)
-		backfill(a, conn, int(time.time()), cfg.startup_lookback_s)
+	try:
+		for a in adapters.values():
+			init_ohlc_table(conn, a.table_name)
+			backfill(a, conn, int(time.time()), cfg.startup_lookback_s)
 
-	cycles = 0
-	while _max_cycles is None or cycles < _max_cycles:
-		now = int(time.time())
+		cycles = 0
+		while _max_cycles is None or cycles < _max_cycles:
+			now = int(time.time())
+			for a in adapters.values():
+				try:
+					newest = refresh_once(a, conn, now, cfg)
+				except Exception as e:  # fail-safe: log + continue; next poll retries
+					logger.warning("refresh_once %s failed: %s", a.table_name, e)
+					newest = conn.execute(
+						f"SELECT MAX(timestamp) FROM {a.table_name} WHERE timestamp <= ?", (now,)
+					).fetchone()[0]
+				age = staleness_age(newest, now)
+				if should_warn_staleness(newest, now, cfg.staleness_warn_s):
+					logger.warning("STALE %s: newest=%s age=%ss (warn>%ss)",
+						a.table_name, newest, age, cfg.staleness_warn_s)
+				else:
+					logger.info("ohlc %s: newest=%s age=%ss", a.table_name, newest, age)
+			cycles += 1
+			if _max_cycles is None or cycles < _max_cycles:
+				time.sleep(cfg.poll_interval_s)
+	finally:
+		conn.close()
 		for a in adapters.values():
 			try:
-				newest = refresh_once(a, conn, now, cfg)
-			except Exception as e:  # fail-safe: log + continue; next poll retries
-				logger.warning("refresh_once %s failed: %s", a.table_name, e)
-				newest = conn.execute(f"SELECT MAX(timestamp) FROM {a.table_name}").fetchone()[0]
-			age = staleness_age(newest, now)
-			if should_warn_staleness(newest, now, cfg.staleness_warn_s):
-				logger.warning("STALE %s: newest=%s age=%ss (warn>%ss)",
-					a.table_name, newest, age, cfg.staleness_warn_s)
-			else:
-				logger.info("ohlc %s: newest=%s age=%ss", a.table_name, newest, age)
-		cycles += 1
-		if _max_cycles is None or cycles < _max_cycles:
-			time.sleep(cfg.poll_interval_s)
+				a.session.close()
+			except Exception:
+				pass
