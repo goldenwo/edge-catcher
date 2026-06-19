@@ -30,4 +30,11 @@ def build_ohlc_provider(config: dict | None) -> OHLCProvider | None:
 	assets = block.get("assets") or {}
 	if not assets:
 		return None
-	return OHLCProvider({a: (paths[0], paths[1]) for a, paths in assets.items()})
+	mapping: dict[str, tuple[str, str]] = {}
+	for a, paths in assets.items():
+		if not (isinstance(paths, (list, tuple)) and len(paths) == 2):
+			raise ValueError(
+				f"ohlc.assets[{a!r}] must be [db_path, table], got {paths!r}"
+			)
+		mapping[a] = (paths[0], paths[1])
+	return OHLCProvider(mapping)

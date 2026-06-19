@@ -1649,6 +1649,28 @@ def test_build_ohlc_provider_maps_assets_to_db_table_tuples():
 	p.close()
 
 
+def test_build_ohlc_provider_rejects_malformed_assets():
+	"""Malformed ohlc.assets entries must raise a clear ValueError naming the
+	offending asset, not an opaque IndexError/TypeError at engine boot.
+	This guard runs ONLY on the gated-ON path (enabled=True, non-empty assets);
+	the default-OFF shapes still return None before reaching it.
+	"""
+	import pytest
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	# scalar value — not a list/tuple at all
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": "data/ohlc.db"}}})
+
+	# 1-element list — missing the table name
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": ["only_one"]}}})
+
+	# 3-element list — too many entries
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": ["a", "b", "c"]}}})
+
+
 def test_ohlc_provider_injection_onto_strategies():
 	"""Gated-on: build + inject mirrors the offline `for s: s.ohlc = provider`
 	loop — every strategy ends with a non-None `.ohlc`. This is the unit-scope

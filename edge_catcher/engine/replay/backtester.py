@@ -140,7 +140,10 @@ async def replay_capture(
 	# build+inject. Default-OFF: when the bundle's config carries no `ohlc`
 	# block (the G-parity bundles), build_ohlc_provider returns None and every
 	# strategy.ohlc is left exactly as the bundle constructed it (§9 parity).
-	# Closed in the dispatch-loop finally below so the connections never leak.
+	# OHLCProvider uses LAZY connections (nothing is opened until a strategy
+	# queries it), so a raise between here and the dispatch-loop try below
+	# leaks nothing real. The finally at the dispatch loop closes it on the
+	# normal end and on swallowed-dispatch-error paths.
 	ohlc_provider = build_ohlc_provider(config)
 	if ohlc_provider is not None:
 		for s in strategies:
