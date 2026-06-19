@@ -1025,6 +1025,9 @@ async def _ticker_refresh(
 						# so 15M markets — discovered HERE, not via recovery —
 						# carry strike data. Fail-safe: {} on non-200 → merge
 						# no-op; the next refresh retries.
+						# No 429-retry on this fetch (unlike check_market_result);
+						# deferred per spec §5.6 — revisit if 2b 15M discovery
+						# bursts approach the rate limit.
 						meta = await fetch_market_meta(client, ticker)
 						market_state.register_ticker(ticker, meta=meta)
 						snapshot = await fetch_orderbook_snapshot(client, ticker)

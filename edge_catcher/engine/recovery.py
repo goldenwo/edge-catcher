@@ -168,7 +168,8 @@ async def fetch_orderbook_snapshot(
 async def fetch_market_meta(client, ticker: str) -> dict:
 	"""Fetch metadata for a single market ticker.
 
-	Extracts: ``expiration_time``, ``status``, ``result``, ``event_ticker``.
+	Extracts: ``expiration_time``, ``status``, ``result``, ``event_ticker``,
+	``floor_strike``, ``close_time``, ``open_time``.
 
 	Args:
 		client: httpx.AsyncClient (or compatible mock).

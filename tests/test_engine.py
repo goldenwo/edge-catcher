@@ -1446,6 +1446,55 @@ def test_ticker_refresh_meta_registered_and_teed():
 	)
 
 
+def test_ticker_refresh_meta_empty_is_failsafe():
+	"""When fetch_market_meta returns {} (non-200 / exception fail-safe),
+	_ticker_refresh must still register the ticker and must NOT clobber any
+	existing metadata with spurious values — the {} merge is a no-op."""
+	from unittest.mock import AsyncMock, patch
+	from edge_catcher.engine import engine as engine_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	sleep_calls = {"n": 0}
+
+	async def _fake_sleep(_seconds):
+		sleep_calls["n"] += 1
+		if sleep_calls["n"] >= 2:
+			raise asyncio.CancelledError
+
+	async def _fake_fetch_tickers(_client, _series):
+		return (["EVT1-T3000"], True)
+
+	from edge_catcher.engine.market_state import OrderbookSnapshot
+
+	async def _fake_fetch_orderbook(_client, _ticker):
+		return OrderbookSnapshot(yes_levels=[(0.55, 5)], no_levels=[(0.45, 5)])
+
+	async def _fake_fetch_meta_empty(_client, _ticker):
+		return {}
+
+	client = AsyncMock()
+
+	with patch.object(engine_mod.asyncio, "sleep", _fake_sleep), \
+			patch.object(engine_mod, "fetch_active_tickers_for_series", _fake_fetch_tickers), \
+			patch.object(engine_mod, "fetch_orderbook_snapshot", _fake_fetch_orderbook), \
+			patch.object(engine_mod, "fetch_market_meta", _fake_fetch_meta_empty):
+		with pytest.raises(asyncio.CancelledError):
+			asyncio.run(engine_mod._ticker_refresh(
+				client, market_state, ["SERIES_A"], [None],
+				config={}, interval=1, capture_writer=spy,
+			))
+
+	# Ticker is still registered despite empty metadata.
+	assert market_state.get_price_history("EVT1-T3000") is not None
+	# No spurious floor_strike written — {} merge must be a no-op.
+	assert market_state.get_metadata("EVT1-T3000").get("floor_strike") is None
+	# Ticker landed in the tee stream (discovered path ran to completion).
+	assert any(kind == "ticker_discovered" for kind, _ in spy.events)
+
+
 def test_replay_restores_metadata():
 	"""dispatch's synthetic ticker_discovered handler restores market_metadata
 	from the captured payload into MarketState.get_metadata — closes the
