@@ -116,3 +116,45 @@ def test_staleness_age_and_warn():
 	assert should_warn_staleness(1781895480, now, warn_s=75) is False
 	assert should_warn_staleness(1781895400, now, warn_s=75) is True
 	assert should_warn_staleness(None, now, warn_s=75) is True
+
+
+def test_reader_sees_writer_commit_without_reopen(tmp_path):
+	import datetime as _dt
+	from pathlib import Path
+	from edge_catcher.research.ohlc_provider import OHLCProvider
+	from edge_catcher.storage.db import get_connection
+
+	db = str(tmp_path / "ohlc.db")
+	w = get_connection(Path(db))          # WAL writer (PRAGMA journal_mode=WAL)
+	init_ohlc_table(w, "eth_ohlc")
+	w.commit()
+	prov = OHLCProvider({"eth": (db, "eth_ohlc")})
+	t = _dt.datetime(2026, 6, 19, 0, 1, 0, tzinfo=_dt.timezone.utc)
+	assert prov.get_candle("eth", t) is None          # establishes reader connection
+	w.execute("INSERT OR REPLACE INTO eth_ohlc VALUES (?,?,?,?,?,?)",
+		(int(t.timestamp()), 1, 1, 1, 1, 1))
+	w.commit()
+	got = prov.get_candle("eth", t)                    # SAME reader conn must see the commit
+	assert got is not None and got.timestamp == int(t.timestamp())
+	prov.close()
+	w.close()
+
+
+def test_cli_builds_config_from_yaml(tmp_path):
+	import yaml
+	from edge_catcher.cli import ohlc_refresh as cli_refresh
+	cfg_file = tmp_path / "c.yaml"
+	cfg_file.write_text(yaml.safe_dump({"ohlc_refresh": {
+		"enabled": True, "db_path": "data/ohlc.db",
+		"products": ["ETH-USD", "SOL-USD", "DOGE-USD"]}}), encoding="utf-8")
+	cfg = cli_refresh._load_config(str(cfg_file))
+	assert cfg is not None and cfg.products == ["ETH-USD", "SOL-USD", "DOGE-USD"]
+	assert cfg.poll_interval_s == 20
+
+
+def test_cli_load_config_disabled_returns_none(tmp_path):
+	import yaml
+	from edge_catcher.cli import ohlc_refresh as cli_refresh
+	cfg_file = tmp_path / "c.yaml"
+	cfg_file.write_text(yaml.safe_dump({"ohlc_refresh": {"enabled": False}}), encoding="utf-8")
+	assert cli_refresh._load_config(str(cfg_file)) is None
