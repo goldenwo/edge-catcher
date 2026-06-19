@@ -77,3 +77,81 @@ To reset the failure counter after investigating:
 ```bash
 sudo systemctl reset-failed edge-catcher-download
 ```
+
+---
+
+## OHLC Refresher Service
+
+The OHLC refresher (`deploy/ohlc-refresher.service`) is a lightweight companion
+daemon that polls Coinbase and upserts one-minute candles into `data/ohlc.db`,
+keeping the tables ≤90s fresh for `on_tick` spot-pricing strategies. It runs as
+a **separate** service alongside the paper-trader.
+
+### When to enable
+
+Enable it when you have at least one `on_tick` strategy that reads `self.ohlc`
+(e.g. `spot-fair-ot-t12`). Without it, the paper-trader's staleness gate will
+reject every tick and your strategy will be silent.
+
+### Setup
+
+1. **Config** — in your `config.local/paper-trader-spotfair.yaml` (or whichever
+   config you use), ensure both the `ohlc:` block and the `ohlc_refresh:` block
+   are present and enabled:
+
+   ```yaml
+   ohlc:
+     enabled: true
+     assets:
+       eth: [data/ohlc.db, eth_ohlc]
+       sol: [data/ohlc.db, sol_ohlc]
+       doge: [data/ohlc.db, doge_ohlc]
+
+   ohlc_refresh:
+     enabled: true
+     db_path: data/ohlc.db
+     products: [ETH-USD, SOL-USD, DOGE-USD]
+     poll_interval_s: 20
+   ```
+
+2. **Install and start** — copy the unit and enable it:
+
+   ```bash
+   sudo cp deploy/ohlc-refresher.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now ohlc-refresher
+   ```
+
+3. **NTP time sync is required** — the staleness gate compares candle timestamps
+   to local wall-clock. If the host clock drifts, the gate rejects otherwise-fresh
+   candles, silently raising tick rejection counts. Verify NTP is active:
+
+   ```bash
+   timedatectl status   # look for "NTP service: active"
+   # Or, if you use chrony:
+   chronyc tracking
+   ```
+
+   Most cloud VMs (Ubuntu, Debian) have `systemd-timesyncd` enabled by default.
+   Raspberry Pi OS does too. If it's off: `sudo systemctl enable --now systemd-timesyncd`.
+
+### Logs
+
+```bash
+# Follow per-cycle freshness + STALE warnings
+tail -f /var/log/edge-catcher/ohlc-refresher.log
+
+# Or via journald
+sudo journalctl -u ohlc-refresher -f
+```
+
+Look for `STALE` WARN lines — these mean a product's newest candle is older than
+`staleness_warn_s` (default 75s) and the paper-trader's staleness gate is likely
+rejecting ticks for that asset.
+
+### Relationship to the paper-trader
+
+Both services read the same config file and write/read the same `data/ohlc.db`.
+The refresher only ever upserts (idempotent); a hard kill is safe at any point.
+Restart order doesn't matter — the paper-trader will tolerate a momentarily
+empty or stale `ohlc.db` until the refresher catches up after boot.
