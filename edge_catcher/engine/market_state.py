@@ -251,7 +251,8 @@ class MarketState:
 		if ticker not in self._series:
 			self._series[ticker] = deque(maxlen=self._limit)
 		if meta:
-			self._metadata[ticker] = meta
+			existing = self._metadata.setdefault(ticker, {})
+			existing.update({k: v for k, v in meta.items() if v is not None})
 
 	def unregister_ticker(self, ticker: str) -> None:
 		"""Remove all state associated with *ticker*."""

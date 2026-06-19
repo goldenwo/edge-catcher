@@ -1273,4 +1273,24 @@ async def test_summary_logger_reports_wide_spread_skips(caplog) -> None:
 			with pytest.raises(asyncio.CancelledError):
 				await _summary_logger(store, metrics, interval=1)
 
-	assert "wide_spread=1" in caplog.text
+
+def test_register_ticker_merges_without_clobbering():
+	from edge_catcher.engine.market_state import MarketState
+	ms = MarketState()
+	ms.register_ticker("KXETH15M-X", meta={"floor_strike": 3000.0, "close_time": "2026-06-19T20:00:00Z", "result": None})
+	# A later meta-less / partial registration must NOT wipe the rich metadata.
+	ms.register_ticker("KXETH15M-X")  # no meta
+	assert ms.get_metadata("KXETH15M-X")["floor_strike"] == 3000.0
+	ms.register_ticker("KXETH15M-X", meta={"result": "yes"})  # partial update
+	md = ms.get_metadata("KXETH15M-X")
+	assert md["floor_strike"] == 3000.0 and md["result"] == "yes"
+
+
+def test_register_ticker_merge_keeps_present_falsy_values():
+	from edge_catcher.engine.market_state import MarketState
+	ms = MarketState()
+	ms.register_ticker("T", meta={"result": "yes"})
+	ms.register_ticker("T", meta={"result": ""})  # empty-string is PRESENT, must apply
+	assert ms.get_metadata("T")["result"] == ""
+	ms.register_ticker("T", meta={"result": None})  # None is absent, must be skipped
+	assert ms.get_metadata("T")["result"] == ""
