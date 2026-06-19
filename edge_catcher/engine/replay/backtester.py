@@ -146,8 +146,8 @@ async def replay_capture(
 	# normal end and on swallowed-dispatch-error paths.
 	ohlc_provider = build_ohlc_provider(config)
 	if ohlc_provider is not None:
-		for s in strategies:
-			s.ohlc = ohlc_provider
+		for strat in strategies:
+			strat.ohlc = ohlc_provider
 
 	# 4. Verify engine version matches dev (warning only — doesn't block)
 	_check_engine_version(bundle, manifest)
