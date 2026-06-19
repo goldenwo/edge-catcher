@@ -1421,6 +1421,7 @@ async def _handle_ticker_msg(
 				market_metadata=market_state.get_metadata(ticker),
 				series=series,
 				is_first_observation=is_first,
+				now=now,
 			)
 			await process_tick(
 				ctx, [strat], store, config, executor,
@@ -1523,6 +1524,7 @@ async def _handle_trade_msg(
 				is_first_observation=is_first,
 				taker_side=taker_side,
 				trade_count=trade_count,
+				now=now,
 			)
 			await process_tick(
 				ctx, [strat], store, config, executor,
