@@ -304,6 +304,7 @@ async def run_recovery(
 						"ticker": ticker,
 						"yes_levels": snapshot.yes_levels,
 						"no_levels": snapshot.no_levels,
+						"market_metadata": meta,
 					}, recv_ts=rec_now)
 
 	log.info("run_recovery: complete — %d total tickers across %d series", total, len(active_series))

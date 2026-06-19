@@ -1299,6 +1299,192 @@ def test_register_ticker_merge_keeps_present_falsy_values():
 	assert ms.get_metadata("T")["result"] == ""
 
 
+# ---------------------------------------------------------------------------
+# Phase 2a Task 3 (A2) — capture market_metadata at BOTH ticker-introducing
+# sites: run_recovery's REST tee and _ticker_refresh's discovery tee. Replay
+# restores via dispatch's synthetic handler reading payload["market_metadata"].
+# ---------------------------------------------------------------------------
+
+class _SpyWriter:
+	"""Minimal RawFrameWriter stand-in: records every synthetic event."""
+
+	def __init__(self):
+		self.events: list[tuple[str, dict]] = []
+
+	def write_synthetic(self, kind, payload, recv_ts=None):
+		self.events.append((kind, payload))
+
+
+def _meta_response(strike=3000.0):
+	"""A 200 /markets/<ticker> response carrying floor_strike + close_time."""
+	from unittest.mock import MagicMock
+	return MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "EVT1",
+				"floor_strike": strike,
+				"close_time": "2026-06-19T20:00:00Z",
+				"open_time": "2026-06-19T19:45:00Z",
+			}
+		},
+	)
+
+
+def _orderbook_response():
+	"""A 200 /markets/<ticker>/orderbook response with one level per side."""
+	from unittest.mock import MagicMock
+	return MagicMock(
+		status_code=200,
+		json=lambda: {
+			"orderbook_fp": {
+				"yes_dollars": [[0.55, 5]],
+				"no_dollars": [[0.45, 5]],
+			}
+		},
+	)
+
+
+def test_recovery_tee_carries_metadata():
+	"""run_recovery's rest_orderbook tee payload must include market_metadata
+	(the meta already fetched + registered for the ticker), so a captured
+	bundle carries strike/close_time for replay to restore."""
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine.recovery import run_recovery
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	events_response = MagicMock(
+		status_code=200,
+		json=lambda: {"events": [{"event_ticker": "EVT1"}]},
+	)
+	markets_response = MagicMock(
+		status_code=200,
+		json=lambda: {"markets": [{"ticker": "EVT1-T3000"}], "cursor": ""},
+	)
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(side_effect=[
+		events_response,
+		markets_response,
+		_meta_response(),
+		_orderbook_response(),
+	])
+
+	asyncio.run(run_recovery(mock_client, market_state, ["SERIES_A"], capture_writer=spy))
+
+	# The tee payload for the discovered ticker carries the fetched metadata...
+	assert any(
+		p.get("market_metadata", {}).get("floor_strike") is not None
+		for _, p in spy.events
+	)
+	# ...and the live MarketState has the metadata registered too.
+	assert market_state.get_metadata("EVT1-T3000")["floor_strike"] is not None
+
+
+def test_ticker_refresh_meta_registered_and_teed():
+	"""_ticker_refresh must (B1) register FULL metadata for a newly-discovered
+	ticker — this is the DOMINANT discovery path for 15M series — AND include
+	market_metadata in its ticker_discovered tee payload."""
+	from unittest.mock import AsyncMock, patch
+	from edge_catcher.engine import engine as engine_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	# Stop the `while True:` loop after one body execution. The body's first
+	# statement is `await asyncio.sleep(interval)`; the second sleep is the
+	# inter-series guard (skipped, single series). So the NEXT sleep call is
+	# the top-of-loop one for iteration 2 — raise there to exit cleanly.
+	sleep_calls = {"n": 0}
+
+	async def _fake_sleep(_seconds):
+		sleep_calls["n"] += 1
+		if sleep_calls["n"] >= 2:
+			raise asyncio.CancelledError
+
+	async def _fake_fetch_tickers(_client, _series):
+		return (["EVT1-T3000"], True)
+
+	from edge_catcher.engine.market_state import OrderbookSnapshot
+
+	async def _fake_fetch_orderbook(_client, _ticker):
+		return OrderbookSnapshot(yes_levels=[(0.55, 5)], no_levels=[(0.45, 5)])
+
+	async def _fake_fetch_meta(_client, _ticker):
+		return {
+			"event_ticker": "EVT1",
+			"floor_strike": 3000.0,
+			"close_time": "2026-06-19T20:00:00Z",
+			"open_time": "2026-06-19T19:45:00Z",
+			"result": None,
+		}
+
+	client = AsyncMock()
+
+	with patch.object(engine_mod.asyncio, "sleep", _fake_sleep), \
+			patch.object(engine_mod, "fetch_active_tickers_for_series", _fake_fetch_tickers), \
+			patch.object(engine_mod, "fetch_orderbook_snapshot", _fake_fetch_orderbook), \
+			patch.object(engine_mod, "fetch_market_meta", _fake_fetch_meta):
+		with pytest.raises(asyncio.CancelledError):
+			asyncio.run(engine_mod._ticker_refresh(
+				client, market_state, ["SERIES_A"], [None],
+				config={}, interval=1, capture_writer=spy,
+			))
+
+	# B1: full metadata registered in live state for the new ticker.
+	assert market_state.get_metadata("EVT1-T3000")["floor_strike"] is not None
+	# The ticker_discovered tee payload carries market_metadata.
+	assert any(
+		kind == "ticker_discovered" and p.get("market_metadata", {}).get("floor_strike") is not None
+		for kind, p in spy.events
+	)
+
+
+def test_replay_restores_metadata():
+	"""dispatch's synthetic ticker_discovered handler restores market_metadata
+	from the captured payload into MarketState.get_metadata — closes the
+	capture→replay round-trip for strike/close_time."""
+	from edge_catcher.engine.dispatch import dispatch_message
+	from edge_catcher.engine.market_state import MarketState
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	market_state = MarketState()
+	event = {
+		"source": "synthetic.ticker_discovered",
+		"payload": {
+			"ticker": "KXNEW-26APR14",
+			"yes_levels": [[0.30, 20]],
+			"no_levels": [[0.70, 15]],
+			"market_metadata": {
+				"floor_strike": 3000.0,
+				"close_time": "2026-06-19T20:00:00Z",
+			},
+		},
+	}
+	asyncio.run(dispatch_message(
+		event,
+		config={},
+		market_state=market_state,
+		store=None,
+		strategies=[],
+		strat_by_series={},
+		pending_states={},
+		dirty=set(),
+		executor=PaperExecutor(market_state=market_state, config={}),
+		now=_now(),
+	))
+
+	meta = market_state.get_metadata("KXNEW-26APR14")
+	assert meta.get("floor_strike") == 3000.0
+	assert meta.get("close_time") == "2026-06-19T20:00:00Z"
+
+
 def test_fetch_market_meta_extracts_strike_and_times():
 	from unittest.mock import AsyncMock, MagicMock
 	from edge_catcher.engine import recovery
