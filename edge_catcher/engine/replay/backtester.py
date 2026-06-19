@@ -40,6 +40,7 @@ from edge_catcher.engine.dispatch import dispatch_message
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
 from edge_catcher.engine.replay.loader import read_jsonl_window
 from edge_catcher.engine.strategy_base import Strategy
 from edge_catcher.engine.trade_store import InMemoryTradeStore
@@ -135,6 +136,16 @@ async def replay_capture(
 	strategy_names = [s.name for s in strategies]
 	log.info("replay_capture: %d strategies active after config filter: %s", len(strategies), strategy_names)
 
+	# 4a. Config-gated OHLCProvider — mirror the offline backtest CLI's
+	# build+inject. Default-OFF: when the bundle's config carries no `ohlc`
+	# block (the G-parity bundles), build_ohlc_provider returns None and every
+	# strategy.ohlc is left exactly as the bundle constructed it (§9 parity).
+	# Closed in the dispatch-loop finally below so the connections never leak.
+	ohlc_provider = build_ohlc_provider(config)
+	if ohlc_provider is not None:
+		for s in strategies:
+			s.ohlc = ohlc_provider
+
 	# 4. Verify engine version matches dev (warning only — doesn't block)
 	_check_engine_version(bundle, manifest)
 
@@ -181,46 +192,54 @@ async def replay_capture(
 	events_processed = 0
 	first_ts: Optional[str] = None
 	last_ts: Optional[str] = None
-	for event in read_jsonl_window(jsonl_path, ticker_filter=ticker_filter):
-		recv_ts = event.get("recv_ts")
-		if not recv_ts:
-			# Malformed capture: every non-header event must have recv_ts.
-			# Don't silently fall back to datetime.now() — that would produce a
-			# naive datetime AND make replay non-deterministic. Skip and warn.
-			log.warning("replay_capture: skipping event with missing recv_ts: %r", event)
-			continue
-		now = datetime.fromisoformat(recv_ts)
-		if now.tzinfo is None:
-			# Capture should always write timezone-aware ISO strings. If one
-			# slipped through, attach UTC explicitly — do NOT let a naive
-			# datetime reach record_trade (which raises ValueError per Task 1).
-			now = now.replace(tzinfo=timezone.utc)
+	try:
+		for event in read_jsonl_window(jsonl_path, ticker_filter=ticker_filter):
+			recv_ts = event.get("recv_ts")
+			if not recv_ts:
+				# Malformed capture: every non-header event must have recv_ts.
+				# Don't silently fall back to datetime.now() — that would produce a
+				# naive datetime AND make replay non-deterministic. Skip and warn.
+				log.warning("replay_capture: skipping event with missing recv_ts: %r", event)
+				continue
+			now = datetime.fromisoformat(recv_ts)
+			if now.tzinfo is None:
+				# Capture should always write timezone-aware ISO strings. If one
+				# slipped through, attach UTC explicitly — do NOT let a naive
+				# datetime reach record_trade (which raises ValueError per Task 1).
+				now = now.replace(tzinfo=timezone.utc)
 
-		if first_ts is None:
-			first_ts = recv_ts
-		last_ts = recv_ts
+			if first_ts is None:
+				first_ts = recv_ts
+			last_ts = recv_ts
 
-		try:
-			await dispatch_message(
-				event=event,
-				config=config,
-				market_state=market_state,
-				store=store,
-				strategies=strategies,
-				strat_by_series=strat_by_series,
-				pending_states=pending_states,
-				dirty=dirty,
-				executor=executor,
-				now=now,
-			)
-		except Exception:
-			log.exception(
-				"replay_capture: dispatch error at recv_seq=%s source=%s",
-				event.get("recv_seq"), event.get("source"),
-			)
-			# Don't halt on dispatch errors — the parity test will surface
-			# the resulting row divergence if it matters.
-		events_processed += 1
+			try:
+				await dispatch_message(
+					event=event,
+					config=config,
+					market_state=market_state,
+					store=store,
+					strategies=strategies,
+					strat_by_series=strat_by_series,
+					pending_states=pending_states,
+					dirty=dirty,
+					executor=executor,
+					now=now,
+				)
+			except Exception:
+				log.exception(
+					"replay_capture: dispatch error at recv_seq=%s source=%s",
+					event.get("recv_seq"), event.get("source"),
+				)
+				# Don't halt on dispatch errors — the parity test will surface
+				# the resulting row divergence if it matters.
+			events_processed += 1
+	finally:
+		# Close the OHLCProvider on EVERY exit path (normal end, the swallowed
+		# per-event dispatch error above, or an unexpected loader/dispatch raise)
+		# so its lazily-opened SQLite connections never leak. No-op when the
+		# config was default-OFF (provider is None — the §9 parity path).
+		if ohlc_provider is not None:
+			ohlc_provider.close()
 
 	# End-of-replay: flush pending_states to the store so final state is
 	# observable via result.store.load_all_states() and so the strict

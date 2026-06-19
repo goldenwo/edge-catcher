@@ -1590,3 +1590,108 @@ def test_fetch_market_meta_tolerates_missing_fields():
 	assert meta["event_ticker"] == "KXETH15M-26JUN1920"
 	# empty-string result passes through as-is (Kalshi returns "" for expired-but-unsettled)
 	assert meta["result"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (Phase 2a-B) — config-gated OHLCProvider wiring
+# ---------------------------------------------------------------------------
+
+
+def test_build_ohlc_provider_gated():
+	"""build_ohlc_provider is the SINGLE config gate for the live + replay engine.
+
+	It must return None on EVERY default-off shape — that is the parity
+	guarantee: the G-parity bundles carry no `ohlc` block, so the wiring is a
+	no-op (strategy.ohlc stays None) on that path. A provider is built ONLY
+	when enabled is truthy AND at least one asset is configured.
+	"""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider  # new module
+
+	# Default-off shapes — all None (constraint #1).
+	assert build_ohlc_provider(None) is None  # config absent entirely
+	assert build_ohlc_provider({}) is None  # no `ohlc` key
+	assert build_ohlc_provider({"ohlc": {}}) is None  # block present, no `enabled`
+	assert build_ohlc_provider(
+		{"ohlc": {"enabled": False, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+	) is None  # explicitly disabled
+	assert build_ohlc_provider(
+		{"ohlc": {"enabled": True, "assets": {}}}
+	) is None  # enabled but no assets ⇒ nothing to build
+
+	# Gated-on — a provider is constructed and is closeable.
+	p = build_ohlc_provider(
+		{"ohlc": {"enabled": True, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+	)
+	assert p is not None
+	p.close()
+
+
+def test_build_ohlc_provider_maps_assets_to_db_table_tuples():
+	"""The provider must receive the SAME asset→(db_path, table) shape the
+	proven offline path (cli/backtest.py) builds — list[db, table] → tuple."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	p = build_ohlc_provider({
+		"ohlc": {
+			"enabled": True,
+			"assets": {
+				"eth": ["data/ohlc.db", "eth_ohlc"],
+				"sol": ["data/ohlc.db", "sol_ohlc"],
+			},
+		}
+	})
+	assert p is not None
+	# OHLCProvider stores the asset→(db, table) mapping on `_config`.
+	assert p._config == {
+		"eth": ("data/ohlc.db", "eth_ohlc"),
+		"sol": ("data/ohlc.db", "sol_ohlc"),
+	}
+	p.close()
+
+
+def test_ohlc_provider_injection_onto_strategies():
+	"""Gated-on: build + inject mirrors the offline `for s: s.ohlc = provider`
+	loop — every strategy ends with a non-None `.ohlc`. This is the unit-scope
+	stand-in for the engine wiring (Step 7); the full-bundle end-to-end is
+	covered by Task 6's integration."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	class _Probe(Strategy):
+		name = "ohlc-probe"
+		ohlc = None  # mirror the real strategy contract: None until injected
+
+		def on_tick(self, ctx):  # pragma: no cover - not exercised here
+			return None
+
+	strategies = [_Probe(), _Probe()]
+	config = {"ohlc": {"enabled": True, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+
+	provider = build_ohlc_provider(config)
+	assert provider is not None
+	for s in strategies:
+		s.ohlc = provider
+	try:
+		assert all(s.ohlc is provider for s in strategies)
+	finally:
+		provider.close()
+
+
+def test_ohlc_neutral_when_config_absent():
+	"""Gated-off (parity path): no `ohlc` block ⇒ no provider ⇒ `.ohlc` is left
+	exactly as constructed (None). Asserts the wiring is a pure no-op."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	class _Probe(Strategy):
+		name = "ohlc-probe-neutral"
+		ohlc = None  # mirror the real strategy contract: None until injected
+
+		def on_tick(self, ctx):  # pragma: no cover - not exercised here
+			return None
+
+	strategies = [_Probe()]
+	provider = build_ohlc_provider({})  # config-absent neutral path
+	assert provider is None
+	if provider is not None:  # mirrors the engine guard — not taken here
+		for s in strategies:
+			s.ohlc = provider
+	assert all(s.ohlc is None for s in strategies)

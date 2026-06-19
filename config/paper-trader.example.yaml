@@ -83,3 +83,14 @@ capture:
   # (single binary, single window). Strike-based markets like SERIES_A add
   # ~150-200 tickers per series. Estimate disk before enabling broad capture.
   # extra_series: [SERIES_A, SERIES_B]
+
+# Optional: spot data for on_tick strategies that price time-to-expiry.
+# Disabled by default — absent/enabled:false means no OHLC provider (no behavior change).
+# assets maps asset -> [sqlite_db_path, table_name]; the engine injects a shared
+# read-only OHLCProvider onto every strategy's `self.ohlc` when enabled.
+ohlc:
+  enabled: false
+  assets:
+    eth: [data/ohlc.db, eth_ohlc]
+    sol: [data/ohlc.db, sol_ohlc]
+    doge: [data/ohlc.db, doge_ohlc]
