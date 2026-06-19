@@ -189,6 +189,9 @@ async def fetch_market_meta(client, ticker: str) -> dict:
 			"status": market.get("status"),
 			"result": market.get("result"),
 			"event_ticker": market.get("event_ticker"),
+			"floor_strike": market.get("floor_strike"),
+			"close_time": market.get("close_time"),
+			"open_time": market.get("open_time"),
 		}
 
 	except Exception:

@@ -1294,3 +1294,61 @@ def test_register_ticker_merge_keeps_present_falsy_values():
 	assert ms.get_metadata("T")["result"] == ""
 	ms.register_ticker("T", meta={"result": None})  # None is absent, must be skipped
 	assert ms.get_metadata("T")["result"] == ""
+
+
+def test_fetch_market_meta_extracts_strike_and_times():
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine import recovery
+
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(return_value=MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "KXETH15M-26JUN1920",
+				"floor_strike": 3000.0,
+				"close_time": "2026-06-19T20:00:00Z",
+				"open_time": "2026-06-19T19:45:00Z",
+			}
+		},
+	))
+
+	meta = asyncio.run(recovery.fetch_market_meta(mock_client, "KXETH15M-26JUN1920-T3000"))
+	assert meta["floor_strike"] == 3000.0
+	assert meta["close_time"] == "2026-06-19T20:00:00Z"
+	assert meta["open_time"] == "2026-06-19T19:45:00Z"
+	# existing fields still present
+	assert meta["event_ticker"] == "KXETH15M-26JUN1920"
+
+
+def test_fetch_market_meta_tolerates_missing_fields():
+	"""floor_strike/close_time/open_time absent from the API response → None; empty result passes through."""
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine import recovery
+
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(return_value=MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "KXETH15M-26JUN1920",
+				# floor_strike, close_time, open_time intentionally absent
+			}
+		},
+	))
+
+	meta = asyncio.run(recovery.fetch_market_meta(mock_client, "KXETH15M-26JUN1920-T3000"))
+	# missing keys must come back as None, not raise
+	assert meta["floor_strike"] is None
+	assert meta["close_time"] is None
+	assert meta["open_time"] is None
+	# existing fields still resolve correctly
+	assert meta["event_ticker"] == "KXETH15M-26JUN1920"
+	# empty-string result passes through as-is (Kalshi returns "" for expired-but-unsettled)
+	assert meta["result"] == ""
