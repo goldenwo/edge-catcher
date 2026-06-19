@@ -1,12 +1,34 @@
 """Coinbase Advanced Trade public API adapter for 1-minute OHLC (any product)."""
 
 import logging
+import math
 import threading
 import time
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+_PRICE_MAX = 1_000_000.0  # crypto USD sanity ceiling; rejects inf / fat-finger
+
+
+def _candle_to_row(c: dict) -> tuple[int, float, float, float, float, float]:
+    """Raw Coinbase candle dict -> (timestamp, open, high, low, close, volume)."""
+    return (
+        int(c["start"]),
+        float(c["open"]), float(c["high"]), float(c["low"]),
+        float(c["close"]), float(c["volume"]),
+    )
+
+
+def valid_candle_row(row: tuple[int, float, float, float, float, float]) -> bool:
+    """A2-VALIDATE: reject non-finite / out-of-band OHLC before upsert.
+    Prices finite and in (0, _PRICE_MAX); volume finite and >= 0."""
+    _, o, h, lo, c, v = row
+    for px in (o, h, lo, c):
+        if not math.isfinite(px) or not (0.0 < px < _PRICE_MAX):
+            return False
+    return math.isfinite(v) and v >= 0.0
 
 # Shared rate limiter: Coinbase allows 10 req/s for public endpoints.
 # A global lock ensures concurrent adapters don't exceed the limit.
@@ -61,7 +83,6 @@ class CoinbaseAdapter:
         progress_callback(pct: int, page: int, total_pages: int, total_inserted: int)
         is called after each page if provided.
         """
-        import math
         window = self.PAGE_SIZE * 60  # seconds covered per page
         total_pages = math.ceil((end_ts - start_ts) / window)
         total_inserted = 0
@@ -72,17 +93,7 @@ class CoinbaseAdapter:
             window_end = min(cursor + window, end_ts)
             candles = self.fetch_candles(cursor, window_end)
 
-            rows = [
-                (
-                    int(c["start"]),
-                    float(c["open"]),
-                    float(c["high"]),
-                    float(c["low"]),
-                    float(c["close"]),
-                    float(c["volume"]),
-                )
-                for c in candles
-            ]
+            rows = [_candle_to_row(c) for c in candles]
 
             if rows:
                 conn.executemany(
@@ -107,3 +118,25 @@ class CoinbaseAdapter:
             cursor = window_end
 
         return total_inserted
+
+    def upsert_candles(self, rows: list[tuple[int, float, float, float, float, float]], conn) -> int:
+        """INSERT OR REPLACE validated rows into self.table_name. Returns count written.
+
+        REPLACE so the mutating forming bar overwrites prior poll state. Invalid rows
+        (valid_candle_row False) are skipped + logged, never written.
+        """
+        good = []
+        for row in rows:
+            if valid_candle_row(row):
+                good.append(row)
+            else:
+                logger.warning("upsert_candles: rejected invalid row %r (table=%s)", row, self.table_name)
+        if not good:
+            return 0
+        conn.executemany(
+            f"INSERT OR REPLACE INTO {self.table_name} (timestamp, open, high, low, close, volume) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            good,
+        )
+        conn.commit()
+        return len(good)
