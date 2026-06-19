@@ -26,7 +26,7 @@ def main() -> None:
 	from edge_catcher.cli import (
 		download, backtest, research,
 		paper_trade, live_trade, formalize, interpret, utils,
-		replay_backtest,
+		replay_backtest, ohlc_refresh,
 	)
 
 	parser = argparse.ArgumentParser(
@@ -39,7 +39,7 @@ def main() -> None:
 
 	for module in [download, backtest, research,
 	               paper_trade, live_trade, formalize, interpret, utils,
-	               replay_backtest]:
+	               replay_backtest, ohlc_refresh]:
 		module.register(sub)
 
 	args = parser.parse_args()

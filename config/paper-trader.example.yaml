@@ -94,3 +94,17 @@ ohlc:
     eth: [data/ohlc.db, eth_ohlc]
     sol: [data/ohlc.db, sol_ohlc]
     doge: [data/ohlc.db, doge_ohlc]
+
+# Optional: continuous Coinbase OHLC refresher (Phase 2b). A SEPARATE service
+# (deploy/ohlc-refresher.service) reads THIS block and keeps the ohlc.db tables
+# in the `ohlc:` block above ≤90s fresh for on_tick strategies. Disabled by default.
+# Requires NTP time sync on the host (see deploy docs) — the staleness gate
+# compares candle timestamps to local wall-clock.
+ohlc_refresh:
+  enabled: false
+  db_path: data/ohlc.db
+  products: [ETH-USD, SOL-USD, DOGE-USD]   # -> eth_ohlc / sol_ohlc / doge_ohlc
+  poll_interval_s: 20      # <=30 keeps the forming bar within the 90s staleness gate
+  staleness_warn_s: 75     # WARN if any product's newest bar is older than this
+  startup_lookback_s: 7200 # backfill window on boot when a table is empty
+  carry_forward: true      # synth current-minute bar from last close if the forming bar lags
