@@ -168,7 +168,8 @@ async def fetch_orderbook_snapshot(
 async def fetch_market_meta(client, ticker: str) -> dict:
 	"""Fetch metadata for a single market ticker.
 
-	Extracts: ``expiration_time``, ``status``, ``result``, ``event_ticker``.
+	Extracts: ``expiration_time``, ``status``, ``result``, ``event_ticker``,
+	``floor_strike``, ``close_time``, ``open_time``.
 
 	Args:
 		client: httpx.AsyncClient (or compatible mock).
@@ -189,6 +190,9 @@ async def fetch_market_meta(client, ticker: str) -> dict:
 			"status": market.get("status"),
 			"result": market.get("result"),
 			"event_ticker": market.get("event_ticker"),
+			"floor_strike": market.get("floor_strike"),
+			"close_time": market.get("close_time"),
+			"open_time": market.get("open_time"),
 		}
 
 	except Exception:
@@ -301,6 +305,7 @@ async def run_recovery(
 						"ticker": ticker,
 						"yes_levels": snapshot.yes_levels,
 						"no_levels": snapshot.no_levels,
+						"market_metadata": meta,
 					}, recv_ts=rec_now)
 
 	log.info("run_recovery: complete — %d total tickers across %d series", total, len(active_series))

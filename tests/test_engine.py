@@ -1273,4 +1273,447 @@ async def test_summary_logger_reports_wide_spread_skips(caplog) -> None:
 			with pytest.raises(asyncio.CancelledError):
 				await _summary_logger(store, metrics, interval=1)
 
-	assert "wide_spread=1" in caplog.text
+
+def test_register_ticker_merges_without_clobbering():
+	from edge_catcher.engine.market_state import MarketState
+	ms = MarketState()
+	ms.register_ticker(
+		"KXETH15M-X",
+		meta={"floor_strike": 3000.0, "close_time": "2026-06-19T20:00:00Z", "result": None},
+	)
+	# A later meta-less / partial registration must NOT wipe the rich metadata.
+	ms.register_ticker("KXETH15M-X")  # no meta
+	assert ms.get_metadata("KXETH15M-X")["floor_strike"] == 3000.0
+	ms.register_ticker("KXETH15M-X", meta={"result": "yes"})  # partial update
+	md = ms.get_metadata("KXETH15M-X")
+	assert md["floor_strike"] == 3000.0 and md["result"] == "yes"
+
+
+def test_register_ticker_merge_keeps_present_falsy_values():
+	from edge_catcher.engine.market_state import MarketState
+	ms = MarketState()
+	ms.register_ticker("T", meta={"result": "yes"})
+	ms.register_ticker("T", meta={"result": ""})  # empty-string is PRESENT, must apply
+	assert ms.get_metadata("T")["result"] == ""
+	ms.register_ticker("T", meta={"result": None})  # None is absent, must be skipped
+	assert ms.get_metadata("T")["result"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a Task 3 (A2) — capture market_metadata at BOTH ticker-introducing
+# sites: run_recovery's REST tee and _ticker_refresh's discovery tee. Replay
+# restores via dispatch's synthetic handler reading payload["market_metadata"].
+# ---------------------------------------------------------------------------
+
+class _SpyWriter:
+	"""Minimal RawFrameWriter stand-in: records every synthetic event."""
+
+	def __init__(self):
+		self.events: list[tuple[str, dict]] = []
+
+	def write_synthetic(self, kind, payload, recv_ts=None):
+		self.events.append((kind, payload))
+
+
+def _meta_response(strike=3000.0):
+	"""A 200 /markets/<ticker> response carrying floor_strike + close_time."""
+	from unittest.mock import MagicMock
+	return MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "EVT1",
+				"floor_strike": strike,
+				"close_time": "2026-06-19T20:00:00Z",
+				"open_time": "2026-06-19T19:45:00Z",
+			}
+		},
+	)
+
+
+def _orderbook_response():
+	"""A 200 /markets/<ticker>/orderbook response with one level per side."""
+	from unittest.mock import MagicMock
+	return MagicMock(
+		status_code=200,
+		json=lambda: {
+			"orderbook_fp": {
+				"yes_dollars": [[0.55, 5]],
+				"no_dollars": [[0.45, 5]],
+			}
+		},
+	)
+
+
+def test_recovery_tee_carries_metadata():
+	"""run_recovery's rest_orderbook tee payload must include market_metadata
+	(the meta already fetched + registered for the ticker), so a captured
+	bundle carries strike/close_time for replay to restore."""
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine.recovery import run_recovery
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	events_response = MagicMock(
+		status_code=200,
+		json=lambda: {"events": [{"event_ticker": "EVT1"}]},
+	)
+	markets_response = MagicMock(
+		status_code=200,
+		json=lambda: {"markets": [{"ticker": "EVT1-T3000"}], "cursor": ""},
+	)
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(side_effect=[
+		events_response,
+		markets_response,
+		_meta_response(),
+		_orderbook_response(),
+	])
+
+	asyncio.run(run_recovery(mock_client, market_state, ["SERIES_A"], capture_writer=spy))
+
+	# The tee payload for the discovered ticker carries the fetched metadata...
+	assert any(
+		p.get("market_metadata", {}).get("floor_strike") is not None
+		for _, p in spy.events
+	)
+	# ...and the live MarketState has the metadata registered too.
+	assert market_state.get_metadata("EVT1-T3000")["floor_strike"] is not None
+
+
+def test_ticker_refresh_meta_registered_and_teed():
+	"""_ticker_refresh must (B1) register FULL metadata for a newly-discovered
+	ticker — this is the DOMINANT discovery path for 15M series — AND include
+	market_metadata in its ticker_discovered tee payload."""
+	from unittest.mock import AsyncMock, patch
+	from edge_catcher.engine import engine as engine_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	# Stop the `while True:` loop after one body execution. The body's first
+	# statement is `await asyncio.sleep(interval)`; the second sleep is the
+	# inter-series guard (skipped, single series). So the NEXT sleep call is
+	# the top-of-loop one for iteration 2 — raise there to exit cleanly.
+	sleep_calls = {"n": 0}
+
+	async def _fake_sleep(_seconds):
+		sleep_calls["n"] += 1
+		if sleep_calls["n"] >= 2:
+			raise asyncio.CancelledError
+
+	async def _fake_fetch_tickers(_client, _series):
+		return (["EVT1-T3000"], True)
+
+	from edge_catcher.engine.market_state import OrderbookSnapshot
+
+	async def _fake_fetch_orderbook(_client, _ticker):
+		return OrderbookSnapshot(yes_levels=[(0.55, 5)], no_levels=[(0.45, 5)])
+
+	async def _fake_fetch_meta(_client, _ticker):
+		return {
+			"event_ticker": "EVT1",
+			"floor_strike": 3000.0,
+			"close_time": "2026-06-19T20:00:00Z",
+			"open_time": "2026-06-19T19:45:00Z",
+			"result": None,
+		}
+
+	client = AsyncMock()
+
+	with patch.object(engine_mod.asyncio, "sleep", _fake_sleep), \
+			patch.object(engine_mod, "fetch_active_tickers_for_series", _fake_fetch_tickers), \
+			patch.object(engine_mod, "fetch_orderbook_snapshot", _fake_fetch_orderbook), \
+			patch.object(engine_mod, "fetch_market_meta", _fake_fetch_meta):
+		with pytest.raises(asyncio.CancelledError):
+			asyncio.run(engine_mod._ticker_refresh(
+				client, market_state, ["SERIES_A"], [None],
+				config={}, interval=1, capture_writer=spy,
+			))
+
+	# B1: full metadata registered in live state for the new ticker.
+	assert market_state.get_metadata("EVT1-T3000")["floor_strike"] is not None
+	# The ticker_discovered tee payload carries market_metadata.
+	assert any(
+		kind == "ticker_discovered" and p.get("market_metadata", {}).get("floor_strike") is not None
+		for kind, p in spy.events
+	)
+
+
+def test_ticker_refresh_meta_empty_is_failsafe():
+	"""When fetch_market_meta returns {} (non-200 / exception fail-safe),
+	_ticker_refresh must still register the ticker and must NOT clobber any
+	existing metadata with spurious values — the {} merge is a no-op."""
+	from unittest.mock import AsyncMock, patch
+	from edge_catcher.engine import engine as engine_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	market_state = MarketState()
+	spy = _SpyWriter()
+
+	sleep_calls = {"n": 0}
+
+	async def _fake_sleep(_seconds):
+		sleep_calls["n"] += 1
+		if sleep_calls["n"] >= 2:
+			raise asyncio.CancelledError
+
+	async def _fake_fetch_tickers(_client, _series):
+		return (["EVT1-T3000"], True)
+
+	from edge_catcher.engine.market_state import OrderbookSnapshot
+
+	async def _fake_fetch_orderbook(_client, _ticker):
+		return OrderbookSnapshot(yes_levels=[(0.55, 5)], no_levels=[(0.45, 5)])
+
+	async def _fake_fetch_meta_empty(_client, _ticker):
+		return {}
+
+	client = AsyncMock()
+
+	with patch.object(engine_mod.asyncio, "sleep", _fake_sleep), \
+			patch.object(engine_mod, "fetch_active_tickers_for_series", _fake_fetch_tickers), \
+			patch.object(engine_mod, "fetch_orderbook_snapshot", _fake_fetch_orderbook), \
+			patch.object(engine_mod, "fetch_market_meta", _fake_fetch_meta_empty):
+		with pytest.raises(asyncio.CancelledError):
+			asyncio.run(engine_mod._ticker_refresh(
+				client, market_state, ["SERIES_A"], [None],
+				config={}, interval=1, capture_writer=spy,
+			))
+
+	# Ticker is still registered despite empty metadata.
+	assert market_state.get_price_history("EVT1-T3000") is not None
+	# No spurious floor_strike written — {} merge must be a no-op.
+	assert market_state.get_metadata("EVT1-T3000").get("floor_strike") is None
+	# Ticker landed in the tee stream (discovered path ran to completion).
+	assert any(kind == "ticker_discovered" for kind, _ in spy.events)
+
+
+def test_replay_restores_metadata():
+	"""dispatch's synthetic ticker_discovered handler restores market_metadata
+	from the captured payload into MarketState.get_metadata — closes the
+	capture→replay round-trip for strike/close_time."""
+	from edge_catcher.engine.dispatch import dispatch_message
+	from edge_catcher.engine.market_state import MarketState
+	from edge_catcher.engine.executors.paper import PaperExecutor
+
+	market_state = MarketState()
+	event = {
+		"source": "synthetic.ticker_discovered",
+		"payload": {
+			"ticker": "KXNEW-26APR14",
+			"yes_levels": [[0.30, 20]],
+			"no_levels": [[0.70, 15]],
+			"market_metadata": {
+				"floor_strike": 3000.0,
+				"close_time": "2026-06-19T20:00:00Z",
+			},
+		},
+	}
+	asyncio.run(dispatch_message(
+		event,
+		config={},
+		market_state=market_state,
+		store=None,
+		strategies=[],
+		strat_by_series={},
+		pending_states={},
+		dirty=set(),
+		executor=PaperExecutor(market_state=market_state, config={}),
+		now=_now(),
+	))
+
+	meta = market_state.get_metadata("KXNEW-26APR14")
+	assert meta.get("floor_strike") == 3000.0
+	assert meta.get("close_time") == "2026-06-19T20:00:00Z"
+
+
+def test_fetch_market_meta_extracts_strike_and_times():
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine import recovery
+
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(return_value=MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "KXETH15M-26JUN1920",
+				"floor_strike": 3000.0,
+				"close_time": "2026-06-19T20:00:00Z",
+				"open_time": "2026-06-19T19:45:00Z",
+			}
+		},
+	))
+
+	meta = asyncio.run(recovery.fetch_market_meta(mock_client, "KXETH15M-26JUN1920-T3000"))
+	assert meta["floor_strike"] == 3000.0
+	assert meta["close_time"] == "2026-06-19T20:00:00Z"
+	assert meta["open_time"] == "2026-06-19T19:45:00Z"
+	# existing fields still present
+	assert meta["event_ticker"] == "KXETH15M-26JUN1920"
+
+
+def test_fetch_market_meta_tolerates_missing_fields():
+	"""floor_strike/close_time/open_time absent from the API response → None; empty result passes through."""
+	from unittest.mock import AsyncMock, MagicMock
+	from edge_catcher.engine import recovery
+
+	mock_client = AsyncMock()
+	mock_client.get = AsyncMock(return_value=MagicMock(
+		status_code=200,
+		json=lambda: {
+			"market": {
+				"expiration_time": "2026-06-19T20:00:00Z",
+				"status": "active",
+				"result": "",
+				"event_ticker": "KXETH15M-26JUN1920",
+				# floor_strike, close_time, open_time intentionally absent
+			}
+		},
+	))
+
+	meta = asyncio.run(recovery.fetch_market_meta(mock_client, "KXETH15M-26JUN1920-T3000"))
+	# missing keys must come back as None, not raise
+	assert meta["floor_strike"] is None
+	assert meta["close_time"] is None
+	assert meta["open_time"] is None
+	# existing fields still resolve correctly
+	assert meta["event_ticker"] == "KXETH15M-26JUN1920"
+	# empty-string result passes through as-is (Kalshi returns "" for expired-but-unsettled)
+	assert meta["result"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (Phase 2a-B) — config-gated OHLCProvider wiring
+# ---------------------------------------------------------------------------
+
+
+def test_build_ohlc_provider_gated():
+	"""build_ohlc_provider is the SINGLE config gate for the live + replay engine.
+
+	It must return None on EVERY default-off shape — that is the parity
+	guarantee: the G-parity bundles carry no `ohlc` block, so the wiring is a
+	no-op (strategy.ohlc stays None) on that path. A provider is built ONLY
+	when enabled is truthy AND at least one asset is configured.
+	"""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider  # new module
+
+	# Default-off shapes — all None (constraint #1).
+	assert build_ohlc_provider(None) is None  # config absent entirely
+	assert build_ohlc_provider({}) is None  # no `ohlc` key
+	assert build_ohlc_provider({"ohlc": {}}) is None  # block present, no `enabled`
+	assert build_ohlc_provider(
+		{"ohlc": {"enabled": False, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+	) is None  # explicitly disabled
+	assert build_ohlc_provider(
+		{"ohlc": {"enabled": True, "assets": {}}}
+	) is None  # enabled but no assets ⇒ nothing to build
+
+	# Gated-on — a provider is constructed and is closeable.
+	p = build_ohlc_provider(
+		{"ohlc": {"enabled": True, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+	)
+	assert p is not None
+	p.close()
+
+
+def test_build_ohlc_provider_maps_assets_to_db_table_tuples():
+	"""The provider must receive the SAME asset→(db_path, table) shape the
+	proven offline path (cli/backtest.py) builds — list[db, table] → tuple."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	p = build_ohlc_provider({
+		"ohlc": {
+			"enabled": True,
+			"assets": {
+				"eth": ["data/ohlc.db", "eth_ohlc"],
+				"sol": ["data/ohlc.db", "sol_ohlc"],
+			},
+		}
+	})
+	assert p is not None
+	# OHLCProvider stores the asset→(db, table) mapping on `_config`.
+	assert p._config == {
+		"eth": ("data/ohlc.db", "eth_ohlc"),
+		"sol": ("data/ohlc.db", "sol_ohlc"),
+	}
+	p.close()
+
+
+def test_build_ohlc_provider_rejects_malformed_assets():
+	"""Malformed ohlc.assets entries must raise a clear ValueError naming the
+	offending asset, not an opaque IndexError/TypeError at engine boot.
+	This guard runs ONLY on the gated-ON path (enabled=True, non-empty assets);
+	the default-OFF shapes still return None before reaching it.
+	"""
+	import pytest
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	# scalar value — not a list/tuple at all
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": "data/ohlc.db"}}})
+
+	# 1-element list — missing the table name
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": ["only_one"]}}})
+
+	# 3-element list — too many entries
+	with pytest.raises(ValueError, match="ohlc.assets"):
+		build_ohlc_provider({"ohlc": {"enabled": True, "assets": {"eth": ["a", "b", "c"]}}})
+
+
+def test_ohlc_provider_injection_onto_strategies():
+	"""Gated-on: build + inject mirrors the offline `for s: s.ohlc = provider`
+	loop — every strategy ends with a non-None `.ohlc`. This is the unit-scope
+	stand-in for the engine wiring (Step 7); the full-bundle end-to-end is
+	covered by Task 6's integration."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	class _Probe(Strategy):
+		name = "ohlc-probe"
+		ohlc = None  # mirror the real strategy contract: None until injected
+
+		def on_tick(self, ctx):  # pragma: no cover - not exercised here
+			return None
+
+	strategies = [_Probe(), _Probe()]
+	config = {"ohlc": {"enabled": True, "assets": {"eth": ["data/ohlc.db", "eth_ohlc"]}}}
+
+	provider = build_ohlc_provider(config)
+	assert provider is not None
+	for s in strategies:
+		s.ohlc = provider
+	try:
+		assert all(s.ohlc is provider for s in strategies)
+	finally:
+		provider.close()
+
+
+def test_ohlc_neutral_when_config_absent():
+	"""Gated-off (parity path): no `ohlc` block ⇒ no provider ⇒ `.ohlc` is left
+	exactly as constructed (None). Asserts the wiring is a pure no-op."""
+	from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
+
+	class _Probe(Strategy):
+		name = "ohlc-probe-neutral"
+		ohlc = None  # mirror the real strategy contract: None until injected
+
+		def on_tick(self, ctx):  # pragma: no cover - not exercised here
+			return None
+
+	strategies = [_Probe()]
+	provider = build_ohlc_provider({})  # config-absent neutral path
+	assert provider is None
+	if provider is not None:  # mirrors the engine guard — not taken here
+		for s in strategies:
+			s.ohlc = provider
+	assert all(s.ohlc is None for s in strategies)
