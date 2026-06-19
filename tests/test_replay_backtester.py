@@ -578,6 +578,75 @@ async def test_replay_capture_uses_injected_executor(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_replay_capture_injects_ohlc_provider(tmp_path):
+	"""replay_capture itself runs the OHLCProvider inject loop.
+
+	Uses the same minimal empty-events bundle scaffold as the existing tests
+	above. OHLCProvider uses lazy connections, so ``data/ohlc.db`` does NOT
+	need to exist — the provider is built, injected, then closed without ever
+	opening the DB.  Proves the inject loop in replay_capture fires (not just
+	the helper + a hand-rolled loop in unit tests).
+	"""
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
+
+	class ProbeStrategy(Strategy):
+		name = "probe-strat"
+		supported_series = ["KXTEST"]
+		default_params: dict = {}
+		ohlc = None
+
+		def on_tick(self, ctx):
+			return []
+
+	bundle = _minimal_bundle(tmp_path)
+	config = {
+		"strategies": {"probe-strat": {"series": ["KXTEST"]}},
+		"ohlc": {
+			"enabled": True,
+			"assets": {"eth": ["data/ohlc.db", "eth_ohlc"]},
+		},
+	}
+	probe = ProbeStrategy()
+	await replay_capture(bundle_path=bundle, strategies=[probe], config=config)
+
+	assert probe.ohlc is not None, (
+		"replay_capture did not inject OHLCProvider onto the strategy — "
+		"the inject loop (§4a) is absent or wired incorrectly"
+	)
+
+
+@pytest.mark.asyncio
+async def test_replay_capture_no_ohlc_block_leaves_provider_none(tmp_path):
+	"""When config has no ``ohlc`` block, strategy.ohlc is left untouched (None).
+
+	Gated-OFF counterpart to test_replay_capture_injects_ohlc_provider —
+	confirms the default-OFF / G-parity contract is preserved.
+	"""
+	from edge_catcher.engine.replay.backtester import replay_capture
+	from edge_catcher.engine.strategy_base import Strategy
+
+	class ProbeStrategy(Strategy):
+		name = "probe-strat"
+		supported_series = ["KXTEST"]
+		default_params: dict = {}
+		ohlc = None
+
+		def on_tick(self, ctx):
+			return []
+
+	bundle = _minimal_bundle(tmp_path, name="2026-04-16")
+	config = {"strategies": {"probe-strat": {"series": ["KXTEST"]}}}
+	probe = ProbeStrategy()
+	await replay_capture(bundle_path=bundle, strategies=[probe], config=config)
+
+	assert probe.ohlc is None, (
+		"replay_capture unexpectedly set strategy.ohlc when no ohlc block is "
+		"present in config — default-OFF / G-parity contract violated"
+	)
+
+
+@pytest.mark.asyncio
 async def test_replay_capture_default_executor_is_paperexecutor_unchanged(tmp_path):
 	"""With NO executor arg the default path constructs a PaperExecutor
 	(byte-identical to pre-seam behavior) and produces a deterministic,

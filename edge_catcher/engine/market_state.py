@@ -247,11 +247,24 @@ class MarketState:
 	# ------------------------------------------------------------------
 
 	def register_ticker(self, ticker: str, meta: dict | None = None) -> None:
-		"""Register a ticker so it can receive updates."""
+		"""Register a ticker so it can receive updates.
+
+		Metadata merge is intentionally a "don't-clobber" update: only keys
+		whose new value is non-None are written.  This means:
+
+		* A present falsy value (``""`` or ``0``) in *meta* DOES overwrite the
+		  stored key — falsy is not the same as absent.
+		* A caller CANNOT clear a field by re-registering it with ``None`` —
+		  ``None`` is silently skipped.  This is deliberate: it protects rich
+		  metadata like ``floor_strike`` and ``close_time`` (set by the first
+		  full registration) from being wiped by a later partial or meta-less
+		  call that happens to pass ``None`` for those keys.
+		"""
 		if ticker not in self._series:
 			self._series[ticker] = deque(maxlen=self._limit)
 		if meta:
-			self._metadata[ticker] = meta
+			existing = self._metadata.setdefault(ticker, {})
+			existing.update({k: v for k, v in meta.items() if v is not None})
 
 	def unregister_ticker(self, ticker: str) -> None:
 		"""Remove all state associated with *ticker*."""

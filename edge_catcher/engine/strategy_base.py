@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from edge_catcher.engine.market_state import TickContext
+
+if TYPE_CHECKING:
+	from edge_catcher.research.ohlc_provider import OHLCProvider
 
 
 # Named alias for the three Phase 1 exit-kinds. Hoisted out of the inline
@@ -44,6 +47,7 @@ class Strategy(ABC):
 	supported_series: list[str]
 	default_params: dict
 	emoji: str = "🔵"  # color bullet shown in notifications
+	ohlc: OHLCProvider | None = None  # optional spot/OHLC provider, injected by the engine when configured
 
 	@abstractmethod
 	def on_tick(self, ctx: TickContext) -> list[Signal]:

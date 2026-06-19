@@ -61,9 +61,11 @@ from edge_catcher.engine.executors.honest_paper import (
 from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.notifications import configure_notify, notify
+from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
 from edge_catcher.engine.recovery import (
 	check_market_result,
 	fetch_active_tickers_for_series,
+	fetch_market_meta,
 	fetch_orderbook_snapshot,
 	run_recovery,
 )
@@ -1020,7 +1022,15 @@ async def _ticker_refresh(
 				# Register new tickers
 				for ticker in tickers:
 					if market_state.get_price_history(ticker) is None:
-						market_state.register_ticker(ticker)
+						# Fetch full metadata (floor_strike/close_time/open_time)
+						# so 15M markets — discovered HERE, not via recovery —
+						# carry strike data. Fail-safe: {} on non-200 → merge
+						# no-op; the next refresh retries.
+						# No 429-retry on this fetch (unlike check_market_result);
+						# deferred per spec §5.6 — revisit if 2b 15M discovery
+						# bursts approach the rate limit.
+						meta = await fetch_market_meta(client, ticker)
+						market_state.register_ticker(ticker, meta=meta)
 						snapshot = await fetch_orderbook_snapshot(client, ticker)
 						if snapshot is not None:
 							# Capture the clock ONCE so both seed_orderbook and
@@ -1033,6 +1043,7 @@ async def _ticker_refresh(
 									"ticker": ticker,
 									"yes_levels": snapshot.yes_levels,
 									"no_levels": snapshot.no_levels,
+									"market_metadata": meta,
 								}, recv_ts=tick_now)
 						new_tickers.append(ticker)
 
@@ -1547,6 +1558,20 @@ async def run_engine(
 		)
 	metrics.set_gauge("entries_skipped_unsupported", len(rejected_pairs))
 
+	# 2a. Config-gated OHLCProvider — mirror the offline backtest CLI's
+	# build+inject so on_tick strategies that price time-to-expiry can read spot
+	# data. Default-OFF: when config has no `ohlc` block (today's deploys),
+	# build_ohlc_provider returns None and every strategy.ohlc is left exactly as
+	# constructed (§9 G-parity). Built AFTER the no-strategies early return above
+	# so it never leaks on that path; closed in the shutdown finally (step 6).
+	# Not closed if run_recovery/startup_reconcile raises before the WS try below —
+	# same lifecycle as store/capture_writer above; a crashing boot leaks one
+	# lazily-opened read-only SQLite handle, which is acceptable.
+	ohlc_provider = build_ohlc_provider(config)
+	if ohlc_provider is not None:
+		for strat in strategies:
+			strat.ohlc = ohlc_provider
+
 	# 3. Load persisted states, determine active series
 	all_states = store.load_all_states()
 	pending_states: dict[str, dict] = {}
@@ -1932,6 +1957,13 @@ async def run_engine(
 			# (6) store.close() exactly once — STRICTLY AFTER step (3).
 			store.close()
 			capture_writer.close()
+
+			# Close the config-gated OHLCProvider (read-only spot-data SQLite
+			# connections) — no money-safety ordering constraint, so it rides
+			# alongside the capture-writer close at the end of step 6. No-op when
+			# the config was default-OFF (provider is None — the §9 parity path).
+			if ohlc_provider is not None:
+				ohlc_provider.close()
 
 			# F1 fatal guard — AFTER the money-safe drain (steps 1-6 ran), BEFORE
 			# the clean SIGTERM alert. A bankroll-refresh KillSwitchTripFailed
