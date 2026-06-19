@@ -7,6 +7,7 @@ and the derive_event_ticker helper.
 import re
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -197,6 +198,8 @@ class TickContext:
 	is_first_observation: bool = False
 	taker_side: str | None = None
 	trade_count: int | None = None
+	# wall-clock for this tick; set by dispatch. Strategies needing time-to-close read this.
+	now: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
