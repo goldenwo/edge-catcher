@@ -1277,7 +1277,10 @@ async def test_summary_logger_reports_wide_spread_skips(caplog) -> None:
 def test_register_ticker_merges_without_clobbering():
 	from edge_catcher.engine.market_state import MarketState
 	ms = MarketState()
-	ms.register_ticker("KXETH15M-X", meta={"floor_strike": 3000.0, "close_time": "2026-06-19T20:00:00Z", "result": None})
+	ms.register_ticker(
+		"KXETH15M-X",
+		meta={"floor_strike": 3000.0, "close_time": "2026-06-19T20:00:00Z", "result": None},
+	)
 	# A later meta-less / partial registration must NOT wipe the rich metadata.
 	ms.register_ticker("KXETH15M-X")  # no meta
 	assert ms.get_metadata("KXETH15M-X")["floor_strike"] == 3000.0
