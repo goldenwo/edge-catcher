@@ -76,6 +76,17 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 
+# numpy>=2.4.5 ships PEP 695 `type` statements in its bundled stubs
+# (numpy/__init__.pyi) that mypy rejects under python_version 3.11 ("Type
+# statement is only supported in Python 3.12 and greater"), failing the gate on
+# a fresh CI install regardless of mypy 1.x/2.x. Skip following numpy's stubs
+# (numpy -> Any) so the type-check gate is decoupled from numpy's stub churn.
+# Runtime numpy is unaffected; revisit if/when we adopt a numpy-typed surface.
+[[tool.mypy.overrides]]
+module = "numpy.*"
+follow_imports = "skip"
+follow_imports_for_stubs = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
