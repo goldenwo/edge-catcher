@@ -203,27 +203,23 @@ async def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 	captured = []
 	def handler(request: httpx.Request) -> httpx.Response:
 		captured.append(request)
-		return httpx.Response(201, json={"order": {
+		# Flat V2 create-order response (no {"order": ...} wrapper, no status).
+		return httpx.Response(201, json={
 			"order_id": "ord-123",
-			"ticker": "X",
-			"side": "yes",
-			"action": "buy",
-			"initial_count_fp": "10.00",
-			"fill_count_fp": "10.00",
-			"remaining_count_fp": "0.00",
-			"yes_price_dollars": "0.0500",
-			"taker_fill_cost_dollars": "0.500000",
-			"time_in_force": "gtc",
-			"status": "executed",
 			"client_order_id": "did-not-set-this-yet",
-		}})
+			"fill_count": "10.00",
+			"remaining_count": "0.00",
+			"average_fill_price": "0.0500",
+			"average_fee_paid": "0.000000",
+			"ts_ms": 1715793600123,
+		})
 	c = make_mock_client(cfg_with_audit, audit_logger, httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
 	order = await c.place(req)
 	assert order.order_id == "ord-123"
 	assert order.count == 10
-	# Path used must include the prefix
-	assert captured[0].url.path == "/trade-api/v2/portfolio/orders"
+	# Path used must be the V2 create endpoint (with the prefix).
+	assert captured[0].url.path == "/trade-api/v2/portfolio/events/orders"
 	# Sig was generated for that exact path (header present; sig verification covered separately)
 	assert "KALSHI-ACCESS-SIGNATURE" in captured[0].headers
 	# Audit row exists
@@ -236,18 +232,21 @@ async def test_place_happy_path(cfg, audit, signing_env, tmp_path):
 
 @pytest.mark.asyncio
 async def test_signed_path_matches_sent_path(cfg, audit, signing_env, tmp_path):
-	"""Regression: httpx must NOT redirect /portfolio/orders to skip the prefix."""
+	"""Regression: httpx must NOT redirect /portfolio/events/orders to skip the prefix."""
 	cfg_with_audit = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	audit_logger = AuditLogger(cfg_with_audit.audit_log_path)
 	captured_url = []
 	def handler(request: httpx.Request) -> httpx.Response:
 		captured_url.append(str(request.url))
-		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
+		return httpx.Response(201, json={
+			"order_id": "x", "fill_count": "1.00", "remaining_count": "0.00",
+			"average_fill_price": "0.0100", "ts_ms": 1,
+		})
 	c = make_mock_client(cfg_with_audit, audit_logger, httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
 	await c.place(req)
-	# Full URL must include /trade-api/v2/portfolio/orders
-	assert "/trade-api/v2/portfolio/orders" in captured_url[0]
+	# Full URL must include the V2 create endpoint path
+	assert "/trade-api/v2/portfolio/events/orders" in captured_url[0]
 
 
 @pytest.mark.asyncio
@@ -261,12 +260,16 @@ async def test_place_does_not_send_buy_max_cost(cfg, audit, signing_env, tmp_pat
 	captured_body = []
 	def handler(request: httpx.Request) -> httpx.Response:
 		captured_body.append(json.loads(request.content))
-		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
+		return httpx.Response(201, json={
+			"order_id": "x", "fill_count": "10.00", "remaining_count": "0.00",
+			"average_fill_price": "0.0500", "ts_ms": 1,
+		})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=10, limit_price_cents=5)
 	await c.place(req)
 	assert "buy_max_cost" not in captured_body[0]
-	assert captured_body[0]["yes_price"] == 5
+	# V2 body carries a single YES-book `price` string, not `yes_price` cents.
+	assert captured_body[0]["price"] == "0.0500"
 
 
 @pytest.mark.asyncio
@@ -340,7 +343,10 @@ async def test_place_429_then_201_succeeds_with_retry(cfg, audit, signing_env, t
 		calls[0] += 1
 		if calls[0] == 1:
 			return httpx.Response(429, json={"error": {"message": "slow down"}})
-		return httpx.Response(201, json={"order": {"order_id": "x", "status": "resting"}})
+		return httpx.Response(201, json={
+			"order_id": "x", "fill_count": "1.00", "remaining_count": "0.00",
+			"average_fill_price": "0.0100", "ts_ms": 1,
+		})
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 	req = OrderRequest(ticker="X", action="buy", side="yes", count=1, limit_price_cents=1)
 	order = await c.place(req)
@@ -654,10 +660,11 @@ async def test_place_returns_order_when_audit_write_fails(
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 
 	def handler(request: httpx.Request) -> httpx.Response:
-		return httpx.Response(201, json={"order": {
-			"order_id": "ord-1", "ticker": "X", "side": "yes", "action": "buy",
-			"count": 1, "yes_price": 1, "time_in_force": "gtc", "status": "resting",
-		}})
+		return httpx.Response(201, json={
+			"order_id": "ord-1", "client_order_id": "did-not-set-this-yet",
+			"fill_count": "1.00", "remaining_count": "0.00",
+			"average_fill_price": "0.0100", "ts_ms": 1,
+		})
 
 	c = make_mock_client(cfg2, AuditLogger(cfg2.audit_log_path), httpx.MockTransport(handler))
 

@@ -56,6 +56,12 @@ _TIF_TO_KALSHI: dict[str, str] = {
 	"fok": "fill_or_kill",
 }
 
+# Kalshi's V2 create-order body requires `self_trade_prevention_type`. We are
+# always an IOC taker with no resting orders of our own, so self-trade
+# prevention can never fire; `taker_at_cross` (cancel the taker portion that
+# would self-cross) is the conservative taker default.
+_SELF_TRADE_PREVENTION = "taker_at_cross"
+
 def _fp_to_int(value: object) -> int:
 	"""Parse a Kalshi fixed-point count STRING (e.g. ``"6.00"``) to ``int``.
 
@@ -161,12 +167,17 @@ class KalshiOrderClient:
 			req.client_order_id = str(uuid.uuid4())
 
 		body = self._build_place_body(req)
-		path = "/portfolio/orders"
+		# Kalshi deprecated the legacy create endpoint (POST /portfolio/orders →
+		# HTTP 410 deprecated_v1_order_endpoint, 2026-06-22). The V2 create
+		# endpoint is /portfolio/events/orders; host + RSA signing are unchanged
+		# (signing covers the full path, which _request rebuilds from this string).
+		path = "/portfolio/events/orders"
 		response = await self._post(path, body, op="place", client_order_id=req.client_order_id)
 		# OrderRejected on 4xx is mapped inside _request via op-specific dispatch.
-		# Kalshi returns {"order": {...}} on success.
-		order_json = response.get("order", response)
-		return self._parse_order(order_json, fallback_request=req)
+		# The V2 create response is the order object FLAT (no {"order": ...}
+		# wrapper) and in single-YES-book terms; _parse_order_v2 maps it back to
+		# the caller's yes/no side.
+		return self._parse_order_v2(response, req)
 
 	async def cancel(self, order_id: str) -> CancelResult:
 		path = f"/portfolio/orders/{order_id}"
@@ -530,33 +541,134 @@ class KalshiOrderClient:
 	# ------------------------------------------------------------------
 
 	def _build_place_body(self, req: OrderRequest) -> dict:
-		# Kalshi's CreateOrderRequest schema does NOT include a `type` field —
-		# the presence of yes_price/no_price implicitly indicates a limit order.
-		# Sending an unexpected `type` causes Kalshi to reject with the
-		# misleadingly-named `fill_or_kill_insufficient_resting_volume` error.
-		# (Discovered during integration testing — see PR #24's journey.)
+		"""Build the Kalshi V2 create-order body.
+
+		The V2 schema (POST /portfolio/events/orders) is single-YES-book:
+		``side`` is ``bid`` (buy YES) / ``ask`` (sell YES) — there is NO direct
+		no-side — and ``price`` is one fixed-point DOLLAR string on the YES book.
+		Our caller-side ``OrderRequest`` is (action ∈ buy/sell) × (side ∈ yes/no)
+		× ``limit_price_cents``; we map it to the YES book:
+
+		  buy  yes @ p  → bid @ p
+		  sell yes @ p  → ask @ p
+		  buy  no  @ p  → ask @ (1 − p)   (buy NO ≡ sell YES at the complement)
+		  sell no  @ p  → bid @ (1 − p)   (sell NO ≡ buy YES at the complement)
+
+		Verified against Kalshi's own legacy echoes (the old response already
+		carried the normalized ``book_side`` + ``yes_price_dollars``): a buy
+		no @ 17¢ came back ``book_side: ask, yes_price_dollars: 0.8300``; a sell
+		no @ 15¢ came back ``book_side: bid, yes_price_dollars: 0.8500``.
+		"""
+		# bid iff we are acquiring YES exposure (buy-yes or sell-no).
+		side_v2 = "bid" if (req.action == "buy") == (req.side == "yes") else "ask"
+		# Limit on the YES book in cents, then exact fixed-point dollars. Integer
+		# cents divide exactly by 100, so the 4-dp string is lossless.
+		yes_cents = req.limit_price_cents if req.side == "yes" else 100 - req.limit_price_cents
+		price = f"{Decimal(yes_cents) / 100:.4f}"
 		body: dict = {
-			"action": req.action,
-			"count": req.count,
-			"side": req.side,
 			"ticker": req.ticker,
+			"side": side_v2,
+			"count": f"{req.count}.00",  # FixedPointCount string (whole contracts)
+			"price": price,
 			"time_in_force": _TIF_TO_KALSHI[req.time_in_force],
+			"self_trade_prevention_type": _SELF_TRADE_PREVENTION,
 			"client_order_id": req.client_order_id,
 		}
-		if req.side == "yes":
-			body["yes_price"] = req.limit_price_cents
-		else:
-			body["no_price"] = req.limit_price_cents
-		# `buy_max_cost` is intentionally NOT sent. Kalshi treats it as a hard
-		# total-cost ceiling and rejects with the misleadingly-named
-		# `fill_or_kill_insufficient_resting_volume` error if our value is even
-		# 1¢ below their internal calculation (rounding/fee drift). Cap safety
-		# is already provided by two other layers:
-		#   1. ABSOLUTE_MAX_ORDER_DOLLARS = $50, hardcoded in client.place()
-		#   2. cli_max_order_dollars, enforced in cli._do_place()
-		# Sub-project D (execution policy) can revisit buy_max_cost as a
-		# Kalshi-side third layer if the rounding rule is ever published.
+		# `buy_max_cost` is intentionally NOT sent — Kalshi rejects it if even 1¢
+		# below its internal cost calc (rounding/fee drift). Cap safety lives in
+		# ABSOLUTE_MAX_ORDER_DOLLARS (client.place) + cli_max_order_dollars (CLI).
 		return body
+
+	def _parse_order_v2(self, data: dict, req: OrderRequest) -> Order:
+		"""Map Kalshi's flat V2 create-order response → normalized :class:`Order`.
+
+		V2 response shape (no ``{"order": ...}`` wrapper, no ``status`` field):
+		``order_id`` / ``client_order_id`` / ``fill_count`` / ``remaining_count``
+		(FixedPointCount strings) / ``average_fill_price`` (FixedPointDollars
+		YES-book string, ``null`` until a fill) / ``average_fee_paid`` / ``ts_ms``.
+
+		The fill price comes back in YES-book terms; for a no-side order we invert
+		it back to the caller's side (``100 − yes``) so the recorded cost basis is
+		the NO price the strategy reasoned about — never the raw YES complement.
+		Rounding is HALF_EVEN to match ``_avg_fill_cents`` /
+		``fill_math.blended_price_cents`` (replay-live parity). ``0`` stays the
+		"no usable cost" sentinel downstream (``_translate_order``) keys off.
+		"""
+		# Defense in depth: the V2 create response is flat, but tolerate a
+		# {"order": {...}} wrapper (the legacy shape, and what a proxy/quirk/future
+		# revert could return) so a real fill is NEVER misread as a phantom
+		# zero-fill reject (funds-at-risk: a filled position dropped). Mirrors the
+		# legacy _parse_order's response.get("order", response) tolerance.
+		if isinstance(data.get("order"), dict):
+			data = data["order"]
+
+		filled_count = _fp_to_int(data.get("fill_count"))
+		remaining = _fp_to_int(data.get("remaining_count"))
+		# Original size = filled + remaining (both present on every real fill);
+		# fall back to the request's original size if EITHER field is absent —
+		# never filled+0, which would understate the order size.
+		if data.get("fill_count") is not None and data.get("remaining_count") is not None:
+			count = filled_count + remaining
+		else:
+			count = req.count
+
+		avg = data.get("average_fill_price")
+		if avg is None:
+			avg_fill_price_cents = 0
+		else:
+			try:
+				yes_cents = int(
+					(Decimal(str(avg)) * 100).to_integral_value(rounding=ROUND_HALF_EVEN)
+				)
+			except (InvalidOperation, ValueError):
+				yes_cents = 0
+			avg_fill_price_cents = yes_cents if req.side == "yes" else 100 - yes_cents
+			# Supported trading band is [1¢, 99¢]. A caller-side fill at the
+			# 0¢/100¢ boundary (yes_cents 0 or 100 — both sides, both boundaries)
+			# collapses onto the 0 = "no usable cost" sentinel rather than recording
+			# a degenerate or sentinel-colliding basis. The warning below makes it
+			# observable; _translate_order then routes to pending (reconcilable).
+			if yes_cents == 0 or yes_cents == 100:
+				avg_fill_price_cents = 0
+
+		# Surface any REAL fill we could not assign a usable cost basis (a boundary
+		# price, a sub-cent VWAP, or a malformed average_fill_price). Downstream
+		# fails safe to pending+reconcile, but on the real-money path it must never
+		# pass silently.
+		if filled_count > 0 and avg_fill_price_cents == 0:
+			log.warning(
+				"Kalshi V2 fill %s: filled_count=%d but no usable cost basis "
+				"(average_fill_price=%r, side=%s) — routing to pending for reconcile",
+				data.get("order_id", ""),
+				filled_count,
+				avg,
+				req.side,
+			)
+
+		# V2 carries no status field; synthesize from fill/remaining for the
+		# place path (the executor keys off filled_count, not status).
+		if filled_count > 0 and remaining == 0:
+			status = "executed"
+		elif filled_count > 0:
+			status = "partially_filled"
+		else:
+			status = "canceled"
+
+		return Order(
+			order_id=data.get("order_id", ""),
+			ticker=req.ticker,
+			side=req.side,
+			action=req.action,
+			count=count,
+			limit_price_cents=req.limit_price_cents,
+			time_in_force=req.time_in_force,
+			status=status,
+			filled_count=filled_count,
+			avg_fill_price_cents=avg_fill_price_cents,
+			created_ts=str(data.get("ts_ms", "")),
+			client_order_id=data.get("client_order_id"),
+			raw=data,
+		)
 
 	def _parse_order(self, data: dict, fallback_request: OrderRequest | None = None) -> Order:
 		"""Map a Kalshi order object (the inner ``"order"`` dict, also each
