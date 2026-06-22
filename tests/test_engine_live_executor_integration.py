@@ -116,17 +116,20 @@ async def test_integration_happy_path_filled(
 	assert len(mock_kalshi_server.requests) == 1
 	req = mock_kalshi_server.requests[0]
 	assert req.method == "POST"
-	assert req.url.path == "/trade-api/v2/portfolio/orders"
+	assert req.url.path == "/trade-api/v2/portfolio/events/orders"
 	assert "KALSHI-ACCESS-SIGNATURE" in req.headers, (
 		"Authorization signature must be present — auth.make_auth_headers "
 		"was not invoked or its result was dropped"
 	)
 	body = json.loads(req.content)
 	assert body["ticker"] == "KXSOL15M-26MAY09H06"
-	assert body["action"] == "buy"
-	assert body["side"] == "yes"
-	assert body["count"] == 10
-	assert body["yes_price"] == 5
+	# V2 single-YES-book shape: buy-yes → bid; price is fixed-point YES dollars;
+	# count is a fixed-point string; `action`/`yes_price` are gone.
+	assert "action" not in body
+	assert body["side"] == "bid"
+	assert body["count"] == "10.00"
+	assert body["price"] == "0.0500"
+	assert body["self_trade_prevention_type"] == "taker_at_cross"
 	# A's wire layer translates "ioc" → "immediate_or_cancel" — verbatim
 	# (Kalshi rejects the short form per test_place_translates_tif_short_to_kalshi_verbose)
 	assert body["time_in_force"] == "immediate_or_cancel"

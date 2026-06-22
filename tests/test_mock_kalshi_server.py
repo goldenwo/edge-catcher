@@ -107,7 +107,7 @@ async def test_coid_matching_synthesises_filled_echo_for_unqueued_coid(
 		assert exit_order.filled_count == 3
 		assert exit_order.client_order_id == "exit-coid-1"
 		assert exit_order.avg_fill_price_cents == 48, "echo must carry a usable fill cost basis"
-		assert exit_order.raw.get("fill_count_fp") == "3.00"
+		assert exit_order.raw.get("fill_count") == "3.00"
 		# The synthesised echo must NOT have consumed the queued entry response.
 		entry_order = await client.place(_buy("entry-coid", count=3, price=50))
 		assert entry_order.order_id == "ord-entry"
