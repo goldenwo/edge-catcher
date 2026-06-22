@@ -53,56 +53,51 @@ from edge_catcher.live.config import LiveConfig
 def kalshi_201_filled(
 	*,
 	order_id: str = "ord-mock-filled",
-	ticker: str = "KXSOL15M-26MAY09H06",
+	ticker: str = "KXSOL15M-26MAY09H06",  # accepted for call-site compat; not in the V2 response
 	side: str = "yes",
-	action: str = "buy",
+	action: str = "buy",  # accepted for call-site compat; the V2 response is sideless
 	count: int = 10,
 	yes_price: int = 5,
 	filled_count: int | None = None,
 	fills: list[dict[str, int]] | None = None,
 	client_order_id: str | None = None,
 ) -> dict[str, Any]:
-	"""Build Kalshi's REAL 201 response body for a filled order.
+	"""Build Kalshi's flat **V2** create-order 201 response body.
 
-	Mirrors the production wire shape captured from the live audit log
-	(``{"order": {...}}``): counts are fixed-point STRINGS (``fill_count_fp`` /
-	``initial_count_fp``), the limit price is a dollar STRING
-	(``{side}_price_dollars``), and the blended cost is the AGGREGATE
-	``taker_fill_cost_dollars`` — there is NO per-fill array.
+	Kalshi deprecated the legacy ``POST /portfolio/orders`` (HTTP 410,
+	2026-06-22). The V2 endpoint (``POST /portfolio/events/orders``) returns the
+	order FLAT — no ``{"order": ...}`` wrapper, no ``status`` field — as
+	``order_id`` / ``client_order_id`` / ``fill_count`` / ``remaining_count``
+	(FixedPointCount strings) / ``average_fill_price`` (FixedPointDollars on the
+	YES book, ``null`` until a fill) / ``average_fee_paid`` / ``ts_ms``.
 
-	``yes_price`` (cents) is the order's own-side limit; ``fills`` is the
-	caller's book-walk (cents) folded into the aggregate the real API returns:
-	``taker_fill_cost_dollars = Σ price·size`` and ``fill_count = Σ size``. This
-	preserves parity — ``_parse_order`` recovers blended =
-	``round(cost·100 / fill_count)`` = ``blended_price_cents(fills)``.
+	``yes_price`` / ``fills`` stay in the caller's OWN-side cents for test
+	ergonomics (as the pre-deprecation helper accepted); they are folded into the
+	single YES-book ``average_fill_price`` the wire actually returns
+	(``own`` for a yes order, ``100 − own`` for a no order). The client's
+	``_parse_order_v2`` inverts the no-side back, so the resulting ``OrderResult``
+	is identical to what the legacy helper produced.
 	"""
 	if filled_count is None:
 		filled_count = count
 	if fills is None:
 		fills = [{"price": yes_price, "size": filled_count}]
-	total_cost_cents = sum(f["price"] * f["size"] for f in fills)
-	# Kalshi reports both sides' prices (complementary); _parse_order reads the
-	# order's own side. yes_price is the own-side limit in cents.
-	own = f"{yes_price / 100:.4f}"
-	comp = f"{(100 - yes_price) / 100:.4f}"
-	order: dict[str, Any] = {
+	total_size = sum(f["size"] for f in fills)
+	# Own-side blended fill price in cents (Σ price·size / Σ size).
+	own_blended_cents = (
+		sum(f["price"] * f["size"] for f in fills) / total_size if total_size else 0.0
+	)
+	# The YES-book price the V2 wire reports: own side for yes, complement for no.
+	yesbook_cents = own_blended_cents if side == "yes" else 100 - own_blended_cents
+	return {
 		"order_id": order_id,
-		"ticker": ticker,
-		"side": side,
-		"action": action,
-		"initial_count_fp": f"{count}.00",
-		"fill_count_fp": f"{filled_count}.00",
-		"remaining_count_fp": f"{count - filled_count}.00",
-		"yes_price_dollars": own if side == "yes" else comp,
-		"no_price_dollars": own if side == "no" else comp,
-		"taker_fill_cost_dollars": f"{total_cost_cents / 100:.6f}",
-		"taker_fees_dollars": "0.000000",
-		"time_in_force": "immediate_or_cancel",
-		"status": "executed" if filled_count == count else "resting",
+		"client_order_id": client_order_id,
+		"fill_count": f"{filled_count}.00",
+		"remaining_count": f"{count - filled_count}.00",
+		"average_fill_price": f"{yesbook_cents / 100:.4f}" if filled_count > 0 else None,
+		"average_fee_paid": "0.000000" if filled_count > 0 else None,
+		"ts_ms": 1715793600123,
 	}
-	if client_order_id is not None:
-		order["client_order_id"] = client_order_id
-	return {"order": order}
 
 
 def kalshi_201_partial(
@@ -177,7 +172,7 @@ class MockKalshiServer:
 	    server.queue_response(kalshi_201_filled(order_id="ord-1"))
 	    client = server.make_client(cfg, audit)
 	    order = await client.place(req)
-	    assert server.requests[-1].url.path.endswith("/portfolio/orders")
+	    assert server.requests[-1].url.path.endswith("/portfolio/events/orders")
 
 	Response queueing:
 	* If only one response is queued, it is returned for every request.
@@ -343,20 +338,20 @@ class MockKalshiServer:
 
 	@staticmethod
 	def _response_coid(body: dict[str, Any]) -> str | None:
-		"""Extract the order ``client_order_id`` from a queued response body."""
-		order = body.get("order") if isinstance(body, dict) else None
-		coid = order.get("client_order_id") if isinstance(order, dict) else None
+		"""Extract the order ``client_order_id`` from a queued V2 response body
+		(flat — no ``order`` wrapper)."""
+		coid = body.get("client_order_id") if isinstance(body, dict) else None
 		return coid if isinstance(coid, str) else None
 
 	@staticmethod
 	def _synthesise_echo(request: httpx.Request) -> dict[str, Any]:
-		"""Build a fully-filled 201 body echoing the placed order.
+		"""Build a fully-filled flat V2 201 body echoing the placed order.
 
 		Used for an unqueued (exit) coid so the place still translates cleanly.
-		The fill price is the request's limit (``yes_price`` / ``no_price``); the
-		exit result is discarded by ``_handle_exit``, so the exact price is
-		immaterial — what matters is a positive fill at a real cost basis.
-		Delegates to :func:`kalshi_201_filled` for the real wire shape.
+		The V2 request body already carries the YES-book ``price``; echo it as the
+		``average_fill_price`` and fill the full ``count``. The exit result is
+		discarded by ``_handle_exit``, so the exact price is immaterial — what
+		matters is a positive fill at a real cost basis.
 		"""
 		try:
 			payload = json.loads(request.content)
@@ -364,22 +359,22 @@ class MockKalshiServer:
 			payload = {}
 		if not isinstance(payload, dict):
 			payload = {}
-		count = int(payload.get("count", 0) or 0)
-		side = payload.get("side", "yes")
-		price = payload.get("yes_price") if side == "yes" else payload.get("no_price")
-		price = int(price or 0)
+		try:
+			# V2 ``count`` is a FixedPointCount string, e.g. "3.00".
+			count = int(float(payload.get("count", 0) or 0))
+		except (ValueError, TypeError):
+			count = 0
+		price = payload.get("price")  # YES-book FixedPointDollars string from the V2 body
 		coid = payload.get("client_order_id")
-		return kalshi_201_filled(
-			order_id=f"echo-{coid}" if coid else "echo-order",
-			ticker=payload.get("ticker", ""),
-			side=side,
-			action=payload.get("action", "buy"),
-			count=count,
-			filled_count=count,
-			yes_price=price,
-			fills=[{"price": price, "size": count}] if count > 0 else [],
-			client_order_id=coid,
-		)
+		return {
+			"order_id": f"echo-{coid}" if coid else "echo-order",
+			"client_order_id": coid,
+			"fill_count": f"{count}.00",
+			"remaining_count": "0.00",
+			"average_fill_price": price if count > 0 else None,
+			"average_fee_paid": "0.000000" if count > 0 else None,
+			"ts_ms": 1715793600123,
+		}
 
 	def make_client(
 		self,
