@@ -36,7 +36,11 @@ dev = [
     "pytest-cov>=4.0",
     "hypothesis>=6.0",
     "ruff>=0.5",
-    "mypy>=1.10",
+    # Pin <2.0: mypy 2.x (released 2026-06) rejects numpy>=2.4.5's PEP 695 `type`
+    # stubs under python_version 3.11 (numpy/__init__.pyi: "Type statement is only
+    # supported in Python 3.12+"). 1.x type-checks the same numpy cleanly. Revisit
+    # as a deliberate mypy-2.x migration, not coupled to a feature change.
+    "mypy>=1.10,<2.0",
     "types-PyYAML>=6.0",
     "types-requests>=2.31",
 ]
