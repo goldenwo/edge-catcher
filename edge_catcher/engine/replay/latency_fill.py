@@ -21,8 +21,11 @@ class PendingFillQueue:
 	"""Deferred entries; drains those whose arrival_time <= now in ENQUEUE (seq)
 	order. `total_enqueued` is the lifetime count (= fill-rate denominator: the
 	drain records only fills, so non-fills = total_enqueued - filled rows)."""
-	_pending: list[PendingFill] = field(default_factory=list)
-	_seq: int = 0
+	# init=False: the only valid construction is PendingFillQueue() — structurally
+	# enforces the invariant `_seq == lifetime enqueue count` (T6's fill-rate
+	# denominator) by keeping the private state out of the generated __init__.
+	_pending: list[PendingFill] = field(default_factory=list, init=False)
+	_seq: int = field(default=0, init=False)
 
 	def enqueue(self, *, req: Any, entry_price: int, signal: Any, arrival_time: datetime) -> None:
 		self._seq += 1

@@ -13,3 +13,12 @@ def test_queue_seq_order_and_total_enqueued():
 	assert q.total_enqueued == 3                       # lifetime counter (T6 denominator)
 	assert [m.req for m in q.drain(_dt(9))] == ["C"]
 	assert q.drain(_dt(9)) == [] and q.total_enqueued == 3
+
+def test_drain_boundary_and_empty():
+	q = PendingFillQueue()
+	assert q.drain(_dt(30)) == []       # empty queue
+	q.enqueue(req="X", entry_price=50, signal="s", arrival_time=_dt(5))
+	assert q.drain(_dt(4)) == []        # not yet matured (arrival 5 > now 4)
+	assert len(q) == 1                  # un-matured order stays pending
+	assert [m.req for m in q.drain(_dt(5))] == ["X"]  # exactly at boundary (<=)
+	assert len(q) == 0 and q.total_enqueued == 1      # drained; lifetime counter holds
