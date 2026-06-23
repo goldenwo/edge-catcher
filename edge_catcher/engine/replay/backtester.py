@@ -71,6 +71,12 @@ class ReplayResult:
 	strategies_loaded: list[str] = field(default_factory=list)
 	store: Optional["InMemoryTradeStore"] = None
 	latency_enqueued: Optional[int] = None
+	# Orders enqueued but NEVER matured (arrival_time > the bundle's last frame —
+	# the final-Δ tail has no t+Δ book to resolve against, and there is no post-loop
+	# drain). The honest T6 fill-rate denominator EXCLUDES these (spec §7: "excluded
+	# AND counted explicitly — never a silent shrink"), i.e. denom = enqueued -
+	# undrained; counting them as non-fills would bias the calibrated Δ downward.
+	latency_undrained: Optional[int] = None
 
 
 def _parse_fill_latency_ms(config: dict) -> int:
@@ -281,11 +287,11 @@ async def replay_capture(
 		if state is not None:
 			store.save_state(strat.name, state)
 
-	latency_enqueued = (
-		cast(Any, executor).pending_queue.total_enqueued
-		if getattr(executor, "pending_queue", None) is not None
-		else None
-	)
+	_pq_final = getattr(executor, "pending_queue", None)
+	latency_enqueued = _pq_final.total_enqueued if _pq_final is not None else None
+	# len(queue) at end = orders still pending = never-matured tail (arrival past
+	# the last frame). T6 excludes these from the fill-rate denominator (§7).
+	latency_undrained = len(_pq_final) if _pq_final is not None else None
 
 	return ReplayResult(
 		trades=store.all_trades(),
@@ -297,6 +303,7 @@ async def replay_capture(
 		strategies_loaded=strategy_names,
 		store=store,
 		latency_enqueued=latency_enqueued,
+		latency_undrained=latency_undrained,
 	)
 
 
