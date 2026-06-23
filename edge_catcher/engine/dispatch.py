@@ -827,29 +827,9 @@ async def _handle_enter(
 			# Kalshi order id (spec §3 `:400 filled` row / §4.2). kalshi_order_id
 			# is result.order_id — the same field the pending arm threads at the
 			# record_pending call below (executor.py `OrderResult.order_id`).
-			_trade_id = store.record_trade(
-				ticker=signal.ticker,
-				entry_price=entry_price,
-				strategy=signal.strategy,
-				side=signal.side,
-				series_ticker=signal.series,
-				intended_size=_result.intended_size,
-				fill_size=_result.filled_size,
-				blended_entry=_result.blended_entry_cents,
-				book_depth=_result.book_depth,
-				fill_pct=_result.fill_pct,
-				slippage_cents=_result.slippage_cents,
-				book_snapshot=_result.book_snapshot,
-				now=now,
-				client_order_id=req.client_order_id,
-				kalshi_order_id=_result.order_id,
-				# Dual-slippage diagnostics (spec §4.2 / §9). Paper persists
-				# both columns onto paper_trades (commit 023a9b5 + 27a7695);
-				# live's record_trade is the CAS to transition_pending_to_open
-				# which IGNORES both (live computes its own pair from the refs
-				# persisted on the pending row — Step 10).
-				market_impact_cents=_result.market_impact_cents,
-				limit_slippage_cents=_result.limit_slippage_cents,
+			_trade_id = record_filled_entry(
+				store, signal=signal, entry_price=entry_price, req=req,
+				result=_result, now=now,
 			)
 		return _result, _trade_id
 
@@ -1620,6 +1600,38 @@ def _handle_synthetic_settlement(store: TradeStoreProtocol, payload: dict, now: 
 			f"for {strategy}/{ticker} — DuplicateOpenTradeError invariant violated"
 		)
 	store.settle_trade(matches[0]["id"], result, now=now)
+
+
+# ---------------------------------------------------------------------------
+# Shared fill-persist helper (inline path + Task-3 latency-drain share this)
+# ---------------------------------------------------------------------------
+
+def record_filled_entry(
+	store: TradeStoreProtocol, *, signal: Signal, entry_price: int,
+	req: OrderRequest, result: OrderResult, now: datetime,
+) -> int:
+	"""Persist a filled entry. Extracted verbatim from _place_and_persist's
+	filled arm so the replay latency-drain (Task 3) records a fill resolved at
+	t+Delta with the SAME call shape. Inline + drain share this => DRY + parity."""
+	return store.record_trade(
+		ticker=signal.ticker,
+		entry_price=entry_price,
+		strategy=signal.strategy,
+		side=signal.side,
+		series_ticker=signal.series,
+		intended_size=result.intended_size,
+		fill_size=result.filled_size,
+		blended_entry=result.blended_entry_cents,
+		book_depth=result.book_depth,
+		fill_pct=result.fill_pct,
+		slippage_cents=result.slippage_cents,
+		book_snapshot=result.book_snapshot,
+		now=now,
+		client_order_id=req.client_order_id,
+		kalshi_order_id=result.order_id,
+		market_impact_cents=result.market_impact_cents,
+		limit_slippage_cents=result.limit_slippage_cents,
+	)
 
 
 # ---------------------------------------------------------------------------
