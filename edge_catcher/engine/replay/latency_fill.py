@@ -44,3 +44,45 @@ class PendingFillQueue:
 
 	def __len__(self) -> int:
 		return len(self._pending)
+
+
+@dataclass
+class LatencyReplayExecutor:
+	"""Replay-only wrapper. latency_ms==0 => transparent passthrough (byte-exact).
+	latency_ms>0 => carries base + queue; _handle_enter enqueues and the replay
+	loop drains via resolve_matured_fills(). Satisfies Executor (place is the only method)."""
+	base: Any
+	latency_ms: int
+	pending_queue: PendingFillQueue = field(default_factory=PendingFillQueue)
+
+	async def place(self, req: Any) -> Any:
+		return await self.base.place(req)	# only reached at Delta=0 (Delta>0 enqueues upstream)
+
+
+async def resolve_matured_fills(
+	queue: PendingFillQueue,
+	now: datetime,
+	base_executor: Any,
+	store: Any,
+) -> None:
+	"""Drain entries matured by `now`; place each against the in-place-evolved book
+	and record FILLS via record_filled_entry. Non-fills write no row (matching
+	replay's InMemory record_rejected no-op) and are counted as
+	queue.total_enqueued - len(store.all_trades()). No metrics (replay has no
+	Metrics instance). Lazy import avoids a top-level cycle with dispatch."""
+	matured = queue.drain(now)
+	if not matured:
+		return
+	from edge_catcher.engine.dispatch import record_filled_entry
+	for pf in matured:
+		result = await base_executor.place(pf.req)
+		if result.status == "filled":
+			record_filled_entry(
+				store,
+				signal=pf.signal,
+				entry_price=pf.entry_price,
+				req=pf.req,
+				result=result,
+				now=pf.arrival_time,
+			)
+		# rejected/pending: no row in replay (InMemory no-op); counted via total_enqueued.
