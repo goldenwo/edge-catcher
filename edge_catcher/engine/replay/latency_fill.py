@@ -56,7 +56,18 @@ class LatencyReplayExecutor:
 	pending_queue: PendingFillQueue = field(default_factory=PendingFillQueue)
 
 	async def place(self, req: Any) -> Any:
-		return await self.base.place(req)	# only reached at Delta=0 (Delta>0 enqueues upstream)
+		# CONTRACT: the backtester only builds this wrapper when fill_latency_ms>0
+		# (at Delta=0 it uses the bare PaperExecutor), so latency_ms>0 here. At
+		# Delta>0, _handle_enter enqueues entries and returns BEFORE place(), so the
+		# only call that legitimately reaches place() is an EXIT (action=="sell"),
+		# which is never deferred. The assert makes a future wiring drift (an ENTRY
+		# resolving inline against the un-evolved book — silently breaking the
+		# latency model) fail loudly instead of corrupting fill fidelity.
+		assert self.latency_ms == 0 or getattr(req, "action", None) == "sell", (
+			"LatencyReplayExecutor.place reached for a non-exit at latency_ms>0; "
+			"entries must enqueue via _handle_enter, not resolve inline"
+		)
+		return await self.base.place(req)
 
 
 async def resolve_matured_fills(
@@ -75,6 +86,11 @@ async def resolve_matured_fills(
 		return
 	from edge_catcher.engine.dispatch import record_filled_entry
 	for pf in matured:
+		# base_executor is a PaperExecutor, contracted to never raise (every error
+		# path returns a defined OrderResult). We deliberately do NOT try/except: a
+		# raise here is a real fill-resolution bug, and failing the replay loudly is
+		# correct — swallowing it would silently miscount the order as a non-fill and
+		# bias the T6 fill-rate validation.
 		result = await base_executor.place(pf.req)
 		if result.status == "filled":
 			record_filled_entry(

@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from edge_catcher.engine.executor import OrderRequest
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
-from edge_catcher.engine.replay.latency_fill import PendingFillQueue, resolve_matured_fills
+from edge_catcher.engine.replay.latency_fill import LatencyReplayExecutor, PendingFillQueue, resolve_matured_fills
 from edge_catcher.engine.strategy_base import Signal
 from edge_catcher.engine.trade_store import InMemoryTradeStore
 
@@ -133,3 +135,14 @@ def test_partial_fill_on_thin_book() -> None:
 	# fill_size should be 1 (only 1 qty available); intended_size should be 2
 	assert row["fill_size"] == 1
 	assert row["fill_size"] < row["intended_size"]
+
+
+def test_place_rejects_inline_entry_at_positive_latency() -> None:
+	"""Delta>0 wrapper contract: place() is only for exits (never deferred). An
+	inline ENTRY (action='buy') reaching place() at latency_ms>0 is a wiring bug
+	and must fail loudly rather than resolve against the un-evolved book."""
+	ex = LatencyReplayExecutor(
+		base=PaperExecutor(market_state=MarketState(), config=CFG), latency_ms=500
+	)
+	with pytest.raises(AssertionError):
+		asyncio.run(ex.place(_req()))   # _req() is action="buy"
