@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from edge_catcher.engine.execution import _make_client_order_id, build_entry_order, entry_spread_too_wide
@@ -741,6 +741,18 @@ async def _handle_enter(
 		entry_best_price_cents=entry_best_price_cents,
 		entry_limit_price_cents=req.limit_price_cents,
 	)
+
+	# Replay-only latency deferral (spec 2026-06-23). Gated on the executor's
+	# positive latency_ms — FALSE for the default PaperExecutor and Delta=0, so
+	# the inline place+route path below stays byte-exact (G-parity). record_intent
+	# above already ran at t (kept synchronous); only the FILL is deferred.
+	_latency_ms = getattr(executor, "latency_ms", 0)
+	if _latency_ms > 0:
+		cast(Any, executor).pending_queue.enqueue(
+			req=req, entry_price=entry_price, signal=signal,
+			arrival_time=now + timedelta(milliseconds=_latency_ms),
+		)
+		return
 
 	# Hard cap on the executor call. ``LiveExecutor.place`` is supposed to
 	# never raise (every error path returns a defined OrderResult), but a

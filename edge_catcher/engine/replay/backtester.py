@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import yaml
 
@@ -70,6 +70,7 @@ class ReplayResult:
 	capture_end_ts: Optional[str] = None
 	strategies_loaded: list[str] = field(default_factory=list)
 	store: Optional["InMemoryTradeStore"] = None
+	latency_enqueued: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +160,20 @@ async def replay_capture(
 	# 5a. Resolve the executor — paper by default (orderbook walk against the
 	# captured book; replay's paper-fidelity default). CR-5 (I2) injects
 	# LiveExecutor against MockKalshiServer — never prod; spec §10.2.
-	executor = executor or PaperExecutor(market_state=market_state, config=config)
+	# fill_latency_ms>0 wraps the base PaperExecutor with LatencyReplayExecutor
+	# so entries are deferred by Δ ms (spec 2026-06-23); 0 or absent = bare
+	# PaperExecutor (default, G-parity-safe). Caller-supplied executor is
+	# always honoured unchanged (only builds when executor is None).
+	if executor is None:
+		_base = PaperExecutor(market_state=market_state, config=config)
+		_latency_ms = int(config.get("fill_latency_ms", 0) or 0)
+		if _latency_ms < 0:
+			raise ValueError(f"fill_latency_ms must be >= 0; got {_latency_ms}")
+		if _latency_ms > 0:
+			from edge_catcher.engine.replay.latency_fill import LatencyReplayExecutor
+			executor = LatencyReplayExecutor(base=_base, latency_ms=_latency_ms)
+		else:
+			executor = _base
 
 	# 6. Construct InMemoryTradeStore and seed from PRIOR day's open_trades
 	#    and strategy_state snapshot.
@@ -216,6 +230,10 @@ async def replay_capture(
 			last_ts = recv_ts
 
 			try:
+				_pq = getattr(executor, "pending_queue", None)
+				if _pq is not None:
+					from edge_catcher.engine.replay.latency_fill import resolve_matured_fills
+					await resolve_matured_fills(_pq, now, cast(Any, executor).base, store)
 				await dispatch_message(
 					event=event,
 					config=config,
@@ -254,6 +272,12 @@ async def replay_capture(
 		if state is not None:
 			store.save_state(strat.name, state)
 
+	latency_enqueued = (
+		cast(Any, executor).pending_queue.total_enqueued
+		if getattr(executor, "pending_queue", None) is not None
+		else None
+	)
+
 	return ReplayResult(
 		trades=store.all_trades(),
 		final_market_state=market_state,
@@ -263,6 +287,7 @@ async def replay_capture(
 		capture_end_ts=last_ts,
 		strategies_loaded=strategy_names,
 		store=store,
+		latency_enqueued=latency_enqueued,
 	)
 
 
