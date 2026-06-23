@@ -14,7 +14,7 @@ The **live-execution cycle** (sub-projects A–F) lands in this release: the pap
 - **Live execution (sub-projects A–F, "v1.6.0" PRs 1–6).** `LiveExecutor` + order builders + `fill_math` + a dispatch pending-branch (#37); an order state machine over a `live_trades` store with reconciliation + ghost-reject handling (#39); risk gates + migration runner + dispatch wiring (#36); live engine wiring + cutover (#40); sizing-wire for live order placement — gate + builder + freshness (#41); additive `Signal`/`Executor`/`OpenPosition` fields preserving the protocol-growth invariant (#35).
 - **Live-only spread-aware entry gate (#50)** — rejects entries whose book spread would cross the strategy's protective stop; paper/replay paths unaffected.
 - **Dual-slippage diagnostics (#54)** — reporting-only `market_impact_cents` (vs top-of-book) and `limit_slippage_cents` (vs the order's limit), persisted on filled entries; additive `OrderResult` fields + migration `0004`.
-- **Honest paper fill simulator — Phase 1 (#57)** — opt-in `paper_fill_model: "fixed"` wraps `PaperExecutor` with a `HonestPaperExecutor` + `FixedSlippageModel` applying a hand-tuned pessimistic per-strategy slippage penalty, narrowing the optimistic executor's over-promise vs live fills. Default `"optimistic"` is byte-unchanged (G-parity 11/11); fail-closed config validation at the boot gate. Phase 2 (`EmpiricalSlippageModel` fit to live data) is the empirical follow-up.
+- **Honest paper fill simulator — Phase 1 (#57)** — opt-in `paper_fill_model: "fixed"` wraps `PaperExecutor` with a `HonestPaperExecutor` + `FixedSlippageModel` applying a hand-tuned pessimistic per-strategy slippage penalty. **Retired in the fill-latency replay cycle (2026-06-23):** live verdict proved the real gap is non-fill (adverse selection on synthetic implied-ask), not slippage magnitude. The honest fill model is now a replay-path `fill_latency_ms` latency gate; `paper_fill_model: "fixed"` is no longer accepted.
 - **Python 3.13 added to the CI test matrix (#48).**
 
 ### Changed
@@ -41,7 +41,7 @@ The **live-execution cycle** (sub-projects A–F) lands in this release: the pap
 
 ### Docs
 
-- **Honest-paper config documented (#59)** — `paper_fill_model` / `honest_paper` in the paper-trader config example, architecture, and README.
+- **Honest-paper config documented (#59)** — `paper_fill_model` / `honest_paper` in the paper-trader config example, architecture, and README. (The `fixed` model and `honest_paper` block were retired 2026-06-23; see the fill-latency replay cycle.)
 - **Replay parity gate (#31)** gained a skip-list + non-strict warning banner for legacy OLD_FAIL bundles.
 
 ## [1.5.0] — 2026-05-08

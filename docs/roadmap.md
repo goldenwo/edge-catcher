@@ -44,7 +44,7 @@ After v1.3.1 the project's actual direction was **live order execution** — not
 
 - **Order path** — `LiveExecutor`, order builders, `fill_math`, and an order state machine over a `live_trades` store with reconciliation + ghost-reject handling, all behind the existing `Executor` Protocol; async engine refactor so live HTTP calls run inside `place()`.
 - **Risk + safety** — risk gates, a fail-closed mode-coherence boot gate, a live-only spread-aware entry gate, and a venue-neutral `LiveVenueClient` contract.
-- **Fidelity tooling** — dual-slippage diagnostics (`market_impact` + `limit_slippage`) and an **opt-in honest paper fill model (Phase 1)** that applies a pessimistic slippage penalty to narrow the optimistic executor's over-promise vs live fills. **Phase 2** — `EmpiricalSlippageModel` fit to validated live data — is the eventual goal here, gated on accumulating enough validated live fills to fit it.
+- **Fidelity tooling** — dual-slippage diagnostics (`market_impact` + `limit_slippage`) and an opt-in honest paper fill model (Phase 1, `paper_fill_model: fixed`, since retired). Live verdict (2026-06-23) proved the real gap is non-fill via adverse selection on synthetic implied-ask, not slippage magnitude. The honest fill model is now a **replay-path `fill_latency_ms` latency gate** that replays each order with arrival-time delay and checks book crossability.
 
 Paper behavior stays byte-unchanged (G-parity 11/11) unless a feature is explicitly opted into; `executor: live|paper` is the mode of record.
 

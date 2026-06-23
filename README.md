@@ -83,7 +83,7 @@ Stages 3 and 4 share the same dispatch path. **A passing replay means your live 
 
 ### Live trading + replay
 
-- **Paper trader** — real-time WebSocket dispatch, orderbook-aware sizing, fresh-book gates, multi-strategy concurrency; opt-in honest fill model (`paper_fill_model: fixed`) applies a pessimistic slippage penalty so paper stops over-promising
+- **Paper trader** — real-time WebSocket dispatch, orderbook-aware sizing, fresh-book gates, multi-strategy concurrency; replay-path honest fill model (`fill_latency_ms`) applies latency-aware arrival-time replay so paper P&L is grounded in actual fill reachability
 - **Capture pipeline** — daily JSONL bundles assembled at midnight UTC with state snapshots; uploads to Cloudflare R2 with local fallback
 - **Replay backtester** — re-runs a captured day through the exact `dispatch_message` path used live; verifies bit-exact reproducibility
 - **Discord notifications** — trade entry/exit with per-strategy color/emoji + P&L

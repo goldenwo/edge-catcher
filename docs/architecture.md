@@ -41,14 +41,13 @@ before any capital — paper or real — gets deployed:
    the live Kalshi WS feed, records trades to a `paper_trades` SQLite
    DB, and captures every event for replay.
 
-   By default the paper executor uses an **optimistic** fill model: it
-   walks the visible orderbook and assumes quoted liquidity fills at the
-   posted price. Because real IOC orders slip, partially fill, or miss,
-   this can over-promise relative to live execution. Set
-   `paper_fill_model: "fixed"` in the paper config to wrap fills with a
-   pessimistic per-strategy slippage penalty (a hand-tuned stub pending
-   empirical calibration) that narrows the gap. The default path is
-   byte-unchanged.
+   The paper executor uses an **optimistic** fill model: it walks the
+   visible orderbook and assumes quoted liquidity fills at the posted
+   price. For execution-fidelity evaluation, the **replay backtester**
+   supports a `fill_latency_ms` latency model that replays each order
+   with arrival-time delay and checks whether the book was still
+   crossable — this is the honest fill verdict, and it lives in the
+   replay path, not the live boot path.
 
 Each stage is more expensive and more realistic than the last, so
 ideas that survive the cheap stages get the expensive ones; ideas that
