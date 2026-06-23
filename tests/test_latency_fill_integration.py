@@ -25,11 +25,6 @@ from edge_catcher.engine.replay.latency_fill import (
 from edge_catcher.engine.strategy_base import Signal
 from edge_catcher.engine.trade_store import InMemoryTradeStore
 
-try:
-	from datetime import datetime, timezone
-except ImportError:
-	pass
-
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -130,26 +125,17 @@ async def test_latency_defers_fill_vs_delta_zero() -> None:
 # ---------------------------------------------------------------------------
 
 def test_negative_fill_latency_rejected() -> None:
-	"""fill_latency_ms=-1 must raise ValueError from the backtester build.
-
-	We test the guard by calling the build logic inline (mirrors what
-	replay_capture does at executor-build time) rather than running a full
-	bundle, which would be slow and require disk fixtures.
-	"""
-	# Reproduce the exact guard from backtester.py so this test stays in-sync
-	# with the production path without needing a real bundle.
-	def _build_executor(config: dict) -> None:
-		_base = PaperExecutor(market_state=MarketState(), config=config)
-		_latency_ms = int(config.get("fill_latency_ms", 0) or 0)
-		if _latency_ms < 0:
-			raise ValueError(f"fill_latency_ms must be >= 0; got {_latency_ms}")
-		from edge_catcher.engine.replay.latency_fill import LatencyReplayExecutor
-		if _latency_ms > 0:
-			return LatencyReplayExecutor(base=_base, latency_ms=_latency_ms)
-		return _base
+	"""The REAL production guard (_parse_fill_latency_ms — the exact function the
+	backtester executor-build calls) rejects fill_latency_ms < 0 and parses
+	valid/absent values. Calling the production function (not a copy) means
+	deleting or loosening the guard fails this test."""
+	from edge_catcher.engine.replay.backtester import _parse_fill_latency_ms
 
 	with pytest.raises(ValueError, match="fill_latency_ms must be >= 0"):
-		_build_executor({"fill_latency_ms": -1})
+		_parse_fill_latency_ms({"fill_latency_ms": -1})
+	assert _parse_fill_latency_ms({}) == 0                      # absent → 0 (optimistic default)
+	assert _parse_fill_latency_ms({"fill_latency_ms": 0}) == 0
+	assert _parse_fill_latency_ms({"fill_latency_ms": 500}) == 500
 
 
 # ---------------------------------------------------------------------------

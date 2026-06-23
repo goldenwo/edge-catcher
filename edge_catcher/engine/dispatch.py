@@ -742,12 +742,17 @@ async def _handle_enter(
 		entry_limit_price_cents=req.limit_price_cents,
 	)
 
-	# Replay-only latency deferral (spec 2026-06-23). Gated on the executor's
-	# positive latency_ms — FALSE for the default PaperExecutor and Delta=0, so
-	# the inline place+route path below stays byte-exact (G-parity). record_intent
-	# above already ran at t (kept synchronous); only the FILL is deferred.
-	_latency_ms = getattr(executor, "latency_ms", 0)
-	if _latency_ms > 0:
+	# Replay-only latency deferral (spec 2026-06-23). Gated on a positive INT
+	# latency_ms — absent on the default PaperExecutor (and on test mocks), so the
+	# inline place+route path below stays byte-exact (G-parity). The isinstance(int)
+	# check is required (not a bare getattr default): a MagicMock executor
+	# auto-creates `.latency_ms` as a truthy child mock that is uncomparable to 0,
+	# so only a real positive int defers. record_intent above already ran at t (kept
+	# synchronous); only the FILL is deferred. cast(Any): pending_queue is a
+	# LatencyReplayExecutor-only attr and must NOT leak into the Executor Protocol
+	# (the live path has no queue).
+	_latency_ms = getattr(executor, "latency_ms", None)
+	if isinstance(_latency_ms, int) and not isinstance(_latency_ms, bool) and _latency_ms > 0:
 		cast(Any, executor).pending_queue.enqueue(
 			req=req, entry_price=entry_price, signal=signal,
 			arrival_time=now + timedelta(milliseconds=_latency_ms),

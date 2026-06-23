@@ -73,6 +73,17 @@ class ReplayResult:
 	latency_enqueued: Optional[int] = None
 
 
+def _parse_fill_latency_ms(config: dict) -> int:
+	"""Parse + validate the replay-only ``fill_latency_ms`` (Δ — the signal→arrival
+	latency in ms). Default 0 reproduces today's optimistic same-tick fill; a
+	negative value is a config error. REPLAY ONLY — the live boot path never reads
+	this key. Extracted so the guard has direct test coverage (not a copy)."""
+	latency_ms = int(config.get("fill_latency_ms", 0) or 0)
+	if latency_ms < 0:
+		raise ValueError(f"fill_latency_ms must be >= 0; got {latency_ms}")
+	return latency_ms
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -166,9 +177,7 @@ async def replay_capture(
 	# always honoured unchanged (only builds when executor is None).
 	if executor is None:
 		_base = PaperExecutor(market_state=market_state, config=config)
-		_latency_ms = int(config.get("fill_latency_ms", 0) or 0)
-		if _latency_ms < 0:
-			raise ValueError(f"fill_latency_ms must be >= 0; got {_latency_ms}")
+		_latency_ms = _parse_fill_latency_ms(config)
 		if _latency_ms > 0:
 			from edge_catcher.engine.replay.latency_fill import LatencyReplayExecutor
 			executor = LatencyReplayExecutor(base=_base, latency_ms=_latency_ms)
