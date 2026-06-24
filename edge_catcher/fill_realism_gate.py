@@ -186,13 +186,14 @@ def decide(
 	n: int,
 	n_target: int,
 	pt_lo: float, pt_hi: float,		# per-trade CI
-	pc_lo: float, pc_hi: float,		# per-contract CI
+	pc_lo: float, pc_hi: float,		# per-contract CI (rule branches on pc_lo; pc_hi accepted for symmetry, reported in the verdict)
 	ceiling: bool,
 ) -> tuple[Decision, str]:
 	"""Asymmetric rule (spec section 4): graduate ONLY at exactly N with both CIs' lower bound > 0;
 	reject continuously (full CI below 0) — the safe direction. Kills are enforced by the
 	operator/live-trader, not here; this evaluates the rows it is given."""
-	# Sub-cap statistical REJECT — reachable at any n, takes precedence over INCONCLUSIVE.
+	# Sub-cap statistical REJECT — takes precedence over ALL other branches, including n==n_target.
+	# SAFETY: reorder this AFTER the n==n_target block and a fully-negative CI at exactly N could graduate.
 	if pt_hi < 0:
 		return Decision.REJECT, "per-trade CI fully below 0 (ci_high<0)"
 	if n == n_target:

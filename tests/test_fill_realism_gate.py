@@ -208,4 +208,14 @@ def test_decide_n_above_target_cannot_graduate_on_streak():
 	# n>50: graduation is only at exactly N — n>N never graduates (caller passes first-50 CIs,
 	# but guard here too): treat n>n_target with otherwise-graduating CIs as REJECT-not-graduate.
 	d, _ = decide(n=63, n_target=50, pt_lo=5, pt_hi=20, pc_lo=2, pc_hi=8, ceiling=False)
-	assert d is not Decision.GRADUATE
+	assert d is Decision.REJECT
+
+
+def test_decide_reject_via_full_negative_ci_takes_precedence_at_N():
+	# Even at exactly N, a fully-negative CI must fire branch 1 (ci_high<0),
+	# NOT fall through to the n==n_target block. Asserting the REASON pins which
+	# branch fired — a branch reorder would change the reason, not just the outcome.
+	d, reason = decide(n=50, n_target=50, pt_lo=-40, pt_hi=-5,
+	                   pc_lo=2, pc_hi=8, ceiling=False)
+	assert d is Decision.REJECT
+	assert "ci_high" in reason  # came from branch 1, not "ci_low<=0 at N"
