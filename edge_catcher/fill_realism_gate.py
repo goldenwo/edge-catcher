@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import random
 import re
+import statistics
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping, Optional
@@ -209,3 +210,59 @@ def decide(
 	if ceiling:
 		return Decision.INCONCLUSIVE, "ceiling before N, CI sign undetermined"
 	return Decision.RUNNING, "accumulating to N"
+
+
+# ---------------------------------------------------------------------------
+# evaluate() — pure orchestrator (Task 5)
+# ---------------------------------------------------------------------------
+
+def evaluate(
+	rows: list[Mapping[str, Any]],
+	*,
+	since: Optional[str],
+	until: Optional[str],
+	n_target: int = 50,
+	seed: int = 1729,
+	resamples: int = 10_000,
+	ceiling_exceeded: bool = False,
+	prior_rejected: bool = False,
+	attempt_num: int = 1,
+) -> GateVerdict:
+	"""Pure orchestration: aggregate → (first n_target positions) → CIs → decide.
+
+	`ceiling_exceeded` / `prior_rejected` / `attempt_num` are supplied by the caller
+	(the gitignored CLI reads them from run state + the ledger). No I/O here."""
+	agg = aggregate_positions(rows, since=since, until=until)
+	# Evaluate strictly the first n_target positions (graduate-only-at-exactly-N, spec section 4).
+	sample = agg.positions[:n_target]
+	pnls = [float(p.pnl_cents) for p in sample]
+	per_contract = [p.pnl_cents / p.position_size for p in sample if p.position_size > 0]
+
+	pt_lo, pt_hi = bootstrap_ci(pnls, seed=seed, resamples=resamples)
+	pc_lo, pc_hi = bootstrap_ci(per_contract, seed=seed, resamples=resamples)
+	mean_pnl = statistics.fmean(pnls) if pnls else 0.0
+
+	decision, reason = decide(
+		n=len(sample), n_target=n_target,
+		pt_lo=pt_lo, pt_hi=pt_hi, pc_lo=pc_lo, pc_hi=pc_hi,
+		ceiling=ceiling_exceeded,
+	)
+	if agg.n_lost_truth:
+		reason = f"{reason} | ALERT: {agg.n_lost_truth} lost_truth row(s) excluded — investigate"
+	requires_signoff = prior_rejected and decision is Decision.GRADUATE
+
+	return GateVerdict(
+		decision=decision,
+		n_positions=len(sample),
+		n_orders_placed=agg.n_orders_placed,
+		observed_fill_rate=agg.observed_fill_rate,
+		mean_pnl_cents=mean_pnl,
+		ci_low=pt_lo, ci_high=pt_hi,
+		per_contract_ci_low=pc_lo, per_contract_ci_high=pc_hi,
+		n_in_flight=agg.n_in_flight,
+		n_lost_truth=agg.n_lost_truth,
+		ceiling_exceeded=ceiling_exceeded,
+		attempt_num=attempt_num,
+		requires_signoff=requires_signoff,
+		outcome_reason=reason,
+	)

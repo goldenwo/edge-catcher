@@ -219,3 +219,40 @@ def test_decide_reject_via_full_negative_ci_takes_precedence_at_N():
 	                   pc_lo=2, pc_hi=8, ceiling=False)
 	assert d is Decision.REJECT
 	assert "ci_high" in reason  # came from branch 1, not "ci_low<=0 at N"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: evaluate() — orchestration + truncation + re-gate sign-off
+# ---------------------------------------------------------------------------
+
+from edge_catcher.fill_realism_gate import evaluate
+
+
+def _filled(coid: str, pnl: int, size: int = 1,
+            t: str = "2026-06-22T05:00:00+00:00") -> dict:
+	return _row(coid, status="won" if pnl >= 0 else "lost", pnl=pnl, fill_size=size, entry_time=t)
+
+
+def test_evaluate_graduates_strong_positive_at_N():
+	# 50 strongly +EV positions, 1 contract each → both CIs positive
+	rows = [_filled(f"c{i}", pnl=40, size=1, t=f"2026-06-22T05:{i:02d}:00+00:00") for i in range(50)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7)
+	assert v.decision is Decision.GRADUATE
+	assert v.n_positions == 50
+	assert v.requires_signoff is False
+
+
+def test_evaluate_surfaces_signoff_when_prior_rejected_and_would_graduate():
+	rows = [_filled(f"c{i}", pnl=40, t=f"2026-06-22T05:{i:02d}:00+00:00") for i in range(50)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7,
+	             prior_rejected=True, attempt_num=2)
+	assert v.decision is Decision.GRADUATE
+	assert v.requires_signoff is True            # operator must sign off (spec re-gate guard)
+	assert v.attempt_num == 2
+
+
+def test_evaluate_truncates_to_first_n_positions():
+	rows = [_filled(f"c{i}", pnl=40, t=f"2026-06-22T05:{i:02d}:00+00:00") for i in range(63)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7)
+	assert v.n_positions == 50                   # only the first 50 evaluated
+	assert v.decision is Decision.GRADUATE        # decided AT N, not on the n=63 streak
