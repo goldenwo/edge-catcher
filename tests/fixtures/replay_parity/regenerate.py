@@ -57,11 +57,13 @@ from edge_catcher.engine.replay.backtester import replay_capture  # noqa: E402
 # spurious-replay bug is fixed) but the over-marking introduces a different
 # class of drift (legitimate live trades suppressed in replay).
 #
-# Empirically validated bit-exact post-fix:
-PARITY_DAYS = [
-	"2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24",
-	"2026-04-25", "2026-04-26", "2026-04-27",
-]
+# 2026-04-21..27 RETIRED (sub-project 2a, option B): their captured-live trades were
+# recorded while the live paper-trader carried the frozen-book bug fixed in dispatch.py
+# _handle_orderbook_delta (V2 scalar deltas now apply). Post-fix replay is CORRECT and no
+# longer matches the bug-contaminated captured-live ground truth, so these fixtures cannot
+# be regenerated. Replay-vs-live parity is re-established on the first POST-DEPLOY bundle
+# (state.json deferred deliverable "orderbook-v2 post-deploy replay-parity"). Repopulate then.
+PARITY_DAYS: list[str] = []   # repopulate with post-deploy day(s)
 
 # Days the parity sweep was originally scoped to but excluded for the reason
 # above. Listed here so the exclusion is explicit and re-introducing them is
@@ -75,15 +77,7 @@ SENTINEL = FIXTURES_DIR / ".fixtures_present"
 # Per-day live trade counts. Post-fix replay output (after subtracting the
 # allowlist) must equal these exactly — guards against silent drift in either
 # direction. Populated empirically from a regenerate.py --all run.
-EXPECTED_TRADE_COUNTS: dict[str, int] = {
-	"2026-04-21": 5,
-	"2026-04-22": 3,
-	"2026-04-23": 6,
-	"2026-04-24": 8,
-	"2026-04-25": 9,
-	"2026-04-26": 4,
-	"2026-04-27": 3,
-}
+EXPECTED_TRADE_COUNTS: dict[str, int] = {}  # repopulate post-deploy (see PARITY_DAYS comment above)
 
 
 def _project_to_key(row) -> tuple:

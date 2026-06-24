@@ -32,10 +32,13 @@ import pytest
 #
 # Mirror this list in tests/fixtures/replay_parity/regenerate.py — they MUST
 # stay in sync (the regenerate script writes the fixtures the test reads).
-PARITY_DAYS = [
-	"2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24",
-	"2026-04-25", "2026-04-26", "2026-04-27",
-]
+# 2026-04-21..27 RETIRED (sub-project 2a, option B): their captured-live trades were
+# recorded while the live paper-trader carried the frozen-book bug fixed in dispatch.py
+# _handle_orderbook_delta (V2 scalar deltas now apply). Post-fix replay is CORRECT and no
+# longer matches the bug-contaminated captured-live ground truth, so these fixtures cannot
+# be regenerated. Replay-vs-live parity is re-established on the first POST-DEPLOY bundle
+# (state.json deferred deliverable "orderbook-v2 post-deploy replay-parity"). Repopulate then.
+PARITY_DAYS: list[str] = []   # repopulate with post-deploy day(s)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "replay_parity"
 SENTINEL = FIXTURES_DIR / ".fixtures_present"
