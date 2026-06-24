@@ -628,3 +628,28 @@ def test_dispatch_orderbook_delta_neither_shape_is_noop(monkeypatch):
 	monkeypatch.setattr(ms, "apply_orderbook_delta", lambda *a: calls.append(a))
 	_handle_orderbook_delta(ms, {"msg": {"market_ticker": "KXT"}})  # no lists, no V2 scalars
 	assert calls == []
+
+
+def test_dispatch_orderbook_delta_v2_adds_fresh_level():
+	# A positive V2 delta to a price NOT on the book ADDS it — the core "book evolves between
+	# snapshots" behavior (apply_orderbook_delta's not-updated-and-delta>0 insert path).
+	ms = MarketState()
+	ms.seed_orderbook("KXT", OrderbookSnapshot(yes_levels=[], no_levels=[]))
+	msg = {"msg": {"market_ticker": "KXT", "price_dollars": "0.55", "delta_fp": "3.00", "side": "no"}}
+	_handle_orderbook_delta(ms, msg)
+	ob = ms.get_orderbook("KXT")
+	assert (0.55, 3) in ob.no_levels
+
+
+def test_dispatch_orderbook_delta_legacy_branch_logs_on_bad_value(monkeypatch):
+	# Pins the silent-skip ASYMMETRY: the legacy branch still logs per-failure (its original
+	# `except Exception: log.exception`), whereas the V2 branch is silent (see the malformed test,
+	# which asserts logged == []). Together they make the asymmetry a tested contract.
+	ms = MarketState()
+	ms.seed_orderbook("KXT", OrderbookSnapshot(yes_levels=[], no_levels=[]))
+	logged: list = []
+	monkeypatch.setattr(dispatch_module.log, "exception", lambda *a, **k: logged.append(a))
+	# Legacy shape (a `yes` list is present -> legacy branch) with a non-numeric price -> float()
+	# raises ValueError -> caught by the legacy `except Exception: log.exception`.
+	_handle_orderbook_delta(ms, {"msg": {"market_ticker": "KXT", "yes": [["notaprice", 5]]}})
+	assert logged  # legacy branch logged the failure (contrast: V2 malformed frames do NOT log)
