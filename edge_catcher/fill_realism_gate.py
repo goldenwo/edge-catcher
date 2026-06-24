@@ -4,6 +4,7 @@ gitignored scripts/fill_realism_gate_cli.py wrapper. Decides GRADUATE/REJECT/INC
 on a strategy's settled live fills, to gate scaling real money."""
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -144,3 +145,33 @@ def aggregate_positions(
 	positions.sort(key=lambda p: (p.entry_time, p.key))
 	return Aggregation(positions=positions, n_orders_placed=n_placed,
 	                   n_in_flight=n_in_flight, n_lost_truth=n_lost_truth)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence interval (spec section 4)
+# ---------------------------------------------------------------------------
+
+def bootstrap_ci(
+	values: list[float],
+	*,
+	seed: int,
+	resamples: int = 10_000,
+	conf: float = 0.95,
+) -> tuple[float, float]:
+	"""Percentile bootstrap CI of the mean. Deterministic under `seed`
+	(random.Random — stdlib, no numpy per house convention). Returns (lo, hi);
+	(0.0, 0.0) for an empty sample."""
+	n = len(values)
+	if n == 0:
+		return (0.0, 0.0)
+	rng = random.Random(seed)
+	means: list[float] = []
+	for _ in range(resamples):
+		total = 0.0
+		for _ in range(n):
+			total += values[rng.randrange(n)]
+		means.append(total / n)
+	means.sort()
+	lo_idx = int((1.0 - conf) / 2.0 * resamples)
+	hi_idx = min(resamples - 1, int((1.0 + conf) / 2.0 * resamples))
+	return (means[lo_idx], means[hi_idx])

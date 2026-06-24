@@ -131,3 +131,28 @@ def test_filled_row_with_null_entry_time_is_flagged_not_dropped():
 	agg = aggregate_positions(rows, since=None, until=None)
 	assert agg.n_positions == 0          # not in the P&L sample (no entry_time)
 	assert agg.n_lost_truth == 1         # surfaced as an anomaly, not silently dropped
+
+
+# ---------------------------------------------------------------------------
+# Task 3: bootstrap_ci
+# ---------------------------------------------------------------------------
+
+from edge_catcher.fill_realism_gate import bootstrap_ci
+
+
+def test_bootstrap_ci_is_deterministic_under_seed():
+	vals = [10, 12, -3, 8, 15, 9, 11, 7, 13, 6]
+	a = bootstrap_ci(vals, seed=42, resamples=2000)
+	b = bootstrap_ci(vals, seed=42, resamples=2000)
+	assert a == b                       # same seed → identical
+	assert a[0] < a[1]                  # lo < hi
+
+
+def test_bootstrap_ci_clearly_positive_excludes_zero():
+	vals = [50, 55, 48, 60, 52, 58, 49, 61, 53, 57]  # all strongly positive
+	lo, hi = bootstrap_ci(vals, seed=1, resamples=5000)
+	assert lo > 0
+
+
+def test_bootstrap_ci_empty_is_zero():
+	assert bootstrap_ci([], seed=1) == (0.0, 0.0)
