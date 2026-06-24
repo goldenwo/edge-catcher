@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from edge_catcher.engine import dispatch as dispatch_module
-from edge_catcher.engine.dispatch import dispatch_message, process_tick
+from edge_catcher.engine.dispatch import _handle_orderbook_delta, dispatch_message, process_tick
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot, TickContext
 from edge_catcher.engine.risk import KillSwitchTripFailed
@@ -581,3 +581,50 @@ async def test_bankroll_refresh_propagates_kill_switch_trip_failed():
 	# Second refresh: counter hits threshold → emit_trip_fn called → raises
 	with pytest.raises(KillSwitchTripFailed):
 		await cache.refresh()
+
+
+# ---------------------------------------------------------------------------
+# _handle_orderbook_delta V2 scalar shape tests
+# ---------------------------------------------------------------------------
+
+def test_dispatch_routes_orderbook_delta_v2():
+	# V2 scalar frame applies exactly one delta with the parsed (side, price$, qty).
+	ms = MarketState()
+	ms.seed_orderbook("KXT", OrderbookSnapshot(yes_levels=[], no_levels=[(0.99, 10)]))
+	msg = {"type": "orderbook_delta", "msg": {
+		"market_ticker": "KXT", "price_dollars": "0.9900", "delta_fp": "-4.00", "side": "no"}}
+	_handle_orderbook_delta(ms, msg)
+	ob = ms.get_orderbook("KXT")
+	assert (0.99, 6) in ob.no_levels          # 10 + int(float("-4.00")) = 6
+
+
+def test_dispatch_orderbook_delta_v2_calls_apply_once(monkeypatch):
+	# Routing contract: exactly one apply with the exact parsed args (no double, no zero).
+	ms = MarketState()
+	calls: list = []
+	monkeypatch.setattr(ms, "apply_orderbook_delta", lambda *a: calls.append(a))
+	msg = {"msg": {"market_ticker": "KXT", "price_dollars": "0.43", "delta_fp": "7.00", "side": "yes"}}
+	_handle_orderbook_delta(ms, msg)
+	assert calls == [("KXT", "yes", 0.43, 7)]
+
+
+def test_dispatch_orderbook_delta_v2_malformed_is_silent_noop(monkeypatch):
+	# OverflowError ("1e999"), ValueError (""), bad side -> zero apply calls, no exception, no log.
+	for bad in ({"side": "yes", "price_dollars": "0.5", "delta_fp": "1e999"},
+	            {"side": "yes", "price_dollars": "", "delta_fp": "1"},
+	            {"side": "maybe", "price_dollars": "0.5", "delta_fp": "1"}):
+		ms = MarketState()
+		calls: list = []
+		monkeypatch.setattr(ms, "apply_orderbook_delta", lambda *a: calls.append(a))
+		logged: list = []
+		monkeypatch.setattr(dispatch_module.log, "exception", lambda *a, **k: logged.append(a))
+		_handle_orderbook_delta(ms, {"msg": {"market_ticker": "KXT", **bad}})
+		assert calls == [] and logged == []
+
+
+def test_dispatch_orderbook_delta_neither_shape_is_noop(monkeypatch):
+	ms = MarketState()
+	calls: list = []
+	monkeypatch.setattr(ms, "apply_orderbook_delta", lambda *a: calls.append(a))
+	_handle_orderbook_delta(ms, {"msg": {"market_ticker": "KXT"}})  # no lists, no V2 scalars
+	assert calls == []
