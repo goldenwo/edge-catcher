@@ -187,7 +187,8 @@ def decide(
 	n: int,
 	n_target: int,
 	pt_lo: float, pt_hi: float,		# per-trade CI
-	pc_lo: float, pc_hi: float,		# per-contract CI (rule branches on pc_lo; pc_hi accepted for symmetry, reported in the verdict)
+	# per-contract CI: rule branches on pc_lo; pc_hi accepted for symmetry, reported in the verdict
+	pc_lo: float, pc_hi: float,
 	ceiling: bool,
 ) -> tuple[Decision, str]:
 	"""Asymmetric rule (spec section 4): graduate ONLY at exactly N with both CIs' lower bound > 0;
