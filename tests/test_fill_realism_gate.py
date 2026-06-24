@@ -164,3 +164,48 @@ def test_bootstrap_ci_clearly_negative_hi_below_zero():
 
 def test_bootstrap_ci_empty_is_zero():
 	assert bootstrap_ci([], seed=1) == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: decide — asymmetric decision rule
+# ---------------------------------------------------------------------------
+
+from edge_catcher.fill_realism_gate import decide, Decision
+
+
+def test_decide_graduate_requires_both_cis_positive_at_N():
+	d, _ = decide(n=50, n_target=50, pt_lo=5, pt_hi=20, pc_lo=2, pc_hi=8, ceiling=False)
+	assert d is Decision.GRADUATE
+
+
+def test_decide_per_trade_pass_but_per_contract_spans_zero_is_inconclusive():
+	d, reason = decide(n=50, n_target=50, pt_lo=5, pt_hi=20, pc_lo=-1, pc_hi=4, ceiling=False)
+	assert d is Decision.INCONCLUSIVE
+	assert "size-dependent" in reason
+
+
+def test_decide_sub_cap_full_negative_ci_rejects():
+	d, _ = decide(n=17, n_target=50, pt_lo=-40, pt_hi=-5, pc_lo=-20, pc_hi=-2, ceiling=False)
+	assert d is Decision.REJECT
+
+
+def test_decide_at_N_ci_low_not_positive_rejects():
+	d, _ = decide(n=50, n_target=50, pt_lo=-2, pt_hi=10, pc_lo=-1, pc_hi=5, ceiling=False)
+	assert d is Decision.REJECT
+
+
+def test_decide_sub_cap_undetermined_keeps_running():
+	d, _ = decide(n=20, n_target=50, pt_lo=-2, pt_hi=10, pc_lo=-1, pc_hi=5, ceiling=False)
+	assert d is Decision.RUNNING
+
+
+def test_decide_ceiling_with_undetermined_sign_is_inconclusive():
+	d, _ = decide(n=20, n_target=50, pt_lo=-2, pt_hi=10, pc_lo=-1, pc_hi=5, ceiling=True)
+	assert d is Decision.INCONCLUSIVE
+
+
+def test_decide_n_above_target_cannot_graduate_on_streak():
+	# n>50: graduation is only at exactly N — n>N never graduates (caller passes first-50 CIs,
+	# but guard here too): treat n>n_target with otherwise-graduating CIs as REJECT-not-graduate.
+	d, _ = decide(n=63, n_target=50, pt_lo=5, pt_hi=20, pc_lo=2, pc_hi=8, ceiling=False)
+	assert d is not Decision.GRADUATE

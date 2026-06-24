@@ -175,3 +175,36 @@ def bootstrap_ci(
 	lo_idx = int((1.0 - conf) / 2.0 * resamples)
 	hi_idx = min(resamples - 1, int((1.0 + conf) / 2.0 * resamples))
 	return (means[lo_idx], means[hi_idx])
+
+
+# ---------------------------------------------------------------------------
+# Asymmetric decision rule (spec section 4)
+# ---------------------------------------------------------------------------
+
+def decide(
+	*,
+	n: int,
+	n_target: int,
+	pt_lo: float, pt_hi: float,		# per-trade CI
+	pc_lo: float, pc_hi: float,		# per-contract CI
+	ceiling: bool,
+) -> tuple[Decision, str]:
+	"""Asymmetric rule (spec section 4): graduate ONLY at exactly N with both CIs' lower bound > 0;
+	reject continuously (full CI below 0) — the safe direction. Kills are enforced by the
+	operator/live-trader, not here; this evaluates the rows it is given."""
+	# Sub-cap statistical REJECT — reachable at any n, takes precedence over INCONCLUSIVE.
+	if pt_hi < 0:
+		return Decision.REJECT, "per-trade CI fully below 0 (ci_high<0)"
+	if n == n_target:
+		if pt_lo > 0 and pc_lo > 0:
+			return Decision.GRADUATE, "per-trade & per-contract ci_low>0 at N"
+		if pt_lo > 0:  # per-trade passes but per-contract spans 0
+			return Decision.INCONCLUSIVE, "size-dependent edge (per-contract ci_low<=0)"
+		return Decision.REJECT, "per-trade ci_low<=0 at N (marginal != scale-worthy)"
+	if n > n_target:
+		# graduation is strictly at the first 50; never graduate a hand-picked larger n
+		return Decision.REJECT, "n>N: graduation only at exactly N (caller must pass first-50)"
+	# n < n_target, sign not fully negative
+	if ceiling:
+		return Decision.INCONCLUSIVE, "ceiling before N, CI sign undetermined"
+	return Decision.RUNNING, "accumulating to N"
