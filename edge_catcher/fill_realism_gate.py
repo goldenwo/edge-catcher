@@ -77,7 +77,7 @@ class Position:
 @dataclass(frozen=True)
 class Aggregation:
 	positions: list[Position]	# filled, in-window, ordered by entry_time (ties by key)
-	n_orders_placed: int		# filled + no-position rows in the placed-window
+	n_orders_placed: int		# distinct filled positions + no-position rows (placed entry-orders)
 	n_in_flight: int
 	n_lost_truth: int
 
@@ -99,7 +99,7 @@ def aggregate_positions(
 	"""Collapse rows into logical positions and partition by status (spec section 4).
 
 	Filled sample: status in FILLED_TERMINAL, windowed by entry_time, parent+children summed.
-	Placed denominator: filled + NO_POSITION rows, windowed by placed_at_utc.
+	Placed denominator: distinct filled positions (entry counted once) + NO_POSITION rows windowed by placed_at_utc.
 	lost_truth / in-flight: counted, excluded from the P&L sample, never silently dropped."""
 	groups: dict[str, dict[str, Any]] = {}
 	n_in_flight = 0
@@ -120,9 +120,14 @@ def aggregate_positions(
 			continue
 		if status in FILLED_TERMINAL:
 			if not _in_window(r.get("entry_time"), since, until):
+				# A filled-terminal row must carry entry_time; NULL = data loss → surface it.
+				# A non-null entry_time merely outside the window is a legitimate skip.
+				if r.get("entry_time") is None:
+					n_lost_truth += 1
 				continue
-			n_placed += 1  # a fill is also a placed order
 			key = _position_key(str(r.get("client_order_id")))
+			if key not in groups:
+				n_placed += 1  # count each logical position's entry ONCE (split children are exits, not new placements)
 			g = groups.setdefault(key, {"pnl": 0, "size": 0, "entry_time": r.get("entry_time")})
 			g["pnl"] += int(r.get("pnl_cents") or 0)
 			g["size"] += int(r.get("fill_size") or 0)
@@ -130,8 +135,7 @@ def aggregate_positions(
 			if r.get("entry_time") and r["entry_time"] < g["entry_time"]:
 				g["entry_time"] = r["entry_time"]
 		else:
-			# unknown/unexpected status: surfaced as lost_truth, never silently dropped
-			n_lost_truth += 1
+			n_lost_truth += 1  # unknown status — surfaced, not dropped
 
 	positions = [
 		Position(key=k, pnl_cents=g["pnl"], position_size=g["size"], entry_time=g["entry_time"])

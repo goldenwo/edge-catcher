@@ -45,8 +45,8 @@ def test_gate_verdict_is_frozen():
 # ---------------------------------------------------------------------------
 
 def _row(coid: str, status: str = "won", pnl: int = 100, fill_size: int = 2,
-         entry_time: str = "2026-06-22T05:00:00+00:00",
-         placed: str = "2026-06-22T05:00:00+00:00", strategy: str = "s") -> dict:
+	entry_time: str = "2026-06-22T05:00:00+00:00",
+	placed: str = "2026-06-22T05:00:00+00:00", strategy: str = "s") -> dict:
 	return {"client_order_id": coid, "status": status, "pnl_cents": pnl,
 	        "fill_size": fill_size, "entry_time": entry_time, "placed_at_utc": placed,
 	        "strategy": strategy}
@@ -62,6 +62,8 @@ def test_partial_exit_children_collapse_to_one_position():
 	p = agg.positions[0]
 	assert p.pnl_cents == 20            # 30 + (-10), no double-count
 	assert p.position_size == 5         # 3 + 2 (parent residual decremented, child slice)
+	assert agg.n_orders_placed == 1     # one logical position = one placed entry (splits are exits)
+	assert agg.observed_fill_rate == 1.0
 
 
 def test_denominator_counts_rejected_by_placed_at_utc_not_entry_time():
@@ -95,3 +97,37 @@ def test_first_n_positions_ordered_by_entry_time():
 	]
 	agg = aggregate_positions(rows, since=None, until=None)
 	assert [p.pnl_cents for p in agg.positions] == [2, 1]  # early first
+
+
+def test_in_flight_rows_excluded_and_counted():
+	rows = [
+		{"client_order_id": "p1", "status": "pending", "pnl_cents": None, "fill_size": 0,
+		 "entry_time": None, "placed_at_utc": "2026-06-22T05:00:00+00:00", "strategy": "s"},
+		{"client_order_id": "o1", "status": "open", "pnl_cents": None, "fill_size": 1,
+		 "entry_time": "2026-06-22T05:00:00+00:00", "placed_at_utc": "2026-06-22T05:00:00+00:00",
+		 "strategy": "s"},
+	]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert agg.positions == []
+	assert agg.n_in_flight == 2
+	assert agg.n_orders_placed == 0     # in-flight rows are not resolved placements
+	assert agg.n_positions == 0
+
+
+def test_zero_fill_size_position_aggregates_without_error():
+	# Defensive: a filled-terminal row with fill_size=0 (should not happen, but must not crash).
+	# Task 5's per-contract math must guard position_size==0 (it filters position_size>0).
+	rows = [_row("z", status="scratch", pnl=0, fill_size=0)]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert agg.n_positions == 1
+	assert agg.positions[0].position_size == 0
+
+
+def test_filled_row_with_null_entry_time_is_flagged_not_dropped():
+	rows = [
+		{"client_order_id": "bad", "status": "won", "pnl_cents": 50, "fill_size": 1,
+		 "entry_time": None, "placed_at_utc": "2026-06-22T05:00:00+00:00", "strategy": "s"},
+	]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert agg.n_positions == 0          # not in the P&L sample (no entry_time)
+	assert agg.n_lost_truth == 1         # surfaced as an anomaly, not silently dropped
