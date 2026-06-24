@@ -256,3 +256,34 @@ def test_evaluate_truncates_to_first_n_positions():
 	v = evaluate(rows, since=None, until=None, n_target=50, seed=7)
 	assert v.n_positions == 50                   # only the first 50 evaluated
 	assert v.decision is Decision.GRADUATE        # decided AT N, not on the n=63 streak
+
+
+def test_evaluate_prior_rejected_but_now_rejects_needs_no_signoff():
+	# A re-gate that FAILS again does not require sign-off — there's nothing to graduate.
+	rows = [_filled(f"c{i}", pnl=-40, size=1, t=f"2026-06-22T05:{i:02d}:00+00:00") for i in range(50)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7,
+	             prior_rejected=True, attempt_num=3)
+	assert v.decision is Decision.REJECT
+	assert v.requires_signoff is False
+	assert v.attempt_num == 3
+
+
+def test_evaluate_surfaces_lost_truth_alert_in_reason():
+	# A lost_truth row is excluded from the P&L sample but surfaced as an ALERT in the reason.
+	rows = [_filled(f"c{i}", pnl=40, size=1, t=f"2026-06-22T05:{i:02d}:00+00:00") for i in range(50)]
+	rows.append({"client_order_id": "lt", "status": "lost_truth", "pnl_cents": None,
+	             "fill_size": 1, "entry_time": "2026-06-22T06:00:00+00:00",
+	             "placed_at_utc": "2026-06-22T06:00:00+00:00", "strategy": "s"})
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7)
+	assert v.n_lost_truth == 1
+	assert "ALERT" in v.outcome_reason and "lost_truth" in v.outcome_reason
+
+
+def test_evaluate_ceiling_subcap_undetermined_is_inconclusive():
+	# Below N, sign undetermined, but the calendar/order ceiling was hit → INCONCLUSIVE (not RUNNING).
+	rows = [_filled(f"c{i}", pnl=(40 if i % 2 else -40), size=1, t=f"2026-06-22T05:{i:02d}:00+00:00")
+	        for i in range(20)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7, ceiling_exceeded=True)
+	assert v.n_positions == 20
+	assert v.ceiling_exceeded is True
+	assert v.decision is Decision.INCONCLUSIVE

@@ -231,7 +231,10 @@ def evaluate(
 	"""Pure orchestration: aggregate → (first n_target positions) → CIs → decide.
 
 	`ceiling_exceeded` / `prior_rejected` / `attempt_num` are supplied by the caller
-	(the gitignored CLI reads them from run state + the ledger). No I/O here."""
+	(the gitignored CLI reads them from run state + the ledger). No I/O here.
+
+	n_orders_placed / observed_fill_rate are full-window (pre-truncation) diagnostics;
+	the CI decision uses only the first n_target positions (len(sample))."""
 	agg = aggregate_positions(rows, since=since, until=until)
 	# Evaluate strictly the first n_target positions (graduate-only-at-exactly-N, spec section 4).
 	sample = agg.positions[:n_target]
