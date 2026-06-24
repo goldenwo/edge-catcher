@@ -287,3 +287,20 @@ def test_evaluate_ceiling_subcap_undetermined_is_inconclusive():
 	assert v.n_positions == 20
 	assert v.ceiling_exceeded is True
 	assert v.decision is Decision.INCONCLUSIVE
+
+
+def test_stage0_known_mirage_rejects():
+	"""The real stage-0 run: 17 filled positions, 4 wins / 13 losses, net -$5.55 (-555c),
+	mean ~= -33c/trade. The gate MUST REJECT on its own statistics (ci_high<0), sub-cap
+	(17 < 50), independent of any kill (spec regression fixture)."""
+	# 4 wins + 13 losses summing to -555c, ~ -33c mean; 1 contract each.
+	wins = [60, 55, 50, 45]                       # +210
+	losses = [-60] * 12 + [-45]                   # -765  -> total -555
+	pnls = wins + losses
+	assert sum(pnls) == -555 and len(pnls) == 17
+	rows = [_filled(f"s0-{i}", pnl=p, size=1, t=f"2026-06-22T05:{i:02d}:00+00:00")
+	        for i, p in enumerate(pnls)]
+	v = evaluate(rows, since=None, until=None, n_target=50, seed=7)
+	assert v.n_positions == 17
+	assert v.ci_high < 0                          # full CI below 0
+	assert v.decision is Decision.REJECT
