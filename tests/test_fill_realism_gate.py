@@ -154,5 +154,13 @@ def test_bootstrap_ci_clearly_positive_excludes_zero():
 	assert lo > 0
 
 
+def test_bootstrap_ci_clearly_negative_hi_below_zero():
+	# REJECT direction: a strongly-negative sample must yield ci_high < 0
+	# (the branch Task 6's stage-0 mirage relies on to reject a losing strategy).
+	vals = [-50.0, -55.0, -48.0, -60.0, -52.0, -58.0, -49.0, -61.0, -53.0, -57.0]
+	lo, hi = bootstrap_ci(vals, seed=2, resamples=5000)
+	assert hi < 0
+
+
 def test_bootstrap_ci_empty_is_zero():
 	assert bootstrap_ci([], seed=1) == (0.0, 0.0)
