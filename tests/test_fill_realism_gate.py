@@ -11,6 +11,8 @@ from edge_catcher.fill_realism_gate import (
 	NO_POSITION,
 	IN_FLIGHT,
 	ALERT_STATUS,
+	aggregate_positions,
+	Position,
 )
 
 
@@ -36,3 +38,60 @@ def test_gate_verdict_is_frozen():
 	assert v.decision is Decision.REJECT
 	with pytest.raises(dataclasses.FrozenInstanceError):
 		v.decision = Decision.GRADUATE  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: aggregate_positions
+# ---------------------------------------------------------------------------
+
+def _row(coid: str, status: str = "won", pnl: int = 100, fill_size: int = 2,
+         entry_time: str = "2026-06-22T05:00:00+00:00",
+         placed: str = "2026-06-22T05:00:00+00:00", strategy: str = "s") -> dict:
+	return {"client_order_id": coid, "status": status, "pnl_cents": pnl,
+	        "fill_size": fill_size, "entry_time": entry_time, "placed_at_utc": placed,
+	        "strategy": strategy}
+
+
+def test_partial_exit_children_collapse_to_one_position():
+	rows = [
+		_row("a", status="won", pnl=30, fill_size=3),            # parent residual (3 contracts)
+		_row("a-split-1", status="lost", pnl=-10, fill_size=2),  # child (2 contracts)
+	]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert len(agg.positions) == 1
+	p = agg.positions[0]
+	assert p.pnl_cents == 20            # 30 + (-10), no double-count
+	assert p.position_size == 5         # 3 + 2 (parent residual decremented, child slice)
+
+
+def test_denominator_counts_rejected_by_placed_at_utc_not_entry_time():
+	rows = [
+		_row("f1", status="won", pnl=50, fill_size=1, entry_time="2026-06-22T05:00:00+00:00"),
+		# a 0-fill IOC: status rejected, NULL entry_time, placed inside window
+		{"client_order_id": "r1", "status": "rejected", "pnl_cents": None, "fill_size": 0,
+		 "entry_time": None, "placed_at_utc": "2026-06-22T05:01:00+00:00", "strategy": "s"},
+	]
+	agg = aggregate_positions(rows, since="2026-06-22T00:00:00+00:00",
+	                          until="2026-06-23T00:00:00+00:00")
+	assert agg.n_positions == 1                 # only the filled one
+	assert agg.n_orders_placed == 2             # filled + rejected (rejected NOT dropped)
+	assert agg.observed_fill_rate == 0.5
+
+
+def test_lost_truth_excluded_and_counted():
+	rows = [
+		_row("f1", status="won", pnl=50, fill_size=1),
+		_row("lt", status="lost_truth", pnl=None, fill_size=1),
+	]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert agg.n_positions == 1
+	assert agg.n_lost_truth == 1                # surfaced, not in the P&L sample
+
+
+def test_first_n_positions_ordered_by_entry_time():
+	rows = [
+		_row("late", entry_time="2026-06-22T09:00:00+00:00", pnl=1),
+		_row("early", entry_time="2026-06-22T05:00:00+00:00", pnl=2),
+	]
+	agg = aggregate_positions(rows, since=None, until=None)
+	assert [p.pnl_cents for p in agg.positions] == [2, 1]  # early first
