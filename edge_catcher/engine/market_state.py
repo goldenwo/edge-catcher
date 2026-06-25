@@ -39,7 +39,11 @@ def _parse_qty(raw: object) -> float | None:
 	global _nonfinite_reject_count
 	try:
 		f = float(raw)  # type: ignore[arg-type]
-	except (TypeError, ValueError):
+	except (TypeError, ValueError, OverflowError):
+		# OverflowError: float() of a Python int too large to represent as a
+		# float64 (e.g. a JSON integer literal with >308 digits). Caught here so
+		# the contract holds at EVERY call site — recovery/replay-seed/snapshot
+		# invoke _parse_qty outside any try, unlike the V2 delta path.
 		return None
 	if not math.isfinite(f):
 		_nonfinite_reject_count += 1

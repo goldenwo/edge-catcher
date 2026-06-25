@@ -466,6 +466,13 @@ class TestParseQty:
 		# covered by test_rejects_non_finite).
 		assert _parse_qty(1e309) is None
 
+	def test_rejects_int_too_large_for_float(self):
+		# A Python int too large to represent as float64 makes float() raise
+		# OverflowError (NOT ValueError) — distinct from the 1e309 float path,
+		# which is already inf. The None-return contract must hold for it too,
+		# since recovery/replay-seed/snapshot call _parse_qty outside any try.
+		assert _parse_qty(10**400) is None
+
 
 # ---------------------------------------------------------------------------
 # walk_book: sub-1.0 total available → fill_size == 0 (clean zero FillResult)
