@@ -669,7 +669,7 @@ def test_dispatch_orderbook_delta_v2_removes_level_at_zero():
 	msg = {"msg": {"market_ticker": "KXT", "price_dollars": "0.9900", "delta_fp": "-4.00", "side": "no"}}
 	_handle_orderbook_delta(ms, msg)
 	ob = ms.get_orderbook("KXT")
-	assert ob.no_levels == []          # 4 + int(float("-4.00")) = 0 -> level removed
+	assert ob.no_levels == []          # 4 + _parse_qty("-4.00") = 4 + (-4.0) = 0.0 -> level removed
 
 
 # ---------------------------------------------------------------------------
