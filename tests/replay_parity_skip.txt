@@ -35,3 +35,18 @@
 2026-04-18  schema-v1 bundle, prior Apr 17 snapshot lacks first_seen
 2026-04-19  schema-v1 bundle, prior Apr 18 snapshot lacks first_seen
 2026-04-20  schema-v1 bundle, prior Apr 19 snapshot lacks first_seen
+
+# --- orderbook-delta V2 frozen-book bug (sub-project 2a, option B) ---
+# These bundles' captured-live trades were recorded while the live paper-trader carried the
+# frozen-book bug (V2 scalar orderbook deltas never applied). After the dispatch.py
+# _handle_orderbook_delta fix, post-fix replay fills are CORRECT and no longer match the
+# bug-contaminated captured-live ground truth, so strict replay-vs-live parity cannot hold on
+# these days. Re-established on the first post-deploy (uncontaminated) bundle. These days were
+# also removed from PARITY_DAYS in test_replay_parity_first_seen.py + regenerate.py.
+2026-04-21  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-22  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-23  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-24  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-25  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-26  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
+2026-04-27  orderbook-v2 frozen-book bug: captured-live encodes the pre-fix bug
