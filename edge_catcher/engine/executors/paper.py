@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
-from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot
+from edge_catcher.engine.market_state import _QTY_DP, FillResult, OrderbookSnapshot, _trim_fills
 
 log = logging.getLogger(__name__)
 
@@ -97,8 +97,10 @@ def walk_book_with_ceiling(
 
 	best_price_cents = levels[0][0]
 	ceiling_cents = best_price_cents + max_slippage_cents
-	remaining = size
-	remaining_budget = max_cost_cents  # None = unlimited
+	remaining: float = size
+	# Float accumulators: levels now carry fractional qty (_parse_qty), so take
+	# is float. fill_size floors the total to whole contracts below (rule a).
+	remaining_budget: float | None = max_cost_cents  # None = unlimited
 	# Collect per-level fills as we walk so we can hand the list to
 	# ``fill_math.blended_price_cents`` — the SINGLE source of truth for the
 	# volume-weighted-average computation. Both paper (this function) and
@@ -107,7 +109,7 @@ def walk_book_with_ceiling(
 	# pre-D inline ``round(total_cost_cents / total_filled)`` line (proven
 	# byte-exact by tests/test_engine_fill_math.py test #14).
 	fills: list[FillEvent] = []
-	total_filled = 0
+	total_filled: float = 0
 
 	for price_cents, qty in levels:
 		if remaining <= 0:
@@ -139,7 +141,22 @@ def walk_book_with_ceiling(
 			intended_size=size,
 		)
 
-	blended = blended_price_cents(fills)
+	# Round before the int() floor: per-level takes are 4dp-exact, but their
+	# float64 sum can carry downward noise (a true 4.0 summing to
+	# 3.9999999999999996), which a bare int() would floor to 3 — silently
+	# dropping a whole contract. Rounding to _QTY_DP first recovers the true
+	# 4dp total, then int() floors that (same round-at-source discipline as
+	# apply_orderbook_delta). Preserves genuine partials (2.7 -> 2, 0.4 -> 0).
+	fill_size = int(round(total_filled, _QTY_DP))  # floor to whole contracts (rule a)
+	if fill_size == 0:
+		return FillResult(
+			fill_size=0,
+			blended_price_cents=0,
+			slippage_cents=0,
+			fill_pct=0.0,
+			intended_size=size,
+		)
+	blended = blended_price_cents(_trim_fills(fills, fill_size))  # rule (b)
 	# Guard: if the book has sub-cent prices that round to 0, the blended
 	# price is unusable as a cost basis. Treat as no fill so the trade is
 	# skipped rather than entered with a corrupt 0¢ price.
@@ -155,10 +172,10 @@ def walk_book_with_ceiling(
 	# shared helper makes the sign convention symmetric with live so a future
 	# sell-side path produces the same positive=worse semantics F's UI expects.
 	slippage = signed_slippage_cents(blended=blended, limit=best_price_cents, action="buy")
-	fill_pct = total_filled / size
+	fill_pct = fill_size / size  # rule (c)
 
 	return FillResult(
-		fill_size=total_filled,
+		fill_size=fill_size,
 		blended_price_cents=blended,
 		slippage_cents=slippage,
 		fill_pct=fill_pct,
@@ -402,7 +419,7 @@ class PaperExecutor:
 				blended_entry_cents=0,
 				fill_pct=0.0,
 				slippage_cents=0,
-				book_depth=snapshot.depth,
+				book_depth=round(snapshot.depth),
 				book_snapshot=None,
 				rejection_reason=fill_or_skip.reason,
 			)
@@ -434,7 +451,7 @@ class PaperExecutor:
 			blended_entry_cents=fill.blended_price_cents,  # 0-sentinel preserved verbatim
 			fill_pct=fill.fill_pct,
 			slippage_cents=fill.slippage_cents,
-			book_depth=snapshot.depth,
+			book_depth=round(snapshot.depth),
 			book_snapshot=json.dumps(side_levels),
 			market_impact_cents=market_impact,
 			limit_slippage_cents=limit_slippage,

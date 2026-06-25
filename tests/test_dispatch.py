@@ -17,7 +17,12 @@ from pathlib import Path
 import pytest
 
 from edge_catcher.engine import dispatch as dispatch_module
-from edge_catcher.engine.dispatch import _handle_orderbook_delta, dispatch_message, process_tick
+from edge_catcher.engine.dispatch import (
+	_handle_orderbook_delta,
+	_handle_orderbook_snapshot,
+	dispatch_message,
+	process_tick,
+)
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot, TickContext
 from edge_catcher.engine.risk import KillSwitchTripFailed
@@ -664,4 +669,21 @@ def test_dispatch_orderbook_delta_v2_removes_level_at_zero():
 	msg = {"msg": {"market_ticker": "KXT", "price_dollars": "0.9900", "delta_fp": "-4.00", "side": "no"}}
 	_handle_orderbook_delta(ms, msg)
 	ob = ms.get_orderbook("KXT")
-	assert ob.no_levels == []          # 4 + int(float("-4.00")) = 0 -> level removed
+	assert ob.no_levels == []          # 4 + _parse_qty("-4.00") = 4 + (-4.0) = 0.0 -> level removed
+
+
+# ---------------------------------------------------------------------------
+# _handle_orderbook_snapshot fractional-quantity ingest
+# ---------------------------------------------------------------------------
+
+def test_orderbook_snapshot_retains_sub_one_contract_levels():
+	# Sub-1.0 and fractional resting quantities survive snapshot ingest now that
+	# qty is sanitized via _parse_qty (float) instead of int-truncated (0.65 -> 0,
+	# 7.25 -> 7). Mirrors the yes_dollars_fp schema the live snapshot handler reads.
+	ms = MarketState()
+	msg = {"msg": {"market_ticker": "T", "yes_dollars_fp": [["0.6400", "0.65"], ["0.2400", "7.25"]],
+	               "no_dollars_fp": []}}
+	_handle_orderbook_snapshot(ms, msg)
+	yes = ms.get_orderbook("T").yes_levels
+	assert (0.64, 0.65) in yes        # previously erased by int-truncation
+	assert (0.24, 7.25) in yes

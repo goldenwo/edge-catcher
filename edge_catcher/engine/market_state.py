@@ -4,11 +4,68 @@ Contains OrderbookSnapshot, FillResult, TickContext, MarketState,
 and the derive_event_ticker helper.
 """
 
+import logging
+import math
 import re
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Orderbook quantity precision
+# ---------------------------------------------------------------------------
+
+# Canonical Kalshi-quantity decimal precision. Kalshi sends <= 2 dp; 4 gives
+# margin and erases float64 accumulation noise so the stored book is
+# deterministic (see spec 4.5). Single home for the precision.
+_QTY_DP = 4
+
+# Upper magnitude bound for a single quantity. The int->float widening removed
+# the arbitrary-precision headroom int() had: two ~1e308 levels (or deltas
+# accumulating there) overflow OrderbookSnapshot.depth to inf, so round(depth)
+# raises OverflowError and json.dumps emits non-standard "Infinity" into
+# persisted bundles (corrupting replay). No real Kalshi level approaches this;
+# 1e9 contracts is far above any market yet far below the float64 overflow
+# regime, keeping summed depth exactly representable. Out-of-range is rejected
+# like non-finite (None -> caller skips the level / no-ops the delta).
+_QTY_MAX = 1e9
+
+_rejected_qty_count = 0
+
+
+def _parse_qty(raw: object) -> float | None:
+	"""Parse a Kalshi fixed-point quantity to rounded float contracts.
+
+	Returns ``None`` when *raw* is unparseable, non-finite, or implausibly large
+	(``abs > _QTY_MAX``), so callers skip the level / no-op the delta exactly as
+	they treat a malformed frame today. Restores the rejection that
+	``int(float(...))`` used to provide via OverflowError/ValueError before the
+	int cast was dropped, plus the magnitude headroom arbitrary-precision int
+	summation implicitly gave (a float book sums to inf where an int book never
+	did).
+	"""
+	global _rejected_qty_count
+	try:
+		f = float(raw)  # type: ignore[arg-type]
+	except (TypeError, ValueError, OverflowError):
+		# OverflowError: float() of a Python int too large to represent as a
+		# float64 (e.g. a JSON integer literal with >308 digits). Caught here so
+		# the contract holds at EVERY call site — recovery/replay-seed/snapshot
+		# invoke _parse_qty outside any try, unlike the V2 delta path.
+		return None
+	if not math.isfinite(f) or abs(f) > _QTY_MAX:
+		_rejected_qty_count += 1
+		# Rate-limited: a non-finite / out-of-range qty is an anomaly (Kalshi's
+		# wire is well-defined). Log the first few and then sparsely.
+		if _rejected_qty_count <= 10 or _rejected_qty_count % 1000 == 0:
+			log.warning("rejected non-finite/out-of-range orderbook qty %r (count=%d)", raw, _rejected_qty_count)
+		return None
+	return round(f, _QTY_DP)
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +90,25 @@ def _is_tradeable_cents(price_dollars: float) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Fill trimming
+# ---------------------------------------------------------------------------
+
+def _trim_fills(fills: list[FillEvent], target: int) -> list[FillEvent]:
+	"""Prefix of *fills* whose sizes sum to exactly *target* whole contracts,
+	trimming the last included fill if needed (priced over exactly the filled
+	quantity, per spec 4.4 rule (b))."""
+	out: list[FillEvent] = []
+	remaining: float = target
+	for f in fills:
+		if remaining <= 0:
+			break
+		take = min(f["size"], remaining)
+		out.append({"price": f["price"], "size": take})
+		remaining -= take
+	return out
+
+
+# ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
 
@@ -50,20 +126,25 @@ class FillResult:
 class OrderbookSnapshot:
 	"""Snapshot of a market's orderbook.
 
-	Levels are (price_dollars: float, quantity: int) resting BIDS per side
+	Levels are (price_dollars: float, quantity: float) resting BIDS per side
 	(Kalshi wire shape), sorted ascending — the BEST bid is the LAST
 	element; levels[0] is the penny floor.  Never read levels[0] as an
 	ask: cross the book via implied_asks()/best_* accessors.
+
+	Quantities are fractional contracts: Kalshi sends fixed-point qty (e.g.
+	"20.56", sub-1.0 levels like "0.65"); they are stored rounded to _QTY_DP
+	via _parse_qty at every ingest boundary, so the book is always finite and
+	deterministic.  Fill walkers floor the *total* fill to whole contracts.
 	"""
-	yes_levels: list[tuple[float, int]]
-	no_levels: list[tuple[float, int]]
+	yes_levels: list[tuple[float, float]]
+	no_levels: list[tuple[float, float]]
 
 	@property
-	def depth(self) -> int:
+	def depth(self) -> float:
 		"""Total resting quantity across both sides."""
 		return sum(q for _, q in self.yes_levels) + sum(q for _, q in self.no_levels)
 
-	def implied_asks(self, side: str) -> list[tuple[int, int]]:
+	def implied_asks(self, side: str) -> list[tuple[int, float]]:
 		"""Implied ask ladder (price_cents, qty) to BUY *side*, cheapest first.
 
 		yes_levels/no_levels hold resting BIDS (Kalshi wire shape, dollars,
@@ -133,7 +214,7 @@ class OrderbookSnapshot:
 			FillResult with fill details in cents.
 		"""
 		levels = self.implied_asks(side)
-		if not levels:
+		if not levels or size <= 0:
 			return FillResult(
 				fill_size=0,
 				blended_price_cents=0,
@@ -143,19 +224,21 @@ class OrderbookSnapshot:
 			)
 
 		best_price_cents = levels[0][0]
-		remaining = size
-		total_cost_cents = 0
-		total_filled = 0
-
+		remaining: float = size
+		fills: list[FillEvent] = []
 		for price_cents, qty in levels:
 			if remaining <= 0:
 				break
 			take = min(qty, remaining)
-			total_cost_cents += take * price_cents
-			total_filled += take
+			fills.append({"price": price_cents, "size": take})
 			remaining -= take
 
-		if total_filled == 0:
+		# Round before the int() floor: the per-level takes are 4dp-exact but
+		# their float64 sum can carry downward noise (a true 4.0 summing to
+		# 3.9999999999999996), which a bare int() would floor to 3 — dropping a
+		# whole contract. Rounding to _QTY_DP first recovers the true 4dp total.
+		fill_size = int(round(sum(f["size"] for f in fills), _QTY_DP))  # floor to whole contracts (rule a)
+		if fill_size == 0:
 			return FillResult(
 				fill_size=0,
 				blended_price_cents=0,
@@ -164,12 +247,12 @@ class OrderbookSnapshot:
 				intended_size=size,
 			)
 
-		blended = round(total_cost_cents / total_filled)
+		blended = blended_price_cents(_trim_fills(fills, fill_size))  # rule (b): VWAP over fill_size
 		slippage = blended - best_price_cents
-		fill_pct = total_filled / size
+		fill_pct = fill_size / size  # rule (c)
 
 		return FillResult(
-			fill_size=total_filled,
+			fill_size=fill_size,
 			blended_price_cents=blended,
 			slippage_cents=slippage,
 			fill_pct=fill_pct,
@@ -344,13 +427,18 @@ class MarketState:
 		ticker: str,
 		side: str,
 		price: float,
-		delta: int,
+		delta: float,
 	) -> None:
 		"""Apply an incremental orderbook update.
 
 		Adds *delta* to the quantity at *price* on *side* ('yes' or 'no').
 		Levels with quantity <= 0 are removed.  Levels are kept sorted
 		(ascending price; resting bids — best bid last).
+
+		The accumulated quantity is re-rounded to _QTY_DP so the stored book
+		stays finite and float64 accumulation noise can't leave a phantom
+		~1e-15 level that the `<= 0` removal test would miss.  Callers feed a
+		*delta* already sanitized by _parse_qty (rounded + finite).
 
 		Args:
 			ticker: Market ticker.
@@ -366,17 +454,21 @@ class MarketState:
 		if ob is None:
 			return
 
-		levels: list[tuple[float, int]] = (
+		levels: list[tuple[float, float]] = (
 			ob.yes_levels if side == "yes" else ob.no_levels
 		)
 
 		# Update existing level or insert new
 		updated = False
-		new_levels: list[tuple[float, int]] = []
+		new_levels: list[tuple[float, float]] = []
 		for p, q in levels:
 			if round(p * 100) == round(price * 100):  # compare in cents to avoid float issues
-				new_q = q + delta
-				if new_q > 0:
+				new_q = round(q + delta, _QTY_DP)
+				# Keep iff in (0, _QTY_MAX]: <= 0 removes the level; > _QTY_MAX is an
+				# anomalous accumulation (each delta is already _QTY_MAX-bounded at ingest,
+				# so this is unreachable in practice) — drop it so the stored total stays
+				# finite + bounded, keeping depth / round() / JSON safe (defense-in-depth).
+				if 0 < new_q <= _QTY_MAX:
 					new_levels.append((p, new_q))
 				updated = True
 			else:

@@ -32,6 +32,7 @@ from edge_catcher.engine.market_state import (
 	OrderbookSnapshot,
 	TickContext,
 	_is_tradeable_cents,
+	_parse_qty,
 	derive_event_ticker,
 )
 from edge_catcher.engine.metrics import Metrics, _GATE_REJECT_COUNTER
@@ -1299,7 +1300,10 @@ def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
 		for side in ("yes", "no"):
 			for price_str, delta in data.get(side, []):
 				try:
-					market_state.apply_orderbook_delta(ticker, side, float(price_str), int(delta))
+					qty = _parse_qty(delta)
+					if qty is None:
+						continue
+					market_state.apply_orderbook_delta(ticker, side, float(price_str), qty)
 				except Exception:
 					log.exception("Error applying orderbook delta for %s", ticker)
 		return
@@ -1311,9 +1315,10 @@ def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
 	side = data.get("side")
 	if side in ("yes", "no") and data.get("price_dollars") is not None and data.get("delta_fp") is not None:
 		try:
-			market_state.apply_orderbook_delta(
-				ticker, side, float(data["price_dollars"]), int(float(data["delta_fp"])),
-			)
+			delta = _parse_qty(data["delta_fp"])
+			if delta is None:
+				return
+			market_state.apply_orderbook_delta(ticker, side, float(data["price_dollars"]), delta)
 		except (TypeError, ValueError, OverflowError):
 			return
 	# A frame matching neither shape is a clean no-op.
@@ -1338,13 +1343,16 @@ def _handle_orderbook_snapshot(market_state: MarketState, msg: dict) -> None:
 	if not ticker:
 		return
 
-	def _parse_side(raw_levels: Any) -> list[tuple[float, int]]:
-		parsed: list[tuple[float, int]] = []
+	def _parse_side(raw_levels: Any) -> list[tuple[float, float]]:
+		parsed: list[tuple[float, float]] = []
 		for entry in raw_levels or []:
 			try:
 				price = float(entry[0])
-				qty = int(float(entry[1]))
+				raw_qty = entry[1]
 			except (TypeError, ValueError, IndexError):
+				continue
+			qty = _parse_qty(raw_qty)
+			if qty is None:
 				continue
 			if qty <= 0:
 				continue
@@ -1578,8 +1586,17 @@ def _handle_synthetic_rest_orderbook(market_state: MarketState, payload: dict) -
 	ticker = payload.get("ticker")
 	if not ticker:
 		return
-	yes_levels = [(float(p), int(q)) for p, q in payload.get("yes_levels", [])]
-	no_levels = [(float(p), int(q)) for p, q in payload.get("no_levels", [])]
+
+	def _levels(raw: list | None) -> list[tuple[float, float]]:
+		out: list[tuple[float, float]] = []
+		for p, q in raw or []:
+			pq = _parse_qty(q)
+			if pq is not None:
+				out.append((float(p), pq))
+		return out
+
+	yes_levels = _levels(payload.get("yes_levels"))
+	no_levels = _levels(payload.get("no_levels"))
 	snapshot = OrderbookSnapshot(yes_levels=yes_levels, no_levels=no_levels)
 	market_state.seed_orderbook(ticker, snapshot)
 	meta = payload.get("market_metadata")

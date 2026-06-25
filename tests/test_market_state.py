@@ -6,6 +6,8 @@ from edge_catcher.engine.market_state import (
 	TickContext,
 	MarketState,
 	derive_event_ticker,
+	_parse_qty,
+	_QTY_DP,
 )
 
 
@@ -102,6 +104,22 @@ class TestOrderbookSnapshotWalkBook:
 		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.71, 10)])
 		result = snap.walk_book("yes", 5)
 		assert result.blended_price_cents == 29
+
+	def test_walk_book_floors_fractional_total_to_whole_contracts(self):
+		# NO side resting bids -> implied YES asks. One level: 2.7 contracts at 64c implied.
+		# (no bid 36c, qty 2.7) implies yes ask 64c, qty 2.7
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 2.7)])
+		fill = snap.walk_book("yes", 5)
+		assert fill.fill_size == 2          # floored from 2.7
+		assert fill.blended_price_cents == 64
+
+	def test_walk_book_fractional_levels_blend_to_whole_fill(self):
+		# YES asks from two NO bids: 0.65 @ 64c then plenty @ 66c
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 0.65), (0.34, 10.0)])
+		fill = snap.walk_book("yes", 1)
+		assert fill.fill_size == 1
+		# 0.65 @ 64c + 0.35 @ 66c -> round(64.7) = 65
+		assert fill.blended_price_cents == 65
 
 
 class TestTickContext:
@@ -238,6 +256,31 @@ class TestMarketState:
 		ms.apply_orderbook_delta("TICKER-F", side="yes", price=0.50, delta=-10)
 		ob = ms.get_orderbook("TICKER-F")
 		assert ob.yes_levels == [] or all(q > 0 for _, q in ob.yes_levels)
+
+	def test_apply_delta_accumulates_fractional_and_removes_at_zero(self):
+		"""Fractional deltas accumulate with 4dp rounding; a level driven to
+		exactly 0.0 is removed (the `new_q > 0` removal test is now exact)."""
+		ms = MarketState()
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, 0.65)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, 19.91)   # 0.65 + 19.91
+		assert ms.get_orderbook("T").yes_levels == [(0.64, 20.56)]
+		ms.apply_orderbook_delta("T", "yes", 0.64, -20.56)  # -> exactly 0.0, removed
+		assert ms.get_orderbook("T").yes_levels == []
+
+	def test_apply_delta_drops_level_exceeding_qty_max(self):
+		"""Defense-in-depth: an accumulated total beyond _QTY_MAX (unreachable in
+		practice — each delta is already _QTY_MAX-clamped at ingest) is dropped so the
+		stored qty stays finite + bounded (depth / round() / JSON safe)."""
+		from edge_catcher.engine.market_state import _QTY_MAX
+
+		ms = MarketState()
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, _QTY_MAX)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, _QTY_MAX)  # 2e9 > _QTY_MAX -> dropped
+		assert ms.get_orderbook("T").yes_levels == []
+		# A delta keeping the total within the cap is retained unchanged.
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, 10.0)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, 5.0)
+		assert ms.get_orderbook("T").yes_levels == [(0.64, 15.0)]
 
 
 # ---------------------------------------------------------------------------
@@ -409,3 +452,71 @@ class TestLiveFillReproduction:
 		assert fill.fill_size == 2
 		assert fill.blended_price_cents == 13
 		assert fill.slippage_cents == 0
+
+
+class TestParseQty:
+	def test_fractional_preserved_and_rounded(self):
+		assert _parse_qty("20.56") == 20.56
+		assert _parse_qty("0.65") == 0.65
+
+	def test_rounds_to_qty_dp(self):
+		assert _QTY_DP == 4
+		assert _parse_qty("1.234567") == round(1.234567, 4)
+
+	def test_rejects_non_finite(self):
+		for bad in ("inf", "-inf", "nan", "1e999", "Infinity", "NaN"):
+			assert _parse_qty(bad) is None
+
+	def test_rejects_unparseable(self):
+		assert _parse_qty("abc") is None
+		assert _parse_qty(None) is None
+
+	def test_accepts_int_and_float_inputs(self):
+		assert _parse_qty(5) == 5.0
+		assert _parse_qty(5.0) == 5.0
+
+	def test_rejects_numeric_overflow(self):
+		# float('1e309') == inf at IEEE-754 double precision → rejected by finite guard.
+		# Documents the numeric-input overflow path (complement to the string path
+		# covered by test_rejects_non_finite).
+		assert _parse_qty(1e309) is None
+
+	def test_rejects_int_too_large_for_float(self):
+		# A Python int too large to represent as float64 makes float() raise
+		# OverflowError (NOT ValueError) — distinct from the 1e309 float path,
+		# which is already inf. The None-return contract must hold for it too,
+		# since recovery/replay-seed/snapshot call _parse_qty outside any try.
+		assert _parse_qty(10**400) is None
+
+	def test_rejects_implausibly_large_magnitude(self):
+		# Finite-but-huge values pass math.isfinite yet would overflow the
+		# float depth-sum to inf (round(inf) crashes; json.dumps emits
+		# "Infinity"). _QTY_MAX rejects them like non-finite, restoring the
+		# headroom int summation implicitly had. Both signs (deltas are signed).
+		from edge_catcher.engine.market_state import _QTY_MAX
+
+		assert _parse_qty(1e308) is None
+		assert _parse_qty(-1e308) is None
+		assert _parse_qty(2 * _QTY_MAX) is None
+		# Boundary: a value at the cap is kept; normal values are unaffected.
+		assert _parse_qty(_QTY_MAX) == _QTY_MAX
+		assert _parse_qty(1000.0) == 1000.0
+
+
+# ---------------------------------------------------------------------------
+# walk_book: sub-1.0 total available → fill_size == 0 (clean zero FillResult)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_book_sub_one_total_returns_zero_fill() -> None:
+	"""When total resting quantity implied for the requested side is < 1.0,
+	walk_book floors fill_size to 0 contracts and returns a clean zero FillResult.
+
+	Setup: only 0.4 contracts resting as a NO bid at 0.36 (→ implied YES ask 64¢).
+	Requesting 5 YES contracts: available = 0.4, int(0.4) == 0 → zero FillResult.
+	"""
+	snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 0.4)])
+	fill = snap.walk_book("yes", 5)
+	assert fill.fill_size == 0
+	assert fill.blended_price_cents == 0
+	assert fill.fill_pct == 0.0

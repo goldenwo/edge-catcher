@@ -39,7 +39,7 @@ from edge_catcher.engine.discovery import get_enabled_strategies
 from edge_catcher.engine.dispatch import dispatch_message
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
-from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
+from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot, _parse_qty
 from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
 from edge_catcher.engine.replay.loader import read_jsonl_window
 from edge_catcher.engine.strategy_base import Strategy
@@ -370,8 +370,8 @@ def _seed_market_state(market_state: MarketState, bundle: Path, prior_bundle: Op
 		return
 	state = json.loads(snapshot_file.read_text(encoding="utf-8"))
 	for ticker, ob in state.get("orderbooks", {}).items():
-		yes_levels = [(float(p), int(q)) for p, q in ob.get("yes_levels", [])]
-		no_levels = [(float(p), int(q)) for p, q in ob.get("no_levels", [])]
+		yes_levels = [(float(p), pq) for p, q in ob.get("yes_levels", []) if (pq := _parse_qty(q)) is not None]
+		no_levels = [(float(p), pq) for p, q in ob.get("no_levels", []) if (pq := _parse_qty(q)) is not None]
 		market_state.seed_orderbook(ticker, OrderbookSnapshot(yes_levels, no_levels))
 	for ticker, meta in state.get("metadata", {}).items():
 		market_state.register_ticker(ticker, meta=meta)
