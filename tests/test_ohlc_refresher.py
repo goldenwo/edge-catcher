@@ -1,6 +1,6 @@
 import sqlite3
 
-from edge_catcher.adapters.coinbase.adapter import valid_candle_row
+from edge_catcher.adapters.coinbase.adapter import CoinbaseAdapter, valid_candle_row
 from edge_catcher.live.ohlc_refresher import (
 	RefreshConfig, refresh_once, backfill, staleness_age, should_warn_staleness,
 )
@@ -25,6 +25,22 @@ class FakeAdapter:
 			"VALUES (?,?,?,?,?,?)", good)
 		conn.commit()
 		return len(good)
+
+
+class StubFetchAdapter(CoinbaseAdapter):
+	"""Real CoinbaseAdapter (real download_range + PAGE_SIZE) with only the network
+	fetch stubbed, so backfill exercises the production pagination path."""
+	def __init__(self, product_id, candles):
+		super().__init__(product_id)
+		self._candles = candles
+		self.windows = []  # (start_ts, end_ts) of every fetch_candles call
+
+	def fetch_candles(self, start_ts, end_ts):
+		# Inclusive on both ends, like the real Coinbase API: a candle landing exactly on
+		# a page boundary (window_end) is returned by BOTH adjacent download_range pages,
+		# so the seam relies on INSERT OR IGNORE to dedupe it.
+		self.windows.append((start_ts, end_ts))
+		return [c for c in self._candles if start_ts <= int(c["start"]) <= end_ts]
 
 
 def _raw(start, close, vol=1.0):
@@ -84,30 +100,53 @@ def test_backfill_from_last_timestamp():
 	conn = _conn()
 	conn.execute("INSERT INTO eth_ohlc VALUES (1781895000, 1,1,1,1,1)")
 	conn.commit()
-	fetched = {}
-
-	class CaptureAdapter(FakeAdapter):
-		def fetch_candles(self, start_ts, end_ts):
-			fetched["start"] = start_ts
-			return [_raw(1781895060, 2.0), _raw(1781895120, 3.0)]
-
-	backfill(CaptureAdapter("ETH-USD", []), conn, now, lookback_s=7200)
-	assert fetched["start"] == 1781895000
+	adapter = StubFetchAdapter("ETH-USD", [_raw(1781895060, 2.0), _raw(1781895120, 3.0)])
+	backfill(adapter, conn, now, lookback_s=7200)
+	assert adapter.windows[0][0] == 1781895000  # starts at the last existing bar
 	assert conn.execute("SELECT COUNT(*) FROM eth_ohlc").fetchone()[0] == 3
 
 
 def test_backfill_empty_table_uses_lookback():
 	now = 1781895455
 	conn = _conn()
-	fetched = {}
+	adapter = StubFetchAdapter("ETH-USD", [])
+	backfill(adapter, conn, now, lookback_s=7200)
+	assert adapter.windows[0][0] == now - 7200  # empty table -> start from now - lookback
 
-	class CaptureAdapter(FakeAdapter):
-		def fetch_candles(self, start_ts, end_ts):
-			fetched["start"] = start_ts
-			return []
 
-	backfill(CaptureAdapter("ETH-USD", []), conn, now, lookback_s=7200)
-	assert fetched["start"] == now - 7200
+def test_backfill_chunks_large_gap_into_pages():
+	# A long downtime gap exceeds Coinbase's 350-candle page limit. backfill must split
+	# the fetch into windows each <= PAGE_SIZE*60s; a single oversized request 400s and
+	# the refresher crash-loops (the real-world bug being fixed).
+	now = 1781960000
+	now_min = (now // 60) * 60
+	gap_minutes = 1050  # 3x PAGE_SIZE
+	first_min = now_min - gap_minutes * 60
+	candles = [_raw(first_min + i * 60, 100.0 + i) for i in range(gap_minutes + 1)]
+	conn = _conn()
+	conn.execute("INSERT INTO eth_ohlc VALUES (?, 1,1,1,1,1)", (first_min,))
+	conn.commit()
+	adapter = StubFetchAdapter("ETH-USD", candles)
+	backfill(adapter, conn, now, lookback_s=7200)
+	window_secs = CoinbaseAdapter.PAGE_SIZE * 60
+	assert len(adapter.windows) >= 2  # paginated, not one giant request
+	assert all((end - start) <= window_secs for start, end in adapter.windows)
+	# distinct bars only: boundary candles fetched by two adjacent pages are deduped by
+	# INSERT OR IGNORE, not double-counted.
+	assert conn.execute("SELECT COUNT(*) FROM eth_ohlc").fetchone()[0] == gap_minutes + 1
+
+
+def test_backfill_skips_invalid_rows():
+	now = 1781895455
+	conn = _conn()
+	conn.execute("INSERT INTO eth_ohlc VALUES (1781895000, 1,1,1,1,1)")
+	conn.commit()
+	bad = {"start": "1781895120", "open": "inf", "high": "inf", "low": "inf",
+		"close": "inf", "volume": "1.0"}
+	adapter = StubFetchAdapter("ETH-USD", [_raw(1781895060, 2.0), bad])
+	backfill(adapter, conn, now, lookback_s=7200)
+	assert conn.execute("SELECT COUNT(*) FROM eth_ohlc WHERE timestamp=1781895120").fetchone()[0] == 0
+	assert conn.execute("SELECT COUNT(*) FROM eth_ohlc WHERE timestamp=1781895060").fetchone()[0] == 1
 
 
 def test_staleness_age_and_warn():

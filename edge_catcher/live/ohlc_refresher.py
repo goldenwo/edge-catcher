@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from pathlib import Path
 
-from edge_catcher.adapters.coinbase.adapter import CoinbaseAdapter, _candle_to_row, valid_candle_row
+from edge_catcher.adapters.coinbase.adapter import CoinbaseAdapter, _candle_to_row
 from edge_catcher.storage.db import get_connection, init_ohlc_table
 
 logger = logging.getLogger(__name__)
@@ -81,17 +81,13 @@ def refresh_once(adapter, conn, now: int, cfg: RefreshConfig) -> int | None:
 
 def backfill(adapter, conn, now: int, lookback_s: int) -> int:
 	"""On boot, fill any gap (INSERT OR IGNORE, immutable history). Start from the
-	latest existing bar, or now-lookback if empty. Returns rows considered."""
+	latest existing bar, or now-lookback if empty. Delegates to the adapter's
+	paginating download_range so a long downtime gap (> PAGE_SIZE minutes) is split
+	into per-page windows instead of one oversized request Coinbase rejects with 400.
+	Returns rows newly inserted."""
 	last = conn.execute(f"SELECT MAX(timestamp) FROM {adapter.table_name}").fetchone()[0]
 	start = last if last is not None else now - lookback_s
-	candles = adapter.fetch_candles(start, now + 60)
-	good = [r for r in (_candle_to_row(c) for c in candles) if valid_candle_row(r)]
-	if good:
-		conn.executemany(
-			f"INSERT OR IGNORE INTO {adapter.table_name} (timestamp, open, high, low, close, volume) "
-			"VALUES (?,?,?,?,?,?)", good)
-		conn.commit()
-	return len(good)
+	return adapter.download_range(start, now + 60, conn)
 
 
 def staleness_age(newest_ts: int | None, now: int) -> int | None:

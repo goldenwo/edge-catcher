@@ -58,6 +58,19 @@ def test_download_range_ignore_keeps_history_immutable():
 	assert c.execute("SELECT close FROM eth_ohlc WHERE timestamp=60").fetchone()[0] == 100
 
 
+def test_download_range_validates_and_skips_invalid_rows(monkeypatch):
+	c = _conn()
+	a = CoinbaseAdapter("ETH-USD")
+	page = [
+		_raw(60, 100.0),
+		{"start": "120", "open": "inf", "high": "inf", "low": "inf", "close": "inf", "volume": "1.0"},
+	]
+	monkeypatch.setattr(a, "fetch_candles", lambda start_ts, end_ts: page)
+	a.download_range(60, 121, c)
+	assert c.execute("SELECT COUNT(*) FROM eth_ohlc WHERE timestamp=120").fetchone()[0] == 0
+	assert c.execute("SELECT COUNT(*) FROM eth_ohlc WHERE timestamp=60").fetchone()[0] == 1
+
+
 def test_upsert_skips_invalid_rows_and_counts_only_written():
 	c = _conn()
 	a = CoinbaseAdapter("ETH-USD")
