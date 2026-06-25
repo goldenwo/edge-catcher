@@ -1398,10 +1398,15 @@ async def _handle_ticker_msg(
 	if yes_ask_raw is None:
 		return
 
-	# Validate price range
+	# Validate price range. OverflowError guards a crafted/garbage "1e999"-style
+	# value: float() yields inf and int(round(inf * 100)) raises OverflowError,
+	# which is NOT a subclass of (TypeError, ValueError). The v2 yes_*_dollars
+	# string fields are externally controlled and reach this parse, so catch it
+	# here and skip the bad frame cleanly instead of letting it escape to
+	# dispatch's broad per-frame handler. Mirrors the sibling _handle_trade_msg.
 	try:
 		yes_ask_cents = int(round(float(yes_ask_raw) * 100))
-	except (TypeError, ValueError):
+	except (TypeError, ValueError, OverflowError):
 		return
 	if not (1 <= yes_ask_cents <= 99):
 		return
@@ -1410,7 +1415,7 @@ async def _handle_ticker_msg(
 	yes_bid_raw = data.get("yes_bid_dollars") or data.get("yes_bid")
 	try:
 		yes_bid_cents = int(round(float(yes_bid_raw) * 100)) if yes_bid_raw is not None else yes_ask_cents
-	except (TypeError, ValueError):
+	except (TypeError, ValueError, OverflowError):
 		yes_bid_cents = yes_ask_cents
 
 	# Update market state

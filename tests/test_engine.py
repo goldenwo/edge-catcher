@@ -415,6 +415,44 @@ class TestHandleTickerMsg:
 		)
 		assert len(store.get_open_trades()) == 1
 
+	@pytest.mark.asyncio
+	@pytest.mark.parametrize(
+		"overflow_field, valid_fields, expected_open_trades",
+		[
+			pytest.param("yes_ask_dollars", {}, 0, id="ask-overflow-frame-skipped"),
+			pytest.param(
+				"yes_bid_dollars", {"yes_ask_dollars": "0.50"}, 1,
+				id="bid-overflow-falls-back-to-ask",
+			),
+		],
+	)
+	async def test_overflow_price_values_caught_not_raised(
+		self, setup, overflow_field, valid_fields, expected_open_trades
+	):
+		"""A crafted/garbage WS string like "1e999" parses to inf; int(round(inf*100))
+		raises OverflowError, which is NOT a subclass of (TypeError, ValueError). The
+		v2 `yes_ask_dollars`/`yes_bid_dollars` string fields are externally controlled
+		and reach this parse, so both guards must catch OverflowError and degrade
+		gracefully at the parse site — rather than let it escape _handle_ticker_msg to
+		dispatch's broad per-frame handler (log.exception noise, frame dropped).
+
+		Mirrors the sibling _handle_trade_msg guards. The two ticker guards differ:
+		yes_ask overflow → frame skipped entirely (no trade); yes_bid overflow is
+		non-fatal → yes_bid falls back to yes_ask and the tick still fires.
+		"""
+		ms, store, strategies, strat_by_series, pending_states, config = setup
+		msg_data = {"market_ticker": "KXBTC15M-26APR10-T100", **valid_fields}
+		msg_data[overflow_field] = "1e999"
+		msg = {"type": "ticker", "msg": msg_data}
+
+		# Must NOT raise OverflowError.
+		await _handle_ticker_msg(
+			msg, config, ms, store, strategies, strat_by_series, pending_states, set(),
+			PaperExecutor(market_state=ms, config=config), now=_now(),
+		)
+
+		assert len(store.get_open_trades()) == expected_open_trades
+
 
 # ---------------------------------------------------------------------------
 # _handle_orderbook_delta tests
