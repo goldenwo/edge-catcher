@@ -308,3 +308,20 @@ def test_signed_slippage_cents_rejects_unknown_action(bad_action: str) -> None:
 	passing 'BUY') silently mis-signs slippage."""
 	with pytest.raises(ValueError, match=r"action must be 'buy' or 'sell'"):
 		signed_slippage_cents(blended=52, limit=50, action=bad_action)
+
+
+# --------------------------------------------------------------------------
+# FillEvent.size float widening — fractional per-level takes
+# --------------------------------------------------------------------------
+
+
+def test_blended_price_handles_fractional_sizes() -> None:
+	# 0.65 @ 64c + 0.35 @ 66c over exactly 1.0 contract -> VWAP
+	fills = [{"price": 64, "size": 0.65}, {"price": 66, "size": 0.35}]
+	# (64*0.65 + 66*0.35) / 1.0 = 41.6 + 23.1 = 64.7 -> round -> 65
+	assert blended_price_cents(fills) == 65
+
+
+def test_blended_price_byte_exact_on_integer_inputs() -> None:
+	fills = [{"price": 64, "size": 20}, {"price": 65, "size": 5}]
+	assert blended_price_cents(fills) == round((64 * 20 + 65 * 5) / 25)

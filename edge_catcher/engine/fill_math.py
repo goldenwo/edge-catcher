@@ -19,13 +19,13 @@ class FillEvent(TypedDict):
 	"""One fill from Kalshi's per-order ``fills`` array (or the paper-side
 	equivalent constructed from a book walk).
 
-	Both fields are integers — ``price`` is cents (1..99 in normal operation;
-	0/100 are pathological but mathematically tolerated by the formula) and
-	``size`` is contract count (>= 0).
+	``price`` is integer cents (1..99 normal; 0/100 tolerated by the formula).
+	``size`` is a contract count and may be **fractional** for a paper-side
+	per-level take against a fractional book (live still passes whole ints).
 	"""
 
 	price: int
-	size: int
+	size: float
 
 
 def blended_price_cents(fills: Iterable[FillEvent]) -> int:
@@ -51,8 +51,8 @@ def blended_price_cents(fills: Iterable[FillEvent]) -> int:
 	Returns:
 		Weighted-average price in cents (rounded), or 0 if total size is 0.
 	"""
-	total_cost = 0
-	total_size = 0
+	total_cost: float = 0.0
+	total_size: float = 0.0
 	for fill in fills:
 		total_cost += fill["price"] * fill["size"]
 		total_size += fill["size"]
