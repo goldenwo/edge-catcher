@@ -49,11 +49,12 @@ def test_book_snapshot_roundtrips_through_synthetic_rest() -> None:
 	ob = ms.get_orderbook("T")
 	assert ob is not None, "orderbook must be seeded after _handle_synthetic_rest_orderbook"
 	# _handle_synthetic_rest_orderbook preserves input order (no re-sort on the
-	# captured REST path — the live engine already sorted at capture time).
-	# Assert as a set of (price, qty) pairs to stay robust to order while still
-	# verifying no re-truncation of values.
-	assert set(ob.yes_levels) == set(levels), (
-		f"levels differ after JSON round-trip: got {ob.yes_levels!r}, expected {set(levels)!r}"
+	# captured REST path — the live engine already sorted at capture time) and
+	# seed_orderbook stores the snapshot verbatim, so ordered-list equality holds
+	# and is the strongest assertion: it also catches accidental reorder/dedup
+	# regressions in the ingest path, not just value re-truncation.
+	assert ob.yes_levels == levels, (
+		f"levels differ after JSON round-trip: got {ob.yes_levels!r}, expected {levels!r}"
 	)
 	assert ob.no_levels == []
 
@@ -126,6 +127,9 @@ def test_serialization_is_deterministic_after_accumulation() -> None:
 		assert lv is not None
 		return json.dumps([[p, q] for p, q in lv.yes_levels])
 
+	# NOTE: the equal-bytes assertion relies on apply_orderbook_delta keeping the
+	# level list in a deterministic (sorted) order. If this test is ever extended
+	# to multiple price points, keep that in mind to avoid order-dependent flakiness.
 	first = build()
 	assert first == build(), "serialization must be deterministic"
 	# No float64 noise: 27.56 must not appear as 27.560000000000002
