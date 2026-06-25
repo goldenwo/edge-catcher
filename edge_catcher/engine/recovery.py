@@ -13,6 +13,7 @@ from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
 	_is_tradeable_cents,
+	_parse_qty,
 )
 
 if TYPE_CHECKING:
@@ -143,14 +144,14 @@ async def fetch_orderbook_snapshot(
 			# (tolerance 1e-3) — naive round() alone lets 0.7¢ and 0.9¢
 			# through because 0.007*100 → 0.70000000000001 rounds to 1.
 			yes_levels = [
-				(float(p), int(float(q)))
+				(float(p), pq)
 				for p, q in ob_fp.get("yes_dollars", [])
-				if _is_tradeable_cents(float(p))
+				if _is_tradeable_cents(float(p)) and (pq := _parse_qty(q)) is not None
 			]
 			no_levels = [
-				(float(p), int(float(q)))
+				(float(p), pq)
 				for p, q in ob_fp.get("no_dollars", [])
-				if _is_tradeable_cents(float(p))
+				if _is_tradeable_cents(float(p)) and (pq := _parse_qty(q)) is not None
 			]
 
 			return OrderbookSnapshot(

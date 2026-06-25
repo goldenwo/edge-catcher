@@ -97,8 +97,10 @@ def walk_book_with_ceiling(
 
 	best_price_cents = levels[0][0]
 	ceiling_cents = best_price_cents + max_slippage_cents
-	remaining = size
-	remaining_budget = max_cost_cents  # None = unlimited
+	remaining: float = size
+	# Float accumulators: levels now carry fractional qty (_parse_qty), so take
+	# is float. fill_size floors the total to whole contracts below (rule a).
+	remaining_budget: float | None = max_cost_cents  # None = unlimited
 	# Collect per-level fills as we walk so we can hand the list to
 	# ``fill_math.blended_price_cents`` — the SINGLE source of truth for the
 	# volume-weighted-average computation. Both paper (this function) and
@@ -107,7 +109,7 @@ def walk_book_with_ceiling(
 	# pre-D inline ``round(total_cost_cents / total_filled)`` line (proven
 	# byte-exact by tests/test_engine_fill_math.py test #14).
 	fills: list[FillEvent] = []
-	total_filled = 0
+	total_filled: float = 0
 
 	for price_cents, qty in levels:
 		if remaining <= 0:
@@ -411,7 +413,7 @@ class PaperExecutor:
 				blended_entry_cents=0,
 				fill_pct=0.0,
 				slippage_cents=0,
-				book_depth=snapshot.depth,
+				book_depth=round(snapshot.depth),
 				book_snapshot=None,
 				rejection_reason=fill_or_skip.reason,
 			)
@@ -443,7 +445,7 @@ class PaperExecutor:
 			blended_entry_cents=fill.blended_price_cents,  # 0-sentinel preserved verbatim
 			fill_pct=fill.fill_pct,
 			slippage_cents=fill.slippage_cents,
-			book_depth=snapshot.depth,
+			book_depth=round(snapshot.depth),
 			book_snapshot=json.dumps(side_levels),
 			market_impact_cents=market_impact,
 			limit_slippage_cents=limit_slippage,

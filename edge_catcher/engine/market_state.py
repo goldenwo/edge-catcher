@@ -109,20 +109,25 @@ class FillResult:
 class OrderbookSnapshot:
 	"""Snapshot of a market's orderbook.
 
-	Levels are (price_dollars: float, quantity: int) resting BIDS per side
+	Levels are (price_dollars: float, quantity: float) resting BIDS per side
 	(Kalshi wire shape), sorted ascending — the BEST bid is the LAST
 	element; levels[0] is the penny floor.  Never read levels[0] as an
 	ask: cross the book via implied_asks()/best_* accessors.
+
+	Quantities are fractional contracts: Kalshi sends fixed-point qty (e.g.
+	"20.56", sub-1.0 levels like "0.65"); they are stored rounded to _QTY_DP
+	via _parse_qty at every ingest boundary, so the book is always finite and
+	deterministic.  Fill walkers floor the *total* fill to whole contracts.
 	"""
-	yes_levels: list[tuple[float, int]]
-	no_levels: list[tuple[float, int]]
+	yes_levels: list[tuple[float, float]]
+	no_levels: list[tuple[float, float]]
 
 	@property
-	def depth(self) -> int:
+	def depth(self) -> float:
 		"""Total resting quantity across both sides."""
 		return sum(q for _, q in self.yes_levels) + sum(q for _, q in self.no_levels)
 
-	def implied_asks(self, side: str) -> list[tuple[int, int]]:
+	def implied_asks(self, side: str) -> list[tuple[int, float]]:
 		"""Implied ask ladder (price_cents, qty) to BUY *side*, cheapest first.
 
 		yes_levels/no_levels hold resting BIDS (Kalshi wire shape, dollars,
@@ -401,13 +406,18 @@ class MarketState:
 		ticker: str,
 		side: str,
 		price: float,
-		delta: int,
+		delta: float,
 	) -> None:
 		"""Apply an incremental orderbook update.
 
 		Adds *delta* to the quantity at *price* on *side* ('yes' or 'no').
 		Levels with quantity <= 0 are removed.  Levels are kept sorted
 		(ascending price; resting bids — best bid last).
+
+		The accumulated quantity is re-rounded to _QTY_DP so the stored book
+		stays finite and float64 accumulation noise can't leave a phantom
+		~1e-15 level that the `<= 0` removal test would miss.  Callers feed a
+		*delta* already sanitized by _parse_qty (rounded + finite).
 
 		Args:
 			ticker: Market ticker.
@@ -423,16 +433,16 @@ class MarketState:
 		if ob is None:
 			return
 
-		levels: list[tuple[float, int]] = (
+		levels: list[tuple[float, float]] = (
 			ob.yes_levels if side == "yes" else ob.no_levels
 		)
 
 		# Update existing level or insert new
 		updated = False
-		new_levels: list[tuple[float, int]] = []
+		new_levels: list[tuple[float, float]] = []
 		for p, q in levels:
 			if round(p * 100) == round(price * 100):  # compare in cents to avoid float issues
-				new_q = q + delta
+				new_q = round(q + delta, _QTY_DP)
 				if new_q > 0:
 					new_levels.append((p, new_q))
 				updated = True

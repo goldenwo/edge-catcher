@@ -257,6 +257,16 @@ class TestMarketState:
 		ob = ms.get_orderbook("TICKER-F")
 		assert ob.yes_levels == [] or all(q > 0 for _, q in ob.yes_levels)
 
+	def test_apply_delta_accumulates_fractional_and_removes_at_zero(self):
+		"""Fractional deltas accumulate with 4dp rounding; a level driven to
+		exactly 0.0 is removed (the `new_q > 0` removal test is now exact)."""
+		ms = MarketState()
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, 0.65)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, 19.91)   # 0.65 + 19.91
+		assert ms.get_orderbook("T").yes_levels == [(0.64, 20.56)]
+		ms.apply_orderbook_delta("T", "yes", 0.64, -20.56)  # -> exactly 0.0, removed
+		assert ms.get_orderbook("T").yes_levels == []
+
 
 # ---------------------------------------------------------------------------
 # Test 1.c — MarketState.clear() must reset _first_seen so the next price
