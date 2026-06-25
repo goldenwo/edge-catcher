@@ -454,3 +454,74 @@ def test_to_markdown_renders_exit_fill_quality_section():
 	md = rep.to_markdown()
 	assert "Exit-fill quality" in md
 	assert "canceled" in md
+
+
+# ---------------------------------------------------------------------------
+# Kalshi V2 single-YES-book create migration (2026-06-22, PR #76 main@790203e).
+# A buy-NO is posted as an ASK on the one YES book (buy-NO == sell-YES), so
+# GET /portfolio/orders echoes it BOOK-frame: action="sell", side="yes",
+# book_side="ask", outcome_side="no" — there is NO action=="buy" to key off.
+# _filled_buy must still recognize it as a (NO) BUY, else every NO-side fill
+# false-positives as PHANTOM (spot-fair-ot fires ~89% NO). Fixtures mirror the
+# live wire shape of id=6 KXETH15M-26JUN221600-00 (fill 2 @ $0.86 -> blended 43c).
+# ---------------------------------------------------------------------------
+from edge_catcher.cross_check import _filled_buy  # noqa: E402
+
+
+def _buy_v2_no(ticker, fill=2, initial=2, cost_dollars=0.86, coid="bot-1"):
+	"""A V2 single-YES-book buy-NO as GET /portfolio/orders echoes it: book-frame
+	action/side with the real outcome in outcome_side, NO-side cost in
+	taker_fill_cost_dollars (0.86/2 fills = 43c)."""
+	return {"ticker": ticker, "action": "sell", "side": "yes", "book_side": "ask",
+	        "outcome_side": "no", "fill_count_fp": f"{fill}.00",
+	        "initial_count_fp": f"{initial}.00", "taker_fill_cost_dollars": cost_dollars,
+	        "taker_fees_dollars": 0.0344, "client_order_id": coid, "status": "executed",
+	        "yes_price_dollars": "0.5600", "no_price_dollars": "0.4400"}
+
+
+def _settle_no(ticker, count=2, no_cost_dollars=0.86):
+	"""A NO-side win: ``count`` NO contracts resolve NO. true_pnl = count*100 - cost."""
+	return {"ticker": ticker, "market_result": "no", "yes_count_fp": 0, "no_count_fp": count,
+	        "value": 100, "yes_total_cost_dollars": 0.0, "no_total_cost_dollars": no_cost_dollars,
+	        "fee_cost": 0.0}
+
+
+def test_filled_buy_recognizes_v2_no_and_legacy_shapes():
+	# A filled V2 buy-NO (book-frame action="sell") IS a buy.
+	assert _filled_buy(_buy_v2_no("KXTEST15M-A")) is True
+	# A 0-fill V2 buy-NO is not a filled buy.
+	assert _filled_buy(_buy_v2_no("KXTEST15M-A", fill=0)) is False
+	# Legacy/V2 buy-YES (action="buy") still a buy.
+	assert _filled_buy(_buy("KXTEST15M-A")) is True
+	# Legacy buy-NO (caller-frame action="buy", side="no") still a buy.
+	assert _filled_buy({"action": "buy", "side": "no", "fill_count_fp": "1.00"}) is True
+	# Legacy sell-NO exit (action="sell", side="no") is NOT a buy.
+	assert _filled_buy({"action": "sell", "side": "no", "fill_count_fp": "1.00"}) is False
+
+
+def test_v2_no_buy_reconciles_matched_not_phantom():
+	# Core regression: a filled V2 buy-NO with a faithful db row must reconcile
+	# MATCHED + clean — pre-fix it false-positived as a material PHANTOM.
+	t = "KXTEST15M-A"
+	# blended = 0.86/2*100 = 43c; NO win true_pnl = 2*100 - 86 = 114c.
+	row = _row(t, side="no", fill_size=2, blended_entry_cents=43, status="won", pnl_cents=114)
+	rep = reconcile([row], [_buy_v2_no(t)], [_settle_no(t)],
+	                in_scope_series=SERIES, expected_strategy="strat-13")
+	f = _finding_for(rep, t)
+	assert f.outcome == Outcome.MATCHED
+	assert f.material is False
+	assert rep.is_clean is True
+
+
+def test_v2_no_buy_flows_through_field_comparison():
+	# Proves the V2 buy-NO reaches _compare_fields (not merely escapes PHANTOM): a
+	# blended disagreement must surface as a material blended_entry_cents diff with
+	# the field populated — a PHANTOM finding carries no fields, so this fails pre-fix.
+	t = "KXTEST15M-A"
+	# Kalshi blended 43c; db mis-records 60c -> 17c diff > 1c threshold.
+	row = _row(t, side="no", fill_size=2, blended_entry_cents=60, status="won", pnl_cents=114)
+	rep = reconcile([row], [_buy_v2_no(t)], [_settle_no(t)],
+	                in_scope_series=SERIES, expected_strategy="strat-13")
+	f = _finding_for(rep, t)
+	assert f.outcome == Outcome.MATCHED
+	assert f.material is True and "blended_entry_cents" in f.fields

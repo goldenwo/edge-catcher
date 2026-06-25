@@ -167,8 +167,41 @@ def _in_scope(ticker: str, series: frozenset[str]) -> bool:
 	return any(ticker == s or ticker.startswith(f"{s}-") for s in series)
 
 
+def _is_buy_order(order: Mapping[str, Any]) -> bool:
+	"""True iff the order is a caller-frame BUY (a position ENTRY), across BOTH
+	Kalshi order shapes that ``/portfolio/orders`` returns.
+
+	Legacy create echoes carry caller-frame ``action``/``side`` directly, so a
+	buy-NO is ``action="buy", side="no"`` — caught by the ``action=="buy"`` arm.
+
+	The V2 single-YES-book create (``POST /portfolio/events/orders``, the
+	2026-06-22 migration in :mod:`edge_catcher.live.client`) has no NO book: a
+	buy-NO is posted as an ASK on the YES book (buy-NO ≡ sell-YES), and the GET
+	echo is BOOK-frame — ``action="sell", side="yes", book_side="ask",
+	outcome_side="no"`` — with no ``action=="buy"`` to key off. The second arm
+	recognizes that signature (the inverse of ``client._build_place_body``'s
+	bid/ask rule) as a (NO) buy.
+
+	V2 duality (documented limitation): on the single YES book a buy-NO and a
+	sell-YES are the SAME order (an ask), so the echo cannot tell them apart
+	(likewise buy-YES vs sell-NO, a bid). Held-to-settlement strategies
+	(spot-fair-ot) place only entries, so every filled order is a buy and this is
+	exact. A future V2 round-trip strategy's exit leg would also match here and
+	surface as MULTI_ENTRY (a material finding for review), never a silent
+	miscount. Legacy round-trips used ``side="no"`` for NO exits, which the first
+	arm leaves correctly classified as sells.
+	"""
+	if order.get("action") == "buy":
+		return True
+	return (
+		order.get("side") == "yes"
+		and order.get("book_side") == "ask"
+		and order.get("outcome_side") == "no"
+	)
+
+
 def _filled_buy(order: Mapping[str, Any]) -> bool:
-	return order.get("action") == "buy" and _num(order.get("fill_count_fp")) > 0
+	return _is_buy_order(order) and _num(order.get("fill_count_fp")) > 0
 
 
 def _asserts_fill(row: Mapping[str, Any]) -> bool:
@@ -212,7 +245,10 @@ def reconcile(
 			continue
 		if _filled_buy(o):
 			buys_by_ticker[ot].append(o)
-		elif o.get("action") == "sell":
+		elif o.get("action") == "sell" and not _is_buy_order(o):
+			# A V2 buy-NO is book-frame action="sell" (an ask on the YES book); when
+			# it 0-fills it falls through _filled_buy, but it is NOT an exit SELL —
+			# _is_buy_order excludes it so it never pollutes the exit-quality stats.
 			sells_by_ticker[ot].append(o)
 	setts_by_ticker: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
 	for s in settlements:
