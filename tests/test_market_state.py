@@ -459,3 +459,28 @@ class TestParseQty:
 	def test_accepts_int_and_float_inputs(self):
 		assert _parse_qty(5) == 5.0
 		assert _parse_qty(5.0) == 5.0
+
+	def test_rejects_numeric_overflow(self):
+		# float('1e309') == inf at IEEE-754 double precision → rejected by finite guard.
+		# Documents the numeric-input overflow path (complement to the string path
+		# covered by test_rejects_non_finite).
+		assert _parse_qty(1e309) is None
+
+
+# ---------------------------------------------------------------------------
+# walk_book: sub-1.0 total available → fill_size == 0 (clean zero FillResult)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_book_sub_one_total_returns_zero_fill() -> None:
+	"""When total resting quantity implied for the requested side is < 1.0,
+	walk_book floors fill_size to 0 contracts and returns a clean zero FillResult.
+
+	Setup: only 0.4 contracts resting as a NO bid at 0.36 (→ implied YES ask 64¢).
+	Requesting 5 YES contracts: available = 0.4, int(0.4) == 0 → zero FillResult.
+	"""
+	snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 0.4)])
+	fill = snap.walk_book("yes", 5)
+	assert fill.fill_size == 0
+	assert fill.blended_price_cents == 0
+	assert fill.fill_pct == 0.0
