@@ -25,18 +25,31 @@ log = logging.getLogger(__name__)
 # deterministic (see spec 4.5). Single home for the precision.
 _QTY_DP = 4
 
-_nonfinite_reject_count = 0
+# Upper magnitude bound for a single quantity. The int->float widening removed
+# the arbitrary-precision headroom int() had: two ~1e308 levels (or deltas
+# accumulating there) overflow OrderbookSnapshot.depth to inf, so round(depth)
+# raises OverflowError and json.dumps emits non-standard "Infinity" into
+# persisted bundles (corrupting replay). No real Kalshi level approaches this;
+# 1e9 contracts is far above any market yet far below the float64 overflow
+# regime, keeping summed depth exactly representable. Out-of-range is rejected
+# like non-finite (None -> caller skips the level / no-ops the delta).
+_QTY_MAX = 1e9
+
+_rejected_qty_count = 0
 
 
 def _parse_qty(raw: object) -> float | None:
 	"""Parse a Kalshi fixed-point quantity to rounded float contracts.
 
-	Returns ``None`` when *raw* is unparseable OR non-finite, so callers skip
-	the level / no-op the delta exactly as they treat a malformed frame today.
-	Restores the rejection that ``int(float(...))`` used to provide via
-	OverflowError/ValueError before the int cast was dropped.
+	Returns ``None`` when *raw* is unparseable, non-finite, or implausibly large
+	(``abs > _QTY_MAX``), so callers skip the level / no-op the delta exactly as
+	they treat a malformed frame today. Restores the rejection that
+	``int(float(...))`` used to provide via OverflowError/ValueError before the
+	int cast was dropped, plus the magnitude headroom arbitrary-precision int
+	summation implicitly gave (a float book sums to inf where an int book never
+	did).
 	"""
-	global _nonfinite_reject_count
+	global _rejected_qty_count
 	try:
 		f = float(raw)  # type: ignore[arg-type]
 	except (TypeError, ValueError, OverflowError):
@@ -45,12 +58,12 @@ def _parse_qty(raw: object) -> float | None:
 		# the contract holds at EVERY call site — recovery/replay-seed/snapshot
 		# invoke _parse_qty outside any try, unlike the V2 delta path.
 		return None
-	if not math.isfinite(f):
-		_nonfinite_reject_count += 1
-		# Rate-limited: a non-finite qty is an anomaly (Kalshi's wire is
-		# well-defined). Log the first few and then sparsely.
-		if _nonfinite_reject_count <= 10 or _nonfinite_reject_count % 1000 == 0:
-			log.warning("rejected non-finite orderbook qty %r (count=%d)", raw, _nonfinite_reject_count)
+	if not math.isfinite(f) or abs(f) > _QTY_MAX:
+		_rejected_qty_count += 1
+		# Rate-limited: a non-finite / out-of-range qty is an anomaly (Kalshi's
+		# wire is well-defined). Log the first few and then sparsely.
+		if _rejected_qty_count <= 10 or _rejected_qty_count % 1000 == 0:
+			log.warning("rejected non-finite/out-of-range orderbook qty %r (count=%d)", raw, _rejected_qty_count)
 		return None
 	return round(f, _QTY_DP)
 

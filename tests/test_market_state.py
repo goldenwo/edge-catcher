@@ -473,6 +473,20 @@ class TestParseQty:
 		# since recovery/replay-seed/snapshot call _parse_qty outside any try.
 		assert _parse_qty(10**400) is None
 
+	def test_rejects_implausibly_large_magnitude(self):
+		# Finite-but-huge values pass math.isfinite yet would overflow the
+		# float depth-sum to inf (round(inf) crashes; json.dumps emits
+		# "Infinity"). _QTY_MAX rejects them like non-finite, restoring the
+		# headroom int summation implicitly had. Both signs (deltas are signed).
+		from edge_catcher.engine.market_state import _QTY_MAX
+
+		assert _parse_qty(1e308) is None
+		assert _parse_qty(-1e308) is None
+		assert _parse_qty(2 * _QTY_MAX) is None
+		# Boundary: a value at the cap is kept; normal values are unaffected.
+		assert _parse_qty(_QTY_MAX) == _QTY_MAX
+		assert _parse_qty(1000.0) == 1000.0
+
 
 # ---------------------------------------------------------------------------
 # walk_book: sub-1.0 total available → fill_size == 0 (clean zero FillResult)

@@ -104,6 +104,41 @@ def test_non_finite_qty_absent_from_book() -> None:
 	assert round(ob.depth) == 21, f"unexpected depth: {ob.depth!r}"
 
 
+def test_implausibly_large_qty_cannot_poison_book_or_serialization() -> None:
+	"""A finite-but-enormous quantity (e.g. '1e308') must be REJECTED at ingest
+	so it can never overflow depth to inf — which would crash round(depth) and
+	emit non-standard 'Infinity' into a serialized bundle (corrupting replay).
+	The pre-int->float code summed such values as exact Python ints without
+	overflow; _QTY_MAX restores that effective bound.
+	"""
+	ms = MarketState()
+	msg: dict = {
+		"msg": {
+			"market_ticker": "T",
+			# Two huge same-side levels: their float sum would be inf if stored.
+			"no_dollars_fp": [
+				["0.4000", "1e308"],
+				["0.4100", "1e308"],
+				["0.4200", "5.0"],   # one legitimate level survives
+			],
+			"yes_dollars_fp": [],
+		},
+	}
+	_handle_orderbook_snapshot(ms, msg)
+	ob = ms.get_orderbook("T")
+	assert ob is not None
+	# Only the legitimate level remains; the two 1e308 levels were dropped.
+	assert ob.no_levels == [(0.42, 5.0)], f"huge levels leaked: {ob.no_levels!r}"
+	# Depth is finite and round() does not raise.
+	import math
+
+	assert math.isfinite(ob.depth)
+	assert round(ob.depth) == 5
+	# Serialized book is valid JSON with no Infinity token.
+	dumped = json.dumps([[p, q] for p, q in ob.no_levels])
+	assert "Infinity" not in dumped
+
+
 # ---------------------------------------------------------------------------
 # A3 — Serialization determinism after accumulation
 # ---------------------------------------------------------------------------
