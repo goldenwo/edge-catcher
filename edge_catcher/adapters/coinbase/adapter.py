@@ -93,7 +93,7 @@ class CoinbaseAdapter:
             window_end = min(cursor + window, end_ts)
             candles = self.fetch_candles(cursor, window_end)
 
-            rows = [_candle_to_row(c) for c in candles]
+            rows = [r for r in (_candle_to_row(c) for c in candles) if valid_candle_row(r)]
 
             if rows:
                 conn.executemany(
