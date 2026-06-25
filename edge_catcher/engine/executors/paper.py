@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
-from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot
+from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot, _trim_fills
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +139,16 @@ def walk_book_with_ceiling(
 			intended_size=size,
 		)
 
-	blended = blended_price_cents(fills)
+	fill_size = int(total_filled)  # floor to whole contracts (rule a)
+	if fill_size == 0:
+		return FillResult(
+			fill_size=0,
+			blended_price_cents=0,
+			slippage_cents=0,
+			fill_pct=0.0,
+			intended_size=size,
+		)
+	blended = blended_price_cents(_trim_fills(fills, fill_size))  # rule (b)
 	# Guard: if the book has sub-cent prices that round to 0, the blended
 	# price is unusable as a cost basis. Treat as no fill so the trade is
 	# skipped rather than entered with a corrupt 0¢ price.
@@ -155,10 +164,10 @@ def walk_book_with_ceiling(
 	# shared helper makes the sign convention symmetric with live so a future
 	# sell-side path produces the same positive=worse semantics F's UI expects.
 	slippage = signed_slippage_cents(blended=blended, limit=best_price_cents, action="buy")
-	fill_pct = total_filled / size
+	fill_pct = fill_size / size  # rule (c)
 
 	return FillResult(
-		fill_size=total_filled,
+		fill_size=fill_size,
 		blended_price_cents=blended,
 		slippage_cents=slippage,
 		fill_pct=fill_pct,

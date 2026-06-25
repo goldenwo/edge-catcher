@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from edge_catcher.engine.fill_math import FillEvent, blended_price_cents
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -68,6 +70,25 @@ def _is_tradeable_cents(price_dollars: float) -> bool:
 	if not (1 <= price_cents <= 99):
 		return False
 	return abs(price_cents_float - price_cents) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# Fill trimming
+# ---------------------------------------------------------------------------
+
+def _trim_fills(fills: list[FillEvent], target: int) -> list[FillEvent]:
+	"""Prefix of *fills* whose sizes sum to exactly *target* whole contracts,
+	trimming the last included fill if needed (priced over exactly the filled
+	quantity, per spec 4.4 rule (b))."""
+	out: list[FillEvent] = []
+	remaining: float = target
+	for f in fills:
+		if remaining <= 0:
+			break
+		take = min(f["size"], remaining)
+		out.append({"price": f["price"], "size": take})
+		remaining -= take
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +192,7 @@ class OrderbookSnapshot:
 			FillResult with fill details in cents.
 		"""
 		levels = self.implied_asks(side)
-		if not levels:
+		if not levels or size <= 0:
 			return FillResult(
 				fill_size=0,
 				blended_price_cents=0,
@@ -181,19 +202,17 @@ class OrderbookSnapshot:
 			)
 
 		best_price_cents = levels[0][0]
-		remaining = size
-		total_cost_cents = 0
-		total_filled = 0
-
+		remaining: float = size
+		fills: list[FillEvent] = []
 		for price_cents, qty in levels:
 			if remaining <= 0:
 				break
 			take = min(qty, remaining)
-			total_cost_cents += take * price_cents
-			total_filled += take
+			fills.append({"price": price_cents, "size": take})
 			remaining -= take
 
-		if total_filled == 0:
+		fill_size = int(sum(f["size"] for f in fills))  # floor to whole contracts (rule a)
+		if fill_size == 0:
 			return FillResult(
 				fill_size=0,
 				blended_price_cents=0,
@@ -202,12 +221,12 @@ class OrderbookSnapshot:
 				intended_size=size,
 			)
 
-		blended = round(total_cost_cents / total_filled)
+		blended = blended_price_cents(_trim_fills(fills, fill_size))  # rule (b): VWAP over fill_size
 		slippage = blended - best_price_cents
-		fill_pct = total_filled / size
+		fill_pct = fill_size / size  # rule (c)
 
 		return FillResult(
-			fill_size=total_filled,
+			fill_size=fill_size,
 			blended_price_cents=blended,
 			slippage_cents=slippage,
 			fill_pct=fill_pct,

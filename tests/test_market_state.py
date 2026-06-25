@@ -105,6 +105,22 @@ class TestOrderbookSnapshotWalkBook:
 		result = snap.walk_book("yes", 5)
 		assert result.blended_price_cents == 29
 
+	def test_walk_book_floors_fractional_total_to_whole_contracts(self):
+		# NO side resting bids -> implied YES asks. One level: 2.7 contracts at 64c implied.
+		# (no bid 36c, qty 2.7) implies yes ask 64c, qty 2.7
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 2.7)])
+		fill = snap.walk_book("yes", 5)
+		assert fill.fill_size == 2          # floored from 2.7
+		assert fill.blended_price_cents == 64
+
+	def test_walk_book_fractional_levels_blend_to_whole_fill(self):
+		# YES asks from two NO bids: 0.65 @ 64c then plenty @ 66c
+		snap = OrderbookSnapshot(yes_levels=[], no_levels=[(0.36, 0.65), (0.34, 10.0)])
+		fill = snap.walk_book("yes", 1)
+		assert fill.fill_size == 1
+		# 0.65 @ 64c + 0.35 @ 66c -> round(64.7) = 65
+		assert fill.blended_price_cents == 65
+
 
 class TestTickContext:
 	def test_basic_construction(self):
