@@ -4,11 +4,49 @@ Contains OrderbookSnapshot, FillResult, TickContext, MarketState,
 and the derive_event_ticker helper.
 """
 
+import logging
+import math
 import re
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Orderbook quantity precision
+# ---------------------------------------------------------------------------
+
+# Canonical Kalshi-quantity decimal precision. Kalshi sends <= 2 dp; 4 gives
+# margin and erases float64 accumulation noise so the stored book is
+# deterministic (see spec 4.5). Single home for the precision.
+_QTY_DP = 4
+
+_nonfinite_reject_count = 0
+
+
+def _parse_qty(raw: object) -> float | None:
+	"""Parse a Kalshi fixed-point quantity to rounded float contracts.
+
+	Returns ``None`` when *raw* is unparseable OR non-finite, so callers skip
+	the level / no-op the delta exactly as they treat a malformed frame today.
+	Restores the rejection that ``int(float(...))`` used to provide via
+	OverflowError/ValueError before the int cast was dropped.
+	"""
+	global _nonfinite_reject_count
+	try:
+		f = float(raw)  # type: ignore[arg-type]
+	except (TypeError, ValueError):
+		return None
+	if not math.isfinite(f):
+		_nonfinite_reject_count += 1
+		# Rate-limited: a non-finite qty is an anomaly (Kalshi's wire is
+		# well-defined). Log the first few and then sparsely.
+		if _nonfinite_reject_count <= 10 or _nonfinite_reject_count % 1000 == 0:
+			log.warning("rejected non-finite orderbook qty %r (count=%d)", raw, _nonfinite_reject_count)
+		return None
+	return round(f, _QTY_DP)
 
 
 # ---------------------------------------------------------------------------

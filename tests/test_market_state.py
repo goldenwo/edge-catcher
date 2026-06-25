@@ -6,6 +6,8 @@ from edge_catcher.engine.market_state import (
 	TickContext,
 	MarketState,
 	derive_event_ticker,
+	_parse_qty,
+	_QTY_DP,
 )
 
 
@@ -409,3 +411,25 @@ class TestLiveFillReproduction:
 		assert fill.fill_size == 2
 		assert fill.blended_price_cents == 13
 		assert fill.slippage_cents == 0
+
+
+class TestParseQty:
+	def test_fractional_preserved_and_rounded(self):
+		assert _parse_qty("20.56") == 20.56
+		assert _parse_qty("0.65") == 0.65
+
+	def test_rounds_to_qty_dp(self):
+		assert _QTY_DP == 4
+		assert _parse_qty("1.234567") == round(1.234567, 4)
+
+	def test_rejects_non_finite(self):
+		for bad in ("inf", "-inf", "nan", "1e999", "Infinity", "NaN"):
+			assert _parse_qty(bad) is None
+
+	def test_rejects_unparseable(self):
+		assert _parse_qty("abc") is None
+		assert _parse_qty(None) is None
+
+	def test_accepts_int_and_float_inputs(self):
+		assert _parse_qty(5) == 5.0
+		assert _parse_qty(5.0) == 5.0
