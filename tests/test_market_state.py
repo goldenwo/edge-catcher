@@ -267,6 +267,21 @@ class TestMarketState:
 		ms.apply_orderbook_delta("T", "yes", 0.64, -20.56)  # -> exactly 0.0, removed
 		assert ms.get_orderbook("T").yes_levels == []
 
+	def test_apply_delta_drops_level_exceeding_qty_max(self):
+		"""Defense-in-depth: an accumulated total beyond _QTY_MAX (unreachable in
+		practice — each delta is already _QTY_MAX-clamped at ingest) is dropped so the
+		stored qty stays finite + bounded (depth / round() / JSON safe)."""
+		from edge_catcher.engine.market_state import _QTY_MAX
+
+		ms = MarketState()
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, _QTY_MAX)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, _QTY_MAX)  # 2e9 > _QTY_MAX -> dropped
+		assert ms.get_orderbook("T").yes_levels == []
+		# A delta keeping the total within the cap is retained unchanged.
+		ms.seed_orderbook("T", OrderbookSnapshot(yes_levels=[(0.64, 10.0)], no_levels=[]))
+		ms.apply_orderbook_delta("T", "yes", 0.64, 5.0)
+		assert ms.get_orderbook("T").yes_levels == [(0.64, 15.0)]
+
 
 # ---------------------------------------------------------------------------
 # Test 1.c — MarketState.clear() must reset _first_seen so the next price

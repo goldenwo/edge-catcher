@@ -464,7 +464,11 @@ class MarketState:
 		for p, q in levels:
 			if round(p * 100) == round(price * 100):  # compare in cents to avoid float issues
 				new_q = round(q + delta, _QTY_DP)
-				if new_q > 0:
+				# Keep iff in (0, _QTY_MAX]: <= 0 removes the level; > _QTY_MAX is an
+				# anomalous accumulation (each delta is already _QTY_MAX-bounded at ingest,
+				# so this is unreachable in practice) — drop it so the stored total stays
+				# finite + bounded, keeping depth / round() / JSON safe (defense-in-depth).
+				if 0 < new_q <= _QTY_MAX:
 					new_levels.append((p, new_q))
 				updated = True
 			else:
