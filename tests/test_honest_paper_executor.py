@@ -1,6 +1,6 @@
 """Honest paper fill simulator — Phase 1 (FixedSlippageModel + HonestPaperExecutor).
 
-WHY this exists: P1's debut-fade verdict found Gap-1 — the optimistic
+WHY this exists: P1's strat-a verdict found Gap-1 — the optimistic
 PaperExecutor's paper win-rate materially overstated live performance on the
 same window, i.e. it over-promises. This wraps it with a pessimistic slippage
 penalty. See

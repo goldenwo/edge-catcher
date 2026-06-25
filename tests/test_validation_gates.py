@@ -839,7 +839,7 @@ class TestExtractNumericParams:
 		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
 
 		code = (
-			"class DebutFade(Strategy):\n"
+			"class StratA(Strategy):\n"
 			"\tname = 'strategy_a'\n"
 			"\tdef __init__(self, threshold_high: int = 60, threshold_low: int = 40,\n"
 			"\t             take_profit: int = 8, stop_loss: int = 5) -> None:\n"
@@ -857,7 +857,7 @@ class TestExtractNumericParams:
 		from edge_catcher.research.validation.gate_sensitivity import _extract_numeric_params
 
 		code = (
-			"class FlowFade(Strategy):\n"
+			"class StratB(Strategy):\n"
 			"\tname = 'strategy_c'\n"
 			"\tdef __init__(self, flow_threshold: float = 0.5, max_move_pct: float = 1.5) -> None:\n"
 			"\t\tpass\n"
@@ -960,7 +960,7 @@ class TestReplaceParam:
 	"""
 
 	SAMPLE = (
-		"class DebutFade(Strategy):\n"
+		"class StratA(Strategy):\n"
 		"\tname = 'strategy_a'\n"
 		"\tdef __init__(self, threshold_high: int = 60, threshold_low: int = 40) -> None:\n"
 		"\t\tself.threshold_high = threshold_high\n"
@@ -974,7 +974,7 @@ class TestReplaceParam:
 	def test_replaces_int_default(self):
 		from edge_catcher.research.validation.gate_sensitivity import _replace_param
 
-		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 72, "strategy_a__sens_72")
+		out = _replace_param(self.SAMPLE, "StratA", "threshold_high", 72, "strategy_a__sens_72")
 		params = self._reparse_params(out)
 		assert params == {"threshold_high": 72, "threshold_low": 40}
 		assert "strategy_a__sens_72" in out
@@ -983,19 +983,19 @@ class TestReplaceParam:
 		from edge_catcher.research.validation.gate_sensitivity import _replace_param
 
 		code = (
-			"class FlowFade(Strategy):\n"
+			"class StratB(Strategy):\n"
 			"\tname = 'strategy_c'\n"
 			"\tdef __init__(self, flow_threshold: float = 0.5, max_count: int = 10) -> None:\n"
 			"\t\tpass\n"
 		)
-		out = _replace_param(code, "FlowFade", "flow_threshold", 0.575, "strategy_c__sens_0_575")
+		out = _replace_param(code, "StratB", "flow_threshold", 0.575, "strategy_c__sens_0_575")
 		params = self._reparse_params(out)
 		assert params == {"flow_threshold": 0.575, "max_count": 10}
 
 	def test_replaces_class_and_name_even_when_values_nonmatching(self):
 		from edge_catcher.research.validation.gate_sensitivity import _replace_param
 
-		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 60, "strategy_a__sens_unchanged")
+		out = _replace_param(self.SAMPLE, "StratA", "threshold_high", 60, "strategy_a__sens_unchanged")
 		# name attribute rewritten
 		assert "name = 'strategy_a__sens_unchanged'" in out or \
 			'name = "strategy_a__sens_unchanged"' in out
@@ -1004,7 +1004,7 @@ class TestReplaceParam:
 
 	def test_replace_param_outputs_tab_indented(self):
 		from edge_catcher.research.validation.gate_sensitivity import _replace_param
-		out = _replace_param(self.SAMPLE, "DebutFade", "threshold_high", 72, "strategy_a__sens_72")
+		out = _replace_param(self.SAMPLE, "StratA", "threshold_high", 72, "strategy_a__sens_72")
 		# No 4-space indentation runs should appear
 		assert "    " not in out, f"ast.unparse 4-space indentation leaked: {out[:200]}"
 
@@ -1295,7 +1295,7 @@ class TestCleanupSafety:
 class TestTailRiskGate:
 	"""Catches strategies with a selling-deep-OTM payoff signature:
 	very high win rate + asymmetric average loss >> average win.
-	The Apr 11 run had fade-long-vol/KXETH (88% WR, avg_loss/avg_win=6.6x)
+	The Apr 11 run had strat-c/KXETH (88% WR, avg_loss/avg_win=6.6x)
 	pass all other gates; this gate must flag it.
 	"""
 
@@ -1303,7 +1303,7 @@ class TestTailRiskGate:
 		"""88% tiny wins + 12% huge losses → classic vol-seller → FAIL."""
 		from edge_catcher.research.validation.gate_tail_risk import TailRiskGate
 
-		# Reproduce fade-long-vol/KXETH-ish shape: mean ≈ 1.1
+		# Reproduce strat-c/KXETH-ish shape: mean ≈ 1.1
 		pnl = [12] * 88 + [-82] * 12
 		result = _make_result(pnl_values=pnl, total_trades=len(pnl))
 		ctx = GateContext(tracker=None, pnl_values=pnl, hypothesis=result.hypothesis)

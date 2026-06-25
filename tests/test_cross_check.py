@@ -280,7 +280,7 @@ def test_expected_no_settlement_status_skipped():
 
 # ---------------------------------------------------------------------------
 # Rejected / 0-fill rows must not be mistaken for PHANTOM (spec §5.3).
-# debut-fade is an IOC taker; an IOC that fills 0 is correctly recorded
+# strat-a is an IOC taker; an IOC that fills 0 is correctly recorded
 # status='rejected', fill_size=0 — it asserts NO position, so with no filled
 # Kalshi BUY the db and exchange AGREE. Flagging it PHANTOM is a false positive.
 # ---------------------------------------------------------------------------

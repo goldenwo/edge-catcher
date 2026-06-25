@@ -43,8 +43,8 @@ def _canned_request(side="yes", limit=42) -> OrderRequest:
 		side=side,
 		size_contracts=4,
 		limit_price_cents=limit,
-		strategy="debut-fade",
-		client_order_id="debut-fade-KXSOL15M-1715000000000",
+		strategy="strat-a",
+		client_order_id="strat-a-KXSOL15M-1715000000000",
 	)
 
 
@@ -224,8 +224,8 @@ async def test_sell_path_leaves_dual_slippage_None():
 		side="yes",
 		size_contracts=4,
 		limit_price_cents=42,
-		strategy="debut-fade",
-		client_order_id="debut-fade-KXSOL15M-1715000000000",
+		strategy="strat-a",
+		client_order_id="strat-a-KXSOL15M-1715000000000",
 		action="sell",
 	)
 

@@ -119,11 +119,11 @@ async def test_list_orders_happy_path_parses_all(cfg, audit, signing_env, tmp_pa
 	body = {
 		"orders": [
 			_order_json(
-				order_id="ord-1", client_order_id="debut-fade-KXSOL15M-1",
+				order_id="ord-1", client_order_id="strat-a-KXSOL15M-1",
 				status="resting", count=10, filled_count=0,
 			),
 			_order_json(
-				order_id="ord-2", client_order_id="debut-fade-KXSOL15M-2",
+				order_id="ord-2", client_order_id="strat-a-KXSOL15M-2",
 				status="executed", count=8, filled_count=8,
 			),
 		],
@@ -143,7 +143,7 @@ async def test_list_orders_happy_path_parses_all(cfg, audit, signing_env, tmp_pa
 	assert all(isinstance(o, Order) for o in orders)
 	assert [o.order_id for o in orders] == ["ord-1", "ord-2"]
 	assert [o.client_order_id for o in orders] == [
-		"debut-fade-KXSOL15M-1", "debut-fade-KXSOL15M-2",
+		"strat-a-KXSOL15M-1", "strat-a-KXSOL15M-2",
 	]
 	assert [o.status for o in orders] == ["resting", "executed"]
 	assert orders[0].filled_count == 0
@@ -515,9 +515,9 @@ async def test_list_orders_skips_malformed_element_logs_and_continues(
 	cfg2 = cfg.model_copy(update={"audit_log_path": tmp_path / "a.jsonl"})
 	body = {
 		"orders": [
-			_order_json(order_id="ord-1", client_order_id="debut-fade-KXSOL15M-1"),
+			_order_json(order_id="ord-1", client_order_id="strat-a-KXSOL15M-1"),
 			"not-a-dict",  # malformed: _parse_order would AttributeError on .get
-			_order_json(order_id="ord-2", client_order_id="debut-fade-KXSOL15M-2"),
+			_order_json(order_id="ord-2", client_order_id="strat-a-KXSOL15M-2"),
 		],
 		"cursor": "",
 	}

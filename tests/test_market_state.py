@@ -373,7 +373,7 @@ class TestMarketStateBidAskAccessors:
 
 class TestLiveFillReproduction:
 	"""Acceptance gate (spec §5.3): corrected book reads must reproduce REAL
-	Kalshi fills from the June 2026 debut-fade live run exactly.
+	Kalshi fills from the June 2026 strat-a live run exactly.
 
 	Provenance: reports/slippage-fidelity-findings-202606.md (§Mechanism) +
 	reports/slippage_table_v2_20260610.csv.  Prices are from the live data;

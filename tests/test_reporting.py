@@ -277,36 +277,36 @@ class TestReportToNotification:
 			},
 			"today": {"settled_count": 2, "pnl_cents": 100, "pnl_usd": 1.0},
 			"today_by_strategy": [
-				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
-				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
-				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
+				{"strategy": "strat-a", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
+				{"strategy": "strat-a", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
+				{"strategy": "strat-b",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
 			],
 			"all_time_by_strategy": [
 				{
-					"strategy": "debut-fade", "closed_trades": 19, "wins": 12,
+					"strategy": "strat-a", "closed_trades": 19, "wins": 12,
 					"net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2,
 				},
 				{
-					"strategy": "flow-fade", "closed_trades": 1, "wins": 1,
+					"strategy": "strat-b", "closed_trades": 1, "wins": 1,
 					"net_pnl_cents": 75, "net_pnl_usd": 0.75, "win_rate_pct": 100.0,
 				},
 			],
 			"open_positions": [
-				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
+				{"strategy": "strat-a", "series_ticker": "KXSOL", "count": 1},
 			],
 		}
 		n = report_to_notification(report)
 		# Yesterday section: each (strategy, series) appears once with W/L counts.
 		assert "Yesterday" in n.body
-		assert "debut-fade / KXETH: 1W / 1L" in n.body
-		assert "flow-fade / KXBTC: 1W / 0L" in n.body
+		assert "strat-a / KXETH: 1W / 1L" in n.body
+		assert "strat-b / KXBTC: 1W / 0L" in n.body
 
 	def test_rich_body_has_all_time_by_strategy_section(self):
 		from edge_catcher.reporting.notify import report_to_notification
 		report = self._sample_report()
 		n = report_to_notification(report)
 		assert "All-time by strategy" in n.body
-		assert "debut-fade: 19 trades" in n.body
+		assert "strat-a: 19 trades" in n.body
 		assert "63.2%" in n.body or "WR: 12/19" in n.body  # accept either rendering
 
 	def test_rich_body_has_portfolio_section(self):
@@ -323,7 +323,7 @@ class TestReportToNotification:
 		report = self._sample_report()
 		n = report_to_notification(report)
 		assert "Open positions" in n.body
-		assert "debut-fade/KXSOL" in n.body or "debut-fade / KXSOL" in n.body
+		assert "strat-a/KXSOL" in n.body or "strat-a / KXSOL" in n.body
 
 	def test_yesterday_section_handles_all_non_won_lost_statuses(self):
 		"""Latent-bug guard: if today_by_strategy has rows but ALL have a
@@ -436,22 +436,22 @@ class TestReportToNotification:
 			},
 			"today": {"settled_count": 2, "pnl_cents": 100, "pnl_usd": 1.0},
 			"today_by_strategy": [
-				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
-				{"strategy": "debut-fade", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
-				{"strategy": "flow-fade",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
+				{"strategy": "strat-a", "series_ticker": "KXETH", "status": "won",  "count": 1, "pnl_cents": 50},
+				{"strategy": "strat-a", "series_ticker": "KXETH", "status": "lost", "count": 1, "pnl_cents": -25},
+				{"strategy": "strat-b",  "series_ticker": "KXBTC", "status": "won",  "count": 1, "pnl_cents": 75},
 			],
 			"all_time_by_strategy": [
 				{
-					"strategy": "debut-fade", "closed_trades": 19, "wins": 12,
+					"strategy": "strat-a", "closed_trades": 19, "wins": 12,
 					"net_pnl_cents": 1455, "net_pnl_usd": 14.55, "win_rate_pct": 63.2,
 				},
 				{
-					"strategy": "flow-fade", "closed_trades": 1, "wins": 1,
+					"strategy": "strat-b", "closed_trades": 1, "wins": 1,
 					"net_pnl_cents": 75, "net_pnl_usd": 0.75, "win_rate_pct": 100.0,
 				},
 			],
 			"open_positions": [
-				{"strategy": "debut-fade", "series_ticker": "KXSOL", "count": 1},
+				{"strategy": "strat-a", "series_ticker": "KXSOL", "count": 1},
 			],
 		}
 
@@ -544,14 +544,14 @@ class TestOpenPositions:
 			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
 			"exit_time TEXT)"
 		)
-		con.execute("INSERT INTO paper_trades VALUES ('debut-fade', 'KXETH', 'open', 50, 1, NULL, 1, NULL)")
-		con.execute("INSERT INTO paper_trades VALUES ('debut-fade', 'KXETH', 'open', 51, 1, NULL, 1, NULL)")
-		con.execute("INSERT INTO paper_trades VALUES ('flow-fade', 'KXBTC', 'open', 60, 1, NULL, 1, NULL)")
+		con.execute("INSERT INTO paper_trades VALUES ('strat-a', 'KXETH', 'open', 50, 1, NULL, 1, NULL)")
+		con.execute("INSERT INTO paper_trades VALUES ('strat-a', 'KXETH', 'open', 51, 1, NULL, 1, NULL)")
+		con.execute("INSERT INTO paper_trades VALUES ('strat-b', 'KXBTC', 'open', 60, 1, NULL, 1, NULL)")
 		con.commit()
 		con.close()
 		report = generate_report(db, date="2026-04-25")
 		open_pos = {(r["strategy"], r["series_ticker"]): r["count"] for r in report["open_positions"]}
-		assert open_pos == {("debut-fade", "KXETH"): 2, ("flow-fade", "KXBTC"): 1}
+		assert open_pos == {("strat-a", "KXETH"): 2, ("strat-b", "KXBTC"): 1}
 
 
 class TestAllTimeByStrategy:
@@ -603,34 +603,34 @@ class TestAllTimeByStrategy:
 			"entry_price REAL, fill_size INTEGER, pnl_cents INTEGER, entry_fee_cents INTEGER, "
 			"exit_time TEXT)"
 		)
-		# debut-fade: 3W / 1L = 75% WR, +20¢ net (10+10+10-10)
+		# strat-a: 3W / 1L = 75% WR, +20¢ net (10+10+10-10)
 		for pnl in (10, 10, 10, -10):
 			status = "won" if pnl > 0 else "lost"
 			con.execute(
-				"INSERT INTO paper_trades VALUES ('debut-fade', 'KX', ?, 50, 1, ?, 1, '2026-04-25T12:00:00Z')",
+				"INSERT INTO paper_trades VALUES ('strat-a', 'KX', ?, 50, 1, ?, 1, '2026-04-25T12:00:00Z')",
 				(status, pnl),
 			)
-		# flow-fade: 1W / 1L = 50% WR, +0¢ net
+		# strat-b: 1W / 1L = 50% WR, +0¢ net
 		con.execute(
-			"INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'won', "
+			"INSERT INTO paper_trades VALUES ('strat-b', 'KX', 'won', "
 			"50, 1, 20, 1, '2026-04-25T12:00:00Z')"
 		)
 		con.execute(
-			"INSERT INTO paper_trades VALUES ('flow-fade', 'KX', 'lost', "
+			"INSERT INTO paper_trades VALUES ('strat-b', 'KX', 'lost', "
 			"50, 1, -20, 1, '2026-04-25T13:00:00Z')"
 		)
 		con.commit()
 		con.close()
 		report = generate_report(db, date="2026-04-25")
 		by_strat = {r["strategy"]: r for r in report["all_time_by_strategy"]}
-		assert by_strat["debut-fade"]["closed_trades"] == 4
-		assert by_strat["debut-fade"]["wins"] == 3
-		assert by_strat["debut-fade"]["net_pnl_cents"] == 20  # 10+10+10-10
-		assert by_strat["debut-fade"]["win_rate_pct"] == 75.0
-		assert by_strat["flow-fade"]["closed_trades"] == 2
-		assert by_strat["flow-fade"]["wins"] == 1
-		assert by_strat["flow-fade"]["net_pnl_cents"] == 0
-		assert by_strat["flow-fade"]["win_rate_pct"] == 50.0
+		assert by_strat["strat-a"]["closed_trades"] == 4
+		assert by_strat["strat-a"]["wins"] == 3
+		assert by_strat["strat-a"]["net_pnl_cents"] == 20  # 10+10+10-10
+		assert by_strat["strat-a"]["win_rate_pct"] == 75.0
+		assert by_strat["strat-b"]["closed_trades"] == 2
+		assert by_strat["strat-b"]["wins"] == 1
+		assert by_strat["strat-b"]["net_pnl_cents"] == 0
+		assert by_strat["strat-b"]["win_rate_pct"] == 50.0
 
 	def test_empty_when_no_settled(self, tmp_path):
 		from edge_catcher.reporting import generate_report

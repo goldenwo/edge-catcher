@@ -13,8 +13,8 @@ def test_order_request_is_frozen():
 		side="yes",
 		size_contracts=10,
 		limit_price_cents=42,
-		strategy="debut-fade",
-		client_order_id="debut-fade-KXSOL15M-1715000000000",
+		strategy="strat-a",
+		client_order_id="strat-a-KXSOL15M-1715000000000",
 	)
 	# CPython 3.11 raises FrozenInstanceError on assignment to a frozen
 	# slotted dataclass (3.12 raises AttributeError). Accept either; do NOT

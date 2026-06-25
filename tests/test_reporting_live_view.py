@@ -359,11 +359,11 @@ def _seed_paper_rows(con: sqlite3.Connection) -> None:
 	shape every production paper_trades_v2.db has — zero scratch rows)."""
 	rows = [
 		# strategy, series, status, entry_price, fill_size, pnl, fee, exit_time
-		("debut-fade", "KXETH", "won", 50, 2, 90, 1, "2026-04-25T16:00:00Z"),
-		("debut-fade", "KXETH", "lost", 50, 1, -40, 1, "2026-04-25T17:00:00Z"),
-		("debut-fade", "KXSOL", "won", 60, 1, 30, 1, "2026-04-26T16:00:00Z"),
-		("flow-fade", "KXBTC", "lost", 45, 3, -55, 2, "2026-04-26T17:00:00Z"),
-		("flow-fade", "KXBTC", "open", 45, 1, None, 1, None),
+		("strat-a", "KXETH", "won", 50, 2, 90, 1, "2026-04-25T16:00:00Z"),
+		("strat-a", "KXETH", "lost", 50, 1, -40, 1, "2026-04-25T17:00:00Z"),
+		("strat-a", "KXSOL", "won", 60, 1, 30, 1, "2026-04-26T16:00:00Z"),
+		("strat-b", "KXBTC", "lost", 45, 3, -55, 2, "2026-04-26T17:00:00Z"),
+		("strat-b", "KXBTC", "open", 45, 1, None, 1, None),
 	]
 	con.executemany(
 		"INSERT INTO paper_trades VALUES (?,?,?,?,?,?,?,?)", rows

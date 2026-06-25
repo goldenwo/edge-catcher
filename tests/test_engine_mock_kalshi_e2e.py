@@ -85,7 +85,7 @@ from tests.fixtures.mock_kalshi_server import (
 
 _SERIES = "KXSOL15M"
 _TICKER = "KXSOL15M-26MAY09H06"
-_STRATEGY = "debut-fade"
+_STRATEGY = "strat-a"
 _NOW = datetime(2026, 5, 23, 1, 0, 0, tzinfo=timezone.utc)
 
 # Phase-1 caps (from the handoff/spec) — gate will Allow within these.

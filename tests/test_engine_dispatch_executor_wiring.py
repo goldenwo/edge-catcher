@@ -42,7 +42,7 @@ async def test_filled_routes_record_trade_with_exact_kwargs(now):
 	))
 	signal = Signal(
 		action="enter", ticker="KXSOL15M-25-T1", side="yes",
-		series="KXSOL15M", strategy="debut-fade", reason="signal",
+		series="KXSOL15M", strategy="strat-a", reason="signal",
 	)
 	ctx = MagicMock(yes_ask=42, no_ask=58, orderbook=MagicMock(depth=5))
 	config = {"_metrics": MagicMock()}
@@ -53,7 +53,7 @@ async def test_filled_routes_record_trade_with_exact_kwargs(now):
 	kwargs = store.record_trade.call_args.kwargs
 	assert kwargs["ticker"] == "KXSOL15M-25-T1"
 	assert kwargs["entry_price"] == 42
-	assert kwargs["strategy"] == "debut-fade"
+	assert kwargs["strategy"] == "strat-a"
 	assert kwargs["side"] == "yes"
 	assert kwargs["series_ticker"] == "KXSOL15M"
 	assert kwargs["intended_size"] == 4

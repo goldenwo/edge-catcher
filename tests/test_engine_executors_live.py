@@ -75,8 +75,8 @@ def _make_request(
 	side: str = "yes",
 	size: int = 10,
 	limit: int = 5,
-	strategy: str = "debut-fade",
-	client_order_id: str = "debut-fade-KXSOL15M-1715195456789-abc12345",
+	strategy: str = "strat-a",
+	client_order_id: str = "strat-a-KXSOL15M-1715195456789-abc12345",
 	action: str = "buy",
 ) -> OrderRequest:
 	"""Construct an engine ``OrderRequest`` with sensible Phase-1 defaults."""
@@ -532,14 +532,14 @@ async def test_place_forwards_client_order_id_to_kalshi_request():
 	client = FakeKalshiClient()
 	client.return_value = _make_order(filled_count=10)
 	executor = LiveExecutor(client)  # type: ignore[arg-type]
-	req = _make_request(client_order_id="debut-fade-KXSOL15M-1715195456789-abc12345")
+	req = _make_request(client_order_id="strat-a-KXSOL15M-1715195456789-abc12345")
 
 	await executor.place(req)
 
 	assert len(client.calls) == 1
 	kalshi_req = client.calls[0]
 	# The Kalshi request must preserve our idempotency key verbatim.
-	assert kalshi_req.client_order_id == "debut-fade-KXSOL15M-1715195456789-abc12345"
+	assert kalshi_req.client_order_id == "strat-a-KXSOL15M-1715195456789-abc12345"
 
 
 # ---------------------------------------------------------------------------
