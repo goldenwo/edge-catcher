@@ -91,7 +91,7 @@ def _row(conn: sqlite3.Connection, row_id: int) -> dict[str, object]:
 def _seed_pending(
 	conn: sqlite3.Connection,
 	*,
-	coid: str = "strat-34-KXSOL15M-1700000000000-cafebabe",
+	coid: str = "strat-a-KXSOL15M-1700000000000-cafebabe",
 	ticker: str = "KXSOL15M-26MAY16H12",
 	side: str = "yes",
 	intended_size: int = 10,
@@ -100,7 +100,7 @@ def _seed_pending(
 		conn,
 		ticker=ticker,
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side=side,
 		intended_size=intended_size,
 		entry_price_cents=40,
@@ -114,7 +114,7 @@ def _seed_pending(
 def _seed_open(
 	conn: sqlite3.Connection,
 	*,
-	coid: str = "strat-34-KXSOL15M-1700000000000-deadbeef",
+	coid: str = "strat-a-KXSOL15M-1700000000000-deadbeef",
 	ticker: str = "KXSOL15M-26MAY16H12",
 	side: str = "yes",
 	intended_size: int = 10,
@@ -126,7 +126,7 @@ def _seed_open(
 		conn,
 		ticker=ticker,
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side=side,
 		intended_size=intended_size,
 		fill_size=fill_size,
@@ -193,7 +193,7 @@ async def test_22_fill_pending_to_open(
 	_wire(mock_kalshi_ws, conn, cbs)
 
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000000-cafebabe",
+		client_order_id="strat-a-KXSOL15M-1700000000000-cafebabe",
 		kalshi_order_id="kx-entry-22",
 		filled_count=10,
 		# two-level walk: 40¢×6 + 41¢×4 → blended round(404/10)=40
@@ -226,12 +226,12 @@ async def test_22_fill_pending_to_open_computes_dual_slippage(
 	# Seed a pending row WITH the two dual-slippage refs (entry_best=38¢ top
 	# of book, entry_limit=41¢ post-taker-cap). Direct record_pending call
 	# so we can supply the refs (the _seed_pending helper omits them).
-	coid = "strat-34-KXSOL15M-1700000000000-dualslip"
+	coid = "strat-a-KXSOL15M-1700000000000-dualslip"
 	row_id = record_pending(
 		conn,
 		ticker="KXSOL15M-26MAY16H12",
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side="yes",
 		intended_size=10,
 		entry_price_cents=40,
@@ -289,7 +289,7 @@ async def test_22_fill_after_concurrent_settlement_is_lost_race_noop(
 
 	with caplog.at_level(logging.WARNING, logger="edge_catcher.live.state"):
 		await mock_kalshi_ws.emit_fill(
-			client_order_id="strat-34-KXSOL15M-1700000000000-cafebabe",
+			client_order_id="strat-a-KXSOL15M-1700000000000-cafebabe",
 			kalshi_order_id="kx-entry-22b",
 			filled_count=10,
 			fills=[{"price": 41, "size": 10}],
@@ -321,7 +321,7 @@ async def test_22_duplicate_fill_after_open_is_idempotent_noop(
 	row_id = _seed_pending(conn)
 	_wire(mock_kalshi_ws, conn, cbs)
 	fill_kwargs = dict(
-		client_order_id="strat-34-KXSOL15M-1700000000000-cafebabe",
+		client_order_id="strat-a-KXSOL15M-1700000000000-cafebabe",
 		kalshi_order_id="kx-entry-22c",
 		filled_count=10,
 		fills=[{"price": 40, "size": 10}],
@@ -354,7 +354,7 @@ async def test_22_partial_entry_fill_writes_true_fill_pct_not_hardcoded_one(
 	_wire(mock_kalshi_ws, conn, cbs)
 
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000000-cafebabe",
+		client_order_id="strat-a-KXSOL15M-1700000000000-cafebabe",
 		kalshi_order_id="kx-entry-22part",
 		filled_count=3,
 		fills=[{"price": 40, "size": 3}],  # IOC partial: 3 of 10
@@ -388,7 +388,7 @@ async def test_22_full_entry_fill_still_writes_fill_pct_one(
 	_wire(mock_kalshi_ws, conn, cbs)
 
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000000-cafebabe",
+		client_order_id="strat-a-KXSOL15M-1700000000000-cafebabe",
 		kalshi_order_id="kx-entry-22full",
 		filled_count=10,
 		fills=[{"price": 40, "size": 10}],
@@ -420,7 +420,7 @@ async def test_23_partial_exit_fill_splits_row(
 	# Exit order's own client_order_id is FRESH (D's build_exit_order) — it
 	# matches no row; the handler resolves the parent by ticker+side.
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000777-exit0001",
+		client_order_id="strat-a-KXSOL15M-1700000000777-exit0001",
 		kalshi_order_id="kx-exit-23",
 		filled_count=4,
 		fills=[{"price": 55, "size": 4}],  # 55 > 40 entry → won child
@@ -457,7 +457,7 @@ async def test_23_duplicate_partial_same_kalshi_id_is_idempotent_noop(
 	parent_id = _seed_open(conn, fill_size=10, blended=40)
 	_wire(mock_kalshi_ws, conn, cbs)
 	dup_kwargs = dict(
-		client_order_id="strat-34-KXSOL15M-1700000000777-exit0001",
+		client_order_id="strat-a-KXSOL15M-1700000000777-exit0001",
 		kalshi_order_id="kx-exit-23DUP",  # the stable Kalshi identity
 		filled_count=4,
 		fills=[{"price": 55, "size": 4}],
@@ -499,7 +499,7 @@ async def test_23_fresh_kalshi_id_is_a_new_partial_not_a_dedup(
 	parent_id = _seed_open(conn, fill_size=10, blended=40)
 	_wire(mock_kalshi_ws, conn, cbs)
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000777-exitA",
+		client_order_id="strat-a-KXSOL15M-1700000000777-exitA",
 		kalshi_order_id="kx-exit-A",
 		filled_count=4,
 		fills=[{"price": 55, "size": 4}],
@@ -507,7 +507,7 @@ async def test_23_fresh_kalshi_id_is_a_new_partial_not_a_dedup(
 		side="yes",
 	)
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000888-exitB",
+		client_order_id="strat-a-KXSOL15M-1700000000888-exitB",
 		kalshi_order_id="kx-exit-B",  # DIFFERENT id → new partial
 		filled_count=3,
 		fills=[{"price": 30, "size": 3}],  # 30 < 40 → lost child
@@ -549,7 +549,7 @@ async def test_23_partial_exit_fill_with_empty_kalshi_id_is_rejected_not_booked(
 
 	with caplog.at_level(logging.ERROR, logger="edge_catcher.live.state"):
 		await mock_kalshi_ws.emit_fill(
-			client_order_id="strat-34-KXSOL15M-1700000000777-exitNOID",
+			client_order_id="strat-a-KXSOL15M-1700000000777-exitNOID",
 			kalshi_order_id="",  # malformed/missing Kalshi identity
 			filled_count=4,
 			fills=[{"price": 55, "size": 4}],
@@ -591,7 +591,7 @@ async def test_23_full_exit_fill_closes_in_place_with_fee_correct_pnl(
 	_wire(mock_kalshi_ws, conn, cbs)
 
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000777-fullexit",
+		client_order_id="strat-a-KXSOL15M-1700000000777-fullexit",
 		kalshi_order_id="kx-exit-full",
 		filled_count=10,
 		fills=[{"price": 60, "size": 10}],
@@ -710,7 +710,7 @@ async def test_24_late_fill_after_settlement_is_lost_race_noop(
 
 	# Late exit fill for the now-closed position.
 	await mock_kalshi_ws.emit_fill(
-		client_order_id="strat-34-KXSOL15M-1700000000999-lateexit",
+		client_order_id="strat-a-KXSOL15M-1700000000999-lateexit",
 		kalshi_order_id="kx-exit-late",
 		filled_count=10,
 		fills=[{"price": 70, "size": 10}],

@@ -1,6 +1,6 @@
 """Honest paper fill simulator — Phase 1 (fixed-slippage stub).
 
-WHY: P1's strat-34 verdict found Gap-1 — the optimistic PaperExecutor's paper
+WHY: P1's strat-a verdict found Gap-1 — the optimistic PaperExecutor's paper
 win-rate materially overstated the strategy's true live win-rate on the same
 window. The optimistic executor walks the book the bot
 sees and assumes that liquidity is available at quoted prices; live IOCs slip,

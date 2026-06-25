@@ -87,9 +87,9 @@ def test_order_request_accepts_dispatch_style_client_order_id():
 	req = OrderRequest(
 		ticker="KXSOL15M-26MAY09H06", action="buy", side="yes",
 		count=1, limit_price_cents=1,
-		client_order_id="strat-34-KXSOL15M-1715195456789",
+		client_order_id="strat-a-KXSOL15M-1715195456789",
 	)
-	assert req.client_order_id == "strat-34-KXSOL15M-1715195456789"
+	assert req.client_order_id == "strat-a-KXSOL15M-1715195456789"
 
 
 def test_order_request_accepts_underscores_and_hyphens():

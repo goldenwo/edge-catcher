@@ -235,7 +235,7 @@ def reconcile(
 			# no filled BUY — a recorded position that doesn't exist on the exchange. A
 			# rejected/0-fill row asserts no position, so with no Kalshi BUY the db and
 			# exchange AGREE: a correctly recorded rejection, not a discrepancy (spec §5.3).
-			# strat-34 is an IOC taker whose entries often 0-fill, so this must not
+			# strat-a is an IOC taker whose entries often 0-fill, so this must not
 			# false-positive into a material PHANTOM on every rejection.
 			if any(_asserts_fill(r) for r in rows):
 				findings.append(Finding(t, Outcome.PHANTOM, True, "db row asserts a fill with no filled Kalshi BUY"))

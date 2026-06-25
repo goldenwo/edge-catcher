@@ -624,7 +624,7 @@ async def _handle_enter(
 	if metrics is None:
 		metrics = Metrics()
 
-	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate v2). strat-34
+	# Live-only spread gate (spec 2026-05-25-live-spread-entry-gate v2). strat-a
 	# is an IOC taker: buys ask, marks bid, so a fill starts -(spread) underwater;
 	# spread >= the strategy's stop stops it out on entry (the proven cause of the
 	# 2026-05-25 cutover loss). `protective_stop_cents` carries the strategy's real
