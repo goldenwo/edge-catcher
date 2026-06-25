@@ -12,7 +12,9 @@ from edge_catcher.fill_realism_gate import (
 	IN_FLIGHT,
 	ALERT_STATUS,
 	aggregate_positions,
-	Position,
+	bootstrap_ci,
+	decide,
+	evaluate,
 )
 
 
@@ -137,8 +139,6 @@ def test_filled_row_with_null_entry_time_is_flagged_not_dropped():
 # Task 3: bootstrap_ci
 # ---------------------------------------------------------------------------
 
-from edge_catcher.fill_realism_gate import bootstrap_ci
-
 
 def test_bootstrap_ci_is_deterministic_under_seed():
 	vals = [10, 12, -3, 8, 15, 9, 11, 7, 13, 6]
@@ -169,8 +169,6 @@ def test_bootstrap_ci_empty_is_zero():
 # ---------------------------------------------------------------------------
 # Task 4: decide — asymmetric decision rule
 # ---------------------------------------------------------------------------
-
-from edge_catcher.fill_realism_gate import decide, Decision
 
 
 def test_decide_graduate_requires_both_cis_positive_at_N():
@@ -224,8 +222,6 @@ def test_decide_reject_via_full_negative_ci_takes_precedence_at_N():
 # ---------------------------------------------------------------------------
 # Task 5: evaluate() — orchestration + truncation + re-gate sign-off
 # ---------------------------------------------------------------------------
-
-from edge_catcher.fill_realism_gate import evaluate
 
 
 def _filled(coid: str, pnl: int, size: int = 1,
