@@ -16,6 +16,7 @@ from edge_catcher.engine.dispatch import (
 	_handle_orderbook_snapshot,
 	_handle_synthetic_rest_orderbook,
 )
+from edge_catcher.engine.executors.paper import walk_book_with_ceiling
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot
 
 
@@ -137,6 +138,33 @@ def test_implausibly_large_qty_cannot_poison_book_or_serialization() -> None:
 	# Serialized book is valid JSON with no Infinity token.
 	dumped = json.dumps([[p, q] for p, q in ob.no_levels])
 	assert "Infinity" not in dumped
+
+
+def test_full_book_consumption_does_not_drop_a_contract_to_float_noise() -> None:
+	"""Regression: per-level fractional takes (4dp-exact) can sum with downward
+	float64 noise — e.g. asks 1.1357 + 2.6127 + 0.2516 is a TRUE 4.0 that
+	computes as 3.9999999999999996. A bare int() floor returns 3, silently
+	dropping a whole contract and under-reporting fill_pct. Both walkers must
+	round to _QTY_DP before flooring, recovering 4. The existing floor tests
+	(2.7->2, 0.4->0) land where naive int() is coincidentally correct and so
+	never exercised this edge.
+
+	NO bids 0.12/0.11/0.10 -> implied YES asks 88/89/90c, taken in ascending
+	price order so the walker's running sum hits the downward-noise value.
+	"""
+	snap = OrderbookSnapshot(
+		yes_levels=[], no_levels=[(0.12, 1.1357), (0.11, 2.6127), (0.10, 0.2516)]
+	)
+	# Precondition: the walk-order sum carries downward noise (bare int -> 3),
+	# while the true total is 4.0 — i.e. without the round-before-floor the
+	# walkers WOULD drop a contract here.
+	walk_sum = sum(q for _, q in snap.implied_asks("yes"))
+	assert int(walk_sum) == 3, f"precondition lost: walk_sum={walk_sum!r}"
+	assert round(walk_sum, 4) == 4.0
+
+	# Both walkers must recover the whole contract.
+	assert snap.walk_book("yes", 10).fill_size == 4
+	assert walk_book_with_ceiling(snap, "yes", 10, 99, None).fill_size == 4
 
 
 # ---------------------------------------------------------------------------

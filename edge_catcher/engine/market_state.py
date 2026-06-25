@@ -233,7 +233,11 @@ class OrderbookSnapshot:
 			fills.append({"price": price_cents, "size": take})
 			remaining -= take
 
-		fill_size = int(sum(f["size"] for f in fills))  # floor to whole contracts (rule a)
+		# Round before the int() floor: the per-level takes are 4dp-exact but
+		# their float64 sum can carry downward noise (a true 4.0 summing to
+		# 3.9999999999999996), which a bare int() would floor to 3 — dropping a
+		# whole contract. Rounding to _QTY_DP first recovers the true 4dp total.
+		fill_size = int(round(sum(f["size"] for f in fills), _QTY_DP))  # floor to whole contracts (rule a)
 		if fill_size == 0:
 			return FillResult(
 				fill_size=0,

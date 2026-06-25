@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from edge_catcher.engine.fill_math import FillEvent, blended_price_cents, signed_slippage_cents
-from edge_catcher.engine.market_state import FillResult, OrderbookSnapshot, _trim_fills
+from edge_catcher.engine.market_state import _QTY_DP, FillResult, OrderbookSnapshot, _trim_fills
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +141,13 @@ def walk_book_with_ceiling(
 			intended_size=size,
 		)
 
-	fill_size = int(total_filled)  # floor to whole contracts (rule a)
+	# Round before the int() floor: per-level takes are 4dp-exact, but their
+	# float64 sum can carry downward noise (a true 4.0 summing to
+	# 3.9999999999999996), which a bare int() would floor to 3 — silently
+	# dropping a whole contract. Rounding to _QTY_DP first recovers the true
+	# 4dp total, then int() floors that (same round-at-source discipline as
+	# apply_orderbook_delta). Preserves genuine partials (2.7 -> 2, 0.4 -> 0).
+	fill_size = int(round(total_filled, _QTY_DP))  # floor to whole contracts (rule a)
 	if fill_size == 0:
 		return FillResult(
 			fill_size=0,
