@@ -1283,20 +1283,40 @@ async def _handle_exit(
 # ---------------------------------------------------------------------------
 
 def _handle_orderbook_delta(market_state: MarketState, msg: dict) -> None:
-	"""Apply an orderbook delta message to market state."""
-	ticker = msg.get("msg", {}).get("market_ticker", "")
+	"""Apply an orderbook delta to market state. Dual-shape, mirroring the snapshot/trade handlers:
+	  - legacy batched: data["yes"]/["no"] = [[price, delta], ...]
+	  - V2 per-level scalar: data has top-level {side, price_dollars, delta_fp}
+	V2 fires only when BOTH legacy keys are absent (`is None`) — an empty list is a valid legacy
+	frame. This is the third dual-shape handler; kept inline (the triggers differ); a shared
+	_parse_fp() is the extraction point if a V3 shape ever lands."""
+	data = msg.get("msg", {})
+	ticker = data.get("market_ticker", "")
 	if not ticker:
 		return
 
-	data = msg.get("msg", {})
-	for side in ("yes", "no"):
-		for price_str, delta in data.get(side, []):
-			try:
-				market_state.apply_orderbook_delta(
-					ticker, side, float(price_str), int(delta),
-				)
-			except Exception:
-				log.exception("Error applying orderbook delta for %s", ticker)
+	# Legacy batched shape (kept as dead-path — no legacy frames are captured today).
+	if data.get("yes") is not None or data.get("no") is not None:
+		for side in ("yes", "no"):
+			for price_str, delta in data.get(side, []):
+				try:
+					market_state.apply_orderbook_delta(ticker, side, float(price_str), int(delta))
+				except Exception:
+					log.exception("Error applying orderbook delta for %s", ticker)
+		return
+
+	# V2 per-level scalar shape. Skip malformed frames SILENTLY — OverflowError is reachable
+	# (int(float("1e999")) / _is_tradeable_cents(inf)) and is not a subclass of TypeError/ValueError;
+	# matches the trade handler's `except (TypeError, ValueError, OverflowError): return` (no per-frame
+	# log at ~12.6M-frame scale).
+	side = data.get("side")
+	if side in ("yes", "no") and data.get("price_dollars") is not None and data.get("delta_fp") is not None:
+		try:
+			market_state.apply_orderbook_delta(
+				ticker, side, float(data["price_dollars"]), int(float(data["delta_fp"])),
+			)
+		except (TypeError, ValueError, OverflowError):
+			return
+	# A frame matching neither shape is a clean no-op.
 
 
 def _handle_orderbook_snapshot(market_state: MarketState, msg: dict) -> None:
