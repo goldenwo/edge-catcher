@@ -653,3 +653,15 @@ def test_dispatch_orderbook_delta_legacy_branch_logs_on_bad_value(monkeypatch):
 	# raises ValueError -> caught by the legacy `except Exception: log.exception`.
 	_handle_orderbook_delta(ms, {"msg": {"market_ticker": "KXT", "yes": [["notaprice", 5]]}})
 	assert logged  # legacy branch logged the failure (contrast: V2 malformed frames do NOT log)
+
+
+def test_dispatch_orderbook_delta_v2_removes_level_at_zero():
+	# A V2 delta that drives a level to exactly 0 REMOVES it (apply_orderbook_delta's `new_q > 0`
+	# false branch) — the most common real delta: a resting level fully lifted. Pins the removal
+	# path at the V2 dispatch seam (review round 3).
+	ms = MarketState()
+	ms.seed_orderbook("KXT", OrderbookSnapshot(yes_levels=[], no_levels=[(0.99, 4)]))
+	msg = {"msg": {"market_ticker": "KXT", "price_dollars": "0.9900", "delta_fp": "-4.00", "side": "no"}}
+	_handle_orderbook_delta(ms, msg)
+	ob = ms.get_orderbook("KXT")
+	assert ob.no_levels == []          # 4 + int(float("-4.00")) = 0 -> level removed
