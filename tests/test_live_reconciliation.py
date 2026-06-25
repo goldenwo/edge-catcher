@@ -105,7 +105,7 @@ def _seed_pending(
 		conn,
 		ticker=ticker,
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side="yes",
 		intended_size=intended_size,
 		entry_price_cents=40,
@@ -127,7 +127,7 @@ def _seed_open(
 		conn,
 		ticker=ticker,
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side="yes",
 		intended_size=fill_size,
 		fill_size=fill_size,
@@ -452,7 +452,7 @@ async def test_15b_startup_orphan_decimal_strike_stores_urlsafe_coid(
 async def test_16_startup_local_open_kalshi_missing_marks_lost_truth(
 	conn: sqlite3.Connection, caplog
 ) -> None:
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-aaa")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-aaa")
 	client = FakeClient(positions=[], orders=[])
 
 	with caplog.at_level(logging.WARNING):
@@ -473,7 +473,7 @@ async def test_absent_ticker_settled_market_stays_open_for_poller(
 	→ settle_trade) closes it to won/lost. Marking it lost_truth would freeze a
 	real settled position's P&L (settle_trade's CAS requires status in
 	open/exit_pending)."""
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-settled")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-settled")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {"status": "finalized", "result": "yes"}},
@@ -502,7 +502,7 @@ async def test_absent_ticker_inconclusive_meta_stays_open_not_lost_truth(
 	→ {}, or expired-but-result-pending), an absent-ticker 'open' row must be
 	LEFT 'open' (retry next reconcile / settlement poller), NEVER terminally
 	marked lost_truth on uncertainty."""
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-unknown")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-unknown")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {}},  # REST error / unknown
@@ -523,7 +523,7 @@ async def test_absent_ticker_live_market_marks_lost_truth(
 	hold the position but Kalshi reports none → lost_truth. Decided off the
 	unambiguous expiration_time, NOT a guessed status string."""
 	future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-live")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-live")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -545,7 +545,7 @@ async def test_absent_ticker_just_expired_within_grace_stays_open(
 	settlement grace) with no result yet is still SETTLING — leave it 'open' for
 	the poller to close once the result lands; do NOT mark lost_truth."""
 	just_expired = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-settling")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-settling")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -572,7 +572,7 @@ async def test_absent_ticker_long_expired_no_result_marks_lost_truth(
 		datetime.now(timezone.utc)
 		- timedelta(seconds=recon._SETTLEMENT_GRACE_SECONDS + 600)
 	).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-void")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-void")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -592,7 +592,7 @@ async def test_absent_ticker_settled_no_result_stays_open(
 ) -> None:
 	"""C2: settled with result 'no' (not just 'yes') also stays 'open' for the
 	poller — the settled branch is side-agnostic."""
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-settled-no")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-settled-no")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {"status": "finalized", "result": "no"}},
@@ -627,7 +627,7 @@ async def test_absent_ticker_grace_boundary_just_inside_stays_open(
 		datetime.now(timezone.utc)
 		- timedelta(seconds=recon._SETTLEMENT_GRACE_SECONDS - 10)
 	).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-gin")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-gin")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -652,7 +652,7 @@ async def test_absent_ticker_grace_boundary_just_outside_marks_lost_truth(
 		datetime.now(timezone.utc)
 		- timedelta(seconds=recon._SETTLEMENT_GRACE_SECONDS + 10)
 	).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-gout")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-gout")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -676,7 +676,7 @@ async def test_absent_ticker_settled_yes_with_future_expiration_stays_open(
 	expiration check ran first, an early-resolved live market would be wrongly
 	frozen as terminal lost_truth (P&L lost)."""
 	future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-early")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-early")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -699,7 +699,7 @@ async def test_absent_ticker_malformed_expiration_stays_open(
 	must parse to None and leave the row 'open' (retry) — never act on a bad
 	timestamp. Exercises _parse_iso_or_none's ValueError path directly; the {}
 	test covers the MISSING-field path, this covers the GARBAGE path."""
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-garbage")
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-garbage")
 	client = FakeClient(
 		positions=[], orders=[],
 		market_meta={"KXSOL15M-26MAY16H12": {
@@ -760,7 +760,7 @@ async def test_local_open_with_flat_kalshi_position_stays_open_for_settlement(
 	would FREEZE a real settled position's P&L forever. lost_truth is reserved
 	for a ticker ABSENT from positions() entirely (genuine truth loss)."""
 	ticker = "KXSOL15M-26MAY16H12"
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-flat", ticker=ticker)
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-flat", ticker=ticker)
 	client = FakeClient(
 		positions=[
 			Position(ticker=ticker, side="yes", count=0, average_price_cents=0, raw={})
@@ -784,7 +784,7 @@ async def test_local_open_with_flat_kalshi_position_stays_open_for_settlement(
 async def test_17_startup_pending_matched_filled_resolves_to_open(
 	conn: sqlite3.Connection,
 ) -> None:
-	coid = "strat-34-KXSOL15M-bbb"
+	coid = "strat-a-KXSOL15M-bbb"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -838,14 +838,14 @@ async def test_17c_matched_filled_computes_dual_slippage_from_refs(
 	row. End-to-end coverage of the reconciler → transition compute path —
 	mirrors the WS-handler test (the §1 keystone single chokepoint serves
 	both deferred callers)."""
-	coid = "strat-34-KXSOL15M-recon-dualslip"
+	coid = "strat-a-KXSOL15M-recon-dualslip"
 	# Direct record_pending so we can seed the two refs (entry_best=38¢ top
 	# of book; entry_limit=42¢ post-taker-cap) — _seed_pending omits them.
 	row_id = record_pending(
 		conn,
 		ticker="KXSOL15M-26MAY16H12",
 		series="KXSOL15M",
-		strategy="strat-34",
+		strategy="strat-a",
 		side="yes",
 		intended_size=10,
 		entry_price_cents=40,
@@ -908,7 +908,7 @@ async def test_17b_matched_filled_prefers_true_avg_fill_over_limit(
 	live-fill-parse fix — before it, the REST Order exposed no fill price and
 	the reconciler had to proxy with the limit.
 	"""
-	coid = "strat-34-KXSOL15M-avgfill"
+	coid = "strat-a-KXSOL15M-avgfill"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -955,7 +955,7 @@ async def test_18_startup_pending_past_ttl_no_order_rejected_post_hoc(
 	conn: sqlite3.Connection,
 ) -> None:
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-ccc", placed_at=_stale()
+		conn, coid="strat-a-KXSOL15M-ccc", placed_at=_stale()
 	)
 	client = FakeClient(orders=[], positions=[])
 
@@ -979,7 +979,7 @@ async def test_18b_startup_pending_within_ttl_no_order_left_pending(
 	(``datetime.now``), so a "young" assertion must be young relative to
 	the actual clock — that is precisely the production guarantee."""
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-ddd", placed_at=_recent()
+		conn, coid="strat-a-KXSOL15M-ddd", placed_at=_recent()
 	)
 	client = FakeClient(orders=[], positions=[])
 
@@ -1002,7 +1002,7 @@ async def test_19_poller_one_list_orders_call_per_cycle(
 	for i in range(5):
 		_seed_pending(
 			conn,
-			coid=f"strat-34-KXSOL15M-p{i}",
+			coid=f"strat-a-KXSOL15M-p{i}",
 			placed_at=_recent(),
 		)
 	client = FakeClient(orders=[], positions=[])
@@ -1037,7 +1037,7 @@ async def test_19b_poller_one_call_even_with_many_pending_single_cycle(
 	directly (no loop timing) with N pending rows; assert exactly 1 call."""
 	for i in range(8):
 		_seed_pending(
-			conn, coid=f"strat-34-KXSOL15M-q{i}", placed_at=_recent()
+			conn, coid=f"strat-a-KXSOL15M-q{i}", placed_at=_recent()
 		)
 	client = FakeClient(orders=[], positions=[])
 
@@ -1057,7 +1057,7 @@ async def test_20_poller_exit_pending_past_ttl_reverts_to_open(
 	conn: sqlite3.Connection,
 ) -> None:
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-ex1", placed_at=_stale()
+		conn, coid="strat-a-KXSOL15M-ex1", placed_at=_stale()
 	)
 	# Promote to open then to exit_pending (placed_at stays old).
 	conn.execute(
@@ -1081,7 +1081,7 @@ async def test_20b_poller_pending_matched_filled_resolves(
 ) -> None:
 	"""Poller positive path: a pending row WITH a Kalshi executed match
 	resolves to open even before TTL."""
-	coid = "strat-34-KXSOL15M-ex2"
+	coid = "strat-a-KXSOL15M-ex2"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1110,7 +1110,7 @@ async def test_20b_poller_pending_matched_filled_resolves(
 async def test_21_reconnect_reconcile_skips_positions_call(
 	conn: sqlite3.Connection,
 ) -> None:
-	coid = "strat-34-KXSOL15M-rc1"
+	coid = "strat-a-KXSOL15M-rc1"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1209,11 +1209,11 @@ async def test_startup_reconcile_is_idempotent(
 	conn: sqlite3.Connection,
 ) -> None:
 	# A mix: one pending→executed, one open→lost_truth, one orphan position.
-	coid_p = "strat-34-KXSOL15M-idem-p"
+	coid_p = "strat-a-KXSOL15M-idem-p"
 	pend_id = _seed_pending(conn, coid=coid_p, placed_at=_recent())
 	open_id = _seed_open(
 		conn,
-		coid="strat-34-KXSOL15M-idem-o",
+		coid="strat-a-KXSOL15M-idem-o",
 		ticker="KXETH15M-26MAY16H12",
 	)
 	client = FakeClient(
@@ -1353,7 +1353,7 @@ async def test_startup_reconcile_bankroll_refresh_failure_is_fatal(
 async def test_pending_matched_kalshi_rejected_resolves_rejected(
 	conn: sqlite3.Connection,
 ) -> None:
-	coid = "strat-34-KXSOL15M-rej"
+	coid = "strat-a-KXSOL15M-rej"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1376,7 +1376,7 @@ async def test_pending_matched_kalshi_rejected_resolves_rejected(
 async def test_pending_matched_kalshi_resting_defensively_rejected(
 	conn: sqlite3.Connection, caplog
 ) -> None:
-	coid = "strat-34-KXSOL15M-rest"
+	coid = "strat-a-KXSOL15M-rest"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1421,7 +1421,7 @@ async def test_reconcile_partial_fill_writes_true_fill_pct(
 	"""Pending intended_size=10; Kalshi reports an executed IOC that only
 	filled 3. Post-reconcile the row is 'open' with fill_size==3 and
 	fill_pct == 0.3 (the real fraction, NOT 1.0); intended_size stays 10."""
-	coid = "strat-34-KXSOL15M-partial"
+	coid = "strat-a-KXSOL15M-partial"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
 	)
@@ -1468,7 +1468,7 @@ async def test_reconcile_full_fill_still_writes_fill_pct_1(
 	"""Regression guard for I1: a genuine full fill (filled_count==count==
 	intended_size) must still produce fill_pct == 1.0 — the fix computes the
 	real fraction, it does not break the common 100% path."""
-	coid = "strat-34-KXSOL15M-fullfrac"
+	coid = "strat-a-KXSOL15M-fullfrac"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
 	)
@@ -1514,7 +1514,7 @@ async def test_reconcile_zero_fill_executed_phantom_rejected_not_open(
 	"""Pending + Kalshi Order(status='executed', filled_count=0, count=0):
 	the row must go 'rejected' (reason 'reconcile_zero_fill') with a WARNING
 	logged — NOT a phantom 'open' that leaks a MAX_OPEN slot forever."""
-	coid = "strat-34-KXSOL15M-zerofill"
+	coid = "strat-a-KXSOL15M-zerofill"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1562,7 +1562,7 @@ async def test_reconcile_executed_with_filled_count_but_zero_count_recovers(
 	'executed' order still has a real fill (fill_size = filled_count = 3),
 	so it must recover as 'open' — the M1 guard keys on the EFFECTIVE
 	fill_size<=0 (the true filled_count), not on count alone."""
-	coid = "strat-34-KXSOL15M-zcount-nz-fill"
+	coid = "strat-a-KXSOL15M-zcount-nz-fill"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
 	)
@@ -1603,7 +1603,7 @@ async def test_reconcile_zero_fill_executed_with_positive_count_rejected_not_pha
 	phantom count-sized 'open' that never drains: no WS event for it, and
 	every later reconcile re-matches it 'executed' so the TTL branch is
 	unreachable — an unbounded MAX_OPEN slot leak with wrong equity)."""
-	coid = "strat-34-KXSOL15M-zerofill-poscount"
+	coid = "strat-a-KXSOL15M-zerofill-poscount"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
 	)
@@ -1656,7 +1656,7 @@ async def test_reconcile_executed_with_zero_price_left_pending_not_phantom_basis
 	filled, Kalshi holds the contracts — rejecting would orphan a real
 	position). A young row retries next reconcile / its WS fill; a stale one
 	TTLs and is recovered via positions()."""
-	coid = "strat-34-KXSOL15M-zeroprice"
+	coid = "strat-a-KXSOL15M-zeroprice"
 	row_id = _seed_pending(
 		conn, coid=coid, placed_at=_recent(), intended_size=10
 	)
@@ -1715,7 +1715,7 @@ async def test_startup_pending_resolved_open_then_lost_truth_same_pass(
 	rows-3-5 sub-step) but positions() returns NO position for that ticker:
 	in the SAME startup pass the row must end 'lost_truth' (matrix row 2),
 	deterministically — resolve-then-lost_truth, exactly once."""
-	coid = "strat-34-KXSOL15M-resolve-then-lost"
+	coid = "strat-a-KXSOL15M-resolve-then-lost"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	client = FakeClient(
 		orders=[
@@ -1771,7 +1771,7 @@ async def test_startup_ttl_rejection_logs_warning(
 	anomalous than a steady-state poller TTL — it must log at WARNING so the
 	operator sees it (M2)."""
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-bootttl", placed_at=_stale()
+		conn, coid="strat-a-KXSOL15M-bootttl", placed_at=_stale()
 	)
 	client = FakeClient(orders=[], positions=[])
 
@@ -1798,7 +1798,7 @@ async def test_poller_ttl_rejection_stays_info(
 	"""Contrast for M2: the steady-state poller TTL→rejected_post_hoc path
 	stays at INFO (a routine 30s-poller TTL is not boot-anomalous)."""
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-pollttl", placed_at=_stale()
+		conn, coid="strat-a-KXSOL15M-pollttl", placed_at=_stale()
 	)
 	client = FakeClient(orders=[], positions=[])
 
@@ -1837,7 +1837,7 @@ async def test_startup_both_agree_open_row_bumps_reconciled_at_utc(
 	the steady-state path); the spec mandates it be stamped. The row must NOT
 	change status (no spurious transition) — only reconciled_at_utc moves."""
 	ticker = "KXSOL15M-26MAY16H12"
-	row_id = _seed_open(conn, coid="strat-34-KXSOL15M-agree", ticker=ticker)
+	row_id = _seed_open(conn, coid="strat-a-KXSOL15M-agree", ticker=ticker)
 	assert _row(conn, row_id)["reconciled_at_utc"] is None
 
 	client = FakeClient(
@@ -1877,7 +1877,7 @@ async def test_startup_both_agree_reconciled_at_utc_is_idempotent(
 	status stays 'open', and the value remains non-NULL across both passes."""
 	ticker = "KXETH15M-26MAY16H12"
 	row_id = _seed_open(
-		conn, coid="strat-34-KXETH15M-agree2", ticker=ticker
+		conn, coid="strat-a-KXETH15M-agree2", ticker=ticker
 	)
 	client = FakeClient(
 		orders=[],
@@ -1919,7 +1919,7 @@ async def test_poller_both_agree_pending_match_bumps_reconciled_at_utc(
 	still-active against Kalshi" — reconciled_at_utc MUST be stamped on the
 	now-active row. (A row with NO Kalshi match is NOT row 6 and is left
 	with a NULL reconciled_at_utc — covered by the contrast assertion.)"""
-	coid = "strat-34-KXSOL15M-pollagree"
+	coid = "strat-a-KXSOL15M-pollagree"
 	row_id = _seed_pending(conn, coid=coid, placed_at=_recent())
 	assert _row(conn, row_id)["reconciled_at_utc"] is None
 
@@ -1953,7 +1953,7 @@ async def test_poller_no_kalshi_match_leaves_reconciled_at_utc_null(
 	including a NULL reconciled_at_utc. Proves the row-6 bump is gated on an
 	actual Kalshi match, not applied blindly to every scanned row."""
 	row_id = _seed_pending(
-		conn, coid="strat-34-KXSOL15M-nomatch", placed_at=_recent()
+		conn, coid="strat-a-KXSOL15M-nomatch", placed_at=_recent()
 	)
 	client = FakeClient(orders=[], positions=[])
 

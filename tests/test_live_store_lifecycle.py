@@ -31,7 +31,7 @@ import pytest
 from edge_catcher.live.state import RecordPendingFailed
 from edge_catcher.live.store import SQLiteTradeStore
 
-INTENT = dict(ticker="KXSOL15M-X", series="KXSOL15M", strategy="strat-34",
+INTENT = dict(ticker="KXSOL15M-X", series="KXSOL15M", strategy="strat-a",
 	side="yes", intended_size=5, entry_price_cents=5,
 	stop_loss_distance_cents=3, client_order_id="cid-A",
 	placed_at_utc="2026-05-18T00:00:00+00:00")
@@ -88,7 +88,7 @@ def test_record_trade_cas_pending_to_open(tmp_path):
 	s = SQLiteTradeStore(tmp_path / "live_trades.db")
 	s.record_intent(**INTENT)
 	tid = s.record_trade(
-		ticker="KXSOL15M-X", entry_price=5, strategy="strat-34",
+		ticker="KXSOL15M-X", entry_price=5, strategy="strat-a",
 		side="yes", series_ticker="KXSOL15M", intended_size=5,
 		fill_size=5, blended_entry=5, book_depth=None, fill_pct=1.0,
 		slippage_cents=0, book_snapshot=None,
@@ -148,7 +148,7 @@ def test_record_trade_requires_kalshi_order_id(tmp_path):
 	for bad_kalshi_id in (None, ""):
 		with pytest.raises(ValueError):
 			s.record_trade(
-				ticker="KXSOL15M-X", entry_price=5, strategy="strat-34",
+				ticker="KXSOL15M-X", entry_price=5, strategy="strat-a",
 				side="yes", series_ticker="KXSOL15M", intended_size=5,
 				fill_size=5, blended_entry=5, book_depth=None, fill_pct=1.0,
 				slippage_cents=0, book_snapshot=None,
@@ -172,7 +172,7 @@ def test_record_trade_requires_kalshi_order_id(tmp_path):
 # -----------------------------------------------------------------------------
 
 REJECT_KW = dict(ticker="KXSOL15M-X", series="KXSOL15M",
-	strategy="strat-34", side="yes", intended_size=5, entry_price_cents=5,
+	strategy="strat-a", side="yes", intended_size=5, entry_price_cents=5,
 	stop_loss_distance_cents=3, placed_at_utc="2026-05-18T00:00:00+00:00")
 
 
@@ -392,7 +392,7 @@ def test_record_rejected_lost_race_open_row_is_logged_anomaly_no_raise(
 	s.record_intent(**INTENT)  # C1 pending, coid='cid-A'
 	# Legitimately transition pending → open (the order filled).
 	s.record_trade(
-		ticker="KXSOL15M-X", entry_price=5, strategy="strat-34",
+		ticker="KXSOL15M-X", entry_price=5, strategy="strat-a",
 		side="yes", series_ticker="KXSOL15M", intended_size=5,
 		fill_size=5, blended_entry=5, book_depth=None, fill_pct=1.0,
 		slippage_cents=0, book_snapshot=None,
@@ -543,7 +543,7 @@ def test_record_pending_backfills_kalshi_order_id_on_L1_row_no_second_insert(
 	assert pre == [("pending", None)]
 
 	s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
-		strategy="strat-34", side="yes", intended_size=5,
+		strategy="strat-a", side="yes", intended_size=5,
 		entry_price_cents=5, stop_loss_distance_cents=3,
 		client_order_id="cid-A", kalshi_order_id="ord-9",
 		placed_at_utc="2026-05-18T00:00:00+00:00",
@@ -587,7 +587,7 @@ def test_record_pending_backfill_failure_is_not_fatal(
 	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
 		# MUST NOT raise — best-effort per §3.1 (NOT RecordPendingFailed).
 		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
-			strategy="strat-34", side="yes", intended_size=5,
+			strategy="strat-a", side="yes", intended_size=5,
 			entry_price_cents=5, stop_loss_distance_cents=3,
 			client_order_id="cid-B", kalshi_order_id="ord-9",
 			placed_at_utc="2026-05-18T00:00:00+00:00",
@@ -622,7 +622,7 @@ def test_record_pending_row_not_found_is_logged_audit_gap_not_fatal(
 	with caplog.at_level("ERROR", logger="edge_catcher.live.store"):
 		# MUST NOT raise — §3.1 accepted audit gap, not fatal.
 		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
-			strategy="strat-34", side="yes", intended_size=5,
+			strategy="strat-a", side="yes", intended_size=5,
 			entry_price_cents=5, stop_loss_distance_cents=3,
 			client_order_id="cid-NEVER", kalshi_order_id="ord-9",
 			placed_at_utc="2026-05-18T00:00:00+00:00",
@@ -653,7 +653,7 @@ def test_record_pending_is_idempotent_double_call(tmp_path):
 	s = SQLiteTradeStore(tmp_path / "live_trades.db")
 	s.record_intent(**dict(INTENT, client_order_id="cid-D"))
 
-	kw = dict(ticker="KXSOL15M-X", series="KXSOL15M", strategy="strat-34",
+	kw = dict(ticker="KXSOL15M-X", series="KXSOL15M", strategy="strat-a",
 		side="yes", intended_size=5, entry_price_cents=5,
 		stop_loss_distance_cents=3, client_order_id="cid-D",
 		kalshi_order_id="ord-1",
@@ -711,7 +711,7 @@ def test_record_pending_unexpected_non_db_error_is_best_effort_distinct_message(
 		# class; specifically NOT RecordPendingFailed (ghost-reject scope is
 		# funds-at-risk pre-place INSERTs only; the durable C1 row exists).
 		s.record_pending(ticker="KXSOL15M-X", series="KXSOL15M",
-			strategy="strat-34", side="yes", intended_size=5,
+			strategy="strat-a", side="yes", intended_size=5,
 			entry_price_cents=5, stop_loss_distance_cents=3,
 			client_order_id="cid-A", kalshi_order_id="ord-9",
 			placed_at_utc="2026-05-18T00:00:00+00:00",
@@ -807,7 +807,7 @@ def _seed_open_live_row(s, *, coid="cid-A", kalshi_id="ord-1"):
 
 	s.record_intent(**dict(INTENT, client_order_id=coid))
 	s.record_trade(
-		ticker="KXSOL15M-X", entry_price=42, strategy="strat-34",
+		ticker="KXSOL15M-X", entry_price=42, strategy="strat-a",
 		side="yes", series_ticker="KXSOL15M", intended_size=10,
 		fill_size=10, blended_entry=42, book_depth=None, fill_pct=1.0,
 		slippage_cents=0, book_snapshot=None,
@@ -850,7 +850,7 @@ def test_get_trade_by_id_returns_live_row_dict(tmp_path):
 	# intent — DDL 0003 comment "Signal's entry_price intent"), so these two
 	# legitimately differ on a live row.
 	assert row["entry_price"] == 5  # aliased from entry_price_cents (intent)
-	assert row["strategy"] == "strat-34"
+	assert row["strategy"] == "strat-a"
 	assert row["side"] == "yes"
 	assert row["series_ticker"] == "KXSOL15M"  # aliased from series
 	assert row["fill_size"] == 10

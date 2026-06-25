@@ -90,7 +90,7 @@ a **separate** service alongside the paper-trader.
 ### When to enable
 
 Enable it when you have at least one `on_tick` strategy that reads `self.ohlc`
-(e.g. `strat-13`). Without it, the paper-trader's staleness gate will
+(e.g. `strat-d`). Without it, the paper-trader's staleness gate will
 reject every tick and your strategy will be silent.
 
 ### Setup

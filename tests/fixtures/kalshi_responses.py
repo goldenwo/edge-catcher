@@ -32,7 +32,7 @@ from __future__ import annotations
 
 _SOL_1600_NO = {
 	"action": "buy", "book_side": "ask",
-	"client_order_id": "strat-34-KXSOL15M-26MAY241600-00-1779652454276-4291e6ee",
+	"client_order_id": "strat-a-KXSOL15M-26MAY241600-00-1779652454276-4291e6ee",
 	"created_time": "2026-05-24T19:54:14.74227Z",
 	"fill_count_fp": "6.00", "initial_count_fp": "6.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T19:54:14.74227Z",
@@ -47,7 +47,7 @@ _SOL_1600_NO = {
 
 _ETH_1600_NO = {
 	"action": "buy", "book_side": "ask",
-	"client_order_id": "strat-34-KXETH15M-26MAY241600-00-1779652455276-a5209bdb",
+	"client_order_id": "strat-a-KXETH15M-26MAY241600-00-1779652455276-a5209bdb",
 	"created_time": "2026-05-24T19:54:15.720467Z",
 	"fill_count_fp": "24.00", "initial_count_fp": "24.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T19:54:15.720467Z",
@@ -62,7 +62,7 @@ _ETH_1600_NO = {
 
 _ETH_1615_YES = {
 	"action": "buy", "book_side": "bid",
-	"client_order_id": "strat-34-KXETH15M-26MAY241615-15-1779653056276-a9672799",
+	"client_order_id": "strat-a-KXETH15M-26MAY241615-15-1779653056276-a9672799",
 	"created_time": "2026-05-24T20:04:16.72002Z",
 	"fill_count_fp": "8.00", "initial_count_fp": "8.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T20:04:16.72002Z",
@@ -77,7 +77,7 @@ _ETH_1615_YES = {
 
 _SOL_1615_YES = {
 	"action": "buy", "book_side": "bid",
-	"client_order_id": "strat-34-KXSOL15M-26MAY241615-15-1779653056736-5eae551d",
+	"client_order_id": "strat-a-KXSOL15M-26MAY241615-15-1779653056736-5eae551d",
 	"created_time": "2026-05-24T20:04:17.149831Z",
 	"fill_count_fp": "5.00", "initial_count_fp": "5.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T20:04:17.149831Z",
@@ -92,7 +92,7 @@ _SOL_1615_YES = {
 
 _SOL_1630_YES = {
 	"action": "buy", "book_side": "bid",
-	"client_order_id": "strat-34-KXSOL15M-26MAY241630-30-1779653963281-90988db5",
+	"client_order_id": "strat-a-KXSOL15M-26MAY241630-30-1779653963281-90988db5",
 	"created_time": "2026-05-24T20:19:23.839513Z",
 	"fill_count_fp": "2.00", "initial_count_fp": "2.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T20:19:23.839513Z",
@@ -107,7 +107,7 @@ _SOL_1630_YES = {
 
 _SOL_1645_NO = {
 	"action": "buy", "book_side": "ask",
-	"client_order_id": "strat-34-KXSOL15M-26MAY241645-45-1779654867279-d8d188b7",
+	"client_order_id": "strat-a-KXSOL15M-26MAY241645-45-1779654867279-d8d188b7",
 	"created_time": "2026-05-24T20:34:27.745827Z",
 	"fill_count_fp": "2.00", "initial_count_fp": "2.00", "remaining_count_fp": "0.00",
 	"last_update_time": "2026-05-24T20:34:27.745827Z",

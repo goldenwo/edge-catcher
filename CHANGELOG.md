@@ -76,7 +76,7 @@ This release contains the foundation for the live-execution cycle: sub-project A
 - **spec-review-loop on plan:** 3 rounds CONVERGED. Round 1 caught the bundle.py source-path bug; round 2 added the regression test; round 3 ten-invariant verification clean.
 - **Independent code-review (Opus):** APPROVE-WITH-NOTES; 7 suggestions applied.
 - **Independent security-review (Opus):** SAFE-WITH-FIXES; cheap defensive items applied (subprocess timeouts, bundle trust-model docstring); 3 medium findings documented as carry-forwards for sub-project D (LiveExecutor's pre-live hardening backlog).
-- **Pi cutover:** `paper-trader.service` restarted at 2026-05-08 12:52:40 EDT. Cutover beacon `engine[G]: paper executor wired, package=edge_catcher.engine` present in `/var/log/edge-catcher/paper-trader.log`. NRestarts=0. Recovery completed (160 tickers / 7 series). Strategy state preserved (strat-34 dedup intact). Daily P&L cron manually fired post-cutover: `pnl_discord OK 246ms`.
+- **Pi cutover:** `paper-trader.service` restarted at 2026-05-08 12:52:40 EDT. Cutover beacon `engine[G]: paper executor wired, package=edge_catcher.engine` present in `/var/log/edge-catcher/paper-trader.log`. NRestarts=0. Recovery completed (160 tickers / 7 series). Strategy state preserved (strat-a dedup intact). Daily P&L cron manually fired post-cutover: `pnl_discord OK 246ms`.
 
 ### Notes
 
