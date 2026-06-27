@@ -57,3 +57,42 @@ def test_migration_adds_columns_to_existing_db(tmp_path):
 	conn.close()
 	assert "takeability_status" in cols
 	assert "execution_archetype" in cols
+
+
+def test_migration_idempotent_on_reopen(tmp_path):
+	# Pre-migration table, then open Tracker TWICE: first ALTERs, second must guard-skip (not raise).
+	db = tmp_path / "old.db"
+	conn = sqlite3.connect(str(db))
+	conn.execute(
+		"CREATE TABLE results ("
+		"hypothesis_id TEXT PRIMARY KEY, verdict TEXT, completed_at TEXT)"
+	)
+	conn.commit()
+	conn.close()
+
+	Tracker(db_path=db)   # first open: migration adds the two columns
+	Tracker(db_path=db)   # second open: guard must skip the ALTER, not raise
+
+	conn = sqlite3.connect(str(db))
+	cols = {row[1] for row in conn.execute("PRAGMA table_info(results)").fetchall()}
+	conn.close()
+	assert "takeability_status" in cols
+	assert "execution_archetype" in cols
+
+
+def test_save_result_persists_real_archetype(tmp_path):
+	# No monkeypatch: exercises the REAL discovery -> class-attribute -> persistence join.
+	# Tracked ExampleStrategy (name 'example') declares execution_archetype='taker_prints'.
+	tracker = Tracker(db_path=tmp_path / "research.db")
+	tracker.save_result(_result(strategy="example"))
+	rows = tracker.list_results()
+	assert rows[0]["execution_archetype"] == "taker_prints"
+
+
+def test_set_takeability_status_rejected(tmp_path):
+	tracker = Tracker(db_path=tmp_path / "research.db")
+	r = _result()
+	tracker.save_result(r)
+	tracker.set_takeability_status(r.hypothesis.id, "rejected")
+	rows = tracker.list_results()
+	assert rows[0]["takeability_status"] == "rejected"

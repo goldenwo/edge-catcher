@@ -5,7 +5,7 @@ from edge_catcher.research.hypothesis import Hypothesis, HypothesisResult
 from edge_catcher.research.validation import gate_fill_fragility as gff
 from edge_catcher.research.validation.gate import GateContext
 from edge_catcher.research.validation.gate_fill_fragility import FillFragilityGate
-from edge_catcher.research.validation.pipeline import default_gates
+from edge_catcher.research.validation.pipeline import ValidationPipeline, default_gates
 
 
 def _ctx(strategy: str):
@@ -43,3 +43,18 @@ def test_robust_archetype_passes_clean(monkeypatch):
 
 def test_gate_registered_in_default_pipeline():
 	assert any(g.name == "fill_fragility" for g in default_gates())
+
+
+def test_pipeline_routes_fragile_to_review(monkeypatch):
+	monkeypatch.setattr(gff, "resolve_execution_archetype", lambda name: "taker_synthetic")
+	result, ctx = _ctx("frag")
+	verdict, reason, _ = ValidationPipeline([FillFragilityGate()]).validate(result, ctx)
+	assert verdict == "review"
+	assert "fill_fragility" in reason
+
+
+def test_pipeline_passes_robust_to_promote(monkeypatch):
+	monkeypatch.setattr(gff, "resolve_execution_archetype", lambda name: "maker")
+	result, ctx = _ctx("mk")
+	verdict, _, _ = ValidationPipeline([FillFragilityGate()]).validate(result, ctx)
+	assert verdict == "promote"

@@ -15,6 +15,7 @@ def _row(strategy, db, sharpe, verdict="promote"):
 def test_is_crypto_db():
 	assert is_crypto_db("data/kalshi-btc.db") is True
 	assert is_crypto_db("data/kalshi-altcrypto.db") is True
+	assert is_crypto_db("data/kalshi-crypto.db") is True
 	assert is_crypto_db("data/kalshi-sports.db") is False
 
 
