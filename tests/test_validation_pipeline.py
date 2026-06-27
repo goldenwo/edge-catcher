@@ -73,12 +73,13 @@ class TestValidationPipeline:
 
 class TestPipelineWithRealGates:
 	def test_default_gates_instantiate(self):
-		"""default_gates() should return 5 gates in recommended order (cheap→expensive)."""
+		"""default_gates() should return 6 gates in recommended order (cheap→expensive)."""
 		from edge_catcher.research.validation.pipeline import default_gates
 		gates = default_gates()
-		assert len(gates) == 5
+		assert len(gates) == 6
 		assert gates[0].name == "tail_risk"
-		assert gates[1].name == "deflated_sharpe"
-		assert gates[2].name == "monte_carlo"
-		assert gates[3].name == "temporal_consistency"
-		assert gates[4].name == "param_sensitivity"
+		assert gates[1].name == "fill_fragility"
+		assert gates[2].name == "deflated_sharpe"
+		assert gates[3].name == "monte_carlo"
+		assert gates[4].name == "temporal_consistency"
+		assert gates[5].name == "param_sensitivity"
