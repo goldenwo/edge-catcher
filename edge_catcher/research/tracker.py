@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS results (
     verdict_reason  TEXT NOT NULL,
     raw_json        TEXT,   -- full backtester output
     validation_details TEXT,  -- JSON array of gate results
+    takeability_status  TEXT NOT NULL DEFAULT 'unproven',
+    execution_archetype TEXT NOT NULL DEFAULT 'unknown',
     completed_at    TEXT NOT NULL
 );
 
@@ -139,9 +141,24 @@ class Tracker:
             columns = {row[1] for row in cursor.fetchall()}
             if "validation_details" not in columns:
                 conn.execute("ALTER TABLE results ADD COLUMN validation_details TEXT")
+            self._migrate_results_columns(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate_results_columns(self, conn: sqlite3.Connection) -> None:
+        """Add takeability columns to a pre-existing results table (idempotent)."""
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(results)")}
+        if "takeability_status" not in existing:
+            conn.execute(
+                "ALTER TABLE results ADD COLUMN takeability_status "
+                "TEXT NOT NULL DEFAULT 'unproven'"
+            )
+        if "execution_archetype" not in existing:
+            conn.execute(
+                "ALTER TABLE results ADD COLUMN execution_archetype "
+                "TEXT NOT NULL DEFAULT 'unknown'"
+            )
 
     def is_tested(self, h: Hypothesis) -> Optional[str]:
         """Return existing hypothesis_id if this combo was already tested, else None."""
@@ -183,11 +200,18 @@ class Tracker:
         finally:
             conn.close()
 
-    def save_result(self, result: HypothesisResult, validation_details: list[dict] | None = None) -> None:
+    def save_result(
+        self,
+        result: HypothesisResult,
+        validation_details: list[dict] | None = None,
+        takeability_status: str = "unproven",
+    ) -> None:
         """Upsert hypothesis + result records."""
         conn = self._connect()
         try:
             h = result.hypothesis
+            from edge_catcher.research.execution_archetype import resolve_execution_archetype
+            archetype = resolve_execution_archetype(h.strategy)
             # Normalize db_path to forward slashes for cross-platform consistency
             db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
             start = h.start_date or ""
@@ -241,8 +265,9 @@ class Tracker:
                    (hypothesis_id, status, total_trades, wins, losses, win_rate,
                     net_pnl_cents, sharpe, max_drawdown_pct, fees_paid_cents,
                     avg_win_cents, avg_loss_cents, per_strategy,
-                    verdict, verdict_reason, raw_json, validation_details, completed_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    verdict, verdict_reason, raw_json, validation_details,
+                    takeability_status, execution_archetype, completed_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     actual_id,
                     result.status,
@@ -261,6 +286,8 @@ class Tracker:
                     result.verdict_reason,
                     json.dumps(result.raw_json),
                     json.dumps(validation_details) if validation_details is not None else None,
+                    takeability_status,
+                    archetype,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -309,7 +336,8 @@ class Tracker:
                           r.status, r.total_trades, r.wins, r.losses, r.win_rate,
                           r.net_pnl_cents, r.sharpe, r.max_drawdown_pct, r.fees_paid_cents,
                           r.avg_win_cents, r.avg_loss_cents,
-                          r.verdict, r.verdict_reason, r.validation_details, r.completed_at
+                          r.verdict, r.verdict_reason, r.validation_details,
+                          r.takeability_status, r.execution_archetype, r.completed_at
                FROM hypotheses h
                JOIN results r ON h.id = r.hypothesis_id
         """
@@ -348,6 +376,18 @@ class Tracker:
             conn.execute(
                 "UPDATE results SET verdict = ? WHERE hypothesis_id = ?",
                 (verdict, hypothesis_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def set_takeability_status(self, hypothesis_id: str, status: str) -> None:
+        """Update the takeability_status of a result row (set by the live #79 gate)."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE results SET takeability_status=? WHERE hypothesis_id=?",
+                (status, hypothesis_id),
             )
             conn.commit()
         finally:
