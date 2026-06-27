@@ -42,6 +42,10 @@ class Strategy(ABC):
 	"""
 	name: str
 	ohlc: "OHLCProvider | None" = None  # Set by backtester if external OHLC data is available
+	# How this strategy realizes its edge on the REAL exchange — the dimension
+	# the event backtester is blind to. One of execution_archetype.VALID_ARCHETYPES.
+	# Default "unknown" is treated CONSERVATIVELY (fill-fragile) by the gate.
+	execution_archetype: str = "unknown"
 
 	@abstractmethod
 	def on_trade(self, trade: Trade, market: Market, portfolio: 'Portfolio') -> list[Signal]:
