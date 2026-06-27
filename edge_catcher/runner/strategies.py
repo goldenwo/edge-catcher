@@ -128,6 +128,7 @@ class ExampleStrategy(Strategy):
 	"""
 
 	name = 'example'
+	execution_archetype = "taker_prints"
 
 	def __init__(self, min_price: int = 40, max_price: int = 60, size: int = 1) -> None:
 		self.min_price = min_price

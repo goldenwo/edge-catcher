@@ -92,6 +92,7 @@ def on_trade(self, trade, market, portfolio):
 6. Use constructor parameters for configurable thresholds (with sensible defaults).
 7. Always check `portfolio.has_position(trade.ticker, self.name)` before buying to avoid duplicate positions.
 8. Kalshi markets are binary (yes/no). yes_price + no_price = 100. Settlement: winner gets 100¢, loser gets 0¢.
+9. The generated class MUST declare an `execution_archetype` class attribute set to one of: "maker", "taker_prints", "taker_synthetic" — matching the proposal's execution_archetype (use "taker_synthetic" if the strategy buys by crossing the implied ask 100 − opposite_bid). If unspecified, omit it (the framework defaults to "unknown", which is screened conservatively).
 
 ## Generating from Validated Hypotheses
 

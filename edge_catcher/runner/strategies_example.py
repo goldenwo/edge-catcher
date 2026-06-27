@@ -61,6 +61,7 @@ class LongshotFadeExample(Strategy):
 	"""
 
 	name = 'longshot_fade_example'
+	execution_archetype = "taker_prints"
 	# Empty list = strategy is allowed on any series. To restrict to certain
 	# series, populate this list (the backtester's series filter is separate,
 	# but strategies that care about series membership can check against this).
