@@ -19,7 +19,7 @@ def _result(strategy="s1"):
 
 def test_save_result_defaults_takeability_unproven(tmp_path, monkeypatch):
 	monkeypatch.setattr(
-		"edge_catcher.research.execution_archetype.resolve_execution_archetype",
+		"edge_catcher.research.tracker.resolve_execution_archetype",
 		lambda name: "maker",
 	)
 	tracker = Tracker(db_path=tmp_path / "research.db")

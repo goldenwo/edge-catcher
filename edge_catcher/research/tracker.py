@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .execution_archetype import resolve_execution_archetype
 from .hypothesis import Hypothesis, HypothesisResult
 
 logger = logging.getLogger(__name__)
@@ -210,7 +211,6 @@ class Tracker:
         conn = self._connect()
         try:
             h = result.hypothesis
-            from edge_catcher.research.execution_archetype import resolve_execution_archetype
             archetype = resolve_execution_archetype(h.strategy)
             # Normalize db_path to forward slashes for cross-platform consistency
             db_path = h.db_path.replace("\\", "/") if h.db_path else h.db_path
