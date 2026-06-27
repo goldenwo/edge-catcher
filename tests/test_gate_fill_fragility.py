@@ -38,6 +38,7 @@ def test_robust_archetype_passes_clean(monkeypatch):
 	gr = FillFragilityGate().check(result, ctx)
 	assert gr.passed is True
 	assert gr.tier is None
+	assert gr.details["execution_archetype"] == "maker"
 
 
 def test_gate_registered_in_default_pipeline():
