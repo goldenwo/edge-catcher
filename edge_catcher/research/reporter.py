@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .execution_archetype import resolve_execution_archetype
 from .hypothesis import HypothesisResult
 
 logger = logging.getLogger(__name__)
@@ -186,4 +187,5 @@ class Reporter:
             "avg_loss_cents": r.avg_loss_cents,
             "verdict": r.verdict,
             "verdict_reason": r.verdict_reason,
+            "execution_archetype": resolve_execution_archetype(h.strategy),
         }
