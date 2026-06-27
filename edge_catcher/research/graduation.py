@@ -39,9 +39,11 @@ def shortlist_for_live(results: list[dict], top_n: int = 3) -> dict:
 		key=lambda r: r.get("sharpe", 0.0),
 		reverse=True,
 	)
-	non_crypto = [r for r in survivors if not is_crypto_db(r.get("db_path", ""))]
-	for r in non_crypto:
-		r["takeability_status"] = _NEEDS_LIVE
+	non_crypto = [
+		{**r, "takeability_status": _NEEDS_LIVE}
+		for r in survivors
+		if not is_crypto_db(r.get("db_path", ""))
+	]
 
 	return {
 		"crypto_shortlist": crypto[:top_n],

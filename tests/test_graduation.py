@@ -38,3 +38,9 @@ def test_shortlist_ignores_non_survivors():
 	out = shortlist_for_live(rows, top_n=3)
 	assert out["crypto_shortlist"] == []
 	assert out["parked_non_crypto"] == []
+
+
+def test_shortlist_does_not_mutate_input_rows():
+	row = _row("d", "data/kalshi-sports.db", 9.0)  # non-crypto survivor
+	shortlist_for_live([row], top_n=3)
+	assert row["takeability_status"] == "unproven"  # caller's row untouched
