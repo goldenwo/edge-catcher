@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 VALID_ARCHETYPES = frozenset({"maker", "taker_prints", "taker_synthetic", "unknown"})
 
-# Archetypes whose fills are NOT reliably takeable on the real exchange.
-# "unknown" is included on purpose: an unclassified strategy is treated
-# conservatively so it cannot bypass the fragility gate.
-FRAGILE_ARCHETYPES = frozenset({"taker_synthetic", "unknown"})
+# The ONLY fill-robust archetypes. Anything else — taker_synthetic, unknown,
+# OR any unrecognized/out-of-vocabulary value — is treated as fill-fragile so a
+# typo or a future archetype can never silently bypass the gate.
+ROBUST_ARCHETYPES = frozenset({"maker", "taker_prints"})
 
 
 def resolve_execution_archetype(strategy_name: str) -> str:
@@ -61,5 +61,9 @@ def resolve_execution_archetype(strategy_name: str) -> str:
 
 
 def is_fragile(archetype: str) -> bool:
-	"""True if the archetype's fills are not reliably live-takeable."""
-	return archetype in FRAGILE_ARCHETYPES
+	"""True if the archetype's fills are not reliably live-takeable.
+
+	Fail-safe: anything not explicitly in ROBUST_ARCHETYPES (including
+	"unknown" and any unrecognized value) is considered fragile.
+	"""
+	return archetype not in ROBUST_ARCHETYPES

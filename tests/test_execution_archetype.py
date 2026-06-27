@@ -10,6 +10,11 @@ def test_is_fragile_classification():
 	assert ea.is_fragile("taker_prints") is False
 
 
+def test_is_fragile_treats_unrecognized_as_fragile():
+	assert ea.is_fragile("bogus") is True
+	assert ea.is_fragile("") is True
+
+
 def test_resolve_reads_declared_attribute(monkeypatch):
 	class Maker:
 		execution_archetype = "maker"
