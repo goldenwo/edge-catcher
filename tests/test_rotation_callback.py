@@ -45,7 +45,7 @@ def test_rotation_callback_deepcopies_market_state_synchronously(
 	seen_market_state: list[MarketState] = []
 	bundle_done = [False]
 
-	def fake_assemble(capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		seen_market_state.append(market_state)
 		bundle_done[0] = True
 		return tmp_path / "bundle-stub"
@@ -89,7 +89,7 @@ def test_rotation_callback_uploads_via_transport_when_provided(
 	stub_bundle_path = tmp_path / "bundle-stub"
 	stub_bundle_path.mkdir()
 
-	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		return stub_bundle_path
 
 	monkeypatch.setattr(engine_mod, "assemble_daily_bundle", fake_assemble)
@@ -125,7 +125,7 @@ def test_rotation_callback_none_transport_skips_upload(
 
 	assembled = [False]
 
-	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		assembled[0] = True
 		return tmp_path / "bundle-stub"
 
