@@ -243,7 +243,7 @@ def test_rotation_callback_deletes_raw_and_marks_uploaded(
 	# Seed a raw JSONL + a stub compressed copy that assemble_daily_bundle "produced"
 	_make_raw(capture_dir, day)
 
-	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		# Create the compressed file where delete_raw_jsonl expects it
 		bundle_dir = capture_dir / capture_date.isoformat()
 		bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -342,7 +342,7 @@ def test_rotation_callback_no_transport_skips_sentinel_and_prune(
 	old_day = day - timedelta(days=30)
 	_make_bundle(capture_dir, old_day, uploaded=False)
 
-	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		bundle_dir = capture_dir / capture_date.isoformat()
 		bundle_dir.mkdir(parents=True, exist_ok=True)
 		(bundle_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl.zst").write_bytes(b"stub")
@@ -394,7 +394,7 @@ def test_rotation_callback_keeps_raw_when_delete_flag_false(
 	day = date(2026, 4, 13)
 	_make_raw(capture_dir, day)
 
-	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state):
+	def fake_assemble(*, capture_date, capture_dir, repo_root, db_path, market_state, config_path=None):
 		bundle_dir = capture_dir / capture_date.isoformat()
 		bundle_dir.mkdir(parents=True, exist_ok=True)
 		(bundle_dir / f"kalshi_engine_{capture_date.isoformat()}.jsonl.zst").write_bytes(b"stub")

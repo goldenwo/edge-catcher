@@ -1123,6 +1123,7 @@ def _make_rotation_callback(
 	*,
 	delete_raw_after_bundle: bool = True,
 	local_retention_days: int = 7,
+	config_path: Optional[Path] = None,
 ):
 	"""Build the rotation_callback closure that RawFrameWriter fires on
 	midnight UTC rollover.
@@ -1161,6 +1162,7 @@ def _make_rotation_callback(
 					repo_root=repo_root,
 					db_path=db_path,
 					market_state=snapshot,
+					config_path=config_path,
 				)
 				bundle_assembled = True
 
@@ -1529,6 +1531,7 @@ async def run_engine(
 			transport=transport,
 			delete_raw_after_bundle=bool(capture_cfg.get("delete_raw_after_bundle", True)),
 			local_retention_days=int(capture_cfg.get("local_retention_days", 7)),
+			config_path=config_path,
 		)
 
 	capture_writer = RawFrameWriter(

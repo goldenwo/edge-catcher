@@ -51,6 +51,7 @@ def assemble_daily_bundle(
 	repo_root: Path,
 	db_path: Path,
 	market_state: Optional[MarketState] = None,
+	config_path: Optional[Path] = None,
 ) -> Path:
 	"""Build the bundle directory for ``capture_date``.
 
@@ -61,6 +62,9 @@ def assemble_daily_bundle(
 		db_path:       Path to the live ``paper_trades_v2.db`` (read-only access).
 		market_state:  Current MarketState. If None, the snapshot is omitted —
 		               useful for catch-up runs where the live state isn't available.
+		config_path:   The resolved ``--config`` the engine ran with; snapshotted
+		               into the bundle as ``paper-trader.yaml``. None (catch-up
+		               runs) falls back to the legacy ``config.local/paper-trader.yaml``.
 
 	Returns:
 		The path of the created bundle directory (``<capture_dir>/<capture_date>/``).
@@ -91,12 +95,12 @@ def assemble_daily_bundle(
 			strategies_src,
 		)
 
-	# 3. Copy paper-trader.yaml from config.local.
-	config_src = repo_root / "config.local" / "paper-trader.yaml"
-	if config_src.exists():
-		shutil.copy2(config_src, bundle_dir / "paper-trader.yaml")
-	else:
-		log.warning("assemble_daily_bundle: paper-trader.yaml not found at %s", config_src)
+	# 3. Snapshot the config the engine ACTUALLY ran with (the resolved
+	#    --config path) so replay loads the SAME config live used. Always
+	#    written as "paper-trader.yaml" because replay (backtester.py) loads
+	#    that exact filename hermetically from the bundle dir. Falls back to
+	#    the legacy config.local/paper-trader.yaml when no path is supplied.
+	_write_config_snapshot(bundle_dir, repo_root, config_path)
 
 	# 4. engine_version.txt — git commit + dirty flag so replay can report
 	#    exactly which engine the captured events ran against.
@@ -221,6 +225,39 @@ def _write_market_state_snapshot(
 		"first_seen": sorted(market_state._first_seen),  # noqa: SLF001
 	}
 	path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
+def _write_config_snapshot(
+	bundle_dir: Path, repo_root: Path, config_path: Optional[Path]
+) -> None:
+	"""Copy the engine's resolved config into the bundle as ``paper-trader.yaml``.
+
+	``config_path`` is the ``--config`` the engine actually loaded (run_engine).
+	When provided it is snapshotted verbatim so replay loads the SAME config the
+	live engine ran — fixing the capture-fidelity bug where a hard-coded
+	``config.local/paper-trader.yaml`` was bundled even when the service ran a
+	different ``--config``. Falls back to that legacy path when ``config_path``
+	is None (catch-up runs) or points at a missing file. The bundle file is
+	ALWAYS named ``paper-trader.yaml`` (replay loads that exact filename).
+	"""
+	legacy = repo_root / "config.local" / "paper-trader.yaml"
+	if config_path is not None and Path(config_path).exists():
+		src = Path(config_path)
+	elif config_path is not None:
+		log.warning(
+			"assemble_daily_bundle: resolved --config %s not found; "
+			"falling back to legacy %s", config_path, legacy,
+		)
+		src = legacy
+	else:
+		src = legacy  # catch-up run with no live --config supplied
+	if src.exists():
+		shutil.copy2(src, bundle_dir / "paper-trader.yaml")
+	else:
+		log.warning(
+			"assemble_daily_bundle: config not found at %s — bundle omits "
+			"paper-trader.yaml", src,
+		)
 
 
 def _write_open_trades_slice(db_path: Path, dst: Path) -> None:
