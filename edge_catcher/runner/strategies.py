@@ -42,6 +42,10 @@ class Strategy(ABC):
 	"""
 	name: str
 	ohlc: "OHLCProvider | None" = None  # Set by backtester if external OHLC data is available
+	# How this strategy realizes its edge on the REAL exchange — the dimension
+	# the event backtester is blind to. One of execution_archetype.VALID_ARCHETYPES.
+	# Default "unknown" is treated CONSERVATIVELY (fill-fragile) by the gate.
+	execution_archetype: str = "unknown"
 
 	@abstractmethod
 	def on_trade(self, trade: Trade, market: Market, portfolio: 'Portfolio') -> list[Signal]:
@@ -124,6 +128,7 @@ class ExampleStrategy(Strategy):
 	"""
 
 	name = 'example'
+	execution_archetype = "taker_prints"
 
 	def __init__(self, min_price: int = 40, max_price: int = 60, size: int = 1) -> None:
 		self.min_price = min_price

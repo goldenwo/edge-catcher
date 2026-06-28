@@ -61,6 +61,7 @@ class ValidationPipeline:
 def default_gates(sweep_N_override: int | None = None) -> list[Gate]:
 	"""Return the default gate pipeline in recommended order (cheap → expensive)."""
 	from .gate_dsr import DeflatedSharpeGate
+	from .gate_fill_fragility import FillFragilityGate
 	from .gate_monte_carlo import MonteCarloGate
 	from .gate_tail_risk import TailRiskGate
 	from .gate_temporal_consistency import TemporalConsistencyGate
@@ -68,6 +69,7 @@ def default_gates(sweep_N_override: int | None = None) -> list[Gate]:
 
 	return [
 		TailRiskGate(),          # cheap, uses only pnl_values
+		FillFragilityGate(),  # cheap vs backtest gates; resolves archetype via strategy discovery; soft (review tier)
 		DeflatedSharpeGate(sweep_N_override=sweep_N_override),  # cheap, uses pnl_values + tracker
 		MonteCarloGate(),        # cheap, uses pnl_values
 		TemporalConsistencyGate(),   # expensive: re-runs backtests
