@@ -65,9 +65,11 @@ class LLMClient:
         "claude-code": {
             "formalizer": "sonnet",
             "interpreter": "haiku",
-            "strategizer": "sonnet",
+            # strategizer/refiner generate strategy CODE in batch research runs;
+            # opus gives more reliable code-gen and avoids sonnet's batch rate limits.
+            "strategizer": "opus",
             "ideator": "opus",
-            "refiner": "sonnet",
+            "refiner": "opus",
         },
     }
 
