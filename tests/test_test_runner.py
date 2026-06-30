@@ -540,6 +540,67 @@ class TestVolumeMispricingTest:
 		conn.close()
 		assert result.verdict == INSUFFICIENT_DATA
 
+	def test_low_tercile_trade_price_calibrated_no_edge(self, tmp_path):
+		"""#5 for VolumeMispricing: low-volume markets are calibrated at trade price
+		even though lifetime VWAP would fabricate an edge (drift poison) → NO_EDGE.
+		"""
+		markets = []
+		trades = []
+		# 150 LOW-volume markets traded at 50¢ that win 50% (calibrated).
+		for i in range(150):
+			ticker = f"VMC-low-{i}"
+			won = i < 75
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_VMC",
+				"result": "yes" if won else "no",
+				"last_price": 99 if won else 1, "volume": 1,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vmc-low-entry-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+			# Lifetime-VWAP poison: large late trade drifting to the outcome,
+			# outside the [0.40,0.60) band — trade-price method ignores it.
+			drift = 99 if won else 1
+			trades.append({
+				"trade_id": f"vmc-low-drift-{i}", "ticker": ticker,
+				"yes_price": drift, "no_price": 100 - drift, "count": 100,
+				"created_time": f"2026-01-{day:02d}T11:00:00Z",
+			})
+		# 150 HIGH-volume markets, also calibrated at 50¢.
+		for i in range(150):
+			ticker = f"VMC-high-{i}"
+			won = i < 75
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_VMC",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 100,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vmc-high-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 100,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"volume_mispricing", conn, "SER_VMC",
+			params={
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+
 
 class TestMomentumAlignmentTest:
 	"""Tests for MomentumAlignmentTest — spot price momentum vs contract price lag."""
@@ -737,3 +798,462 @@ class TestMomentumAlignmentTest:
 		assert result3.verdict == INSUFFICIENT_DATA
 
 		conn.close()
+
+	def test_bare_db_path_resolves_under_data_dir(self, tmp_path, monkeypatch):
+		"""#2: a bare ohlc db_path ("kalshi-altcrypto.db") that doesn't exist as-is
+		resolves to data/<path>. With the file present there, the test proceeds past
+		the existence check (no ohlc_db_not_found).
+		"""
+		# Build the OHLC db UNDER a data/ subdir, named exactly like the bare path.
+		data_dir = tmp_path / "data"
+		data_dir.mkdir()
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			for hour in range(1, 7):
+				candles.append({
+					"timestamp": f"2026-01-{day:02d}T0{hour}:00:00Z",
+					"open": 100.0 + hour * 4, "high": 100.0 + hour * 5 + 1,
+					"low": 100.0 + hour * 4 - 1, "close": 100.0 + hour * 5,
+					"volume": 1000.0,
+				})
+		# Write the db at data/kalshi-altcrypto.db (table "ohlc_alt").
+		import sqlite3 as _sqlite3
+		db_file = data_dir / "kalshi-altcrypto.db"
+		oc = _sqlite3.connect(str(db_file))
+		oc.execute("CREATE TABLE ohlc_alt (timestamp TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL)")
+		for c in candles:
+			oc.execute(
+				"INSERT INTO ohlc_alt VALUES (?,?,?,?,?,?)",
+				(c["timestamp"], c["open"], c["high"], c["low"], c["close"], c["volume"]),
+			)
+		oc.commit()
+		oc.close()
+
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"ALT-{i}"
+			won = i < 140  # 70% win rate at 50¢ → up-momentum edge
+			day = (i % n_days) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_ALT",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T20:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"alt-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"2026-01-{day:02d}T07:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+
+		# Run from tmp_path so "data/kalshi-altcrypto.db" resolves there.
+		monkeypatch.chdir(tmp_path)
+		runner = TestRunner()
+		result = runner.run(
+			"momentum_alignment", conn, "SER_ALT",
+			params={
+				"ohlc_config": {"db_path": "kalshi-altcrypto.db", "table": "ohlc_alt", "asset": "ALT"},
+				"lookback_candles": 5,
+				"buckets": [[0.30, 0.70]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		# The bare path resolved under data/ — the test got past the existence check.
+		assert result.detail.get("reason") != "ohlc_db_not_found"
+
+	def test_still_missing_path_reports_resolved_path(self, tmp_path, monkeypatch):
+		"""#2: when neither the bare path nor data/<path> exists, stay graceful with
+		ohlc_db_not_found and report the RESOLVED (data/-prefixed) path in detail.
+		"""
+		markets = [{
+			"ticker": "ALT2-1", "series_ticker": "SER_ALT2", "result": "yes",
+			"last_price": 50, "close_time": "2026-01-01T12:00:00Z",
+			"open_time": "2026-01-01T00:00:00Z",
+		}]
+		trades = [{
+			"trade_id": "alt2-t-1", "ticker": "ALT2-1", "yes_price": 50,
+			"no_price": 50, "count": 1, "created_time": "2026-01-01T06:00:00Z",
+		}]
+		conn = _make_test_db(tmp_path, markets, trades)
+		monkeypatch.chdir(tmp_path)
+		runner = TestRunner()
+		result = runner.run(
+			"momentum_alignment", conn, "SER_ALT2",
+			params={
+				"ohlc_config": {"db_path": "no-such.db", "table": "ohlc", "asset": "ALT"},
+				"buckets": [[0.30, 0.70]], "min_n_per_bucket": 5, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == INSUFFICIENT_DATA
+		assert result.detail["reason"] == "ohlc_db_not_found"
+		# Resolved path is the data/-prefixed candidate, not the bare name.
+		import os
+		assert result.detail["db_path"] == os.path.join("data", "no-such.db")
+
+
+class TestFeeModelResolution:
+	"""Regression tests for fee_model resolution (fail-loud on unknown names).
+
+	Guards against the silent 0.0 fallback: a config passing an unrecognized
+	fee_model (e.g. "kalshi") used to run the fee-adjusted edge gate with ZERO
+	fees — a false-positive risk where a small raw edge passes a gate that real
+	Kalshi fees would have killed.
+	"""
+
+	@pytest.mark.parametrize("test_type", [
+		"price_bucket_bias",
+		"lifecycle_bias",
+		"volume_mispricing",
+		"momentum_alignment",
+	])
+	def test_unknown_fee_model_raises(self, tmp_path, test_type):
+		"""An unrecognized fee_model name must raise, not silently zero fees.
+
+		Covers every registered test type: fee resolution happens before any DB
+		query, so an empty DB still reaches (and trips) the resolver.
+		"""
+		conn = _make_test_db(tmp_path, markets=[], trades=[])
+		runner = TestRunner()
+		with pytest.raises(ValueError, match="fee_model"):
+			runner.run(
+				test_type, conn, "SER_X",
+				params={"buckets": [[0.40, 0.60]], "fee_model": "not_a_real_fee_model"},
+				thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+			)
+		conn.close()
+
+	def test_kalshi_fee_model_is_applied(self, tmp_path):
+		"""fee_model="kalshi" must apply the REAL Kalshi fee curve, not zero/flat.
+
+		Runs the same dataset under "zero" vs "kalshi": kalshi must be lower by
+		exactly the exchange's per-contract fee at the implied price
+		(ceil(0.07*p*(1-p)*100) cents). A silent 0.0 fallback would make them
+		equal; the old flat 0.0175*(1-p) rate would give the wrong magnitude.
+		"""
+		from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"FM-{i}"
+			won = i < 100  # 50% win rate at implied 0.50
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_FM",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"fm-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		params = {"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10}
+		thresholds = {"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0}
+		zero = runner.run(
+			"price_bucket_bias", conn, "SER_FM",
+			params={**params, "fee_model": "zero"}, thresholds=thresholds,
+		)
+		kalshi = runner.run(
+			"price_bucket_bias", conn, "SER_FM",
+			params={**params, "fee_model": "kalshi"}, thresholds=thresholds,
+		)
+		conn.close()
+
+		# Kalshi fees must actually bite (would be equal if "kalshi" → silent 0.0).
+		assert kalshi.fee_adjusted_edge < zero.fee_adjusted_edge
+		implied = zero.detail["overall_implied"]
+		expected_fee = STANDARD_FEE.calculate(round(implied * 100), 1) / 100.0
+		assert kalshi.fee_adjusted_edge == pytest.approx(zero.fee_adjusted_edge - expected_fee)
+
+	def test_kalshi_aliases_standard(self):
+		"""The "kalshi" rate aliases "standard" — same maker-fee approximation."""
+		from edge_catcher.research.test_runner import FEE_MODELS
+
+		assert FEE_MODELS["kalshi"] == FEE_MODELS["standard"]
+
+
+class TestBucketScaleNormalization:
+	"""#1 fail-safe: cents-scale bucket configs are auto-normalized to 0–1.
+
+	The LLM ideator historically emitted cents-scale buckets (e.g. [[1,30]])
+	against 0–1 implied data, so `1 <= implied` was unsatisfiable → every bucket
+	n=0 → spurious INSUFFICIENT_DATA. The normalizer divides any >1 bound by 100
+	and logs a warning, turning a silent total-drop into a corrected run.
+	"""
+
+	def _overpriced_30c_db(self, tmp_path, series):
+		"""200 markets traded at 30¢ (implied 0.30) that settle YES only 10%.
+
+		Lands in the 0.01–0.30 / 1–30¢ band; strongly overpriced → an edge so the
+		verdict is not NO_EDGE, making the cents-vs-0–1 equivalence meaningful.
+		"""
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"BS-{i}"
+			won = i < 20  # 10% win rate at 30¢ implied
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": series,
+				"result": "yes" if won else "no",
+				"last_price": 30, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"bs-{i}", "ticker": ticker,
+				"yes_price": 25, "no_price": 75, "count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		return _make_test_db(tmp_path, markets, trades)
+
+	def test_cents_scale_buckets_populate_and_warn(self, tmp_path, caplog):
+		"""A cents-scale [[1,30]] config populates (not INSUFFICIENT_DATA) + warns."""
+		import logging
+		conn = self._overpriced_30c_db(tmp_path, "SER_BS1")
+		runner = TestRunner()
+		with caplog.at_level(logging.WARNING):
+			result = runner.run(
+				"price_bucket_bias", conn, "SER_BS1",
+				params={"buckets": [[1, 30]], "min_n_per_bucket": 10, "fee_model": "zero"},
+				thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+			)
+		conn.close()
+		assert result.verdict != INSUFFICIENT_DATA
+		assert any("cents" in rec.message.lower() or "normal" in rec.message.lower()
+			for rec in caplog.records), "expected an auto-normalization warning"
+
+	def test_cents_and_unit_configs_agree(self, tmp_path):
+		"""[[1,30]] (cents) and [[0.01,0.30]] (0–1) give the same verdict + z."""
+		conn = self._overpriced_30c_db(tmp_path, "SER_BS2")
+		runner = TestRunner()
+		thresholds = {"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0}
+		cents = runner.run(
+			"price_bucket_bias", conn, "SER_BS2",
+			params={"buckets": [[1, 30]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds=thresholds,
+		)
+		unit = runner.run(
+			"price_bucket_bias", conn, "SER_BS2",
+			params={"buckets": [[0.01, 0.30]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds=thresholds,
+		)
+		conn.close()
+		assert cents.verdict == unit.verdict
+		assert cents.z_stat == pytest.approx(unit.z_stat)
+
+
+class TestPriceBucketTradePriceCalibration:
+	"""#5: condition on the price each trade was placed at, not lifetime VWAP.
+
+	Lifetime VWAP overshoots toward 0/100 as 15-min markets resolve, fabricating a
+	monotonic longshot/favorite edge. The new method buckets by per-trade price and
+	clusters by ticker, so each market contributes one calibration residual.
+	"""
+
+	def test_calibrated_entry_prices_no_edge(self, tmp_path):
+		"""Per-bucket win_rate ≈ entry price even though lifetime VWAP would fabricate
+		a monotonic edge (YES drift to 99¢, NO drift to 1¢) → NO_EDGE.
+		"""
+		markets = []
+		trades = []
+		# Four analysis bands centered at 0.20/0.40/0.60/0.80; in each, a fraction
+		# equal to the centre settles YES, so win_rate ≈ mean entry price.
+		band_centres = [20, 40, 60, 80]
+		mkt_id = 0
+		for centre in band_centres:
+			n = 120
+			n_yes = round(n * centre / 100.0)
+			for k in range(n):
+				won = k < n_yes
+				ticker = f"CAL-{mkt_id}"
+				mkt_id += 1
+				day = (k % 28) + 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_CAL",
+					"result": "yes" if won else "no",
+					"last_price": 99 if won else 1, "volume": 10,
+					"close_time": f"2026-01-{day:02d}T12:00:00Z",
+					"open_time": f"2026-01-{day:02d}T00:00:00Z",
+				})
+				# Calibrated entry trade at the band centre price.
+				trades.append({
+					"trade_id": f"cal-entry-{ticker}", "ticker": ticker,
+					"yes_price": centre, "no_price": 100 - centre, "count": 1,
+					"created_time": f"2026-01-{day:02d}T06:00:00Z",
+				})
+				# Lifetime-VWAP poison: a large late trade drifting to the outcome
+				# (99¢ for YES, 1¢ for NO). Falls OUTSIDE every analysis band, so the
+				# trade-price method ignores it; a lifetime-VWAP method would not.
+				drift = 99 if won else 1
+				trades.append({
+					"trade_id": f"cal-drift-{ticker}", "ticker": ticker,
+					"yes_price": drift, "no_price": 100 - drift, "count": 100,
+					"created_time": f"2026-01-{day:02d}T11:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_CAL",
+			params={
+				"buckets": [[0.10, 0.30], [0.30, 0.50], [0.50, 0.70], [0.70, 0.90]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		# Positively confirm the mechanism (not just an absent verdict): all four
+		# bands populate and each is calibrated (win_rate ≈ entry price), proving the
+		# count=100 drift trades at 99¢/1¢ were ignored rather than poisoning a VWAP.
+		assert len(result.detail["buckets"]) == 4
+		for b in result.detail["buckets"]:
+			assert abs(b["edge"]) < 0.1
+
+	def test_genuine_trade_price_mispricing_edge_exists(self, tmp_path):
+		"""Markets traded at 20¢ that win 40% → +0.20 edge in the [0.10,0.30) bucket."""
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"MIS-{i}"
+			won = i < 80  # 40% win rate at 20¢ entry
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_MIS",
+				"result": "yes" if won else "no",
+				"last_price": 20, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"mis-{i}", "ticker": ticker,
+				"yes_price": 20, "no_price": 80, "count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_MIS",
+			params={
+				"buckets": [[0.10, 0.30], [0.30, 0.50]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		# The driving bucket is the 0.10–0.30 band; positive edge (win > implied).
+		assert result.z_stat > 2.0
+		driver = result.detail["driver_bucket"]
+		assert driver["bucket_lo"] == pytest.approx(0.10)
+		assert driver["bucket_hi"] == pytest.approx(0.30)
+
+	def test_unpooled_opposite_buckets_dont_cancel(self, tmp_path):
+		"""A +edge longshot bucket and a −edge favorite bucket → EDGE_EXISTS, not
+		cancelled to NO_EDGE by pooling. Verdict named to a single bucket.
+		"""
+		markets = []
+		trades = []
+		# Bucket A: trade at 20¢, win 45% → +0.25 edge.
+		for i in range(150):
+			ticker = f"UP-A-{i}"
+			won = i < 68  # ~45%
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_UP",
+				"result": "yes" if won else "no",
+				"last_price": 20, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"up-a-{i}", "ticker": ticker,
+				"yes_price": 20, "no_price": 80, "count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		# Bucket B: trade at 80¢, win 55% → −0.25 edge.
+		for i in range(150):
+			ticker = f"UP-B-{i}"
+			won = i < 82  # ~55%
+			day = (i % 28) + 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_UP",
+				"result": "yes" if won else "no",
+				"last_price": 80, "volume": 10,
+				"close_time": f"2026-01-{day:02d}T12:00:00Z",
+				"open_time": f"2026-01-{day:02d}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"up-b-{i}", "ticker": ticker,
+				"yes_price": 80, "no_price": 20, "count": 1,
+				"created_time": f"2026-01-{day:02d}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_UP",
+			params={
+				"buckets": [[0.10, 0.30], [0.70, 0.90]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		# A pooled aggregate would roughly cancel (+0.25 and −0.25), so EDGE_EXISTS
+		# here proves the per-bucket (un-pooled) verdict drove it.
+		driver = result.detail["driver_bucket"]
+		assert (driver["bucket_lo"], driver["bucket_hi"]) in (
+			(pytest.approx(0.10), pytest.approx(0.30)),
+			(pytest.approx(0.70), pytest.approx(0.90)),
+		)
+
+	def test_clustering_by_ticker_not_trade(self, tmp_path):
+		"""Many trades within FEW markets → effective N = #markets, so z does not
+		inflate with trade count. 3 markets × 100 trades each at 50¢, 2/3 win.
+		"""
+		markets = []
+		trades = []
+		outcomes = ["yes", "no", "yes"]  # 2/3 win at 50¢ → big per-trade z, tiny per-market z
+		for i, res in enumerate(outcomes):
+			ticker = f"CL-{i}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_CL",
+				"result": res,
+				"last_price": 50, "volume": 100,
+				"close_time": f"2026-01-{i + 1:02d}T12:00:00Z",
+				"open_time": f"2026-01-{i + 1:02d}T00:00:00Z",
+			})
+			for j in range(100):
+				trades.append({
+					"trade_id": f"cl-{i}-{j}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"2026-01-{i + 1:02d}T06:{j % 60:02d}:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_CL",
+			params={
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 3, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		# Per-trade clustering would give |z| ≫ 2 on 300 trades; per-ticker keeps it small.
+		assert abs(result.z_stat) < 2.0
+		assert result.verdict != EDGE_EXISTS

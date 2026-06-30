@@ -1,9 +1,19 @@
 """Tests for shared statistical utilities."""
 
+import math
+
 import pytest
+from edge_catcher.adapters.kalshi.fees import INDEX_FEE, STANDARD_FEE
+from edge_catcher.fees import ZERO_FEE
 from edge_catcher.research.stats_utils import (
 	proportions_ztest, clustered_z, wilson_ci, fee_adjusted_edge,
+	fee_adjusted_edge_curve,
 )
+
+
+def _real_fee_dollars(rate: float, p: float) -> float:
+	"""The exchange's real per-contract fee: ceil(rate * p * (1-p) * 100) cents → $."""
+	return math.ceil(rate * p * (1 - p) * 100) / 100.0
 
 
 class TestProportionsZtest:
@@ -86,3 +96,36 @@ class TestFeeAdjustedEdge:
 	def test_zero_fee(self):
 		result = fee_adjusted_edge(0.05, 0.50, 0.0)
 		assert result == 0.05
+
+
+class TestFeeAdjustedEdgeCurve:
+	"""The real-fee gate: subtracts the exchange's actual per-contract fee curve."""
+
+	@pytest.mark.parametrize("implied", [0.05, 0.10, 0.25, 0.50, 0.75, 0.90])
+	def test_matches_kalshi_standard_curve(self, implied):
+		"""Curve fee equals the exchange's ceil(0.07*p*(1-p)*100) cents/contract."""
+		raw = 0.10
+		result = fee_adjusted_edge_curve(raw, implied, STANDARD_FEE)
+		assert result == pytest.approx(raw - _real_fee_dollars(0.07, implied))
+
+	def test_index_curve_uses_index_rate(self):
+		"""The index fee model applies the 0.035 rate, not standard's 0.07."""
+		raw = 0.10
+		result = fee_adjusted_edge_curve(raw, 0.50, INDEX_FEE)
+		assert result == pytest.approx(raw - _real_fee_dollars(0.035, 0.50))
+
+	def test_midprice_fee_exceeds_flat_approximation(self):
+		"""At p≈0.5 the real curve charges materially more than the old flat rate.
+
+		Flat: 0.0175 * (1 - 0.5) = 0.00875. Curve: ceil(0.07*0.5*0.5*100) = 2c = 0.02.
+		The flat approximation understated mid-priced fees — a false-positive risk.
+		"""
+		raw = 0.10
+		flat_fee = raw - fee_adjusted_edge(raw, 0.50, 0.0175)
+		curve_fee = raw - fee_adjusted_edge_curve(raw, 0.50, STANDARD_FEE)
+		assert curve_fee == pytest.approx(0.02)
+		assert curve_fee > flat_fee
+		assert curve_fee / flat_fee > 1.5
+
+	def test_zero_fee_model_subtracts_nothing(self):
+		assert fee_adjusted_edge_curve(0.05, 0.50, ZERO_FEE) == 0.05

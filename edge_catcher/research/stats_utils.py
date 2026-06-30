@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
+from edge_catcher.fees import FeeModel
+
 
 def proportions_ztest(wins: int, n: int, p0: float) -> tuple[float, float]:
 	"""One-sample proportions z-test. Returns (z_stat, p_value).
@@ -79,8 +81,31 @@ def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def fee_adjusted_edge(raw_edge: float, implied_prob: float, maker_fee_rate: float) -> float:
-	"""Subtract maker fee impact from raw edge.
+	"""Subtract maker fee impact from raw edge (flat-rate approximation).
 
 	Fee = maker_fee_rate * (1 - implied_prob) per contract.
+
+	NOTE: this is a flat-rate *approximation*, not Kalshi's real per-contract fee.
+	The exchange charges ceil(0.07 * p * (1-p) * 100) cents/contract per side
+	(see edge_catcher/adapters/kalshi/fees.py); the linear `rate * (1 - p)` form
+	used here is a stand-in calibrated near the longshot bucket. Prefer
+	fee_adjusted_edge_curve() for live-fidelity gating; this flat form remains for
+	the legacy hypothesis template (ai/formalizer.py) and
+	hypotheses/kalshi/price_efficiency.py.
 	"""
 	return raw_edge - maker_fee_rate * (1.0 - implied_prob)
+
+
+def fee_adjusted_edge_curve(raw_edge: float, implied_prob: float, fee_model: FeeModel) -> float:
+	"""Subtract the exchange's real per-contract entry fee from the raw edge.
+
+	Unlike fee_adjusted_edge (a flat-rate approximation), this charges the
+	exchange's actual fee curve via FeeModel.calculate(), so the gate matches live
+	execution. The edge is a per-$1-notional quantity (win-rate minus implied
+	price), so we charge the single-contract fee at the implied price and convert
+	cents → dollars. The fee is charged once on entry; a buy-to-settlement
+	position pays no exit fee.
+	"""
+	price_cents = round(implied_prob * 100)
+	fee_cents = fee_model.calculate(price_cents, 1)
+	return raw_edge - fee_cents / 100.0

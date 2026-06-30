@@ -90,8 +90,12 @@ Each hypothesis config must have:
 - "params": test-specific parameters
 - "thresholds": statistical thresholds
 
+IMPORTANT — bucket scale: `buckets` are price bands on a 0–1 IMPLIED-PROBABILITY scale (NOT 0–100 cents). A 5¢ contract is 0.05, a 95¢ contract is 0.95. Always emit fractional bounds in [0,1]. Example covering longshots through favorites:
+  "buckets": [[0.01,0.05],[0.05,0.10],[0.10,0.25],[0.25,0.50],[0.50,0.75],[0.75,0.90],[0.90,0.95],[0.95,0.99]]
+Never emit cents-scale buckets like [[1,5],[95,99]] — on a 0–1 implied scale those bands are empty and the test collects no data.
+
 Available test types:
-- price_bucket_bias: Tests if settlement rates deviate from implied probability. Params: buckets (price ranges), min_n_per_bucket, fee_model.
-- lifecycle_bias: Tests if early-traded markets are more mispriced than late ones. Params: lifecycle_window_minutes, buckets, min_n_per_bucket, fee_model.
-- volume_mispricing: Tests if low-volume markets have wider mispricing. Params: buckets, min_n_per_bucket, fee_model.
-- momentum_alignment: Tests if contract prices lag spot price movements. Params: ohlc_config ({db_path, table, asset}), lookback_candles, buckets, min_n_per_bucket, fee_model.
+- price_bucket_bias: Tests if settlement rates deviate from implied probability. Params: buckets (0–1 implied-probability bands, see above), min_n_per_bucket, fee_model.
+- lifecycle_bias: Tests if early-traded markets are more mispriced than late ones. Params: lifecycle_window_minutes, buckets (0–1 implied-probability bands), min_n_per_bucket, fee_model.
+- volume_mispricing: Tests if low-volume markets have wider mispricing. Params: buckets (0–1 implied-probability bands), min_n_per_bucket, fee_model.
+- momentum_alignment: Tests if contract prices lag spot price movements. Params: ohlc_config ({db_path, table, asset}), lookback_candles, buckets (0–1 implied-probability bands), min_n_per_bucket, fee_model.
