@@ -73,7 +73,10 @@ def register(subparsers) -> None:
 	rs_loop.add_argument("--max-llm-calls", type=int, default=10, dest="max_llm_calls",
 	                     help="Cap on LLM API calls in ideation phase (default: 10)")
 	rs_loop.add_argument("--grid-only", action="store_true", dest="grid_only",
-	                     help="Skip LLM phase")
+	                     help="Run ONLY the grid sweep over the strategy arsenal and skip "
+	                          "LLM ideation. NOTE: the default loop (without this flag) runs "
+	                          "LLM hypothesis ideation and SKIPS the grid sweep entirely — pass "
+	                          "--grid-only when you specifically want the (legacy) arsenal sweep.")
 	rs_loop.add_argument("--llm-only", action="store_true", dest="llm_only",
 	                     help="Skip grid/expansion, ideate from context + existing results only")
 	rs_loop.add_argument("--output", default=None, help="Save report to this base path")

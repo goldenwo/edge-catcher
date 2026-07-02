@@ -187,6 +187,11 @@ class LoopOrchestrator:
 		if self._cancelled():
 			logger.info("Loop cancelled by external request before phase 1")
 			return 2, all_results
+		# By design, the grid sweep runs ONLY under --grid-only. The default loop
+		# path (this branch is skipped) goes straight to LLM ideation: the arsenal
+		# the grid would sweep is the old set Phase A already killed as mirages, so
+		# running it by default costs backtests for little value. See research CLI
+		# --grid-only help and spec 2026-06-29-discovery-loop-method-fix §4.
 		if self.grid_only:
 			# Legacy: full grid sweep
 			planner = GridPlanner(tracker=self.tracker)

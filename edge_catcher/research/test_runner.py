@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
+from edge_catcher.adapters.kalshi.fees import INDEX_FEE, STANDARD_FEE
+from edge_catcher.fees import ZERO_FEE, FeeModel
 from edge_catcher.research.stats_utils import (
 	clustered_z,
-	fee_adjusted_edge,
+	fee_adjusted_edge_curve,
 	proportions_ztest,
 	wilson_ci,
 )
+
+logger = logging.getLogger(__name__)
 
 # Verdict constants
 EDGE_EXISTS = "EDGE_EXISTS"
@@ -19,12 +24,214 @@ NO_EDGE = "NO_EDGE"
 INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 EDGE_NOT_TRADEABLE = "EDGE_NOT_TRADEABLE"
 
-# Fee model mapping: name → maker fee rate
-FEE_MODELS: dict[str, float] = {
-	"zero": 0.0,
-	"standard": 0.0175,
-	"index": 0.00875,
+# Fee model mapping: name → FeeModel. The gate applies each model's real
+# per-contract fee curve via fee_adjusted_edge_curve() (see stats_utils.py), so
+# fee accounting matches live execution rather than a flat approximation.
+FEE_MODELS: dict[str, FeeModel] = {
+	"zero": ZERO_FEE,
+	"standard": STANDARD_FEE,
+	"index": INDEX_FEE,
 }
+# "kalshi" is the name research configs pass for the live Kalshi taker fee; it
+# resolves to the standard fee model. Aliased (not a second entry) so the two
+# can't silently drift apart.
+FEE_MODELS["kalshi"] = FEE_MODELS["standard"]
+
+
+def _resolve_fee_model(fee_model: str) -> FeeModel:
+	"""Map a fee_model name to its FeeModel, failing loud on unknown names.
+
+	An unknown name used to fall back to 0.0 silently, which ran the fee-adjusted
+	edge gate with ZERO fees — a false-positive risk where a small raw edge could
+	pass a gate that real fees would have killed. Unknown names now raise.
+	"""
+	if fee_model not in FEE_MODELS:
+		raise ValueError(
+			f"Unknown fee_model {fee_model!r}. Valid options: {sorted(FEE_MODELS)}"
+		)
+	return FEE_MODELS[fee_model]
+
+
+def _normalize_buckets(buckets: list[list[float]]) -> list[tuple[float, float]]:
+	"""Normalize bucket bounds to the 0–1 implied-probability scale, PER BUCKET.
+
+	Fail-safe for #1: the LLM ideator historically emitted cents-scale buckets
+	(e.g. [[1,30]]) against 0–1 implied data, so `1 <= implied` was unsatisfiable
+	→ every bucket n=0 → a silent INSUFFICIENT_DATA total-drop.
+
+	Normalization is PER BUCKET (not whole-list): a single cents-scale bucket must
+	not corrupt valid 0–1 siblings. For each `[lo, hi]`, if EITHER bound > 1.0 the
+	bucket is treated as cents-scale and both its bounds are divided by 100; ≤1
+	bounds are left as-is (a `[0, 1]` bucket is the full 0–1 probability range —
+	the correct default, not cents to disambiguate). We warn once per call listing
+	which buckets were rescaled — turning a silent drop into a corrected run plus a
+	visible warning (mirrors the fail-loud stance on fee models).
+
+	After normalization we VALIDATE and raise ValueError (fail loud, consistent with
+	the fee_model handling) if any bucket has `lo >= hi`, `lo < 0`, or `hi > 1.0`.
+	"""
+	normalized: list[tuple[float, float]] = []
+	rescaled: list[list[float]] = []
+	for lo, hi in buckets:
+		if lo > 1.0 or hi > 1.0:
+			rescaled.append([lo, hi])
+			normalized.append((lo / 100.0, hi / 100.0))
+		else:
+			normalized.append((lo, hi))
+
+	if rescaled:
+		logger.warning(
+			"Bucket(s) %r appear to be cents-scale (a bound > 1.0); "
+			"auto-normalizing those to the 0–1 implied-probability scale by dividing by 100. "
+			"Configs should pass buckets on a 0–1 scale (e.g. [[0.01,0.30]]).",
+			rescaled,
+		)
+
+	for lo, hi in normalized:
+		if lo >= hi or lo < 0.0 or hi > 1.0:
+			raise ValueError(
+				f"Invalid bucket [{lo}, {hi}] after normalization: require "
+				f"0.0 <= lo < hi <= 1.0."
+			)
+
+	return normalized
+
+
+def _trade_price_cluster_rows(
+	cursor: sqlite3.Cursor,
+	series: str,
+	lo: float,
+	hi: float,
+	ticker_filter: Optional[set[str]] = None,
+) -> list[tuple[float, bool, str | None]]:
+	"""Return one calibration row per market that traded in price band [lo, hi).
+
+	Conditions on the price each trade was actually placed at (not a per-market
+	lifetime VWAP). For each market, the count-weighted mean yes_price over trades
+	whose price falls in [lo, hi) (0–1 scale) is the market's implied price in the
+	band; the market's settled outcome is the realization. Each row's CLUSTER KEY is
+	the market's close_date (day), so feeding these to clustered_z gives effective
+	N = #independent days in the band, not #markets. Clustering by day (not ticker)
+	is critical: 15-min markets produce ~96 correlated markets/day, and one-cluster-
+	per-market understates the SE and fabricates edges (25–59% false-positive rate
+	under intraday correlation). Matches the sibling
+	hypotheses/kalshi/price_efficiency.py, which also clusters by close_date.
+
+	Per-trade calibration is unbiased ONLY if the trade price is a fair belief at
+	trade time. Systematic price drift on structurally inefficient markets (e.g. a
+	market whose price predictably drifts toward its outcome after entry) can leave a
+	real-looking calibration residual inside a band and surface as an apparent signal
+	— it is a genuine inefficiency, not a per-trade-VWAP artifact, but callers should
+	not read it as a pure calibration result.
+
+	`lo`/`hi` are on the 0–1 scale; the SQL band filter compares INTEGER cents. We
+	round to integer cent bounds (`round(lo*100)`, `round(hi*100)`) rather than
+	binding floats, because `0.07*100 == 7.0000000000000009 > 7` silently drops/
+	misfiles boundary cents against the INTEGER `yes_price` column.
+	`ticker_filter`, when given, restricts to those tickers (used by the volume
+	terciles in VolumeMispricingTest).
+
+	The cluster key (close_date) is a real string when close_time is populated and
+	None otherwise; the return type is `str | None` to match clustered_z's signature
+	(which we deliberately do not modify). GROUP BY t.ticker is kept — the count-
+	weighted mean price is still per-market; only the returned cluster KEY changed
+	from ticker to close_date.
+	"""
+	lo_c = round(lo * 100)
+	hi_c = round(hi * 100)
+	params: list[object] = [series, lo_c, hi_c]
+	ticker_clause = ""
+	if ticker_filter is not None:
+		if not ticker_filter:
+			return []
+		placeholders = ",".join("?" for _ in ticker_filter)
+		ticker_clause = f" AND t.ticker IN ({placeholders})"
+		params.extend(sorted(ticker_filter))
+
+	cursor.execute(
+		"SELECT t.ticker, m.result, m.close_time, "
+		"       SUM(CAST(t.yes_price AS REAL) * t.count) / SUM(t.count) / 100.0 AS mean_price "
+		"FROM trades t JOIN markets m ON t.ticker = m.ticker "
+		"WHERE m.series_ticker = ? AND m.result IS NOT NULL "
+		"  AND t.yes_price >= ? AND t.yes_price < ?"
+		f"{ticker_clause} "
+		"GROUP BY t.ticker",
+		params,
+	)
+	rows: list[tuple[float, bool, str | None]] = []
+	for ticker, result, close_time, mean_price in cursor.fetchall():
+		if mean_price is None:
+			continue
+		close_date = close_time[:10] if close_time else None
+		rows.append((float(mean_price), result == "yes", close_date))
+	return rows
+
+
+def _bonferroni_z_threshold(z_threshold: float, k: int) -> float:
+	"""Bonferroni-correct a z-threshold for K simultaneously evaluated buckets.
+
+	Converts the per-test z-threshold to its two-sided alpha, divides alpha by K,
+	and returns the z-threshold for that corrected alpha. Conservative and simple
+	(no assumption about bucket independence beyond Bonferroni's worst case).
+	"""
+	from scipy.stats import norm
+
+	if k <= 1:
+		return z_threshold
+	alpha = 2.0 * (1.0 - norm.cdf(z_threshold))
+	if alpha <= 0.0:
+		return z_threshold
+	return float(norm.ppf(1.0 - (alpha / k) / 2.0))
+
+
+def _bucket_bonferroni_verdict(
+	bucket_results: list[dict],
+	z_threshold: float,
+	min_fee_adj: float,
+	any_bucket_met_min_n: bool,
+) -> tuple[str, Optional[dict], float, float]:
+	"""Un-pooled per-bucket verdict with Bonferroni multiple-testing correction.
+
+	Each entry in `bucket_results` must carry "z" (clustered z) and "fee_adj"
+	(fee_adjusted_edge_curve). K = number of evaluated buckets (those that met
+	min_n). A bucket *qualifies* iff |z| >= z_corr AND fee_adj > max(min_fee_adj,
+	0.0), where z_corr is the Bonferroni-corrected threshold for K buckets. The floor
+	is clamped at 0 so EDGE_EXISTS always requires a genuinely net-positive fee-
+	adjusted edge even if a config passes a negative `min_fee_adjusted_edge`. Verdict:
+	  - EDGE_EXISTS        if ≥1 bucket qualifies;
+	  - EDGE_NOT_TRADEABLE if ≥1 significant (|z|>=z_corr) bucket is fee-walled
+	                       (fee_adj <= 0);
+	  - NO_EDGE            if ≥1 bucket met min_n but none qualifies;
+	  - INSUFFICIENT_DATA  if no bucket met min_n.
+
+	Does not pool opposite-sign buckets, so a +edge longshot and a −edge favorite
+	cannot cancel. Returns (verdict, driver_bucket, z_stat, fee_adjusted_edge),
+	where the driver is the qualifying bucket with the largest |fee_adj| (most
+	economically meaningful), or the max-|z| bucket if none qualifies.
+	"""
+	if not any_bucket_met_min_n or not bucket_results:
+		return (INSUFFICIENT_DATA, None, 0.0, 0.0)
+
+	k = len(bucket_results)
+	z_corr = _bonferroni_z_threshold(z_threshold, k)
+
+	fee_floor = max(min_fee_adj, 0.0)
+	qualifying = [b for b in bucket_results if abs(b["z"]) >= z_corr and b["fee_adj"] > fee_floor]
+	significant_fee_walled = [
+		b for b in bucket_results if abs(b["z"]) >= z_corr and b["fee_adj"] <= 0
+	]
+
+	if qualifying:
+		driver = max(qualifying, key=lambda b: abs(b["fee_adj"]))
+		verdict = EDGE_EXISTS
+	elif significant_fee_walled:
+		driver = max(significant_fee_walled, key=lambda b: abs(b["z"]))
+		verdict = EDGE_NOT_TRADEABLE
+	else:
+		driver = max(bucket_results, key=lambda b: abs(b["z"]))
+		verdict = NO_EDGE
+
+	return (verdict, driver, float(driver["z"]), float(driver["fee_adj"]))
 
 
 @dataclass
@@ -95,120 +302,116 @@ class PriceBucketBiasTest(StatisticalTest):
 	) -> TestResult:
 		buckets: list[list[float]] = params.get("buckets", [[0.01, 0.30]])
 		min_n: int = params.get("min_n_per_bucket", 30)
-		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		min_clusters: int = thresholds.get("min_clusters", 2)
+		fee_model: FeeModel = _resolve_fee_model(params.get("fee_model", "zero"))
 		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
 		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
 
 		cursor = conn.cursor()
 
-		# 1. Query all settled markets for the series
+		# 1. Confirm the series has settled markets at all (graceful early exit).
 		cursor.execute(
-			"SELECT ticker, result, last_price, close_time "
-			"FROM markets WHERE series_ticker = ? AND result IS NOT NULL",
+			"SELECT COUNT(*) FROM markets WHERE series_ticker = ? AND result IS NOT NULL",
 			(series,),
 		)
-		markets = cursor.fetchall()
-
-		if not markets:
+		if (cursor.fetchone() or [0])[0] == 0:
 			return TestResult(
 				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
 				detail={"reason": "no_settled_markets", "n": 0},
 			)
 
-		# 2-3. Compute VWAP and assign to buckets
-		bucket_tuples = [(lo, hi) for lo, hi in buckets]
-		bucket_data: dict[tuple[float, float], list[tuple[float, bool, Optional[str]]]] = {
-			(lo, hi): [] for lo, hi in bucket_tuples
-		}
+		bucket_tuples = _normalize_buckets(buckets)
 
-		for row in markets:
-			ticker, result, last_price, close_time = row[0], row[1], row[2], row[3]
-			implied = _compute_vwap(cursor, ticker, last_price)
-			if implied is None:
-				continue
-
-			# Find matching bucket
-			for lo, hi in bucket_tuples:
-				if lo <= implied < hi:
-					won = (result == "yes")
-					close_date = close_time[:10] if close_time else None
-					bucket_data[(lo, hi)].append((implied, won, close_date))
-					break
-
-		# 4. Per-bucket statistics
+		# 2-4. Per bucket: trade-price calibration (one row per market that traded
+		# in the band), clustered by close_date so effective N = #independent days.
 		bucket_results: list[dict] = []
-		any_bucket_has_data = False
-		all_rows: list[tuple[float, bool, Optional[str]]] = []
+		any_bucket_met_min_n = False
+		all_rows: list[tuple[float, bool, str | None]] = []
+		cluster_floor_skipped: list[dict] = []
 
-		for (lo, hi) in bucket_tuples:
-			rows = bucket_data[(lo, hi)]
-			n = len(rows)
-
-			if n < min_n:
+		for lo, hi in bucket_tuples:
+			rows = _trade_price_cluster_rows(cursor, series, lo, hi)
+			n_markets = len(rows)
+			if n_markets < min_n:
 				continue
 
-			any_bucket_has_data = True
 			wins = sum(1 for _, won, _ in rows if won)
-			implied_vals = [imp for imp, _, _ in rows]
-			mean_implied = sum(implied_vals) / len(implied_vals)
-			actual_win_rate = wins / n
-			edge = actual_win_rate - mean_implied
+			mean_price = sum(p for p, _, _ in rows) / n_markets
+			win_rate = wins / n_markets
+			edge = win_rate - mean_price
 
-			z_naive, p_naive = proportions_ztest(wins, n, mean_implied)
+			z_naive, p_naive = proportions_ztest(wins, n_markets, mean_price)
 			z_clust, p_clust, n_clust = clustered_z(rows)
-			fee_adj = fee_adjusted_edge(edge, mean_implied, maker_fee)
-			ci_lo, ci_hi = wilson_ci(wins, n)
+			# FIX A3: charge the fee on the edge MAGNITUDE. edge < 0 means the bucket
+			# is overpriced (a short-side edge); the tradeable edge is |edge| - fee,
+			# so a fee applied to the signed (negative) edge would wrongly push a real
+			# short-side edge further negative and never grade EDGE_EXISTS. Keep the
+			# SIGNED edge in the detail for direction.
+			fee_adj = fee_adjusted_edge_curve(abs(edge), mean_price, fee_model)
+			ci_lo, ci_hi = wilson_ci(wins, n_markets)
 
-			bucket_results.append({
+			bucket_entry = {
 				"bucket_lo": lo, "bucket_hi": hi,
-				"n": n, "n_clusters": n_clust,
-				"implied_prob": mean_implied,
-				"actual_win_rate": actual_win_rate,
+				"n_markets": n_markets, "n_clusters": n_clust,
+				"mean_price": mean_price,
+				"win_rate": win_rate,
 				"edge": edge,
+				"z": float(z_clust),
 				"z_stat_naive": float(z_naive),
-				"z_stat_clustered": float(z_clust),
+				"p": float(p_clust),
 				"p_value_naive": float(p_naive),
-				"p_value_clustered": float(p_clust),
-				"fee_adjusted_edge": fee_adj,
+				"fee_adj": fee_adj,
 				"ci_lower": ci_lo, "ci_upper": ci_hi,
-			})
+			}
 
+			# FIX A1 min-cluster floor: a bucket is eligible for the verdict only if
+			# it clears min_clusters independent days. Buckets below the floor are NOT
+			# added to the evaluated results (they can't drive a verdict) but are noted
+			# in the detail. Understating the cluster count is exactly what fabricates
+			# edges under intraday correlation, so a thin-day bucket must not score.
+			if n_clust < min_clusters:
+				cluster_floor_skipped.append(bucket_entry)
+				continue
+
+			any_bucket_met_min_n = True
+			bucket_results.append(bucket_entry)
 			all_rows.extend(rows)
 
-		if not any_bucket_has_data:
+		verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
+			bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+		)
+
+		if verdict == INSUFFICIENT_DATA:
 			return TestResult(
 				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
-				detail={"reason": "no_bucket_met_min_n", "buckets": []},
+				detail={
+					"reason": "no_bucket_met_min_n", "buckets": bucket_results,
+					"cluster_floor_skipped": cluster_floor_skipped,
+				},
 			)
 
-		# 5. Aggregate across buckets using all qualifying rows
+		# Aggregate descriptors (back-compat detail keys); the VERDICT is per-bucket.
 		total_n = len(all_rows)
 		total_wins = sum(1 for _, won, _ in all_rows if won)
-		total_implied = sum(imp for imp, _, _ in all_rows) / total_n
-		overall_edge = total_wins / total_n - total_implied
-
-		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_rows)
-		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
-
-		# 6. Verdict logic
-		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
-			verdict = EDGE_EXISTS
-		elif abs(overall_z_clust) >= z_threshold and overall_fee_adj <= 0:
-			verdict = EDGE_NOT_TRADEABLE
-		else:
-			verdict = NO_EDGE
+		total_implied = sum(p for p, _, _ in all_rows) / total_n
+		driver_key = (
+			(driver["bucket_lo"], driver["bucket_hi"]) if driver is not None else None
+		)
 
 		return TestResult(
 			verdict=verdict,
-			z_stat=float(overall_z_clust),
-			fee_adjusted_edge=overall_fee_adj,
+			z_stat=z_stat,
+			fee_adjusted_edge=fee_adj_result,
 			detail={
 				"n": total_n,
-				"n_clusters": overall_n_clust,
 				"overall_implied": total_implied,
 				"overall_win_rate": total_wins / total_n,
-				"overall_edge": overall_edge,
+				"overall_edge": total_wins / total_n - total_implied,
+				"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+				"driver_bucket": driver,
+				"driver_bucket_band": driver_key,
 				"buckets": bucket_results,
+				"cluster_floor_skipped": cluster_floor_skipped,
 			},
 		)
 
@@ -227,7 +430,7 @@ class LifecycleBiasTest(StatisticalTest):
 		lifecycle_window_minutes: int = params.get("lifecycle_window_minutes", 30)
 		buckets: list[list[float]] = params.get("buckets", [[0.40, 0.60]])
 		min_n: int = params.get("min_n_per_bucket", 30)
-		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		fee_model: FeeModel = _resolve_fee_model(params.get("fee_model", "zero"))
 		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
 		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
 
@@ -247,7 +450,7 @@ class LifecycleBiasTest(StatisticalTest):
 				detail={"reason": "no_settled_markets", "n": 0},
 			)
 
-		bucket_tuples = [(lo, hi) for lo, hi in buckets]
+		bucket_tuples = _normalize_buckets(buckets)
 
 		# Per segment: early/late → per bucket → list of (implied, won, ticker)
 		# cluster key = ticker (each market is one observation)
@@ -391,7 +594,7 @@ class LifecycleBiasTest(StatisticalTest):
 		overall_edge = total_wins / total_n - total_implied
 
 		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_diff_rows)
-		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
+		overall_fee_adj = fee_adjusted_edge_curve(overall_edge, total_implied, fee_model)
 
 		# 7. Verdict
 		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
@@ -434,7 +637,8 @@ class VolumeMispricingTest(StatisticalTest):
 	) -> TestResult:
 		buckets: list[list[float]] = params.get("buckets", [[0.40, 0.60]])
 		min_n: int = params.get("min_n_per_bucket", 30)
-		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		min_clusters: int = thresholds.get("min_clusters", 2)
+		fee_model: FeeModel = _resolve_fee_model(params.get("fee_model", "zero"))
 		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
 		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
 
@@ -461,140 +665,148 @@ class VolumeMispricingTest(StatisticalTest):
 		t1 = sorted_volumes[n_total // 3]      # upper bound of low tercile
 		t2 = sorted_volumes[2 * n_total // 3]  # upper bound of medium tercile
 
-		bucket_tuples = [(lo, hi) for lo, hi in buckets]
+		bucket_tuples = _normalize_buckets(buckets)
 
-		# Per tercile → per bucket → list of (implied, won, close_date)
-		tercile_bucket_data: dict[str, dict[tuple[float, float], list[tuple[float, bool, Optional[str]]]]] = {
-			"low":    {(lo, hi): [] for lo, hi in bucket_tuples},
-			"medium": {(lo, hi): [] for lo, hi in bucket_tuples},
-			"high":   {(lo, hi): [] for lo, hi in bucket_tuples},
-		}
-
+		# Split tickers into volume terciles (membership only — the per-bucket
+		# implied price now comes from trade-price calibration, not lifetime VWAP).
+		low_tickers: set[str] = set()
+		med_tickers: set[str] = set()
+		high_tickers: set[str] = set()
 		for row in markets:
-			ticker, result, last_price, volume, close_time = row[0], row[1], row[2], row[3], row[4]
-			vol = volume or 0
-
-			# Assign to tercile
+			ticker, vol = row[0], (row[3] or 0)
 			if vol <= t1:
-				tercile = "low"
+				low_tickers.add(ticker)
 			elif vol <= t2:
-				tercile = "medium"
+				med_tickers.add(ticker)
 			else:
-				tercile = "high"
+				high_tickers.add(ticker)
 
-			implied = _compute_vwap(cursor, ticker, last_price)
-			if implied is None:
-				continue
+		# 3. Analyze the LOW-volume tercile per bucket via trade-price calibration.
+		def _tercile_summary(rows: list[tuple[float, bool, str | None]]) -> dict:
+			if not rows:
+				return {"n_markets": 0}
+			wins = sum(1 for _, won, _ in rows if won)
+			n = len(rows)
+			mean_price = sum(p for p, _, _ in rows) / n
+			z, p, nc = clustered_z(rows)
+			return {
+				"n_markets": n, "n_clusters": nc,
+				"mean_price": mean_price,
+				"win_rate": wins / n,
+				"edge": wins / n - mean_price,
+				"z_stat_clustered": float(z),
+				"p_value_clustered": float(p),
+			}
 
-			for lo, hi in bucket_tuples:
-				if lo <= implied < hi:
-					won = (result == "yes")
-					close_date = close_time[:10] if close_time else None
-					tercile_bucket_data[tercile][(lo, hi)].append((implied, won, close_date))
-					break
-
-		# 3. Analyze low-volume tercile per bucket
 		bucket_results: list[dict] = []
-		any_bucket_has_data = False
-		all_low_rows: list[tuple[float, bool, Optional[str]]] = []
+		any_bucket_met_min_n = False
+		all_low_rows: list[tuple[float, bool, str | None]] = []
+		cluster_floor_skipped: list[dict] = []
 
 		for lo, hi in bucket_tuples:
-			low_rows = tercile_bucket_data["low"][(lo, hi)]
-			med_rows = tercile_bucket_data["medium"][(lo, hi)]
-			hi_rows  = tercile_bucket_data["high"][(lo, hi)]
+			low_rows = _trade_price_cluster_rows(cursor, series, lo, hi, ticker_filter=low_tickers)
+			med_summary = _tercile_summary(
+				_trade_price_cluster_rows(cursor, series, lo, hi, ticker_filter=med_tickers)
+			)
+			hi_rows = _trade_price_cluster_rows(cursor, series, lo, hi, ticker_filter=high_tickers)
+			hi_summary = _tercile_summary(hi_rows)
 
 			if len(low_rows) < min_n:
 				continue
 
-			any_bucket_has_data = True
-
-			# Low tercile stats
 			lv_wins = sum(1 for _, won, _ in low_rows if won)
 			lv_n = len(low_rows)
-			lv_implied = sum(imp for imp, _, _ in low_rows) / lv_n
+			lv_mean_price = sum(p for p, _, _ in low_rows) / lv_n
 			lv_win_rate = lv_wins / lv_n
-			lv_edge = lv_win_rate - lv_implied
+			lv_edge = lv_win_rate - lv_mean_price
 
 			lv_z, lv_p, lv_nc = clustered_z(low_rows)
-			lv_z_naive, lv_p_naive = proportions_ztest(lv_wins, lv_n, lv_implied)
+			lv_z_naive, lv_p_naive = proportions_ztest(lv_wins, lv_n, lv_mean_price)
 			lv_ci_lo, lv_ci_hi = wilson_ci(lv_wins, lv_n)
+			# FIX A3: charge the fee on the edge MAGNITUDE (see PriceBucketBiasTest).
+			lv_fee_adj = fee_adjusted_edge_curve(abs(lv_edge), lv_mean_price, fee_model)
 
-			# Medium/high stats (optional, for detail reporting)
-			def _tercile_summary(rows: list) -> dict:
-				if not rows:
-					return {"n": 0}
-				wins = sum(1 for _, won, _ in rows if won)
-				n = len(rows)
-				imp = sum(i for i, _, _ in rows) / n
-				z, p, nc = clustered_z(rows)
-				return {
-					"n": n, "n_clusters": nc,
-					"implied_prob": imp,
-					"win_rate": wins / n,
-					"edge": wins / n - imp,
-					"z_stat_clustered": float(z),
-					"p_value_clustered": float(p),
-				}
-
-			bucket_results.append({
+			bucket_entry = {
 				"bucket_lo": lo, "bucket_hi": hi,
+				# Verdict keys (consumed by _bucket_bonferroni_verdict):
+				"z": float(lv_z),
+				"fee_adj": lv_fee_adj,
+				"n_markets": lv_n,
+				"n_clusters": lv_nc,
+				"mean_price": lv_mean_price,
+				"win_rate": lv_win_rate,
+				"edge": lv_edge,
+				"p": float(lv_p),
+				"ci_lower": lv_ci_lo,
+				"ci_upper": lv_ci_hi,
+				# Detail block:
 				"low_volume": {
-					"n": lv_n, "n_clusters": lv_nc,
-					"implied_prob": lv_implied,
-					"actual_win_rate": lv_win_rate,
+					"n_markets": lv_n, "n_clusters": lv_nc,
+					"mean_price": lv_mean_price,
+					"win_rate": lv_win_rate,
 					"edge": lv_edge,
 					"z_stat_naive": float(lv_z_naive),
 					"z_stat_clustered": float(lv_z),
 					"p_value_naive": float(lv_p_naive),
 					"p_value_clustered": float(lv_p),
+					"fee_adjusted_edge": lv_fee_adj,
 					"ci_lower": lv_ci_lo,
 					"ci_upper": lv_ci_hi,
 				},
-				"medium_volume": _tercile_summary(med_rows),
-				"high_volume":   _tercile_summary(hi_rows),
+				"medium_volume": med_summary,
+				"high_volume": hi_summary,
 				"edge_differential_low_vs_high": (
-					lv_edge - _tercile_summary(hi_rows).get("edge", 0.0)
-					if hi_rows else None
+					lv_edge - hi_summary.get("edge", 0.0) if hi_rows else None
 				),
-			})
+			}
 
+			# FIX A1 min-cluster floor: only buckets clearing min_clusters independent
+			# days are eligible for the verdict (see PriceBucketBiasTest).
+			if lv_nc < min_clusters:
+				cluster_floor_skipped.append(bucket_entry)
+				continue
+
+			any_bucket_met_min_n = True
+			bucket_results.append(bucket_entry)
 			all_low_rows.extend(low_rows)
 
-		if not any_bucket_has_data:
+		verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
+			bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+		)
+
+		if verdict == INSUFFICIENT_DATA:
 			return TestResult(
 				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
-				detail={"reason": "no_bucket_met_min_n", "buckets": [], "tercile_bounds": (t1, t2)},
+				detail={
+					"reason": "no_bucket_met_min_n", "buckets": bucket_results,
+					"tercile_bounds": (t1, t2),
+					"cluster_floor_skipped": cluster_floor_skipped,
+				},
 			)
 
-		# 4-5. Aggregate across buckets using all qualifying low-volume rows
+		# Aggregate descriptors (back-compat detail keys); the VERDICT is per-bucket.
 		total_n = len(all_low_rows)
 		total_wins = sum(1 for _, won, _ in all_low_rows if won)
-		total_implied = sum(imp for imp, _, _ in all_low_rows) / total_n
-		overall_edge = total_wins / total_n - total_implied
-
-		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_low_rows)
-		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
-
-		# 6. Verdict: significant mispricing in low-volume tercile → EDGE_EXISTS
-		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
-			verdict = EDGE_EXISTS
-		elif abs(overall_z_clust) >= z_threshold and overall_fee_adj <= 0:
-			verdict = EDGE_NOT_TRADEABLE
-		else:
-			verdict = NO_EDGE
+		total_implied = sum(p for p, _, _ in all_low_rows) / total_n
+		driver_key = (
+			(driver["bucket_lo"], driver["bucket_hi"]) if driver is not None else None
+		)
 
 		return TestResult(
 			verdict=verdict,
-			z_stat=float(overall_z_clust),
-			fee_adjusted_edge=overall_fee_adj,
+			z_stat=z_stat,
+			fee_adjusted_edge=fee_adj_result,
 			detail={
 				"n_low_volume": total_n,
-				"n_clusters": overall_n_clust,
 				"overall_implied": total_implied,
 				"overall_win_rate": total_wins / total_n,
-				"overall_edge": overall_edge,
+				"overall_edge": total_wins / total_n - total_implied,
+				"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+				"driver_bucket": driver,
+				"driver_bucket_band": driver_key,
 				"tercile_bounds": (t1, t2),
 				"buckets": bucket_results,
+				"cluster_floor_skipped": cluster_floor_skipped,
 			},
 		)
 
@@ -623,7 +835,7 @@ class MomentumAlignmentTest(StatisticalTest):
 		lookback: int = params.get("lookback_candles", 5)
 		buckets: list[list[float]] = params.get("buckets", [[0.30, 0.70]])
 		min_n: int = params.get("min_n_per_bucket", 30)
-		maker_fee: float = FEE_MODELS.get(params.get("fee_model", "zero"), 0.0)
+		fee_model: FeeModel = _resolve_fee_model(params.get("fee_model", "zero"))
 		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
 		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
 
@@ -638,11 +850,20 @@ class MomentumAlignmentTest(StatisticalTest):
 		ohlc_table: str = ohlc_config.get("table", "")
 
 		import os
+		# #2: data_source_config.ohlc_for_series hands back a BARE db_file
+		# ("kalshi-altcrypto.db") but the actual file lives under data/. If the path
+		# doesn't exist as given, fall back to data/<path> (the convention in
+		# data_source_resolver.py). Keep this local to the test (smallest change).
 		if not os.path.exists(ohlc_db_path):
-			return TestResult(
-				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
-				detail={"reason": "ohlc_db_not_found", "db_path": ohlc_db_path},
-			)
+			data_dir_candidate = os.path.join("data", ohlc_db_path)
+			if os.path.exists(data_dir_candidate):
+				ohlc_db_path = data_dir_candidate
+			else:
+				# Still missing — stay graceful, reporting the RESOLVED candidate path.
+				return TestResult(
+					verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+					detail={"reason": "ohlc_db_not_found", "db_path": data_dir_candidate},
+				)
 
 		try:
 			ohlc_conn = sqlite3.connect(ohlc_db_path)
@@ -673,7 +894,7 @@ class MomentumAlignmentTest(StatisticalTest):
 				lookback=lookback,
 				buckets=buckets,
 				min_n=min_n,
-				maker_fee=maker_fee,
+				fee_model=fee_model,
 				z_threshold=z_threshold,
 				min_fee_adj=min_fee_adj,
 			)
@@ -689,7 +910,7 @@ class MomentumAlignmentTest(StatisticalTest):
 		lookback: int,
 		buckets: list[list[float]],
 		min_n: int,
-		maker_fee: float,
+		fee_model: FeeModel,
 		z_threshold: float,
 		min_fee_adj: float,
 	) -> TestResult:
@@ -855,7 +1076,7 @@ class MomentumAlignmentTest(StatisticalTest):
 		overall_edge = total_wins / total_n - total_implied
 
 		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_signal_rows)
-		overall_fee_adj = fee_adjusted_edge(overall_edge, total_implied, maker_fee)
+		overall_fee_adj = fee_adjusted_edge_curve(overall_edge, total_implied, fee_model)
 
 		# Verdict
 		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
