@@ -20,6 +20,32 @@ def proportions_ztest(wins: int, n: int, p0: float) -> tuple[float, float]:
 	return (float(z), float(p))
 
 
+def _z_over_excesses(excess: list[float]) -> tuple[float, float, int]:
+	"""z-statistic over per-cluster excess values (shared clustered-z core).
+
+	Returns (z_stat, p_value, n_clusters). Fewer than 2 clusters → (0, 1, k).
+	Zero between-cluster variance with a nonzero mean excess → ±100 with the
+	effect's sign (identical excess in every cluster: real effect, zero variance).
+	"""
+	from scipy.stats import norm
+
+	k = len(excess)
+	if k < 2:
+		return (0.0, 1.0, k)
+
+	mean_exc = sum(excess) / k
+	var = sum((x - mean_exc) ** 2 for x in excess) / (k - 1)
+	se = math.sqrt(var / k)
+	if se == 0:
+		if mean_exc == 0.0:
+			return (0.0, 1.0, k)
+		return (math.copysign(100.0, mean_exc), 0.0, k)
+
+	z = mean_exc / se
+	p = 2 * (1 - norm.cdf(abs(z)))
+	return (float(z), float(p), k)
+
+
 def clustered_z(
 	rows: list[tuple[float, bool, str | None]],
 ) -> tuple[float, float, int]:
@@ -28,8 +54,6 @@ def clustered_z(
 	Each row is (implied_prob, won: bool, cluster_key: str|None).
 	Returns (z_stat, p_value, n_clusters).
 	"""
-	from scipy.stats import norm
-
 	clusters: dict[str, dict] = defaultdict(lambda: {"wins": 0, "n": 0, "implied": []})
 	for implied, won, cluster_key in rows:
 		key = cluster_key or "__no_key__"
@@ -37,30 +61,27 @@ def clustered_z(
 		clusters[key]["n"] += 1
 		clusters[key]["implied"].append(implied)
 
-	if len(clusters) < 2:
-		return (0.0, 1.0, len(clusters))
+	excess = [
+		c["wins"] / c["n"] - sum(c["implied"]) / len(c["implied"])
+		for c in clusters.values()
+	]
+	return _z_over_excesses(excess)
 
-	excess = []
-	for c in clusters.values():
-		mean_implied = sum(c["implied"]) / len(c["implied"])
-		excess.append(c["wins"] / c["n"] - mean_implied)
 
-	k = len(excess)
-	mean_exc = sum(excess) / k
-	var = sum((x - mean_exc) ** 2 for x in excess) / (k - 1)
-	se = math.sqrt(var / k)
-	if se == 0:
-		# All clusters show identical excess — effect is real but variance is zero.
-		# Return a large z with sign matching the direction of the effect.
-		if mean_exc == 0.0:
-			return (0.0, 1.0, k)
-		z = math.copysign(100.0, mean_exc)
-		p = 0.0
-		return (float(z), float(p), k)
+def clustered_z_from_stats(
+	clusters: list[tuple[int, int, float]],
+) -> tuple[float, float, int]:
+	"""clustered_z's aggregate-input twin: one (n, wins, sum_implied) per cluster.
 
-	z = mean_exc / se
-	p = 2 * (1 - norm.cdf(abs(z)))
-	return (float(z), float(p), k)
+	Identical to clustered_z on the same population **iff each aggregate summarizes
+	one row per observation** (n = row count, sum_implied = Σ per-row implied), since
+	clustered_z's per-cluster mean_implied is an unweighted mean over its rows:
+	cluster excess = wins/n − sum_implied/n. Callers that aggregate in SQL (one
+	GROUP BY row per cluster) use this to avoid materializing millions of per-trade
+	rows in Python. Returns (z_stat, p_value, n_clusters).
+	"""
+	excess = [wins / n - sum_implied / n for n, wins, sum_implied in clusters if n > 0]
+	return _z_over_excesses(excess)
 
 
 def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:

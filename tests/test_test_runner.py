@@ -397,6 +397,245 @@ class TestLifecycleBiasTest:
 		assert result.verdict == INSUFFICIENT_DATA
 
 
+	def test_lifecycle_clusters_by_day_not_ticker(self, tmp_path):
+		"""Lifecycle clusters by close_date (day), not ticker — the same fabrication
+		vector FIX A1 removed from price_bucket_bias. 6 days × 30 markets → the
+		early-segment cluster count is 6, not 180.
+		"""
+		from edge_catcher.research.test_runner import TestRunner
+
+		markets = []
+		trades = []
+		wins_by_day = [11, 7, 10, 8, 10, 8]  # ~30% with per-day wobble (finite z)
+		mkt = 0
+		for d, wd in enumerate(wins_by_day, start=1):
+			date = f"2026-04-{d:02d}"
+			for k in range(30):
+				won = k < wd
+				ticker = f"LCD-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_LCD",
+					"result": "yes" if won else "no",
+					"last_price": 50, "volume": 10,
+					"open_time": f"{date}T08:00:00Z",
+					"close_time": f"{date}T20:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"lcd-e-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T08:10:00Z",
+				})
+				trades.append({
+					"trade_id": f"lcd-l-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T10:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"lifecycle_bias", conn, "SER_LCD",
+			params={
+				"lifecycle_window_minutes": 30,
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		assert b["n_clusters"] == 6
+
+	def test_lifecycle_early_late_split_boundary(self, tmp_path):
+		"""Pin the early/late split, including the exact-cutoff boundary (<=).
+
+		Guards the SQL rewrite against SQLite type affinity: an uncast
+		strftime('%s', ...) TEXT value compares GREATER than any INTEGER, which would
+		silently classify EVERY trade as late (early_n_trades == 0 → permanent
+		INSUFFICIENT_DATA). Window = 30 min from open at 08:00 → trades at 08:10 and
+		exactly 08:30 are EARLY; 08:50 is LATE.
+		"""
+		from edge_catcher.research.test_runner import TestRunner
+
+		markets = []
+		trades = []
+		for i in range(40):
+			ticker = f"LCB-{i}"
+			won = i % 2 == 0
+			day = (i % 5) + 1
+			date = f"2026-04-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_LCB",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 10,
+				"open_time": f"{date}T08:00:00Z",
+				"close_time": f"{date}T20:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"lcb-e1-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T08:10:00Z",
+			})
+			# Exactly at open + 30 min: inclusive boundary → EARLY.
+			trades.append({
+				"trade_id": f"lcb-e2-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T08:30:00Z",
+			})
+			trades.append({
+				"trade_id": f"lcb-l-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T08:50:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"lifecycle_bias", conn, "SER_LCB",
+			params={
+				"lifecycle_window_minutes": 30,
+				"buckets": [[0.40, 0.60]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		assert b["early_n_trades"] == 80   # 2 early trades × 40 markets
+		assert b["late_n_trades"] == 40    # 1 late trade × 40 markets
+
+	def test_lifecycle_min_clusters_floor(self, tmp_path):
+		"""A strong early signal spaning only 2 days must not drive a verdict when
+		min_clusters = 3 (thin-day guard, previously missing from lifecycle).
+		"""
+		from edge_catcher.research.test_runner import TestRunner
+
+		markets = []
+		trades = []
+		mkt = 0
+		for d in (1, 2):
+			date = f"2026-04-{d:02d}"
+			wd = 3 if d == 1 else 4  # ~10-13% win at 50¢ — strong mispricing
+			for k in range(30):
+				won = k < wd
+				ticker = f"LCF-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_LCF",
+					"result": "yes" if won else "no",
+					"last_price": 50, "volume": 10,
+					"open_time": f"{date}T08:00:00Z",
+					"close_time": f"{date}T20:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"lcf-e-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T08:10:00Z",
+				})
+				trades.append({
+					"trade_id": f"lcf-l-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T10:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		params = {
+			"lifecycle_window_minutes": 30,
+			"buckets": [[0.40, 0.60]],
+			"min_n_per_bucket": 10,
+			"fee_model": "zero",
+		}
+		ok = runner.run(
+			"lifecycle_bias", conn, "SER_LCF", params=params,
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0, "min_clusters": 2},
+		)
+		floored = runner.run(
+			"lifecycle_bias", conn, "SER_LCF", params=params,
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0, "min_clusters": 3},
+		)
+		conn.close()
+		assert ok.verdict == EDGE_EXISTS
+		assert floored.verdict == INSUFFICIENT_DATA
+
+	def test_lifecycle_differential_z_in_detail(self, tmp_path):
+		"""The day-clustered differential (early_excess − late_excess over days
+		present in BOTH segments) is reported per bucket, so a lifecycle-specific
+		effect can be told apart from a static bias.
+
+		Early trades at 50¢ on markets winning ~30% (mispriced −0.2); late trades at
+		30¢ (calibrated). Wide bucket captures both. Two extra days carry early-only
+		trades — they must be DROPPED from the differential (days in both = 20).
+		"""
+		from edge_catcher.research.test_runner import TestRunner
+
+		markets = []
+		trades = []
+		mkt = 0
+		wins_by_day = [2, 4] * 10  # 20 days, mean 30% of 10 markets/day
+		for d, wd in enumerate(wins_by_day, start=1):
+			date = f"2026-04-{d:02d}" if d <= 28 else f"2026-05-{d - 28:02d}"
+			for k in range(10):
+				won = k < wd
+				ticker = f"LDF-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_LDF",
+					"result": "yes" if won else "no",
+					"last_price": 30, "volume": 10,
+					"open_time": f"{date}T08:00:00Z",
+					"close_time": f"{date}T20:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"ldf-e-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T08:10:00Z",
+				})
+				trades.append({
+					"trade_id": f"ldf-l-{ticker}", "ticker": ticker,
+					"yes_price": 30, "no_price": 70, "count": 1,
+					"created_time": f"{date}T10:00:00Z",
+				})
+		# Two extra days with EARLY-only trades (no late segment on those days).
+		for d in (29, 30):
+			date = f"2026-05-{d - 28:02d}"
+			for k in range(10):
+				won = k < 3
+				ticker = f"LDF-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_LDF",
+					"result": "yes" if won else "no",
+					"last_price": 30, "volume": 10,
+					"open_time": f"{date}T08:00:00Z",
+					"close_time": f"{date}T20:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"ldf-e-{ticker}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T08:10:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"lifecycle_bias", conn, "SER_LDF",
+			params={
+				"lifecycle_window_minutes": 30,
+				"buckets": [[0.20, 0.60]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		# Early mispriced, late calibrated → strongly negative differential.
+		assert b["differential_z"] <= -3.0
+		# Days present in BOTH segments only: 20, not 22.
+		assert b["differential_n_clusters"] == 20
+		assert b["n_clusters"] == 22  # early segment spans all 22 days
+
+
 class TestVolumeMispricingTest:
 	"""Tests for VolumeMispricingTest — liquidity-based edge detection."""
 
@@ -547,6 +786,57 @@ class TestVolumeMispricingTest:
 				"fee_model": "zero",
 			},
 			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == INSUFFICIENT_DATA
+
+	def test_volume_dual_min_n_floor_requires_markets_too(self, tmp_path):
+		"""The low-tercile floor requires BOTH n_trades >= min_n AND n_markets >=
+		min_n — two heavily-traded thin markets must not clear a trades-only floor.
+		"""
+		from edge_catcher.research.test_runner import TestRunner
+
+		markets = []
+		trades = []
+		# Two LOW-volume markets with 2,500 in-band trades each.
+		for d, ticker in ((1, "VDF-A"), (2, "VDF-B")):
+			date = f"2026-03-{d:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_VDF",
+				"result": "yes" if d == 1 else "no",
+				"last_price": 50, "volume": 1,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			for j in range(2500):
+				trades.append({
+					"trade_id": f"vdf-{ticker}-{j}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T06:00:00Z",
+				})
+		# Medium/high-volume markets (out of the low tercile; 1 in-band trade each).
+		for i in range(8):
+			ticker = f"VDF-H-{i}"
+			day = (i % 4) + 1
+			date = f"2026-03-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_VDF",
+				"result": "yes" if i % 2 == 0 else "no",
+				"last_price": 50, "volume": 100 + i,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vdf-h-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"volume_mispricing", conn, "SER_VDF",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 30, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
 		)
 		conn.close()
 		assert result.verdict == INSUFFICIENT_DATA
@@ -1347,11 +1637,17 @@ class TestPriceBucketTradePriceCalibration:
 
 		6 days × 50 markets/day at 50¢, with a real but per-day-noisy mispricing
 		(mean win 63%). The effective N is the number of independent DAYS (6), so
-		n_clusters == 6 — not 300 (per-ticker) and not the trade count. Clustering by
+		n_clusters == 6 — not 300 (per-ticker) and not 900 (per-trade). Clustering by
 		ticker (300 clusters) would understate the SE and report |z| ≈ 4.66; the
 		correct day-clustering reports |z| ≈ 3.04. Pinning n_clusters AND the z
 		magnitude catches a revert to per-ticker clustering, which is the exact bug
 		FIX A1 fixes (15-min markets → ~96 correlated markets/day fabricate edges).
+
+		LOAD-BEARING invariance under per-trade calibration: with 3 trades/market all
+		at the SAME price and outcome, each day's excess (wins/n − Σprice/n) is
+		unchanged by the 3× row multiplication, so the pinned z survives the
+		per-market → per-trade migration exactly. n_trades/n_markets pin the counting
+		unit directly.
 		"""
 		markets = []
 		trades = []
@@ -1393,6 +1689,9 @@ class TestPriceBucketTradePriceCalibration:
 		b = result.detail["buckets"][0]
 		# Cluster key is the DAY: 6 distinct close_dates → 6 clusters (not 300, not 900).
 		assert b["n_clusters"] == 6
+		# Per-trade counting unit: 900 trade observations across 300 markets.
+		assert b["n_trades"] == 900
+		assert b["n_markets"] == 300
 		# Day-clustered z ≈ 3.04; ticker-clustering would inflate it to ≈ 4.66.
 		assert abs(result.z_stat) == pytest.approx(3.036, abs=0.05)
 
@@ -1683,8 +1982,173 @@ class TestPriceBucketTradePriceCalibration:
 		assert len(result.detail["buckets"]) == 1
 		b = result.detail["buckets"][0]
 		assert b["n_markets"] == 2000                       # band fully populated
+		assert b["n_trades"] == 2000                        # one in-band trade ROW each
 		assert b["mean_price"] == pytest.approx(0.60, abs=0.01)  # in-band entries only
 		assert abs(b["edge"]) < 0.01                        # calibrated
+
+	def test_transit_artifact_graded_no_edge(self, tmp_path):
+		"""PER-TRADE control: fair-priced markets that merely TRANSIT a band must not
+		fabricate an edge (the false 'favorites-overpriced' signature that survived
+		PR #87's per-market-mean-in-band calibration).
+
+		Fixture per day: 10 'resident' markets with 10 trades each at 70¢ (8 settle
+		YES, 2 NO) + 20 'transit' markets with exactly 1 trade at 70¢ (4 YES, 16 NO).
+		Pooled per-trade calibration is EXACTLY flat: 84 YES-market trades / 120
+		trades = 0.70 realized at 0.70 mean price. But one-row-per-market grading sees
+		30 markets, mean price 0.70, win rate 12/30 = 0.40 → a fabricated −0.30 gap.
+
+		Three assertions with distinct roles:
+		(a) fixture-validity precondition — the per-market gap really is huge
+			(computed inline from the fixture, does not exercise production code);
+		(b) the REAL mutation guard — the shipped test grades NO_EDGE (a revert to
+			one-row-per-market aggregation flips this to EDGE_EXISTS);
+		(c) direct aggregation-unit guard — n_trades > n_markets in the detail
+			(proves the shipped code counts trades, not markets).
+		"""
+		markets = []
+		trades = []
+		n_days = 6
+		mkt = 0
+		for d in range(1, n_days + 1):
+			date = f"2026-03-{d:02d}"
+			# 10 residents × 10 trades @70¢; 8 YES / 2 NO.
+			for r in range(10):
+				won = r < 8
+				ticker = f"TA-R-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_TA",
+					"result": "yes" if won else "no",
+					"last_price": 70, "volume": 100,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				for j in range(10):
+					trades.append({
+						"trade_id": f"ta-r-{ticker}-{j}", "ticker": ticker,
+						"yes_price": 70, "no_price": 30, "count": 1,
+						"created_time": f"{date}T06:{j:02d}:00Z",
+					})
+			# 20 transits × 1 trade @70¢; 4 YES / 16 NO (passing through en route to 0).
+			for t in range(20):
+				won = t < 4
+				ticker = f"TA-T-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_TA",
+					"result": "yes" if won else "no",
+					"last_price": 70 if won else 5, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"ta-t-{ticker}", "ticker": ticker,
+					"yes_price": 70, "no_price": 30, "count": 1,
+					"created_time": f"{date}T07:00:00Z",
+				})
+
+		# (a) Fixture-validity precondition: inline per-market grading on this data
+		# shows the fabricated gap (win rate 0.40 vs mean in-band price 0.70).
+		in_band_markets = {t["ticker"] for t in trades if 60 <= t["yes_price"] < 80}
+		results_by_ticker = {m["ticker"]: m["result"] for m in markets}
+		per_market_win = sum(
+			1 for tk in in_band_markets if results_by_ticker[tk] == "yes"
+		) / len(in_band_markets)
+		assert per_market_win == pytest.approx(0.40)
+		assert abs(per_market_win - 0.70) > 0.1  # the trap is present in the fixture
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_TA",
+			params={"buckets": [[0.60, 0.80]], "min_n_per_bucket": 30, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		# (b) The real mutation guard: per-trade calibration is flat → NO_EDGE.
+		assert result.verdict == NO_EDGE
+		b = result.detail["buckets"][0]
+		assert b["mean_price"] == pytest.approx(0.70, abs=0.005)
+		assert b["win_rate"] == pytest.approx(0.70, abs=0.005)
+		# (c) Aggregation-unit guard: 720 trades across 180 markets.
+		assert b["n_trades"] == 720
+		assert b["n_markets"] == 180
+		assert b["n_trades"] > b["n_markets"]
+
+	def test_void_results_excluded(self, tmp_path):
+		"""Only 'yes'/'no' settlements count. A voided market's trades must be
+		excluded entirely — counting void as NO fabricates an edge (here a calibrated
+		50¢ series would read as 25% realized → spurious EDGE_EXISTS).
+		"""
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"VD-{i}"
+			day = (i % 20) + 1
+			date = f"2026-03-{day:02d}"
+			if i < 100:
+				result = "yes" if i < 50 else "no"  # calibrated 50% at 50¢
+			else:
+				result = "void"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_VD",
+				"result": result,
+				"last_price": 50, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"vd-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_VD",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		b = result.detail["buckets"][0]
+		# Void markets' trades are excluded from the observation set entirely.
+		assert b["n_trades"] == 100
+		assert b["n_markets"] == 100
+		assert b["win_rate"] == pytest.approx(0.50)
+
+	def test_dual_min_n_floor_requires_markets_too(self, tmp_path):
+		"""min_n_per_bucket floors BOTH n_trades AND n_markets. Two markets with
+		5,000 in-band trades between them clear a trades-only floor but carry ~2
+		independent observations — they must stay INSUFFICIENT_DATA (the OLD
+		market-count floor is preserved, not weakened, by the per-trade switch).
+		"""
+		markets = []
+		trades = []
+		for d, ticker in ((1, "DF-A"), (2, "DF-B")):
+			date = f"2026-03-{d:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_DF",
+				"result": "yes" if d == 1 else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			for j in range(2500):
+				trades.append({
+					"trade_id": f"df-{ticker}-{j}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": f"{date}T06:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_DF",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 30, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == INSUFFICIENT_DATA
 
 	@pytest.mark.filterwarnings("ignore:divide by zero encountered:RuntimeWarning")
 	def test_c3b_in_band_drift_surfaces_as_real_signal(self, tmp_path):
