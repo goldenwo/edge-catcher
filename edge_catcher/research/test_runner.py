@@ -219,8 +219,11 @@ def _per_trade_band_day_stats(
 		if segment not in ("early", "late"):
 			raise ValueError(f"Unknown lifecycle segment {segment!r}: use 'early' or 'late'")
 		op = "<=" if segment == "early" else ">"
-		# Hoist the per-market cutoff into a derived table: strftime(open_time)
-		# runs once per MARKET instead of once per joined trade row.
+		# The derived table keeps the cutoff expression in one place, but SQLite's
+		# query flattener inlines it (simple SELECT, no aggregate), so
+		# strftime(open_time) still evaluates per joined trade row — the flattened
+		# plan keeps the markets PK index and benchmarked fine; do not "optimize"
+		# assuming a materialized per-market hoist happened.
 		from_clause = (
 			"FROM trades t JOIN ("
 			"SELECT ticker, result, close_time, volume, "
@@ -501,7 +504,7 @@ class PriceBucketBiasTest(StatisticalTest):
 	Works with any set of probability buckets, not just longshots.
 
 	Calibration is TRUE PER-TRADE (one observation per trade row in the band,
-	day-clustered) — see _per_trade_band_stats for why per-market aggregation
+	day-clustered) — see _per_trade_band_day_stats for why per-market aggregation
 	fabricates edges. min_n_per_bucket floors BOTH n_trades and n_markets.
 	"""
 	name: ClassVar[str] = "price_bucket_bias"
@@ -636,7 +639,7 @@ class LifecycleBiasTest(StatisticalTest):
 	segments — for lifecycle attribution.
 
 	Calibration is TRUE PER-TRADE (one observation per trade row in the band's
-	segment, day-clustered) — see _per_trade_band_stats. A segment with no trades
+	segment, day-clustered) — see _per_trade_band_day_stats. A segment with no trades
 	contributes no observations (no last_price fallback — never a synthetic one).
 	min_n_per_bucket floors n_trades AND n_markets in BOTH segments.
 	"""
@@ -975,7 +978,7 @@ class MomentumAlignmentTest(StatisticalTest):
 	WARNING — methodology NOT yet ported to per-trade calibration: this test
 	still grades one observation per MARKET, bucketed by lifetime VWAP (with a
 	last_price fallback), pooled without Bonferroni or a min_clusters floor —
-	the same per-market aggregation class that _per_trade_band_stats' docstring
+	the same per-market aggregation class that _per_trade_band_day_stats' docstring
 	documents as edge-fabricating, and it has NOT been validated against the
 	known-dead controls the other tests have. Treat its EDGE_EXISTS as a lead
 	to re-verify per-trade, never as a graded edge. The detail carries
