@@ -76,9 +76,9 @@ class TestClusteredZFromStats:
 	"""
 
 	@staticmethod
-	def _aggregate(rows):
+	def _aggregate(rows: list[tuple[float, bool, str]]) -> list[tuple[int, int, float]]:
 		"""Collapse per-trade rows into per-cluster (n, wins, sum_implied)."""
-		by_key: dict = {}
+		by_key: dict[str, tuple[int, int, float]] = {}
 		for implied, won, key in rows:
 			n, wins, s = by_key.get(key, (0, 0, 0.0))
 			by_key[key] = (n + 1, wins + int(won), s + implied)

@@ -645,9 +645,16 @@ class LLMIdeator:
 		# Block 4: Available test types
 		test_type_descriptions = {
 			"price_bucket_bias": "Tests if settlement rates deviate from implied probability",
-			"lifecycle_bias": "Tests if early-traded markets are more mispriced than late ones",
+			"lifecycle_bias": (
+				"Tests for tradeable mispricing in the EARLY window after market open "
+				"(a static bias also triggers it; the detail's differential_z tells "
+				"lifecycle-specific from static)"
+			),
 			"volume_mispricing": "Tests if low-volume markets have wider mispricing",
-			"momentum_alignment": "Tests if contract prices lag spot price movements",
+			"momentum_alignment": (
+				"Tests if contract prices lag spot price movements (per-market VWAP "
+				"method, NOT per-trade calibrated — verdicts need re-verification)"
+			),
 		}
 		parts.append("\n## Available Test Types\n")
 		for tt in available_test_types:

@@ -20,8 +20,12 @@ def proportions_ztest(wins: int, n: int, p0: float) -> tuple[float, float]:
 	return (float(z), float(p))
 
 
-def _z_over_excesses(excess: list[float]) -> tuple[float, float, int]:
+def z_over_excesses(excess: list[float]) -> tuple[float, float, int]:
 	"""z-statistic over per-cluster excess values (shared clustered-z core).
+
+	Public: clustered_z and clustered_z_from_stats wrap it, and lifecycle's paired
+	early-vs-late differential feeds precomputed per-day contrasts directly. Its
+	degenerate-branch semantics are a cross-module contract.
 
 	Returns (z_stat, p_value, n_clusters). Fewer than 2 clusters → (0, 1, k).
 	Zero between-cluster variance with a nonzero mean excess → ±100 with the
@@ -65,7 +69,7 @@ def clustered_z(
 		c["wins"] / c["n"] - sum(c["implied"]) / len(c["implied"])
 		for c in clusters.values()
 	]
-	return _z_over_excesses(excess)
+	return z_over_excesses(excess)
 
 
 def clustered_z_from_stats(
@@ -81,7 +85,7 @@ def clustered_z_from_stats(
 	rows in Python. Returns (z_stat, p_value, n_clusters).
 	"""
 	excess = [wins / n - sum_implied / n for n, wins, sum_implied in clusters if n > 0]
-	return _z_over_excesses(excess)
+	return z_over_excesses(excess)
 
 
 def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:

@@ -558,6 +558,18 @@ class TestLifecycleBiasTest:
 		assert ok.verdict == EDGE_EXISTS
 		assert floored.verdict == INSUFFICIENT_DATA
 
+	def test_unknown_lifecycle_segment_raises(self, tmp_path):
+		"""An unrecognized segment name must fail loud, not silently return the
+		late segment (fail-loud stance, matching _resolve_fee_model)."""
+		from edge_catcher.research.test_runner import _per_trade_band_day_stats
+
+		conn = _make_test_db(tmp_path, markets=[], trades=[])
+		with pytest.raises(ValueError, match="segment"):
+			_per_trade_band_day_stats(
+				conn.cursor(), "SER_X", [(40, 60)], lifecycle_segment=("earlly", 30),
+			)
+		conn.close()
+
 	def test_lifecycle_differential_z_in_detail(self, tmp_path):
 		"""The day-clustered differential (early_excess − late_excess over days
 		present in BOTH segments) is reported per bucket, so a lifecycle-specific
@@ -1425,6 +1437,17 @@ class TestBucketScaleNormalization:
 		with pytest.raises(ValueError, match=r"-0.1|Invalid bucket"):
 			_normalize_buckets([[-0.1, 0.3]])
 
+	def test_sub_cent_bucket_bound_raises(self):
+		"""Kalshi prices are integer cents; a half-cent bound like 0.115 cannot be
+		represented in the SQL band filter — float rounding silently empties or
+		double-widens adjacent bands (round(0.115*100) == 12 == round(0.125*100)).
+		Fail loud instead of silently corrupting the grid.
+		"""
+		from edge_catcher.research.test_runner import _normalize_buckets
+
+		with pytest.raises(ValueError, match=r"integer.cent|0.115"):
+			_normalize_buckets([[0.115, 0.125]])
+
 
 class TestPriceBucketTradePriceCalibration:
 	"""#5: condition on the price each trade was placed at, not lifetime VWAP.
@@ -2116,6 +2139,124 @@ class TestPriceBucketTradePriceCalibration:
 		assert b["n_trades"] == 100
 		assert b["n_markets"] == 100
 		assert b["win_rate"] == pytest.approx(0.50)
+
+	def test_zero_and_null_count_trades_excluded(self, tmp_path):
+		"""Trades with count <= 0 or NULL are placeholder rows, not prints — they
+		must not count as observations (the old count-weighted SQL excluded them
+		incidentally; the per-trade rewrite must exclude them deliberately).
+
+		100 calibrated markets at 50c + 60 zero/NULL-count rows at 50c placed only
+		on YES-settlers: counted, they'd skew win_rate to ~0.69 and fabricate an
+		edge; excluded, the band stays calibrated with n_trades == 100.
+		"""
+		markets = []
+		trades = []
+		for i in range(100):
+			ticker = f"ZC-{i}"
+			won = i < 50
+			day = (i % 20) + 1
+			date = f"2026-03-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_ZC",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"zc-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": f"{date}T06:00:00Z",
+			})
+			if won:
+				# Zero-size and NULL-size phantom prints on winners only.
+				trades.append({
+					"trade_id": f"zc-z-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 0,
+					"created_time": f"{date}T07:00:00Z",
+				})
+				if i < 10:
+					trades.append({
+						"trade_id": f"zc-n-{i}", "ticker": ticker,
+						"yes_price": 50, "no_price": 50, "count": None,
+						"created_time": f"{date}T08:00:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_ZC",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		assert b["n_trades"] == 100
+		assert b["win_rate"] == pytest.approx(0.50)
+		assert result.verdict == NO_EDGE
+
+	def test_min_n_zero_does_not_crash_on_empty_band(self, tmp_path):
+		"""min_n_per_bucket <= 0 (config-generated) must not ZeroDivisionError on an
+		empty band — the floor is clamped to at least 1 observation.
+		"""
+		markets = [{
+			"ticker": "MN-1", "series_ticker": "SER_MN", "result": "yes",
+			"last_price": 90, "volume": 10,
+			"close_time": "2026-03-01T12:00:00Z", "open_time": "2026-03-01T00:00:00Z",
+		}]
+		trades = [{
+			"trade_id": "mn-1", "ticker": "MN-1", "yes_price": 90, "no_price": 10,
+			"count": 1, "created_time": "2026-03-01T06:00:00Z",
+		}]
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		# The [0.40, 0.60) band is empty (only trade is at 90c); min_n=0 must not crash.
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_MN",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 0, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == INSUFFICIENT_DATA
+
+	def test_overlapping_buckets_populate_independently(self, tmp_path):
+		"""Overlapping bands are legal config: a trade inside both bands counts in
+		both (the single-pass CASE optimization must fall back to per-band queries
+		rather than assigning each trade to only the first matching band).
+		"""
+		markets = []
+		trades = []
+		for i in range(120):
+			ticker = f"OV-{i}"
+			won = i < 66  # 55% win at 55c → calibrated
+			day = (i % 20) + 1
+			date = f"2026-03-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_OV",
+				"result": "yes" if won else "no",
+				"last_price": 55, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"ov-{i}", "ticker": ticker,
+				"yes_price": 55, "no_price": 45, "count": 1,
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		runner = TestRunner()
+		result = runner.run(
+			"price_bucket_bias", conn, "SER_OV",
+			params={
+				# 55c falls inside BOTH bands.
+				"buckets": [[0.40, 0.60], [0.50, 0.70]],
+				"min_n_per_bucket": 10, "fee_model": "zero",
+			},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert len(result.detail["buckets"]) == 2
+		for b in result.detail["buckets"]:
+			assert b["n_trades"] == 120
 
 	def test_dual_min_n_floor_requires_markets_too(self, tmp_path):
 		"""min_n_per_bucket floors BOTH n_trades AND n_markets. Two markets with
