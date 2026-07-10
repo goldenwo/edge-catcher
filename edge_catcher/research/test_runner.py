@@ -218,9 +218,10 @@ _CAUSAL_CUM_VOLUME_SUBQUERY = (
 # get regime NULL and match no regime filter. Binds one param: series_ticker.
 _MOMENTUM_REGIME_SUBQUERY = (
 	"SELECT t.ticker, t.trade_id, t.yes_price, t.count, t.created_time, t.taker_side, "
-	"       (SELECT r.regime FROM _momentum_regime r "
+	"       (SELECT CASE WHEN r.ts_end > CAST(strftime('%s', t.created_time) AS INTEGER) "
+	"                    THEN r.regime END "
+	"        FROM _momentum_regime r "
 	"        WHERE r.ts_start <= CAST(strftime('%s', t.created_time) AS INTEGER) "
-	"          AND r.ts_end > CAST(strftime('%s', t.created_time) AS INTEGER) "
 	"        ORDER BY r.ts_start DESC LIMIT 1) AS regime "
 	"FROM trades t JOIN markets m ON t.ticker = m.ticker "
 	"WHERE m.series_ticker = ? AND m.result IN ('yes', 'no') "
