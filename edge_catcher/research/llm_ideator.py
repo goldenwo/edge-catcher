@@ -650,7 +650,10 @@ class LLMIdeator:
 				"(a static bias also triggers it; the detail's differential_z tells "
 				"lifecycle-specific from static)"
 			),
-			"volume_mispricing": "Tests if low-volume markets have wider mispricing",
+			"volume_mispricing": (
+				"Tests if prints placed while a market is still thin (low cumulative "
+				"volume traded so far) are wider mispriced"
+			),
 			"momentum_alignment": (
 				"Tests if contract prices lag spot price movements (per-market VWAP "
 				"method, NOT per-trade calibrated — verdicts need re-verification)"
