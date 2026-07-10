@@ -105,7 +105,12 @@ class TestTestRunner:
 
 class TestPriceBucketBiasTest:
 	def test_edge_exists_when_overpriced(self, tmp_path):
-		"""Contracts at 50% that settle YES only 30% → significant negative z."""
+		"""Contracts at 50% that settle YES only 30% → significant negative z.
+
+		Prints alternate taker sides so the genuine edge shows on the
+		taker-replicable (NO) side too — one-sided prints are the class (b)
+		artifact signature and correctly downgrade.
+		"""
 		markets = []
 		trades = []
 		for i in range(200):
@@ -121,6 +126,7 @@ class TestPriceBucketBiasTest:
 			trades.append({
 				"trade_id": f"t-{i}", "ticker": ticker,
 				"yes_price": 50, "no_price": 50,
+				"taker_side": "yes" if i % 2 == 0 else "no",
 				"created_time": f"2026-01-{(i % 30) + 1:02d}T06:00:00Z",
 			})
 		conn = _make_test_db(tmp_path, markets, trades)
@@ -217,6 +223,7 @@ class TestPriceBucketBiasTest:
 			trades.append({
 				"trade_id": f"t-{i}", "ticker": ticker,
 				"yes_price": 50, "no_price": 50,
+				"taker_side": "yes" if i % 2 == 0 else "no",
 				"created_time": f"2026-01-{(i % 30) + 1:02d}T06:00:00Z",
 			})
 		conn = _make_test_db(tmp_path, markets, trades)
@@ -265,7 +272,8 @@ class TestLifecycleBiasTest:
 				"open_time": open_time,
 				"close_time": f"2026-01-{day:02d}T20:00:00Z",
 			})
-			# 3 early trades within 15 minutes of open
+			# 3 early trades within 15 minutes of open (mixed taker sides — the
+			# genuine edge must show on the taker-replicable side, class (b)).
 			for j in range(3):
 				trades.append({
 					"trade_id": f"lc-early-{i}-{j}",
@@ -273,6 +281,7 @@ class TestLifecycleBiasTest:
 					"yes_price": 50,
 					"no_price": 50,
 					"count": 1,
+					"taker_side": "yes" if j % 2 == 0 else "no",
 					"created_time": f"2026-01-{day:02d}T08:{(j * 5):02d}:00Z",
 				})
 			# 3 late trades 2 hours after open
@@ -506,8 +515,14 @@ class TestLifecycleBiasTest:
 		assert b["late_n_trades"] == 40    # 1 late trade × 40 markets
 
 	def test_lifecycle_min_clusters_floor(self, tmp_path):
-		"""A strong early signal spaning only 2 days must not drive a verdict when
+		"""A strong early signal spanning only 2 days must not drive a verdict when
 		min_clusters = 3 (thin-day guard, previously missing from lifecycle).
+
+		At min_clusters = 2 the bucket IS evaluated (clears the floor) but the MC
+		null gate (class (d)) correctly refuses 2-cluster inference: under a
+		discrete null two days tie with sizable probability, producing the
+		zero-variance sentinel in the simulated statistic, so no finite z clears
+		alpha → NO_EDGE with mc_gate_ok False, not EDGE_EXISTS.
 		"""
 		from edge_catcher.research.test_runner import TestRunner
 
@@ -528,11 +543,16 @@ class TestLifecycleBiasTest:
 					"open_time": f"{date}T08:00:00Z",
 					"close_time": f"{date}T20:00:00Z",
 				})
-				trades.append({
-					"trade_id": f"lcf-e-{ticker}", "ticker": ticker,
-					"yes_price": 50, "no_price": 50, "count": 1,
-					"created_time": f"{date}T08:10:00Z",
-				})
+				# One early print per taker side: at k=2 days the side stat has
+				# df=1 (Cauchy tails), so each side needs the market set's full
+				# power to clear the class (b) gate — a genuine edge prints on both.
+				for side in ("yes", "no"):
+					trades.append({
+						"trade_id": f"lcf-e-{side}-{ticker}", "ticker": ticker,
+						"yes_price": 50, "no_price": 50, "count": 1,
+						"taker_side": side,
+						"created_time": f"{date}T08:10:00Z",
+					})
 				trades.append({
 					"trade_id": f"lcf-l-{ticker}", "ticker": ticker,
 					"yes_price": 50, "no_price": 50, "count": 1,
@@ -555,7 +575,14 @@ class TestLifecycleBiasTest:
 			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0, "min_clusters": 3},
 		)
 		conn.close()
-		assert ok.verdict == EDGE_EXISTS
+		# min_clusters=2: the bucket clears the floor and is EVALUATED — it fails
+		# only the (honest) MC null gate, not the floor.
+		assert ok.verdict == NO_EDGE
+		b = ok.detail["buckets"][0]
+		assert b["n_clusters"] == 2
+		assert b["significant"] is True
+		assert b["mc_gate_ok"] is False
+		# min_clusters=3: the same bucket never enters evaluation at all.
 		assert floored.verdict == INSUFFICIENT_DATA
 
 	def test_unknown_lifecycle_segment_raises(self, tmp_path):
@@ -649,74 +676,12 @@ class TestLifecycleBiasTest:
 
 
 class TestVolumeMispricingTest:
-	"""Tests for VolumeMispricingTest — liquidity-based edge detection."""
+	"""Tests for VolumeMispricingTest — liquidity-based edge detection.
 
-	def test_edge_exists_low_volume_mispriced(self, tmp_path):
-		"""Low-volume markets (volume=1) have 30% win rate at 50% implied;
-		high-volume markets (volume=100) have 50% win rate → EDGE_EXISTS."""
-		from edge_catcher.research.test_runner import TestRunner, EDGE_EXISTS
-
-		markets = []
-		trades = []
-		# 150 low-volume markets: 30% win rate
-		for i in range(150):
-			ticker = f"VM-low-{i}"
-			won = i < 45  # 30% win rate
-			day = (i % 28) + 1
-			markets.append({
-				"ticker": ticker,
-				"series_ticker": "SER_VM",
-				"result": "yes" if won else "no",
-				"last_price": 50,
-				"volume": 1,  # thin market
-				"close_time": f"2026-01-{day:02d}T12:00:00Z",
-				"open_time": f"2026-01-{day:02d}T00:00:00Z",
-			})
-			trades.append({
-				"trade_id": f"vm-low-{i}",
-				"ticker": ticker,
-				"yes_price": 50,
-				"no_price": 50,
-				"count": 1,
-				"created_time": f"2026-01-{day:02d}T06:00:00Z",
-			})
-		# 150 high-volume markets: 50% win rate
-		for i in range(150):
-			ticker = f"VM-high-{i}"
-			won = i < 75  # 50% win rate
-			day = (i % 28) + 1
-			markets.append({
-				"ticker": ticker,
-				"series_ticker": "SER_VM",
-				"result": "yes" if won else "no",
-				"last_price": 50,
-				"volume": 100,  # liquid market
-				"close_time": f"2026-01-{day:02d}T12:00:00Z",
-				"open_time": f"2026-01-{day:02d}T00:00:00Z",
-			})
-			trades.append({
-				"trade_id": f"vm-high-{i}",
-				"ticker": ticker,
-				"yes_price": 50,
-				"no_price": 50,
-				"count": 100,
-				"created_time": f"2026-01-{day:02d}T06:00:00Z",
-			})
-
-		conn = _make_test_db(tmp_path, markets, trades)
-		runner = TestRunner()
-		result = runner.run(
-			"volume_mispricing", conn, "SER_VM",
-			params={
-				"buckets": [[0.40, 0.60]],
-				"min_n_per_bucket": 10,
-				"fee_model": "zero",
-			},
-			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
-		)
-		conn.close()
-		assert result.verdict == EDGE_EXISTS
-		assert result.z_stat < -2.0
+	The EDGE_EXISTS positive control lives in TestCausalVolumeTerciles
+	(test_thin_so_far_mispricing_edge_exists), which pins the causal
+	at-trade-time tercile semantics that replaced final-volume membership.
+	"""
 
 	def test_no_edge_uniform_across_volumes(self, tmp_path):
 		"""All volume levels show ~50% win rate → NO_EDGE."""
@@ -913,6 +878,368 @@ class TestVolumeMispricingTest:
 		)
 		conn.close()
 		assert result.verdict == NO_EDGE
+
+
+class TestCausalVolumeTerciles:
+	"""Artifact class (a): final-volume look-ahead.
+
+	VolumeMispricingTest's terciles used final settled m.volume, which is
+	outcome-endogenous on in-play venues — winners/losers accumulate different
+	volume BY settlement, so conditioning on final volume selects on outcome
+	(proven by real adversarial refutations: rebuilding terciles causally
+	collapsed verified kills' z-scores to noise, and final volume differed
+	strongly by settlement outcome series-wide). Tercile membership must come
+	from the volume traded BEFORE each print (running Σ of prior t.count per
+	market by created_time) — capture is complete (ΣT.count matches m.volume),
+	so this is exact.
+	"""
+
+	def test_final_volume_outcome_correlation_no_edge(self, tmp_path):
+		"""THE class (a) regression control: a perfectly fair 50¢ series where
+		final volume correlates with outcome (winners attract 100 extra late
+		prints). Under FINAL-volume terciles the low tercile is exactly the
+		losers → in-band win rate 0% at 50¢ → a fabricated edge that every other
+		gate PASSES (the selection is real in the selected population — even the
+		MC null can't see it). Under causal terciles every market's in-band print
+		sits at cum-volume 0 → the thin-so-far cell holds winners AND losers →
+		calibrated → NO_EDGE.
+		"""
+		markets = []
+		trades = []
+		for i in range(300):
+			ticker = f"FV-{i}"
+			won = i % 2 == 0  # fair: half win, interleaved across days
+			day = (i % 28) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_FV",
+				"result": "yes" if won else "no",
+				"last_price": 99 if won else 1,
+				"volume": 102 if won else 2,  # final volume ← outcome (in-play)
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			# The in-band prints: first prints of every market (cum volume 0/1).
+			for si, side in enumerate(("yes", "no")):
+				trades.append({
+					"trade_id": f"fv-{side}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"taker_side": side,
+					"created_time": f"{date}T06:00:{si:02d}Z",
+				})
+			# Winners then attract heavy in-play flow (out of the analysis band).
+			if won:
+				for j in range(100):
+					trades.append({
+						"trade_id": f"fv-drift-{i}-{j}", "ticker": ticker,
+						"yes_price": 99, "no_price": 1, "count": 1,
+						"created_time": f"{date}T08:{j // 60:02d}:{j % 60:02d}Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"volume_mispricing", conn, "SER_FV",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		assert result.detail["volume_basis"] == "at_trade_cumulative"
+		b = result.detail["buckets"][0]
+		# The thin-so-far cell contains BOTH outcomes — calibrated, not selected.
+		assert b["win_rate"] == pytest.approx(0.50, abs=0.02)
+
+	def test_thin_so_far_mispricing_edge_exists(self, tmp_path):
+		"""Positive control for the causal rebuild: prints placed while the market
+		is still THIN (cum volume ≤ t1) are mispriced (30% win at 50¢); prints
+		arriving after ~200 contracts have traded are calibrated → the low
+		(thin-so-far) tercile drives EDGE_EXISTS.
+		"""
+		markets = []
+		trades = []
+		# Group T: 150 thin markets — only first prints, 30% win at 50¢.
+		for i in range(150):
+			ticker = f"TSF-T-{i}"
+			won = i < 45
+			day = (i % 28) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_TSF",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 2,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			for si, side in enumerate(("yes", "no")):
+				trades.append({
+					"trade_id": f"tsf-t-{side}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"taker_side": side,
+					"created_time": f"{date}T06:00:{si:02d}Z",
+				})
+		# Group D: 150 deep markets — 200 contracts trade first (out of band),
+		# then calibrated 50¢ prints (50% win).
+		for i in range(150):
+			ticker = f"TSF-D-{i}"
+			won = i < 75
+			day = (i % 28) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_TSF",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 402,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			for j in range(2):
+				trades.append({
+					"trade_id": f"tsf-d-pre-{i}-{j}", "ticker": ticker,
+					"yes_price": 80, "no_price": 20, "count": 100,
+					"created_time": f"{date}T05:0{j}:00Z",
+				})
+			for si, side in enumerate(("yes", "no")):
+				trades.append({
+					"trade_id": f"tsf-d-{side}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"taker_side": side,
+					"created_time": f"{date}T06:00:{si:02d}Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"volume_mispricing", conn, "SER_TSF",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		assert result.z_stat < -2.0
+		b = result.detail["driver_bucket"]
+		# The driver's low tercile holds ONLY the thin-so-far prints.
+		assert b["win_rate"] == pytest.approx(0.30, abs=0.02)
+		assert b["n_markets"] == 150
+
+
+class TestPerMarketSensitivity:
+	"""Artifact class (f): print-count endogeneity.
+
+	Per-trade weighting lets many-print markets dominate; when print count
+	correlates with outcome, the per-trade edge can be fabricated while the
+	one-obs-per-market view is calibrated or OPPOSITE (proven by a real
+	adversarial refutation: a verified kill had a huge per-trade z while its
+	per-market calibration was flat). Every bucket carries a per_market_edge
+	sensitivity read; a sign flip (or zero) against the per-trade edge GATES
+	the bucket out of EDGE_EXISTS → EDGE_NOT_TRADEABLE. Flag-only proved
+	insufficient on real data: the (local) real-data control re-graded a
+	hand-killed series EDGE_EXISTS through a sign-flipped bucket that passed
+	every other gate.
+	"""
+
+	def test_sign_flip_gate_direct_verdict_logic(self):
+		"""Direct helper guard: identical strong buckets, only the market-level
+		outcome count differs. Sign-agreeing per-market view → EDGE_EXISTS;
+		sign-flipped view → EDGE_NOT_TRADEABLE with the flag.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket(market_wins: int) -> dict:
+			# A strong per-trade signal over many markets and day-clusters whose
+			# market-level outcome count either corroborates or contradicts it.
+			return {
+				"bucket_lo": 0.20, "bucket_hi": 0.35,
+				"z": -5.0, "n_clusters": 90, "fee_adj": 0.05, "edge": -0.07,
+				"n_markets": 2000, "mean_price": 0.27, "market_wins": market_wins,
+			}
+
+		agreeing = bucket(400)  # per-market win rate 0.20 → edge −0.07, same sign
+		res_ok = _bucket_bonferroni_verdict([agreeing], 3.0, 0.0, True)
+		assert res_ok[0] == EDGE_EXISTS
+		assert agreeing["per_market_sign_flip"] is False
+
+		flipped = bucket(640)  # per-market win rate 0.32 → edge +0.05, OPPOSITE
+		res_flip = _bucket_bonferroni_verdict([flipped], 3.0, 0.0, True)
+		assert res_flip[0] == EDGE_NOT_TRADEABLE
+		assert flipped["per_market_sign_flip"] is True
+
+	def test_print_count_endogeneity_flags_verdict(self, tmp_path):
+		"""50 'loud' markets (20 prints each, all lose) + 150 'quiet' markets
+		(1 print, 80% win) at 60¢: per-market win rate is exactly 0.60 —
+		calibrated — while the per-trade view fabricates a −0.50 edge. The
+		sign-flip gate downgrades the verdict and the flag is surfaced.
+		"""
+		markets = []
+		trades = []
+		mkt = 0
+		for i in range(200):
+			loud = i < 50
+			won = not loud and (i - 50) < 120  # loud lose; 120/150 quiet win
+			day = (i % 20) + 1
+			date = f"2026-02-{day:02d}"
+			ticker = f"PM-{mkt}"
+			mkt += 1
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_PM",
+				"result": "yes" if won else "no",
+				"last_price": 60, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			n_prints = 20 if loud else 1
+			for j in range(n_prints):
+				trades.append({
+					"trade_id": f"pm-{ticker}-{j}", "ticker": ticker,
+					"yes_price": 60, "no_price": 40, "count": 1,
+					"taker_side": "yes" if j % 2 == 0 else "no",
+					"created_time": f"{date}T06:{j:02d}:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_PM",
+			params={"buckets": [[0.50, 0.70]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		# The fabricated per-trade edge must not grade EDGE_EXISTS.
+		assert result.verdict == EDGE_NOT_TRADEABLE
+		b = result.detail["buckets"][0]
+		# Per-trade view: fabricated large negative edge (loud losers dominate).
+		assert b["edge"] < -0.3
+		# Per-market view: calibrated (120 wins / 200 markets at 60¢).
+		assert b["per_market_edge"] == pytest.approx(0.0, abs=0.01)
+		assert b["per_market_sign_flip"] is True
+		# The flag is surfaced at the top level for downstream verifiers.
+		assert result.detail["per_market_sign_flip"] is True
+
+	def test_gates_use_per_market_baseline_not_trade_weighted(self):
+		"""The (c)/(f) gates compare MARKET-level outcome counts, so their null
+		baseline must be the mean of per-market in-band prices — the
+		trade-weighted band mean is wrong whenever print count correlates with
+		price inside the band, and fabricates spurious sign flips that kill
+		genuine edges. Entries carrying "per_market_mean_price" must use it.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket(**extra) -> dict:
+			# 100 loud low-priced markets (many prints) + 200 quiet high-priced
+			# ones: trade-weighted mean 0.417, honest per-market mean 0.53,
+			# uniform genuine -0.03 per-market edge (150/300 win).
+			return {
+				"bucket_lo": 0.40, "bucket_hi": 0.60,
+				"z": -6.0, "n_clusters": 30, "fee_adj": 0.03, "edge": -0.03,
+				"n_markets": 300, "mean_price": 0.417, "market_wins": 150,
+				**extra,
+			}
+
+		honest = bucket(per_market_mean_price=0.53)
+		res = _bucket_bonferroni_verdict([honest], 2.0, 0.0, True)
+		assert res[0] == EDGE_EXISTS
+		assert honest["per_market_edge"] == pytest.approx(-0.03)
+		assert honest["per_market_sign_flip"] is False
+		# The (c) expectations must use the same per-market baseline.
+		assert honest["expected_market_wins"] == pytest.approx(300 * 0.53)
+
+		# Without the per-market baseline the trade-weighted fallback fabricates
+		# a +0.083 per-market edge -> spurious flip -> downgrade.
+		fallback = bucket()
+		res_fb = _bucket_bonferroni_verdict([fallback], 2.0, 0.0, True)
+		assert res_fb[0] == EDGE_NOT_TRADEABLE
+		assert fallback["per_market_sign_flip"] is True
+
+	def test_price_print_count_correlation_does_not_fabricate_flip(self, tmp_path):
+		"""End-to-end: the runner must populate per_market_mean_price from the
+		batched per-market scan so a uniform genuine edge with price/print-count
+		correlation is NOT flagged. 100 'loud' markets (10 prints each at 41¢,
+		38% win) + 200 'quiet' markets (1 print at 59¢, 56% win): every market
+		carries the same −0.03 edge; the trade-weighted baseline (0.417) would
+		fabricate per_market_edge = +0.083 and a spurious flip.
+		"""
+		markets = []
+		trades = []
+		for i in range(100):
+			ticker = f"LB-{i}"
+			won = i % 50 < 19  # 38/100, spread across days
+			day = (i % 25) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_LB",
+				"result": "yes" if won else "no",
+				"last_price": 41, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			for j in range(10):
+				trades.append({
+					"trade_id": f"lb-{ticker}-{j}", "ticker": ticker,
+					"yes_price": 41, "no_price": 59, "count": 1,
+					"taker_side": "yes" if j % 2 == 0 else "no",
+					"created_time": f"{date}T06:{j:02d}:00Z",
+				})
+		for i in range(200):
+			ticker = f"QB-{i}"
+			won = i % 25 < 14  # 112/200, spread across days
+			day = (i % 25) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_LB",
+				"result": "yes" if won else "no",
+				"last_price": 59, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"qb-{i}", "ticker": ticker,
+				"yes_price": 59, "no_price": 41, "count": 1,
+				"taker_side": "yes" if i % 2 == 0 else "no",
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_LB",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		# The honest per-market baseline: (100·0.41 + 200·0.59) / 300 = 0.53.
+		assert b["per_market_mean_price"] == pytest.approx(0.53, abs=0.001)
+		# Per-market view agrees with the genuine per-trade direction: no flip.
+		assert b["per_market_edge"] == pytest.approx(-0.03, abs=0.001)
+		assert b["per_market_sign_flip"] is False
+
+	def test_consistent_views_do_not_flag(self, tmp_path):
+		"""When per-trade and per-market views agree (one print per market, a
+		genuine +0.20 edge), the sensitivity read matches and nothing is flagged.
+		"""
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"PC-{i}"
+			won = i < 80  # 40% win at 20¢
+			day = (i % 28) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_PC",
+				"result": "yes" if won else "no",
+				"last_price": 20, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"pc-{i}", "ticker": ticker,
+				"yes_price": 20, "no_price": 80, "count": 1,
+				"taker_side": "yes" if i % 2 == 0 else "no",
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_PC",
+			params={"buckets": [[0.10, 0.30]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		b = result.detail["buckets"][0]
+		assert b["per_market_edge"] == pytest.approx(b["edge"], abs=0.001)
+		assert b["per_market_sign_flip"] is False
+		assert result.detail["per_market_sign_flip"] is False
 
 
 class TestMomentumAlignmentTest:
@@ -1773,11 +2100,14 @@ class TestPriceBucketTradePriceCalibration:
 		independent DAYS is not eligible for the verdict (it is noted in the detail).
 
 		2 days × 30 markets at 50¢ that win ~12% → a significant, fee-clearing signal
-		with n_clusters = 2. With min_clusters = 2 the bucket is evaluated → EDGE_EXISTS.
-		With min_clusters = 3 the same bucket (2 days < 3) is EXCLUDED from
-		bucket_results → INSUFFICIENT_DATA, and it appears under cluster_floor_skipped.
-		This is the guard against a thin-day bucket driving a verdict, which is exactly
-		how intraday correlation fabricates edges.
+		with n_clusters = 2. With min_clusters = 2 the bucket is evaluated (clears
+		the floor); the class (d) MC null gate then refuses 2-cluster inference
+		(discrete null → frequent day ties → sentinel sims), so the honest verdict
+		is NO_EDGE with the bucket present and flagged. With min_clusters = 3 the
+		same bucket (2 days < 3) is EXCLUDED from bucket_results →
+		INSUFFICIENT_DATA, and it appears under cluster_floor_skipped. This is the
+		guard against a thin-day bucket driving a verdict, which is exactly how
+		intraday correlation fabricates edges.
 		"""
 		markets = []
 		trades = []
@@ -1796,11 +2126,15 @@ class TestPriceBucketTradePriceCalibration:
 					"close_time": f"{date}T12:00:00Z",
 					"open_time": f"{date}T00:00:00Z",
 				})
-				trades.append({
-					"trade_id": f"mc-{ticker}", "ticker": ticker,
-					"yes_price": 50, "no_price": 50, "count": 1,
-					"created_time": f"{date}T06:00:00Z",
-				})
+				# Both taker sides per market: at k=2 the side stat has df=1, so
+				# each side needs the full market set to clear the class (b) gate.
+				for side in ("yes", "no"):
+					trades.append({
+						"trade_id": f"mc-{side}-{ticker}", "ticker": ticker,
+						"yes_price": 50, "no_price": 50, "count": 1,
+						"taker_side": side,
+						"created_time": f"{date}T06:00:00Z",
+					})
 		conn = _make_test_db(tmp_path, markets, trades)
 		runner = TestRunner()
 		# min_clusters = 2 (default): 2 days clears the floor → the bucket is evaluated.
@@ -1816,8 +2150,12 @@ class TestPriceBucketTradePriceCalibration:
 			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0, "min_clusters": 3},
 		)
 		conn.close()
-		assert ok.verdict == EDGE_EXISTS
+		# min_clusters=2: evaluated (floor cleared); the MC null gate is what
+		# (honestly) blocks EDGE_EXISTS at 2 clusters.
+		assert ok.verdict == NO_EDGE
 		assert ok.detail["buckets"][0]["n_clusters"] == 2
+		assert ok.detail["buckets"][0]["significant"] is True
+		assert ok.detail["buckets"][0]["mc_gate_ok"] is False
 		assert floored.verdict == INSUFFICIENT_DATA
 		assert floored.detail["reason"] == "no_bucket_met_min_n"
 		# The thin-day bucket is recorded (not silently dropped) for transparency.
@@ -1869,18 +2207,19 @@ class TestPriceBucketTradePriceCalibration:
 		assert result.fee_adjusted_edge < 0
 
 	def test_c2_bonferroni_correction_flips_verdict(self, tmp_path):
-		"""C2: pin the Bonferroni correction's real effect. The driver bucket's raw
-		|z| = 2.312 sits BETWEEN the uncorrected threshold (2.0) and the K=4 corrected
-		threshold (2.531). Run with all 4 eligible buckets → NO_EDGE (correction bites);
-		run that same driver bucket ALONE (K=1) → EDGE_EXISTS. Replacing the correction
-		with `return z_threshold` would make both runs EDGE_EXISTS.
+		"""C2: pin the Bonferroni correction's real effect. The driver bucket's
+		t(9) p-value (z = 2.642 over k = 10 days → p_t ≈ 0.027) sits BETWEEN the
+		uncorrected alpha (0.0455 at threshold 2.0) and the K=4 corrected alpha
+		(0.0114). Run with all 4 eligible buckets → NO_EDGE (correction bites);
+		run that same driver bucket ALONE (K=1) → EDGE_EXISTS. Removing the K
+		division would make both runs EDGE_EXISTS.
 		"""
 		per_day = 400
 		driver_price = 25          # implied 0.25
 		base = per_day * 25 // 100  # 100 fair wins/day at 25¢
 		# Fixed zero-mean noise → real per-day variance so z is finite, not se==0.
 		noise = [30, -30, 20, -20, 10, -10, 5, -5, 15, -15]
-		surplus = 14               # tuned so driver clustered z == 2.312
+		surplus = 16               # tuned so driver clustered z == 2.642
 		driver_wins = [base + surplus + x for x in noise]
 		# 3 fair filler buckets (mean excess 0, same noise → small z, don't qualify).
 		filler_specs = [
@@ -1923,7 +2262,7 @@ class TestPriceBucketTradePriceCalibration:
 		dir_k4.mkdir()
 		dir_k1.mkdir()
 
-		# K=4: all buckets together → corrected threshold 2.531 > 2.312 → NO_EDGE.
+		# K=4: all buckets together → corrected alpha 0.0114 < p_t 0.027 → NO_EDGE.
 		m, t = _rows([(driver_price, driver_wins), *filler_specs])
 		conn = _make_test_db(dir_k4, m, t)
 		r4 = TestRunner().run("price_bucket_bias", conn, "SER_C2",
@@ -1931,7 +2270,7 @@ class TestPriceBucketTradePriceCalibration:
 			thresholds=thresholds)
 		conn.close()
 
-		# K=1: driver bucket alone → uncorrected threshold 2.0 < 2.312 → EDGE_EXISTS.
+		# K=1: driver bucket alone → uncorrected alpha 0.0455 > p_t 0.027 → EDGE_EXISTS.
 		m2, t2 = _rows([(driver_price, driver_wins)])
 		conn2 = _make_test_db(dir_k1, m2, t2)
 		r1 = TestRunner().run("price_bucket_bias", conn2, "SER_C2",
@@ -1941,9 +2280,10 @@ class TestPriceBucketTradePriceCalibration:
 
 		assert r4.verdict == NO_EDGE
 		assert r1.verdict == EDGE_EXISTS
-		# Same driver z in both runs; only the threshold changed.
-		assert r1.z_stat == pytest.approx(2.312, abs=0.01)
+		# Same driver z in both runs; only the corrected alpha changed.
+		assert r1.z_stat == pytest.approx(2.642, abs=0.01)
 		assert r4.detail["z_threshold_bonferroni"] == pytest.approx(2.531, abs=0.01)
+		assert r4.detail["alpha_bonferroni"] == pytest.approx(0.0455 / 4, abs=0.001)
 
 	def test_c3a_new_method_kills_in_band_vwap_artifact(self, tmp_path):
 		"""C3(a): the trade-price method kills a lifetime-VWAP artifact IN A POPULATED
@@ -2349,3 +2689,588 @@ class TestPriceBucketTradePriceCalibration:
 		assert b["n_markets"] == 160          # only winners traded in-band
 		assert b["win_rate"] == pytest.approx(1.0)
 		assert b["edge"] == pytest.approx(0.25, abs=0.01)
+
+
+class TestSmallKTReference:
+	"""Artifact class (e): small-k normal inflation.
+
+	The day-clustered statistic is a mean/SE over k cluster excesses, which under
+	the null is Student-t with k−1 df — NOT normal. Grading the verdict on the
+	normal reference let findings clear the bar by hairs that t(k−1) rejects
+	(proven by real adversarial refutations, including one with dozens of
+	clusters that cleared its Bonferroni alpha under the normal reference and
+	failed under t). The verdict threshold must be the t(k−1) p-value vs the
+	Bonferroni-corrected alpha.
+	"""
+
+	def test_t_pvalue_reference_values(self):
+		"""stats_utils.t_pvalue: two-sided Student-t p; df < 1 is unusable → 1.0."""
+		from edge_catcher.research.stats_utils import t_pvalue
+
+		# t = 3.5 at df = 7 → two-sided p ≈ 0.00997 (fails alpha 0.0027; the
+		# normal reference would give 0.000465 and pass — the exact inflation).
+		assert t_pvalue(3.5, 7) == pytest.approx(0.00997, abs=0.0005)
+		assert t_pvalue(-3.5, 7) == t_pvalue(3.5, 7)
+		# Large df converges to the normal reference.
+		assert t_pvalue(3.5, 100_000) == pytest.approx(0.000465, abs=0.00002)
+		# Degenerate df: no usable t reference → p = 1.0 (never significant).
+		assert t_pvalue(3.5, 0) == 1.0
+		assert t_pvalue(3.5, -1) == 1.0
+
+	def test_small_k_fails_t_reference_large_k_passes(self):
+		"""Direct verdict-helper guard: identical z, only k differs.
+
+		z = 3.5 at base threshold 3.0 (alpha 0.0027, K=1): the normal reference
+		passes (p = 4.65e-4) at ANY k — the pre-fix behavior. Under t(k−1) the
+		k=8 bucket fails (p ≈ 0.00997 > 0.0027) while k=1000 passes. A revert to
+		the normal reference makes both EDGE_EXISTS.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket(k: int) -> dict:
+			return {
+				"bucket_lo": 0.20, "bucket_hi": 0.30,
+				"z": 3.5, "fee_adj": 0.05, "edge": 0.05, "n_clusters": k,
+			}
+
+		small = _bucket_bonferroni_verdict([bucket(8)], 3.0, 0.0, True)
+		large = _bucket_bonferroni_verdict([bucket(1000)], 3.0, 0.0, True)
+		assert small[0] == NO_EDGE
+		assert large[0] == EDGE_EXISTS
+
+	def test_small_k_t_reference_end_to_end(self, tmp_path):
+		"""Runner-level class (e) control: a 10-day signal tuned to z ≈ 3.30 clears
+		the normal bar at threshold 3.0 (p = 9.7e-4 < 0.0027) but fails t(9)
+		(p ≈ 0.0092) → NO_EDGE. Pre-fix this graded EDGE_EXISTS.
+		"""
+		per_day = 400
+		base = per_day * 25 // 100  # 100 fair wins/day at 25¢
+		noise = [30, -30, 20, -20, 10, -10, 5, -5, 15, -15]
+		surplus = 20  # z = surplus·√10/sd(noise) ≈ 3.30
+		markets = []
+		trades = []
+		mkt = 0
+		for di, x in enumerate(noise):
+			date = f"2026-02-{di + 1:02d}"
+			w = base + surplus + x
+			for k in range(per_day):
+				won = k < w
+				ticker = f"TK-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_TK",
+					"result": "yes" if won else "no",
+					"last_price": 25, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"tk-{ticker}", "ticker": ticker,
+					"yes_price": 25, "no_price": 75, "count": 1,
+					"created_time": f"{date}T06:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_TK",
+			params={"buckets": [[0.20, 0.30]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		b = result.detail["buckets"][0]
+		# The z itself DID clear the raw threshold — only the t reference kills it.
+		assert abs(b["z"]) > 3.0
+		assert b["p_t"] > 0.0027
+
+
+class TestTakerSideCompositionGate:
+	"""Artifact class (b): taker-side composition.
+
+	A band signal carried entirely by aggressive prints on ONE side, while the
+	taker-replicable side is flat or opposite, is bid-ask bounce / adverse
+	selection — not mispricing a taker can capture (proven by real adversarial
+	refutations where the entire graded signal sat in one side's prints and the
+	replicable side showed nothing). EDGE_EXISTS must require the exploit side
+	(taker='yes' prints for a positive edge, taker='no' for a negative one) to
+	independently clear the BASE alpha with a matching sign.
+	"""
+
+	def _one_sided_db(self, tmp_path, series: str):
+		"""Bid-ask-bounce structure: true prob 60%, asks at 65¢ (taker=yes,
+		4 prints/market), bids at 55¢ (taker=no, 1 print/market). The pooled band
+		[0.50,0.70) shows a composition-driven −0.03 edge (mean price 0.63 vs 60%
+		win), but the taker-replicable NO side realizes edge +0.05 — the OPPOSITE
+		sign. Nothing here is capturable by buying NO at the ask.
+		"""
+		markets = []
+		trades = []
+		mkt = 0
+		for d in range(1, 29):
+			date = f"2026-01-{d:02d}"
+			wins_today = 11 if d % 2 else 13  # mean 12/20 = 60%
+			for k in range(20):
+				won = k < wins_today
+				ticker = f"TS-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": series,
+					"result": "yes" if won else "no",
+					"last_price": 60, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				for j in range(4):
+					trades.append({
+						"trade_id": f"ts-y-{ticker}-{j}", "ticker": ticker,
+						"yes_price": 65, "no_price": 35, "count": 1,
+						"taker_side": "yes",
+						"created_time": f"{date}T06:{j:02d}:00Z",
+					})
+				trades.append({
+					"trade_id": f"ts-n-{ticker}", "ticker": ticker,
+					"yes_price": 55, "no_price": 45, "count": 1,
+					"taker_side": "no",
+					"created_time": f"{date}T07:00:00Z",
+				})
+		return _make_test_db(tmp_path, markets, trades)
+
+	def test_one_sided_signal_downgraded_not_edge_exists(self, tmp_path):
+		"""The composition artifact must not grade EDGE_EXISTS: the exploit (NO)
+		side's edge is +0.05 against the pooled −0.03 → taker_side_fragile →
+		EDGE_NOT_TRADEABLE. Pre-fix this graded EDGE_EXISTS.
+		"""
+		conn = self._one_sided_db(tmp_path, "SER_TS")
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_TS",
+			params={"buckets": [[0.50, 0.70]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_NOT_TRADEABLE
+		driver = result.detail["driver_bucket"]
+		assert driver["taker_side_fragile"] is True
+		assert driver["exploit_side"] == "no"
+		# Side detail exposes the decomposition: the yes side carries the negative
+		# signal; the replicable no side is positive (bid-ask bounce signature).
+		assert driver["taker_yes"]["n_trades"] == 2240
+		assert driver["taker_no"]["n_trades"] == 560
+		assert driver["taker_yes"]["edge"] == pytest.approx(-0.05, abs=0.01)
+		assert driver["taker_no"]["edge"] == pytest.approx(+0.05, abs=0.01)
+
+	def test_both_sided_signal_still_grades_edge_exists(self, tmp_path):
+		"""Over-kill guard: a genuine mispricing printed on BOTH sides at the same
+		price keeps EDGE_EXISTS (the exploit side independently clears base alpha
+		with a matching sign).
+		"""
+		markets = []
+		trades = []
+		mkt = 0
+		for d in range(1, 29):
+			date = f"2026-01-{d:02d}"
+			wins_today = 10 if d % 2 else 12  # mean 11/20 = 55% at 65¢ → edge −0.10
+			for k in range(20):
+				won = k < wins_today
+				ticker = f"TB-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_TB",
+					"result": "yes" if won else "no",
+					"last_price": 65, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				for side in ("yes", "no"):
+					trades.append({
+						"trade_id": f"tb-{side}-{ticker}", "ticker": ticker,
+						"yes_price": 65, "no_price": 35, "count": 1,
+						"taker_side": side,
+						"created_time": f"{date}T06:00:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_TB",
+			params={"buckets": [[0.50, 0.70]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_EXISTS
+		driver = result.detail["driver_bucket"]
+		assert driver["exploit_side"] == "no"
+		assert driver["taker_side_fragile"] is False
+
+	def test_missing_side_data_flagged_unavailable_not_fragile(self, tmp_path):
+		"""Prints whose taker_side is not 'yes'/'no' (adapter default '' when the
+		API omits the field; 'unknown' on other venues) leave both side splits
+		empty. The gate still refuses EDGE_EXISTS (replicability unverifiable),
+		but the detail must say taker_side_unavailable — NOT taker_side_fragile,
+		which asserts a diagnosed one-sided artifact that was never measured.
+		"""
+		markets = []
+		trades = []
+		for i in range(200):
+			ticker = f"NS-{i}"
+			won = i < 60  # genuine 30%-win mispricing at 50¢
+			day = (i % 28) + 1
+			date = f"2026-01-{day:02d}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_NS",
+				"result": "yes" if won else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": f"{date}T12:00:00Z",
+				"open_time": f"{date}T00:00:00Z",
+			})
+			trades.append({
+				"trade_id": f"ns-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"taker_side": "",  # side metadata absent in the capture
+				"created_time": f"{date}T06:00:00Z",
+			})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_NS",
+			params={"buckets": [[0.40, 0.60]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == EDGE_NOT_TRADEABLE
+		driver = result.detail["driver_bucket"]
+		assert driver["taker_side_coverage"] == 0.0
+		assert driver["taker_side_unavailable"] is True
+		# NOT labeled as a diagnosed composition artifact.
+		assert driver["taker_side_fragile"] is False
+
+	def test_taker_gate_direct_verdict_logic(self):
+		"""Direct helper guard: identical significant buckets, only the exploit-side
+		stats differ. Corroborated exploit side → EDGE_EXISTS; opposite-sign or
+		insignificant exploit side → EDGE_NOT_TRADEABLE with the fragile flag.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket(exploit_edge: float, exploit_p_t: float) -> dict:
+			return {
+				"bucket_lo": 0.50, "bucket_hi": 0.70,
+				"z": -6.0, "n_clusters": 30, "fee_adj": 0.03, "edge": -0.05,
+				"exploit_side": "no", "exploit_n_trades": 500,
+				"exploit_edge": exploit_edge, "exploit_p_t": exploit_p_t,
+				"exploit_n_clusters": 30,
+			}
+
+		ok = bucket(-0.05, 1e-6)
+		corroborated = _bucket_bonferroni_verdict([ok], 3.0, 0.0, True)
+		assert corroborated[0] == EDGE_EXISTS
+		assert ok["taker_side_fragile"] is False
+
+		flat = bucket(-0.05, 0.5)  # right sign, but n.s. on the replicable side
+		res_flat = _bucket_bonferroni_verdict([flat], 3.0, 0.0, True)
+		assert res_flat[0] == EDGE_NOT_TRADEABLE
+		assert flat["taker_side_fragile"] is True
+
+		opposite = bucket(+0.05, 1e-6)  # significant but WRONG sign
+		res_opp = _bucket_bonferroni_verdict([opposite], 3.0, 0.0, True)
+		assert res_opp[0] == EDGE_NOT_TRADEABLE
+		assert opposite["taker_side_fragile"] is True
+
+		empty = bucket(-0.05, 1e-6)
+		empty["exploit_n_trades"] = 0  # signal entirely on the other side
+		res_empty = _bucket_bonferroni_verdict([empty], 3.0, 0.0, True)
+		assert res_empty[0] == EDGE_NOT_TRADEABLE
+		assert empty["taker_side_fragile"] is True
+
+
+class TestDegenerateOutcomeGate:
+	"""Artifact class (c): degenerate zero-win z.
+
+	When a band's wins are 0 (or n) in every cluster, the clustered z over
+	excesses measures only PRICE dispersion across days — a huge |z| can coexist
+	with an entirely unremarkable exact-binomial p (proven by a real adversarial
+	refutation on an extreme-price band). EDGE_EXISTS must require market-level
+	expected wins AND losses ≥ ~5 (normal approximation valid), or an exact
+	binomial cross-check on the market-level outcome count to independently
+	clear the Bonferroni alpha.
+	"""
+
+	def test_exact_binom_pvalue_reference_values(self):
+		from edge_catcher.research.stats_utils import exact_binom_pvalue
+
+		# 0 wins in 60 markets at mean price 1.5¢: E[wins] = 0.9 — observing 0
+		# is unremarkable (p ≈ 1), no matter what the dispersion z claims.
+		assert exact_binom_pvalue(0, 60, 0.015) > 0.5
+		# 12 wins in 200 markets at 1¢ (E = 2) IS a real anomaly (p ≪ 0.001).
+		assert exact_binom_pvalue(12, 200, 0.01) < 1e-4
+		# Guards: nothing observed / degenerate null probability → 1.0.
+		assert exact_binom_pvalue(0, 0, 0.5) == 1.0
+		assert exact_binom_pvalue(0, 10, 0.0) == 1.0
+		assert exact_binom_pvalue(10, 10, 1.0) == 1.0
+
+	def test_degenerate_gate_direct_verdict_logic(self):
+		"""Direct helper guard for the three branches: E-floor pass, E-floor fail
+		with an unremarkable exact p (kill), and E-floor fail rescued by a truly
+		anomalous exact p (keep).
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket(n_markets: int, mean_price: float, market_wins: int, edge: float, z: float) -> dict:
+			return {
+				"bucket_lo": 0.0, "bucket_hi": 0.03,
+				"z": z, "n_clusters": 10, "fee_adj": 0.01, "edge": edge,
+				"n_markets": n_markets, "mean_price": mean_price,
+				"market_wins": market_wins,
+			}
+
+		# Zero wins, E[wins] = 0.9: the −9 z is pure price dispersion → NO_EDGE.
+		dead = bucket(60, 0.015, 0, -0.015, -9.0)
+		assert _bucket_bonferroni_verdict([dead], 2.0, 0.0, True)[0] == NO_EDGE
+		assert dead["degenerate_gate_ok"] is False
+		assert dead["expected_market_wins"] < 5
+		assert dead["exact_binom_p"] > 0.05
+
+		# Mirror: all-win favorites band, E[losses] = 0.9 → NO_EDGE.
+		all_win = bucket(60, 0.985, 60, +0.015, +9.0)
+		assert _bucket_bonferroni_verdict([all_win], 2.0, 0.0, True)[0] == NO_EDGE
+		assert all_win["degenerate_gate_ok"] is False
+
+		# Healthy outcome counts (E both ≥ 5): gate passes without the cross-check.
+		healthy = bucket(2000, 0.5, 800, -0.10, -9.0)
+		assert _bucket_bonferroni_verdict([healthy], 2.0, 0.0, True)[0] == EDGE_EXISTS
+		assert healthy["degenerate_gate_ok"] is True
+
+		# E[wins] = 2 < 5 BUT 12 observed wins is a genuine exact-binomial anomaly
+		# → rescued by the cross-check.
+		rescued = bucket(200, 0.01, 12, +0.05, +9.0)
+		assert _bucket_bonferroni_verdict([rescued], 2.0, 0.0, True)[0] == EDGE_EXISTS
+		assert rescued["degenerate_gate_ok"] is True
+		assert rescued["exact_binom_p"] < 0.01
+
+	@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+	@pytest.mark.filterwarnings("ignore:divide by zero encountered:RuntimeWarning")
+	def test_zero_win_dispersion_z_graded_no_edge(self, tmp_path):
+		"""End-to-end class (c) control: a 0–3¢ band where EVERY market settles NO.
+		Day mean prices alternate 1¢/2¢, so the clustered z ≈ −9 measures price
+		dispersion only; the exact market-level read (0 wins, E = 0.9) is p ≈ 1.
+		Pre-fix this graded EDGE_EXISTS.
+		"""
+		markets = []
+		trades = []
+		mkt = 0
+		for d in range(1, 11):
+			date = f"2026-02-{d:02d}"
+			price = 1 if d % 2 else 2
+			for k in range(6):
+				ticker = f"ZW-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_ZW",
+					"result": "no",
+					"last_price": price, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				for side in ("yes", "no"):
+					trades.append({
+						"trade_id": f"zw-{side}-{ticker}", "ticker": ticker,
+						"yes_price": price, "no_price": 100 - price, "count": 1,
+						"taker_side": side,
+						"created_time": f"{date}T06:00:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_ZW",
+			params={"buckets": [[0.0, 0.03]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		b = result.detail["buckets"][0]
+		# The dispersion z is huge — only the outcome-count gate kills it.
+		assert abs(b["z"]) > 5.0
+		assert b["degenerate_gate_ok"] is False
+		assert b["market_wins"] == 0
+		assert b["expected_market_wins"] < 5
+
+
+class TestMcNullGate:
+	"""Artifact class (d): rare-event null inflation.
+
+	When E[outcome-flips] is small (few clusters, extreme prices, lumpy per-day
+	counts), the clustered z's nominal p overstates by orders of magnitude
+	(proven by real adversarial refutations where the honest MC p sat many
+	orders of magnitude above the nominal claim, and the nominal method fired
+	frequently under a simulated H0). The honest reference is a Monte Carlo
+	null: redraw each market's outcome ~ Bernoulli(its in-band traded price),
+	keep the day-cluster structure, recompute the same statistic. EDGE_EXISTS
+	requires the MC p to clear the Bonferroni alpha.
+	"""
+
+	def test_mc_null_pvalue_rare_event_inflation(self):
+		"""The rare-event mechanism: 6 days × 5 markets at 95¢. The most likely
+		null outcome (all 30 win, P ≈ 0.21) already produces the zero-variance
+		sentinel |z| = 100, so ANY huge observed z has an honest MC p ≳ 0.2 —
+		while its nominal normal p claims < 1e-10.
+		"""
+		from edge_catcher.research.stats_utils import mc_null_pvalue
+
+		market_stats = [
+			(f"2026-03-{d:02d}", 1, 0.95)
+			for d in range(1, 7)
+			for _ in range(5)
+		]
+		p = mc_null_pvalue(market_stats, z_obs=8.93)
+		assert p > 0.05  # orders of magnitude above the nominal normal claim
+
+	def test_mc_null_pvalue_null_calibration(self):
+		"""Under a well-behaved null (20 days × 10 markets at 50¢), a modest
+		z_obs = 1.0 is unremarkable: MC p lands near the t(19) two-sided value
+		(≈ 0.33), nowhere near significance.
+		"""
+		from edge_catcher.research.stats_utils import mc_null_pvalue
+
+		market_stats = [
+			(f"2026-03-{d:02d}", 1, 0.50)
+			for d in range(1, 21)
+			for _ in range(10)
+		]
+		p = mc_null_pvalue(market_stats, z_obs=1.0)
+		assert 0.15 < p < 0.6
+
+	def test_mc_null_pvalue_strong_signal_stays_significant(self):
+		"""Over-kill guard: a z_obs = 8 over 28 well-populated days IS honestly
+		extreme — MC p must stay at the floor (no sim reaches it).
+		"""
+		from edge_catcher.research.stats_utils import mc_null_pvalue
+
+		market_stats = [
+			(f"2026-03-{d:02d}", 1, 0.50)
+			for d in range(1, 29)
+			for _ in range(20)
+		]
+		p = mc_null_pvalue(market_stats, z_obs=8.0)
+		assert p < 0.001
+
+	def test_mc_null_pvalue_determinism_and_guards(self):
+		from edge_catcher.research.stats_utils import mc_null_pvalue
+
+		market_stats = [("2026-03-01", 1, 0.5)] * 5 + [("2026-03-02", 1, 0.5)] * 5
+		assert mc_null_pvalue(market_stats, 2.0) == mc_null_pvalue(market_stats, 2.0)
+		# Fewer than 2 day-clusters: no null to simulate → 1.0.
+		assert mc_null_pvalue([("2026-03-01", 1, 0.5)] * 10, 5.0) == 1.0
+		assert mc_null_pvalue([], 5.0) == 1.0
+		# Add-one correction: p is never exactly 0.
+		assert mc_null_pvalue(market_stats, 500.0) > 0.0
+
+	def test_mc_gate_direct_verdict_logic(self):
+		"""Direct helper guard: an otherwise-qualifying bucket must survive only
+		if the MC null clears the Bonferroni alpha. The rare-event structure
+		(6 lumpy days at 95¢) fails; the well-populated structure passes.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		def bucket() -> dict:
+			return {
+				"bucket_lo": 0.93, "bucket_hi": 0.97,
+				"z": 8.93, "n_clusters": 6, "fee_adj": 0.03, "edge": 0.04,
+			}
+
+		rare = [
+			(f"2026-03-{d:02d}", 1, 0.95)
+			for d in range(1, 7)
+			for _ in range(5)
+		]
+		b_rare = bucket()
+		res = _bucket_bonferroni_verdict([b_rare], 2.0, 0.0, True, mc_rows_fn=lambda b: rare)
+		assert res[0] == NO_EDGE
+		assert b_rare["mc_p"] > 0.0455
+		assert b_rare["mc_gate_ok"] is False
+
+		healthy = [
+			(f"2026-03-{d:02d}", 1, 0.50)
+			for d in range(1, 29)
+			for _ in range(20)
+		]
+		b_ok = bucket()
+		b_ok["n_clusters"] = 28
+		res_ok = _bucket_bonferroni_verdict([b_ok], 2.0, 0.0, True, mc_rows_fn=lambda b: healthy)
+		assert res_ok[0] == EDGE_EXISTS
+		assert b_ok["mc_gate_ok"] is True
+
+	def test_mc_resolution_scales_to_bonferroni_alpha(self):
+		"""The MC p floor is 1/(n_sims+1); with a FIXED sim count the gate goes
+		mathematically unpassable once alpha_corr < that floor (e.g. a z=3.5
+		threshold with K=5 evaluated buckets → alpha_corr ≈ 9.3e-5 < 1e-4).
+		Sims must scale with alpha so a genuinely extreme bucket can still
+		qualify. Pre-fix this graded NO_EDGE with mc_p == 9.999e-5 > alpha_corr
+		despite ZERO extreme sims.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		strong = {
+			"bucket_lo": 0.20, "bucket_hi": 0.30,
+			"z": 12.0, "n_clusters": 28, "fee_adj": 0.05, "edge": 0.05,
+		}
+		duds = [
+			{
+				"bucket_lo": lo, "bucket_hi": lo + 0.10,
+				"z": 0.1, "n_clusters": 28, "fee_adj": 0.01, "edge": 0.01,
+			}
+			for lo in (0.30, 0.40, 0.50, 0.60)
+		]
+		healthy = [
+			(f"2026-03-{d:02d}", 1, 0.50)
+			for d in range(1, 29)
+			for _ in range(20)
+		]
+		res = _bucket_bonferroni_verdict(
+			[strong, *duds], 3.5, 0.0, True, mc_rows_fn=lambda b: healthy,
+		)
+		# alpha_corr = 2(1−Φ(3.5))/5 ≈ 9.3e-5 — below the fixed-10k floor.
+		assert res[0] == EDGE_EXISTS
+		assert strong["mc_gate_ok"] is True
+		assert strong["mc_p"] <= 9.31e-5
+		assert strong["mc_n_sims"] > 100_000  # sims scaled, not fixed
+
+	def test_rare_event_inflation_end_to_end(self, tmp_path):
+		"""Runner-level class (d) control: 6 days × 25 markets at 95¢ with wins
+		[24,24,25,24,24,25]. The day-excess spread is small by luck → z = +2.77,
+		t(5) p = 0.0395 ≤ alpha 0.0455 — every pre-MC gate passes (E[losses] =
+		7.5 clears class (c); both taker sides print). But the honest MC null
+		(lumpy skewed day excesses at an extreme price) gives p ≈ 0.074 → NO_EDGE.
+		The normal reference claimed p = 0.006 — the rare-event inflation.
+		"""
+		wins_by_day = [24, 24, 25, 24, 24, 25]
+		markets = []
+		trades = []
+		mkt = 0
+		for d, w in enumerate(wins_by_day, start=1):
+			date = f"2026-03-{d:02d}"
+			for k in range(25):
+				won = k < w
+				ticker = f"RE-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_RE",
+					"result": "yes" if won else "no",
+					"last_price": 95, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				for side in ("yes", "no"):
+					trades.append({
+						"trade_id": f"re-{side}-{ticker}", "ticker": ticker,
+						"yes_price": 95, "no_price": 5, "count": 1,
+						"taker_side": side,
+						"created_time": f"{date}T06:00:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_RE",
+			params={"buckets": [[0.93, 0.97]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+		b = result.detail["buckets"][0]
+		# Every pre-MC gate passed — only the honest null kills it.
+		assert b["significant"] is True
+		assert b["taker_gate_ok"] is True
+		assert b["degenerate_gate_ok"] is True
+		assert b["mc_gate_ok"] is False
+		assert b["mc_p"] > 0.0455

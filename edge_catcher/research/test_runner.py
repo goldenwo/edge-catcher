@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass
-from typing import ClassVar, NamedTuple, Optional
+from typing import Callable, ClassVar, NamedTuple, Optional
 
 from edge_catcher.adapters.kalshi.fees import INDEX_FEE, STANDARD_FEE
 from edge_catcher.fees import ZERO_FEE, FeeModel
 from edge_catcher.research.stats_utils import (
 	clustered_z,
 	clustered_z_from_stats,
+	exact_binom_pvalue,
 	fee_adjusted_edge_curve,
+	mc_null_pvalue,
 	proportions_ztest,
+	t_pvalue,
 	wilson_ci,
 	z_over_excesses,
 )
@@ -25,6 +29,27 @@ EDGE_EXISTS = "EDGE_EXISTS"
 NO_EDGE = "NO_EDGE"
 INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 EDGE_NOT_TRADEABLE = "EDGE_NOT_TRADEABLE"
+
+# Artifact class (c) floor: a bucket's market-level expected wins AND losses
+# (n_markets × mean in-band price / its complement) must both reach this for the
+# clustered normal/t machinery to be trusted; below it the z can be pure price
+# dispersion (wins == 0 or == n in every cluster) and only an exact binomial
+# cross-check on the market-level outcome count counts as evidence.
+MIN_EXPECTED_MARKET_OUTCOMES = 5.0
+
+# Artifact class (d): simulations for the Monte-Carlo null gate on each
+# EDGE_EXISTS candidate bucket. The achievable p floor is 1/(n_sims+1), so a
+# FIXED count silently makes the gate unpassable once the Bonferroni alpha
+# drops below it (a z=3.5 threshold with K>=5 evaluated buckets already does).
+# MC_NULL_SIMS is the base; the verdict scales sims up so the floor sits an
+# order of magnitude below the corrected alpha, capped at MC_NULL_SIMS_MAX to
+# bound runtime (at the cap the floor is 5e-7 — passable for every realistic
+# threshold config; z would need to exceed ~5.0 at K=1 to out-run it).
+MC_NULL_SIMS = 10_000
+MC_NULL_SIMS_MAX = 2_000_000
+
+# One (day, n_trades, sum_price) row per in-band market — the MC null's input.
+McMarketRows = list[tuple[Optional[str], int, float]]
 
 # Fee model mapping: name → FeeModel. The gate applies each model's real
 # per-contract fee curve via fee_adjusted_edge_curve() (see stats_utils.py), so
@@ -110,13 +135,26 @@ def _normalize_buckets(buckets: list[list[float]]) -> list[tuple[float, float]]:
 
 
 class _BandDayStats(NamedTuple):
-	"""Per-day-cluster aggregate of in-band trades (one SQL GROUP BY row per day)."""
+	"""Per-day-cluster aggregate of in-band trades (one SQL GROUP BY row per day).
+
+	The per-taker-side splits (artifact class (b)) carry the same n/wins/Σprice
+	shape restricted to prints where the aggressor was the YES / NO buyer. Rows
+	whose taker_side is neither value (defensive — the schema says NOT NULL
+	'yes'/'no') count in the totals but in neither side split.
+	"""
 
 	day: Optional[str]
 	n_trades: int
 	n_markets: int
 	wins: int
 	sum_price: float  # Σ per-trade yes_price on the 0–1 scale
+	market_wins: int = 0  # distinct in-band markets that settled YES (class (c))
+	yes_n: int = 0
+	yes_wins: int = 0
+	yes_sum_price: float = 0.0
+	no_n: int = 0
+	no_wins: int = 0
+	no_sum_price: float = 0.0
 
 
 def _bands_to_cents(bucket_tuples: list[tuple[float, float]]) -> list[tuple[int, int]]:
@@ -135,11 +173,226 @@ def _bands_are_disjoint(bands_c: list[tuple[int, int]]) -> bool:
 	return all(prev[1] <= curr[0] for prev, curr in zip(ordered, ordered[1:]))
 
 
+# Per-print CAUSAL cumulative volume: contracts traded in the market STRICTLY
+# BEFORE each print (running Σ of prior t.count, ordered by created_time with
+# trade_id as the deterministic tiebreak; a market's first print sits at 0).
+# This is the only volume a trader standing at that print could have observed —
+# final settled m.volume is outcome-endogenous on in-play venues (artifact
+# class (a)). Placeholder rows (count <= 0/NULL) and unorderable rows (NULL
+# created_time) are excluded from both the running sum and the observations.
+# Binds one param: series_ticker.
+_CAUSAL_CUM_VOLUME_SUBQUERY = (
+	"SELECT t.ticker, t.trade_id, t.yes_price, t.count, t.created_time, t.taker_side, "
+	"       COALESCE(SUM(t.count) OVER ("
+	"PARTITION BY t.ticker ORDER BY t.created_time, t.trade_id "
+	"ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS cum_before "
+	"FROM trades t JOIN markets m ON t.ticker = m.ticker "
+	"WHERE m.series_ticker = ? AND m.result IN ('yes', 'no') "
+	"AND t.count > 0 AND t.created_time IS NOT NULL"
+)
+
+
+def _band_scan_clauses(
+	series: str,
+	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+	lifecycle_segment: Optional[tuple[str, int]] = None,
+) -> tuple[str, list[str], list[object]]:
+	"""Shared FROM/WHERE construction for in-band trade scans.
+
+	Used by _per_trade_band_day_stats (day aggregates) and _per_market_band_stats
+	(per-market MC-null rows) so both populations are filtered IDENTICALLY.
+	Returns (from_clause, where_parts, params) — band predicates are appended by
+	the caller.
+
+	`cum_volume_range` = (gt, le) filters on each print's CAUSAL cumulative
+	prior volume (_CAUSAL_CUM_VOLUME_SUBQUERY) — exclusive lower, inclusive
+	upper, either side None for unbounded. Membership semantics match the
+	tercile-bound quantile convention in VolumeMispricingTest exactly.
+
+	`lifecycle_segment` = ("early"|"late", window_minutes) restricts to trades at
+	most / strictly-more-than window minutes after the market's open_time. The
+	derived table keeps the cutoff expression in one place, but SQLite's query
+	flattener inlines it (simple SELECT, no aggregate), so strftime(open_time)
+	still evaluates per joined trade row — the flattened plan keeps the markets
+	PK index and benchmarked fine; do not "optimize" assuming a materialized
+	per-market hoist happened. Both strftime('%s', ...) values are CAST to
+	INTEGER — uncast, SQLite's type affinity compares the TEXT strftime result
+	GREATER than any number, which silently empties the early segment. Trades
+	with NULL created_time and markets with NULL open_time are excluded (they
+	cannot be segmented). Unknown segment names raise. Not combinable with
+	`cum_volume_range`.
+	"""
+	if cum_volume_range is not None and lifecycle_segment is not None:
+		raise ValueError("cum_volume_range and lifecycle_segment cannot be combined")
+
+	where_parts = ["m.result IN ('yes', 'no')", "t.count > 0"]
+	params: list[object] = []
+
+	if lifecycle_segment is not None:
+		segment, window_minutes = lifecycle_segment
+		if segment not in ("early", "late"):
+			raise ValueError(f"Unknown lifecycle segment {segment!r}: use 'early' or 'late'")
+		op = "<=" if segment == "early" else ">"
+		from_clause = (
+			"FROM trades t JOIN ("
+			"SELECT ticker, result, close_time, volume, "
+			"       CAST(strftime('%s', open_time) AS INTEGER) + ? * 60 AS cutoff_ts "
+			"FROM markets WHERE series_ticker = ? AND open_time IS NOT NULL"
+			") m ON t.ticker = m.ticker"
+		)
+		params = [window_minutes, series]
+		where_parts.append("t.created_time IS NOT NULL")
+		where_parts.append(
+			f"CAST(strftime('%s', t.created_time) AS INTEGER) {op} m.cutoff_ts"
+		)
+	elif cum_volume_range is not None:
+		# The derived trade table carries cum_before; the outer join back to
+		# markets supplies result/close_time for the aggregate columns.
+		from_clause = (
+			f"FROM ({_CAUSAL_CUM_VOLUME_SUBQUERY}) t "
+			"JOIN markets m ON t.ticker = m.ticker"
+		)
+		params = [series]
+		cum_gt, cum_le = cum_volume_range
+		if cum_gt is not None:
+			where_parts.append("t.cum_before > ?")
+			params.append(cum_gt)
+		if cum_le is not None:
+			where_parts.append("t.cum_before <= ?")
+			params.append(cum_le)
+	else:
+		from_clause = "FROM trades t JOIN markets m ON t.ticker = m.ticker"
+		where_parts.insert(0, "m.series_ticker = ?")
+		params = [series]
+
+	return from_clause, where_parts, params
+
+
+def _per_market_band_stats(
+	cursor: sqlite3.Cursor,
+	series: str,
+	bands_c: list[tuple[int, int]],
+	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+	lifecycle_segment: Optional[tuple[str, int]] = None,
+) -> list[McMarketRows]:
+	"""Per-market in-band aggregates, one row list per band (parallel to bands_c).
+
+	One (close-date day, n_trades, Σ price on 0–1) row per in-band MARKET.
+	This single scan feeds BOTH market-level gate baselines — the class (c)/(f)
+	per-market mean price (the trade-weighted band mean is a WRONG baseline for
+	market-level outcome counts whenever print count correlates with price
+	inside the band) — and the class (d) MC null, whose redraw unit is the
+	market. Filters are shared verbatim with _per_trade_band_day_stats via
+	_band_scan_clauses, so the graded population and the gate populations are
+	identical by construction. `day` rides along the GROUP BY exactly because
+	each market has one close_time. Disjoint bands (the normal case) are
+	answered in ONE scan via a CASE selector, mirroring
+	_per_trade_band_day_stats; overlapping bands fall back to one scan each.
+	"""
+	if not bands_c:
+		return []
+	from_clause, where_parts, params = _band_scan_clauses(
+		series, cum_volume_range, lifecycle_segment
+	)
+	agg_columns = (
+		"substr(m.close_time, 1, 10) AS day, "
+		"COUNT(*) AS n_trades, "
+		"SUM(t.yes_price) / 100.0 AS sum_price"
+	)
+	per_band: list[McMarketRows] = [[] for _ in bands_c]
+
+	if _bands_are_disjoint(bands_c):
+		band_case = "CASE " + " ".join(
+			f"WHEN t.yes_price >= {lo} AND t.yes_price < {hi} THEN {idx}"
+			for idx, (lo, hi) in enumerate(bands_c)
+		) + " END"
+		min_lo = min(lo for lo, _ in bands_c)
+		max_hi = max(hi for _, hi in bands_c)
+		sql = (
+			f"SELECT {band_case} AS band, {agg_columns} "
+			f"{from_clause} "
+			f"WHERE {' AND '.join(where_parts)} "
+			f"  AND t.yes_price >= {min_lo} AND t.yes_price < {max_hi} "
+			"GROUP BY band, t.ticker"
+		)
+		cursor.execute(sql, params)
+		for band, day, n_trades, sum_price in cursor.fetchall():
+			if band is None:
+				continue  # trade in a gap between non-contiguous bands
+			per_band[band].append((day, n_trades, float(sum_price)))
+	else:
+		for idx, (lo, hi) in enumerate(bands_c):
+			sql = (
+				f"SELECT {agg_columns} "
+				f"{from_clause} "
+				f"WHERE {' AND '.join(where_parts)} "
+				f"  AND t.yes_price >= {lo} AND t.yes_price < {hi} "
+				"GROUP BY t.ticker"
+			)
+			cursor.execute(sql, params)
+			per_band[idx] = [
+				(day, n_trades, float(sum_price))
+				for day, n_trades, sum_price in cursor.fetchall()
+			]
+
+	return per_band
+
+
+def _attach_per_market_stats(
+	cursor: sqlite3.Cursor,
+	series: str,
+	bucket_results: list[dict],
+	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+	lifecycle_segment: Optional[tuple[str, int]] = None,
+) -> Callable[[dict], McMarketRows]:
+	"""One batched per-market scan for every evaluated bucket.
+
+	Annotates each entry with "per_market_mean_price" (mean over in-band markets
+	of their per-market mean in-band price — the honest baseline for the class
+	(c)/(f) market-level gates) and returns the mc_rows_fn the MC gate reuses,
+	so the graded scan, the gate baselines, and the MC null all describe the
+	SAME population fetched with the SAME filters, specified once per run.
+	"""
+	per_band = _per_market_band_stats(
+		cursor, series, [_entry_band_c(b) for b in bucket_results],
+		cum_volume_range, lifecycle_segment,
+	)
+	rows_by_band: dict[tuple[float, float], McMarketRows] = {}
+	for b, rows in zip(bucket_results, per_band):
+		rows_by_band[(b["bucket_lo"], b["bucket_hi"])] = rows
+		if rows:
+			b["per_market_mean_price"] = sum(sp / n for _, n, sp in rows) / len(rows)
+	return lambda b: rows_by_band[(b["bucket_lo"], b["bucket_hi"])]
+
+
+def _entry_band_c(bucket_entry: dict) -> tuple[int, int]:
+	"""A bucket entry's integer-cent band bounds (delegates to _bands_to_cents so
+	the round()-not-int() rationale lives in exactly one place)."""
+	return _bands_to_cents([(bucket_entry["bucket_lo"], bucket_entry["bucket_hi"])])[0]
+
+
+def _row_to_band_day_stats(row: tuple) -> _BandDayStats:
+	"""Map one aggregate SQL row (agg_columns order) to _BandDayStats.
+
+	The single place that owns the positional column mapping — both scan
+	branches route through it, so a column added to agg_columns cannot be
+	unpacked differently by the two.
+	"""
+	(
+		day, n_trades, n_markets, wins, sum_price, market_wins,
+		y_n, y_w, y_sp, n_n, n_w, n_sp,
+	) = row
+	return _BandDayStats(
+		day, n_trades, n_markets, wins, float(sum_price), market_wins,
+		y_n, y_w, float(y_sp), n_n, n_w, float(n_sp),
+	)
+
+
 def _per_trade_band_day_stats(
 	cursor: sqlite3.Cursor,
 	series: str,
 	bands_c: list[tuple[int, int]],
-	volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
+	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
 	lifecycle_segment: Optional[tuple[str, int]] = None,
 ) -> list[list[_BandDayStats]]:
 	"""TRUE per-trade calibration aggregates per price band, per day.
@@ -188,75 +441,34 @@ def _per_trade_band_day_stats(
 	one scan per band, because a CASE would assign a trade to only its first
 	matching band and silently under-count the others.
 
-	`volume_range` = (gt, le) filters on COALESCE(m.volume, 0) — exclusive lower,
-	inclusive upper, either side None for unbounded. Used by the volume terciles;
-	membership semantics match the Python tercile split exactly. (A ticker IN(...)
-	list is deliberately NOT used: a tercile of a long-history series exceeds
-	SQLite's bound-variable limit and crashes.)
-
-	`lifecycle_segment` = ("early"|"late", window_minutes) restricts to trades at
-	most / strictly-more-than window minutes after the market's open_time. The
-	per-market cutoff is computed once per MARKET in a derived table (not per trade
-	row), and both strftime('%s', ...) values are CAST to INTEGER — uncast,
-	SQLite's type affinity compares the TEXT strftime result GREATER than any
-	number, which silently empties the early segment. Trades with NULL
-	created_time and markets with NULL open_time are excluded (they cannot be
-	segmented). Unknown segment names raise. Not combinable with `volume_range`.
+	`cum_volume_range` / `lifecycle_segment` filter semantics live in
+	_band_scan_clauses (shared with the MC null's per-market scan so both
+	populations filter identically). A volume tercile is a range predicate, NOT
+	a ticker IN(...) list — a tercile of a long-history series exceeds SQLite's
+	bound-variable limit and crashes.
 
 	A NULL close_time yields a single NULL day (one pooled cluster), matching
 	clustered_z's "__no_key__" pooling.
 	"""
 	if not bands_c:
 		return []
-	if volume_range is not None and lifecycle_segment is not None:
-		raise ValueError("volume_range and lifecycle_segment cannot be combined")
-
-	where_parts = ["m.result IN ('yes', 'no')", "t.count > 0"]
-	params_prefix: list[object] = []
-
-	if lifecycle_segment is not None:
-		segment, window_minutes = lifecycle_segment
-		if segment not in ("early", "late"):
-			raise ValueError(f"Unknown lifecycle segment {segment!r}: use 'early' or 'late'")
-		op = "<=" if segment == "early" else ">"
-		# The derived table keeps the cutoff expression in one place, but SQLite's
-		# query flattener inlines it (simple SELECT, no aggregate), so
-		# strftime(open_time) still evaluates per joined trade row — the flattened
-		# plan keeps the markets PK index and benchmarked fine; do not "optimize"
-		# assuming a materialized per-market hoist happened.
-		from_clause = (
-			"FROM trades t JOIN ("
-			"SELECT ticker, result, close_time, volume, "
-			"       CAST(strftime('%s', open_time) AS INTEGER) + ? * 60 AS cutoff_ts "
-			"FROM markets WHERE series_ticker = ? AND open_time IS NOT NULL"
-			") m ON t.ticker = m.ticker"
-		)
-		params_prefix = [window_minutes, series]
-		where_parts.append("t.created_time IS NOT NULL")
-		where_parts.append(
-			f"CAST(strftime('%s', t.created_time) AS INTEGER) {op} m.cutoff_ts"
-		)
-	else:
-		from_clause = "FROM trades t JOIN markets m ON t.ticker = m.ticker"
-		where_parts.insert(0, "m.series_ticker = ?")
-		params_prefix = [series]
-
-	volume_params: list[object] = []
-	if volume_range is not None:
-		vol_gt, vol_le = volume_range
-		if vol_gt is not None:
-			where_parts.append("COALESCE(m.volume, 0) > ?")
-			volume_params.append(vol_gt)
-		if vol_le is not None:
-			where_parts.append("COALESCE(m.volume, 0) <= ?")
-			volume_params.append(vol_le)
+	from_clause, where_parts, scan_params = _band_scan_clauses(
+		series, cum_volume_range, lifecycle_segment
+	)
 
 	agg_columns = (
 		"substr(m.close_time, 1, 10) AS day, "
 		"COUNT(*) AS n_trades, "
 		"COUNT(DISTINCT t.ticker) AS n_markets, "
 		"SUM(CASE WHEN m.result = 'yes' THEN 1 ELSE 0 END) AS wins, "
-		"SUM(t.yes_price) / 100.0 AS sum_price"
+		"SUM(t.yes_price) / 100.0 AS sum_price, "
+		"COUNT(DISTINCT CASE WHEN m.result = 'yes' THEN t.ticker END) AS market_wins, "
+		"SUM(CASE WHEN t.taker_side = 'yes' THEN 1 ELSE 0 END) AS yes_n, "
+		"SUM(CASE WHEN t.taker_side = 'yes' AND m.result = 'yes' THEN 1 ELSE 0 END) AS yes_wins, "
+		"SUM(CASE WHEN t.taker_side = 'yes' THEN t.yes_price ELSE 0 END) / 100.0 AS yes_sum_price, "
+		"SUM(CASE WHEN t.taker_side = 'no' THEN 1 ELSE 0 END) AS no_n, "
+		"SUM(CASE WHEN t.taker_side = 'no' AND m.result = 'yes' THEN 1 ELSE 0 END) AS no_wins, "
+		"SUM(CASE WHEN t.taker_side = 'no' THEN t.yes_price ELSE 0 END) / 100.0 AS no_sum_price"
 	)
 
 	def _run(sql: str, params: list[object]) -> sqlite3.Cursor:
@@ -281,14 +493,11 @@ def _per_trade_band_day_stats(
 			f"  AND t.yes_price >= {min_lo} AND t.yes_price < {max_hi} "
 			"GROUP BY band, day"
 		)
-		for band, day, n_trades, n_markets, wins, sum_price in _run(
-			sql, params_prefix + volume_params
-		).fetchall():
+		for row in _run(sql, scan_params).fetchall():
+			band = row[0]
 			if band is None:
 				continue  # trade in a gap between non-contiguous bands
-			per_band[band].append(
-				_BandDayStats(day, n_trades, n_markets, wins, float(sum_price))
-			)
+			per_band[band].append(_row_to_band_day_stats(row[1:]))
 	else:
 		for idx, (lo, hi) in enumerate(bands_c):
 			sql = (
@@ -299,10 +508,7 @@ def _per_trade_band_day_stats(
 				"GROUP BY day"
 			)
 			per_band[idx] = [
-				_BandDayStats(day, n_trades, n_markets, wins, float(sum_price))
-				for day, n_trades, n_markets, wins, sum_price in _run(
-					sql, params_prefix + volume_params
-				).fetchall()
+				_row_to_band_day_stats(row) for row in _run(sql, scan_params).fetchall()
 			]
 
 	return per_band
@@ -321,18 +527,19 @@ class _BandSummary(NamedTuple):
 	z: float
 	p: float
 	n_clusters: int
+	market_wins: int
 
 
 def _summarize_band(day_stats: list[_BandDayStats]) -> _BandSummary:
 	"""Reduce per-day aggregates to bucket stats.
 
-	Summing n_markets across days is exact: each market has one close_date, so it
-	appears in exactly one day row. An empty band returns an all-zero summary
-	(p = 1.0) so callers can floor-check without special-casing.
+	Summing n_markets (and market_wins) across days is exact: each market has one
+	close_date, so it appears in exactly one day row. An empty band returns an
+	all-zero summary (p = 1.0) so callers can floor-check without special-casing.
 	"""
 	n_trades = sum(s.n_trades for s in day_stats)
 	if n_trades == 0:
-		return _BandSummary(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0)
+		return _BandSummary(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0)
 	n_markets = sum(s.n_markets for s in day_stats)
 	wins = sum(s.wins for s in day_stats)
 	sum_price = sum(s.sum_price for s in day_stats)
@@ -345,7 +552,91 @@ def _summarize_band(day_stats: list[_BandDayStats]) -> _BandSummary:
 		n_trades, n_markets, wins, sum_price,
 		mean_price, win_rate, win_rate - mean_price,
 		float(z), float(p), n_clusters,
+		sum(s.market_wins for s in day_stats),
 	)
+
+
+class _SideSummary(NamedTuple):
+	"""Per-taker-side reduction of a band's day aggregates (artifact class (b))."""
+
+	n_trades: int
+	wins: int
+	mean_price: float
+	win_rate: float
+	edge: float
+	z: float
+	p_t: float
+	n_clusters: int
+
+
+def _summarize_side(day_stats: list[_BandDayStats], side: str) -> _SideSummary:
+	"""Day-clustered stats over one taker side's prints in a band.
+
+	Days with no prints on the side contribute no cluster (clustered_z_from_stats
+	drops n == 0 rows); the side's effective k can therefore be smaller than the
+	band's. An empty side returns an all-zero summary with p_t = 1.0.
+	"""
+	if side == "yes":
+		rows = [(s.yes_n, s.yes_wins, s.yes_sum_price) for s in day_stats if s.yes_n > 0]
+	else:
+		rows = [(s.no_n, s.no_wins, s.no_sum_price) for s in day_stats if s.no_n > 0]
+	n = sum(r[0] for r in rows)
+	if n == 0:
+		return _SideSummary(0, 0, 0.0, 0.0, 0.0, 0.0, 1.0, 0)
+	wins = sum(r[1] for r in rows)
+	sum_price = sum(r[2] for r in rows)
+	z, _p, k = clustered_z_from_stats(rows)
+	return _SideSummary(
+		n, wins, sum_price / n, wins / n, wins / n - sum_price / n,
+		float(z), t_pvalue(z, k - 1), k,
+	)
+
+
+def _taker_side_entry_fields(day_stats: list[_BandDayStats], pooled_edge: float) -> dict:
+	"""Bucket-entry fields for the taker-side composition gate (class (b)).
+
+	The exploit side is the side of the book a TAKER must hit to capture the
+	pooled edge: a positive edge (band underpriced) is captured by buying YES —
+	the taker='yes' prints show what that realizes; a negative edge (overpriced)
+	is captured by buying NO — the taker='no' prints. _bucket_bonferroni_verdict
+	requires the exploit side to independently clear the BASE alpha with a
+	matching sign before a bucket can drive EDGE_EXISTS.
+	"""
+	yes_s = _summarize_side(day_stats, "yes")
+	no_s = _summarize_side(day_stats, "no")
+	if pooled_edge > 0:
+		exploit_side: Optional[str] = "yes"
+	elif pooled_edge < 0:
+		exploit_side = "no"
+	else:
+		exploit_side = None
+	exploit = yes_s if exploit_side == "yes" else no_s if exploit_side == "no" else None
+
+	def _block(s: _SideSummary) -> dict:
+		return {
+			"n_trades": s.n_trades, "n_clusters": s.n_clusters,
+			"mean_price": s.mean_price, "win_rate": s.win_rate,
+			"edge": s.edge, "z": s.z, "p_t": s.p_t,
+		}
+
+	# Prints whose taker_side is neither 'yes' nor 'no' (adapter default ''
+	# when the API omits the field; 'unknown' on other venues) count in the
+	# pooled totals but in neither side split. Coverage lets the verdict
+	# distinguish "no side data captured" from a diagnosed one-sided artifact.
+	total_n = sum(s.n_trades for s in day_stats)
+	sided_n = yes_s.n_trades + no_s.n_trades
+
+	return {
+		"taker_yes": _block(yes_s),
+		"taker_no": _block(no_s),
+		"taker_side_coverage": sided_n / total_n if total_n else 0.0,
+		"exploit_side": exploit_side,
+		"exploit_n_trades": exploit.n_trades if exploit else 0,
+		"exploit_edge": exploit.edge if exploit else 0.0,
+		"exploit_z": exploit.z if exploit else 0.0,
+		"exploit_p_t": exploit.p_t if exploit else 1.0,
+		"exploit_n_clusters": exploit.n_clusters if exploit else 0,
+	}
 
 
 def _meets_min_n(summary: _BandSummary, min_n: int) -> bool:
@@ -385,15 +676,33 @@ def _bonferroni_z_threshold(z_threshold: float, k: int) -> float:
 	Converts the per-test z-threshold to its two-sided alpha, divides alpha by K,
 	and returns the z-threshold for that corrected alpha. Conservative and simple
 	(no assumption about bucket independence beyond Bonferroni's worst case).
+	Reported in the detail for reference; the VERDICT compares the bucket's
+	t(k−1) p-value against _bonferroni_alpha (see _bucket_bonferroni_verdict).
+	The alpha formula lives ONLY in _bonferroni_alpha so the reported threshold
+	and the deciding alpha cannot drift apart.
 	"""
 	from scipy.stats import norm
 
 	if k <= 1:
 		return z_threshold
-	alpha = 2.0 * (1.0 - norm.cdf(z_threshold))
-	if alpha <= 0.0:
+	alpha_corr = _bonferroni_alpha(z_threshold, k)
+	if alpha_corr <= 0.0:
 		return z_threshold
-	return float(norm.ppf(1.0 - (alpha / k) / 2.0))
+	return float(norm.ppf(1.0 - alpha_corr / 2.0))
+
+
+def _bonferroni_alpha(z_threshold: float, k: int) -> float:
+	"""The Bonferroni-corrected two-sided alpha for K evaluated buckets.
+
+	The configured z-threshold defines the per-test alpha on the normal scale
+	(the scale thresholds have always been configured in); the verdict then
+	compares each bucket's t(k−1) p-value against alpha/K. An absurdly high
+	threshold yields alpha 0.0 and rejects everything — fail-closed.
+	"""
+	from scipy.stats import norm
+
+	alpha = float(2.0 * (1.0 - norm.cdf(z_threshold)))
+	return alpha / k if k > 1 else alpha
 
 
 def _bucket_bonferroni_verdict(
@@ -401,18 +710,66 @@ def _bucket_bonferroni_verdict(
 	z_threshold: float,
 	min_fee_adj: float,
 	any_bucket_met_min_n: bool,
+	mc_rows_fn: Optional[Callable[[dict], McMarketRows]] = None,
 ) -> tuple[str, Optional[dict], float, float]:
 	"""Un-pooled per-bucket verdict with Bonferroni multiple-testing correction.
 
-	Each entry in `bucket_results` must carry "z" (clustered z) and "fee_adj"
-	(fee_adjusted_edge_curve). K = number of evaluated buckets (those that met
-	min_n). A bucket *qualifies* iff |z| >= z_corr AND fee_adj > max(min_fee_adj,
-	0.0), where z_corr is the Bonferroni-corrected threshold for K buckets. The floor
-	is clamped at 0 so EDGE_EXISTS always requires a genuinely net-positive fee-
-	adjusted edge even if a config passes a negative `min_fee_adjusted_edge`. Verdict:
+	Each entry in `bucket_results` must carry "z" (day-clustered z), "n_clusters"
+	(independent days behind it) and "fee_adj" (fee_adjusted_edge_curve). K =
+	number of evaluated buckets (those that met min_n).
+
+	Significance is graded on the STUDENT-T reference (artifact class (e)): the
+	clustered statistic is a mean/SE over k day excesses, t-distributed with k−1
+	df under the null, so each bucket's two-sided t(k−1) p-value must clear the
+	Bonferroni alpha (per-test alpha of the configured z-threshold, divided by
+	K). The normal reference overstates small-k significance — real refutations
+	killed findings that cleared it by hairs and failed under t. Each evaluated
+	bucket is annotated in place with "p_t" and "significant" for the detail.
+
+	TAKER-SIDE GATE (artifact class (b)): entries carrying "exploit_side" fields
+	(from _taker_side_entry_fields) must show the taker-replicable side clearing
+	the BASE alpha (uncorrected — a corroboration check on a lower-powered
+	subset, not the primary inference) with an edge whose sign matches the pooled
+	edge. A significant bucket failing the gate is bid-ask bounce / adverse
+	selection, not capturable mispricing: it is flagged "taker_side_fragile" and
+	downgraded to EDGE_NOT_TRADEABLE. Entries without the fields (direct unit
+	tests) skip the gate.
+
+	DEGENERATE-OUTCOME GATE (artifact class (c)): entries carrying "market_wins"
+	(with "n_markets"/"mean_price") must have market-level expected wins AND
+	losses of at least MIN_EXPECTED_MARKET_OUTCOMES — below that the clustered z
+	can be pure price dispersion (wins == 0 or == n in every cluster). A bucket
+	under the floor survives only if the exact binomial on its market-level
+	outcome count independently clears the Bonferroni alpha. Failing buckets are
+	NOT honestly significant → they fall through to NO_EDGE, not
+	EDGE_NOT_TRADEABLE.
+
+	MC NULL GATE (artifact class (d)): when `mc_rows_fn` is supplied, every
+	bucket that survives all other gates is re-tested against the Monte-Carlo
+	null (market outcomes redrawn ~ Bernoulli(in-band traded price), day
+	clusters kept — mc_null_pvalue). EDGE_EXISTS requires mc_p <= the Bonferroni
+	alpha; a failing bucket's nominal significance was rare-event inflation →
+	NO_EDGE. Evaluated lazily (qualifiers only) because each run is
+	MC_NULL_SIMS simulations over the bucket's per-market rows.
+
+	PER-MARKET SENSITIVITY GATE (artifact class (f)): entries with "market_wins"
+	are annotated with "per_market_edge" (one-obs-per-market view) and
+	"per_market_sign_flip". A flip — the market-level calibration going the
+	OTHER way (or exactly zero) against the per-trade edge — is the print-count
+	endogeneity signature: many-print markets dominate the per-trade stat and
+	print counts are outcome-endogenous in play, so the per-trade direction is
+	not what a market-level position realizes. Sign-flipped buckets cannot drive
+	EDGE_EXISTS → EDGE_NOT_TRADEABLE. (Flag-only proved insufficient: a local
+	real-data control re-graded a hand-killed series EDGE_EXISTS through a
+	sign-flipped bucket that passed every other gate.)
+
+	A bucket *qualifies* iff it is significant AND fee_adj > max(min_fee_adj,
+	0.0) AND its taker and degenerate-outcome gates pass. The floor is clamped
+	at 0 so EDGE_EXISTS always requires a genuinely net-positive fee-adjusted
+	edge even if a config passes a negative `min_fee_adjusted_edge`. Verdict:
 	  - EDGE_EXISTS        if ≥1 bucket qualifies;
-	  - EDGE_NOT_TRADEABLE if ≥1 significant (|z|>=z_corr) bucket is fee-walled
-	                       (fee_adj <= 0);
+	  - EDGE_NOT_TRADEABLE if ≥1 significant, non-degenerate bucket is fee-walled
+	                       (fee_adj <= 0) or taker-side fragile;
 	  - NO_EDGE            if ≥1 bucket met min_n but none qualifies;
 	  - INSUFFICIENT_DATA  if no bucket met min_n.
 
@@ -424,20 +781,105 @@ def _bucket_bonferroni_verdict(
 	if not any_bucket_met_min_n or not bucket_results:
 		return (INSUFFICIENT_DATA, None, 0.0, 0.0)
 
-	k = len(bucket_results)
-	z_corr = _bonferroni_z_threshold(z_threshold, k)
+	alpha_corr = _bonferroni_alpha(z_threshold, len(bucket_results))
+	alpha_base = _bonferroni_alpha(z_threshold, 1)
+
+	def _taker_gate_ok(b: dict) -> bool:
+		if "exploit_side" not in b:
+			return True  # side data not supplied — gate not evaluated
+		if b["exploit_side"] is None or b["exploit_n_trades"] == 0:
+			return False  # the signal lives entirely on the non-replicable side
+		if b["exploit_edge"] * b["edge"] <= 0:
+			return False  # the replicable side realizes the OPPOSITE of the claim
+		return b["exploit_p_t"] <= alpha_base
+
+	def _degenerate_gate_ok(b: dict) -> bool:
+		if "market_wins" not in b:
+			return True  # outcome-count data not supplied — gate not evaluated
+		# Market-level gates need the PER-MARKET baseline (mean of per-market
+		# in-band mean prices). The trade-weighted band mean is wrong whenever
+		# print count correlates with price inside the band; it remains only a
+		# fallback for direct unit tests that don't supply the batched scan.
+		base = b.get("per_market_mean_price", b["mean_price"])
+		expected_wins = b["n_markets"] * base
+		expected_losses = b["n_markets"] * (1.0 - base)
+		b["expected_market_wins"] = expected_wins
+		b["expected_market_losses"] = expected_losses
+		if (
+			expected_wins >= MIN_EXPECTED_MARKET_OUTCOMES
+			and expected_losses >= MIN_EXPECTED_MARKET_OUTCOMES
+		):
+			return True
+		b["exact_binom_p"] = exact_binom_pvalue(
+			b["market_wins"], b["n_markets"], base
+		)
+		# bool(): keep detail flags JSON-serializable (never numpy bools).
+		return bool(b["exact_binom_p"] <= alpha_corr)
 
 	fee_floor = max(min_fee_adj, 0.0)
-	qualifying = [b for b in bucket_results if abs(b["z"]) >= z_corr and b["fee_adj"] > fee_floor]
-	significant_fee_walled = [
-		b for b in bucket_results if abs(b["z"]) >= z_corr and b["fee_adj"] <= 0
+	for b in bucket_results:
+		b["p_t"] = t_pvalue(b["z"], b["n_clusters"] - 1)
+		b["significant"] = b["p_t"] <= alpha_corr
+		b["taker_gate_ok"] = _taker_gate_ok(b)
+		if "exploit_side" in b:
+			# "fragile" asserts a MEASURED one-sided composition; a capture with
+			# no side metadata at all is "unavailable" instead (the gate still
+			# refuses EDGE_EXISTS — replicability is unverifiable either way).
+			no_side_data = b.get("taker_side_coverage", 1.0) == 0.0
+			b["taker_side_unavailable"] = bool(no_side_data)
+			b["taker_side_fragile"] = bool(
+				b["significant"] and not b["taker_gate_ok"] and not no_side_data
+			)
+		b["degenerate_gate_ok"] = _degenerate_gate_ok(b)
+		if "market_wins" in b:
+			# Class (f) sensitivity: the one-obs-per-market edge against the
+			# PER-MARKET mean price (trade-weighted fallback for unit tests).
+			base = b.get("per_market_mean_price", b["mean_price"])
+			per_market_edge = b["market_wins"] / b["n_markets"] - base
+			b["per_market_edge"] = per_market_edge
+			b["per_market_sign_flip"] = bool(
+				b["edge"] != 0 and per_market_edge * b["edge"] <= 0
+			)
+
+	qualifying = [
+		b for b in bucket_results
+		if b["significant"] and b["fee_adj"] > fee_floor
+		and b["taker_gate_ok"] and b["degenerate_gate_ok"]
+		and not b.get("per_market_sign_flip", False)
 	]
+	significant_not_tradeable = [
+		b for b in bucket_results
+		if b["significant"] and b["degenerate_gate_ok"]
+		and (
+			b["fee_adj"] <= 0
+			or not b["taker_gate_ok"]
+			or b.get("per_market_sign_flip", False)
+		)
+	]
+
+	if mc_rows_fn is not None:
+		# Scale sims so the MC p floor (1/(n_sims+1)) sits an order of magnitude
+		# below alpha_corr — a fixed count makes the gate unpassable for tighter
+		# alphas (see MC_NULL_SIMS_MAX comment).
+		mc_sims = MC_NULL_SIMS
+		if alpha_corr > 0:
+			mc_sims = min(
+				MC_NULL_SIMS_MAX, max(MC_NULL_SIMS, math.ceil(10.0 / alpha_corr))
+			)
+		survivors = []
+		for b in qualifying:
+			b["mc_p"] = mc_null_pvalue(mc_rows_fn(b), b["z"], mc_sims)
+			b["mc_n_sims"] = mc_sims
+			b["mc_gate_ok"] = b["mc_p"] <= alpha_corr
+			if b["mc_gate_ok"]:
+				survivors.append(b)
+		qualifying = survivors
 
 	if qualifying:
 		driver = max(qualifying, key=lambda b: abs(b["fee_adj"]))
 		verdict = EDGE_EXISTS
-	elif significant_fee_walled:
-		driver = max(significant_fee_walled, key=lambda b: abs(b["z"]))
+	elif significant_not_tradeable:
+		driver = max(significant_not_tradeable, key=lambda b: abs(b["z"]))
 		verdict = EDGE_NOT_TRADEABLE
 	else:
 		driver = max(bucket_results, key=lambda b: abs(b["z"]))
@@ -565,6 +1007,7 @@ class PriceBucketBiasTest(StatisticalTest):
 			bucket_entry = {
 				"bucket_lo": lo, "bucket_hi": hi,
 				"n_trades": s.n_trades, "n_markets": s.n_markets, "n_clusters": s.n_clusters,
+				"market_wins": s.market_wins,
 				"mean_price": s.mean_price,
 				"win_rate": s.win_rate,
 				"edge": s.edge,
@@ -574,6 +1017,7 @@ class PriceBucketBiasTest(StatisticalTest):
 				"p_value_naive": float(p_naive),
 				"fee_adj": fee_adj,
 				"ci_lower_naive": ci_lo, "ci_upper_naive": ci_hi,
+				**_taker_side_entry_fields(day_stats, s.edge),
 			}
 
 			# FIX A1 min-cluster floor: a bucket is eligible for the verdict only if
@@ -591,8 +1035,10 @@ class PriceBucketBiasTest(StatisticalTest):
 			total_wins += s.wins
 			total_sum_price += s.sum_price
 
+		mc_rows_fn = _attach_per_market_stats(cursor, series, bucket_results)
 		verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
 			bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+			mc_rows_fn=mc_rows_fn,
 		)
 
 		if verdict == INSUFFICIENT_DATA:
@@ -619,8 +1065,10 @@ class PriceBucketBiasTest(StatisticalTest):
 				"overall_win_rate": total_wins / total_n,
 				"overall_edge": total_wins / total_n - total_implied,
 				"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+				"alpha_bonferroni": _bonferroni_alpha(z_threshold, len(bucket_results)),
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
+				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -726,6 +1174,9 @@ class LifecycleBiasTest(StatisticalTest):
 				"fee_adj": fee_adj,
 				"n_clusters": e.n_clusters,
 				"edge": e.edge,
+				"n_markets": e.n_markets,
+				"mean_price": e.mean_price,
+				"market_wins": e.market_wins,
 				# Early segment (drives the verdict):
 				"early_n_trades": e.n_trades, "early_n_markets": e.n_markets,
 				"early_implied": e.mean_price, "early_win_rate": e.win_rate,
@@ -741,6 +1192,8 @@ class LifecycleBiasTest(StatisticalTest):
 				"edge_differential": e.edge - late.edge,
 				"differential_z": float(d_z), "differential_p": float(d_p),
 				"differential_n_clusters": d_k,
+				# Taker-side gate on the verdict-driving (early) segment.
+				**_taker_side_entry_fields(early_stats, e.edge),
 			}
 
 			# Min-cluster floor on the verdict-driving (early) segment.
@@ -754,8 +1207,13 @@ class LifecycleBiasTest(StatisticalTest):
 			total_early_wins += e.wins
 			total_early_sum_price += e.sum_price
 
+		mc_rows_fn = _attach_per_market_stats(
+			cursor, series, bucket_results,
+			lifecycle_segment=("early", lifecycle_window_minutes),
+		)
 		verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
 			bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+			mc_rows_fn=mc_rows_fn,
 		)
 
 		if verdict == INSUFFICIENT_DATA:
@@ -782,8 +1240,10 @@ class LifecycleBiasTest(StatisticalTest):
 				"overall_early_edge": total_early_wins / total_early_n - total_implied,
 				"lifecycle_window_minutes": lifecycle_window_minutes,
 				"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+				"alpha_bonferroni": _bonferroni_alpha(z_threshold, len(bucket_results)),
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
+				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -791,10 +1251,22 @@ class LifecycleBiasTest(StatisticalTest):
 
 
 class VolumeMispricingTest(StatisticalTest):
-	"""Test whether thin (low-volume) markets have wider mispricing than liquid ones.
+	"""Test whether prints placed in THIN-SO-FAR markets are wider mispriced.
 
-	Splits settled markets into volume terciles and checks whether the low-volume
-	tercile shows significantly more mispricing than the medium/high terciles.
+	Splits prints into terciles of CAUSAL cumulative volume — the contracts that
+	had traded in the market BEFORE each print — and checks whether the
+	thin-so-far tercile shows significantly more mispricing than the deeper
+	ones. Tercile membership from final settled m.volume is artifact class (a):
+	final volume is outcome-endogenous on in-play venues (winners and losers
+	accumulate different flow BY settlement), so conditioning on it selects on
+	outcome — proven by real adversarial refutations where rebuilding the
+	terciles causally collapsed verified kills' z-scores to noise. Capture is
+	complete (per-market Σt.count matches m.volume), so the running per-print
+	sum is exact, not a proxy.
+
+	Cost note: the tercile bounds (count + two ORDER BY/OFFSET quantiles) and
+	the three tercile scans each evaluate the window subquery — six windowed
+	scans per run. Correctness over speed; the scans are series-filtered.
 	"""
 	name: ClassVar[str] = "volume_mispricing"
 
@@ -815,7 +1287,8 @@ class VolumeMispricingTest(StatisticalTest):
 		cursor = conn.cursor()
 
 		# 1. Confirm the series has decided (yes/no) markets at all (graceful exit),
-		#    then fetch their volumes for the tercile bounds.
+		#    then compute the CAUSAL cumulative-volume tercile bounds over every
+		#    valid print of those markets (same population the scans filter).
 		n_decided_markets = _count_decided_markets(cursor, series)
 		if n_decided_markets == 0:
 			return TestResult(
@@ -823,28 +1296,39 @@ class VolumeMispricingTest(StatisticalTest):
 				detail={"reason": "no_settled_markets", "n": 0},
 			)
 		cursor.execute(
-			"SELECT COALESCE(volume, 0) FROM markets "
-			"WHERE series_ticker = ? AND result IN ('yes', 'no')",
-			(series,),
+			f"SELECT COUNT(*) FROM ({_CAUSAL_CUM_VOLUME_SUBQUERY})", (series,)
 		)
-		sorted_volumes = sorted(row[0] for row in cursor.fetchall())
-		n_total = len(sorted_volumes)
-		t1 = sorted_volumes[n_total // 3]      # upper bound of low tercile
-		t2 = sorted_volumes[2 * n_total // 3]  # upper bound of medium tercile
+		n_total = int(cursor.fetchone()[0])
+		if n_total == 0:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={"reason": "no_valid_prints", "n": 0},
+			)
+
+		def _cum_quantile(offset: int) -> float:
+			cursor.execute(
+				f"SELECT cum_before FROM ({_CAUSAL_CUM_VOLUME_SUBQUERY}) "
+				"ORDER BY cum_before LIMIT 1 OFFSET ?",
+				(series, offset),
+			)
+			return float(cursor.fetchone()[0])
+
+		t1 = _cum_quantile(n_total // 3)      # upper bound of thin-so-far tercile
+		t2 = _cum_quantile(2 * n_total // 3)  # upper bound of medium tercile
 
 		bucket_tuples = _normalize_buckets(buckets)
 		bands_c = _bands_to_cents(bucket_tuples)
 
 		# 2-3. One scan per tercile across ALL bands. Tercile membership is a
-		# volume-range predicate in SQL (COALESCE(volume,0): low <= t1 < med <= t2
+		# range predicate on the print's causal cum_before (low <= t1 < med <= t2
 		# < high) — NOT a ticker IN(...) list, which would exceed SQLite's
 		# bound-variable limit on long-history series and crash.
 		low_bands = _per_trade_band_day_stats(
-			cursor, series, bands_c, volume_range=(None, t1))
+			cursor, series, bands_c, cum_volume_range=(None, t1))
 		med_bands = _per_trade_band_day_stats(
-			cursor, series, bands_c, volume_range=(t1, t2))
+			cursor, series, bands_c, cum_volume_range=(t1, t2))
 		high_bands = _per_trade_band_day_stats(
-			cursor, series, bands_c, volume_range=(t2, None))
+			cursor, series, bands_c, cum_volume_range=(t2, None))
 
 		def _tercile_detail(summary: _BandSummary) -> dict:
 			if summary.n_trades == 0:
@@ -889,6 +1373,7 @@ class VolumeMispricingTest(StatisticalTest):
 				"n_trades": lv.n_trades,
 				"n_markets": lv.n_markets,
 				"n_clusters": lv.n_clusters,
+				"market_wins": lv.market_wins,
 				"mean_price": lv.mean_price,
 				"win_rate": lv.win_rate,
 				"edge": lv.edge,
@@ -915,6 +1400,8 @@ class VolumeMispricingTest(StatisticalTest):
 				"edge_differential_low_vs_high": (
 					lv.edge - hi_summary.edge if hi_summary.n_trades else None
 				),
+				# Taker-side gate on the verdict-driving (low) tercile.
+				**_taker_side_entry_fields(low_bands[i], lv.edge),
 			}
 
 			# FIX A1 min-cluster floor: only buckets clearing min_clusters independent
@@ -929,8 +1416,12 @@ class VolumeMispricingTest(StatisticalTest):
 			total_wins += lv.wins
 			total_sum_price += lv.sum_price
 
+		mc_rows_fn = _attach_per_market_stats(
+			cursor, series, bucket_results, cum_volume_range=(None, t1),
+		)
 		verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
 			bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+			mc_rows_fn=mc_rows_fn,
 		)
 
 		if verdict == INSUFFICIENT_DATA:
@@ -938,6 +1429,7 @@ class VolumeMispricingTest(StatisticalTest):
 				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
 				detail={
 					"reason": "no_bucket_met_min_n", "buckets": bucket_results,
+					"volume_basis": "at_trade_cumulative",
 					"tercile_bounds": (t1, t2),
 					"cluster_floor_skipped": cluster_floor_skipped,
 				},
@@ -958,8 +1450,11 @@ class VolumeMispricingTest(StatisticalTest):
 				"overall_win_rate": total_wins / total_n,
 				"overall_edge": total_wins / total_n - total_implied,
 				"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+				"alpha_bonferroni": _bonferroni_alpha(z_threshold, len(bucket_results)),
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
+				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"volume_basis": "at_trade_cumulative",
 				"tercile_bounds": (t1, t2),
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
