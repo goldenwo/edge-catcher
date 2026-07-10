@@ -79,3 +79,52 @@ class TestHypothesisKillRegistry:
                 verdict="NO_EDGE", params={}, z_stat=1.0)
         assert tracker.is_hypothesis_killed("price_bucket_bias", "SER_A", "k.db") is True
         assert tracker.is_hypothesis_killed("price_bucket_bias", "SER_B", "k.db") is False
+
+
+class TestFlaggedDowngradesNeverPermanent:
+    """EDGE_NOT_TRADEABLE now includes gate DOWNGRADES (taker-side fragile /
+    unavailable, per-market sign flip) — signals that exist but are not
+    TAKER-replicable or not verifiable, which can still be maker-viable leads.
+    Those must never become permanent kills (the permanent registry feeds the
+    ideator's do-not-repropose blacklist); only genuinely fee-walled
+    EDGE_NOT_TRADEABLE keeps the permanent-at-5 rule.
+    """
+
+    def test_flagged_not_tradeable_never_goes_permanent(self, tracker):
+        for _ in range(7):
+            tracker.record_hypothesis_kill(
+                "price_bucket_bias", "SER_A", "k.db",
+                verdict="EDGE_NOT_TRADEABLE", params={}, z_stat=-5.9,
+                downgrade_flags=["taker_side_fragile"],
+            )
+        kills = tracker.list_hypothesis_kills()
+        assert kills[0]["kill_count"] == 7
+        assert kills[0]["permanent"] == 0
+        # The registry records WHY, so maker-candidate leads stay queryable.
+        assert "taker_side_fragile" in kills[0]["reason_summary"]
+        assert tracker.is_hypothesis_killed("price_bucket_bias", "SER_A", "k.db") is False
+
+    def test_unflagged_not_tradeable_still_goes_permanent(self, tracker):
+        for _ in range(5):
+            tracker.record_hypothesis_kill(
+                "momentum", "SER_B", "alt.db",
+                verdict="EDGE_NOT_TRADEABLE", params={}, z_stat=3.0,
+                downgrade_flags=[],
+            )
+        kills = tracker.list_hypothesis_kills()
+        assert kills[0]["kill_count"] == 5
+        assert kills[0]["permanent"] == 1
+
+    def test_loop_extracts_downgrade_flags_from_driver(self):
+        from edge_catcher.research.loop import _downgrade_flags
+
+        flagged = {"driver_bucket": {
+            "taker_side_fragile": True, "per_market_sign_flip": True,
+            "taker_side_unavailable": False, "z": -5.9,
+        }}
+        assert _downgrade_flags(flagged) == [
+            "taker_side_fragile", "per_market_sign_flip",
+        ]
+        assert _downgrade_flags({"driver_bucket": {"z": 2.0}}) == []
+        assert _downgrade_flags({}) == []
+        assert _downgrade_flags({"driver_bucket": None}) == []

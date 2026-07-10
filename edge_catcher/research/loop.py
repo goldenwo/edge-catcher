@@ -25,6 +25,21 @@ from .tracker import Tracker
 
 logger = logging.getLogger(__name__)
 
+# Driver-bucket flags marking a verdict DOWNGRADE rather than a dead edge: the
+# signal exists but is not taker-replicable (or replicability is unverifiable).
+# Passed to the kill registry so such leads never become permanent kills.
+_DOWNGRADE_FLAG_KEYS = (
+	"taker_side_fragile",
+	"taker_side_unavailable",
+	"per_market_sign_flip",
+)
+
+
+def _downgrade_flags(detail: dict) -> list[str]:
+	"""The downgrade flags set on a test result's verdict-driving bucket."""
+	driver = detail.get("driver_bucket") or {}
+	return [flag for flag in _DOWNGRADE_FLAG_KEYS if driver.get(flag)]
+
 
 class LoopOrchestrator:
 	def __init__(
@@ -445,13 +460,16 @@ class LoopOrchestrator:
 				rationale=config.get("rationale", ""),
 			)
 
-			# Update kill registry for non-edge results
+			# Update kill registry for non-edge results. Gate downgrades
+			# (taker-side fragile/unavailable, per-market sign flip) are passed
+			# through so maker-viable or unverifiable leads never go permanent.
 			if test_result.verdict != EDGE_EXISTS:
 				self.tracker.record_hypothesis_kill(
 					config["test_type"], config["series"], config["db"],
 					verdict=test_result.verdict,
 					params=config["params"],
 					z_stat=test_result.z_stat,
+					downgrade_flags=_downgrade_flags(test_result.detail),
 				)
 
 			if test_result.verdict == EDGE_EXISTS:
