@@ -705,6 +705,7 @@ class Tracker:
         verdict: str,
         params: dict,
         z_stat: float,
+        downgrade_flags: Optional[list[str]] = None,
     ) -> None:
         """Record a hypothesis test failure toward the kill counter.
 
@@ -712,12 +713,22 @@ class Tracker:
         - INSUFFICIENT_DATA -> skip (don't count)
         - NO_EDGE -> increment kill_count; permanent at 3
         - EDGE_NOT_TRADEABLE -> increment kill_count; permanent at 5
+        - EDGE_NOT_TRADEABLE with `downgrade_flags` (taker-side fragile /
+          unavailable, per-market sign flip) -> increment kill_count but NEVER
+          permanent: the signal exists and may be maker-viable or simply
+          unverifiable, and the permanent registry feeds the ideator's
+          do-not-repropose blacklist. The flags are recorded in reason_summary
+          ("EDGE_NOT_TRADEABLE[flag1,flag2]") so those leads stay queryable.
+          Permanence is evaluated per call: a later UNflagged (fee-walled)
+          recording of the same pattern applies the normal threshold.
         """
         if verdict == "INSUFFICIENT_DATA":
             return
 
         pattern_key = f"{test_type}:{series}:{db}"
         threshold = 3 if verdict == "NO_EDGE" else 5
+        flagged = bool(downgrade_flags) and verdict == "EDGE_NOT_TRADEABLE"
+        reason = f"{verdict}[{','.join(downgrade_flags or [])}]" if flagged else verdict
 
         conn = self._connect()
         try:
@@ -738,8 +749,8 @@ class Tracker:
                         new_count,
                         json.dumps(params),
                         z_stat,
-                        1 if new_count >= threshold else 0,
-                        verdict,
+                        1 if new_count >= threshold and not flagged else 0,
+                        reason,
                     ),
                 )
             else:
@@ -753,8 +764,8 @@ class Tracker:
                         new_count,
                         json.dumps(params),
                         z_stat,
-                        1 if new_count >= threshold else 0,
-                        verdict,
+                        1 if new_count >= threshold and not flagged else 0,
+                        reason,
                         pattern_key,
                     ),
                 )
