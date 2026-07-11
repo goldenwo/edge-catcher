@@ -1182,8 +1182,12 @@ class TestPerMarketSensitivity:
 		markets, trades = [], []
 		for d in range(40):
 			date = f"2026-04-{(d % 28) + 1:02d}"
+			# Fraction-YES varies day to day (45%/35%, mean 40%) so the per-market
+			# z is significant via FINITE variance — a genuine power test, not a
+			# degenerate all-days-identical z.
+			yes_n = 45 if d % 2 == 0 else 35
 			for k in range(100):
-				won = k < 40  # 40% settle YES vs 27¢ implied → genuine +0.13 edge
+				won = k < yes_n  # ~40% settle YES vs 27¢ implied → genuine +0.13 edge
 				ticker = f"MG-{d}-{k}"
 				markets.append({
 					"ticker": ticker, "series_ticker": "SER_MG",
