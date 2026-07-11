@@ -1112,6 +1112,115 @@ class TestPerMarketSensitivity:
 		# The flag is surfaced at the top level for downstream verifiers.
 		assert result.detail["per_market_sign_flip"] is True
 
+	def test_per_market_insignificant_same_sign_is_not_edge(self, tmp_path):
+		"""Class (f) magnitude collapse (KXNBAMENTION signature, k-independent):
+		the per-trade edge is strongly significant, but the one-obs-per-market
+		day-clustered calibration is INSIGNIFICANT and only slightly negative —
+		same sign as the per-trade edge, so the sign-flip check does NOT fire.
+		The whole per-trade edge is print-count endogeneity: NO-settlers linger
+		in the band (30 prints) while YES-settlers exit early (2 prints), so the
+		trade-weighted stat is dominated by losers even though markets settle at
+		their in-band price. A position realizes the per-MARKET edge (~0), not the
+		per-trade edge, so this must not grade EDGE_EXISTS. The sign-only gate let
+		it through (real-data control KXNBAMENTION re-crossed to EDGE_EXISTS once
+		the small-k penalty relaxed at k=118); the per-market day-clustered
+		significance gate refuses it.
+		"""
+		markets, trades = [], []
+		for d in range(40):
+			date = f"2026-03-{(d % 28) + 1:02d}"
+			# Per-day fraction-YES swings wide around 0.59 so the per-market day
+			# excess has high variance (insignificant clustered z) while its mean
+			# (-0.01) stays same-sign as the per-trade edge (sign-flip won't fire).
+			yes_n = 69 if d % 2 == 0 else 49
+			for k in range(100):
+				won = k < yes_n
+				ticker = f"MF-{d}-{k}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_MC",
+					"result": "yes" if won else "no",
+					"last_price": 60, "volume": 10,
+					"close_time": f"{date}T12:00:00Z", "open_time": f"{date}T00:00:00Z",
+				})
+				# YES-settlers exit the band early (2 prints); NO-settlers linger (30).
+				for j in range(2 if won else 30):
+					trades.append({
+						"trade_id": f"{ticker}-{j}", "ticker": ticker,
+						"yes_price": 60, "no_price": 40, "count": 1,
+						"taker_side": "yes" if j % 2 == 0 else "no",
+						"created_time": f"{date}T06:{j % 60:02d}:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_MC",
+			params={"buckets": [[0.50, 0.70]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		# Per-trade view: strongly significant fabricated edge.
+		assert b["z"] < -5.0 and b["fee_adj"] > 0.0
+		# Same-sign near-zero per-market point estimate: sign-flip cannot catch it.
+		assert b["per_market_sign_flip"] is False
+		# Per-market day-clustered calibration is insignificant → the edge is not
+		# realizable at the market level → must NOT grade EDGE_EXISTS.
+		assert abs(b["per_market_z"]) < 3.0
+		assert result.verdict == EDGE_NOT_TRADEABLE
+		# The downgrade must carry a positive flag so the kill registry keeps the
+		# lead proposable (never a permanent kill) — same #90 protection as a
+		# sign flip, which this failure mode is a sibling of.
+		assert b["per_market_unconfirmed"] is True
+		assert result.detail["driver_bucket"].get("per_market_unconfirmed") is True
+
+	def test_genuine_edge_under_lumpy_prints_still_confirms(self, tmp_path):
+		"""Over-kill boundary (the positive control for the confirmation gate):
+		a GENUINE market-level edge must survive even when print counts are
+		heterogeneous — the same lumpy-print regime the negative test fabricates
+		in. Here in-band markets settle YES at 0.40 vs a 0.27 implied (a real
+		+0.13 per-market edge), and print counts vary 2↔20 INDEPENDENTLY of
+		outcome, so the per-market day-clustered z is significant and the gate
+		must CONFIRM → EDGE_EXISTS. Guards against a mis-specification that
+		under-powers the per-market z on lumpy data and silently over-kills real
+		edges.
+		"""
+		markets, trades = [], []
+		for d in range(40):
+			date = f"2026-04-{(d % 28) + 1:02d}"
+			# Fraction-YES varies day to day (45%/35%, mean 40%) so the per-market
+			# z is significant via FINITE variance — a genuine power test, not a
+			# degenerate all-days-identical z.
+			yes_n = 45 if d % 2 == 0 else 35
+			for k in range(100):
+				won = k < yes_n  # ~40% settle YES vs 27¢ implied → genuine +0.13 edge
+				ticker = f"MG-{d}-{k}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_MG",
+					"result": "yes" if won else "no",
+					"last_price": 27, "volume": 10,
+					"close_time": f"{date}T12:00:00Z", "open_time": f"{date}T00:00:00Z",
+				})
+				# Print count varies with the market INDEX, not the outcome — so
+				# the per-trade and per-market views agree (no print endogeneity).
+				for j in range(20 if k % 2 == 0 else 2):
+					trades.append({
+						"trade_id": f"{ticker}-{j}", "ticker": ticker,
+						"yes_price": 27, "no_price": 73, "count": 1,
+						"taker_side": "yes" if j % 2 == 0 else "no",
+						"created_time": f"{date}T06:{j % 60:02d}:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_MG",
+			params={"buckets": [[0.20, 0.35]], "min_n_per_bucket": 10, "fee_model": "zero"},
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		b = result.detail["buckets"][0]
+		assert abs(b["per_market_z"]) > 3.0
+		assert b["per_market_confirms"] is True
+		assert b.get("per_market_unconfirmed") is False
+		assert result.verdict == EDGE_EXISTS
+
 	def test_gates_use_per_market_baseline_not_trade_weighted(self):
 		"""The (c)/(f) gates compare MARKET-level outcome counts, so their null
 		baseline must be the mean of per-market in-band prices — the

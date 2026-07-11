@@ -49,8 +49,10 @@ MIN_EXPECTED_MARKET_OUTCOMES = 5.0
 MC_NULL_SIMS = 10_000
 MC_NULL_SIMS_MAX = 2_000_000
 
-# One (day, n_trades, sum_price) row per in-band market — the MC null's input.
-McMarketRows = list[tuple[Optional[str], int, float]]
+# One (day, n_trades, sum_price, won) row per in-band market — feeds the MC null
+# (day, n_trades, sum_price) AND the per-market day-clustered calibration z (won =
+# 1 if the market settled YES, class (f)). `won` rides along the same single scan.
+McMarketRows = list[tuple[Optional[str], int, float, int]]
 
 # Momentum regime classification (MomentumAlignmentTest): the |lookback return|
 # must exceed this for a directional regime; below it the regime is "flat" and
@@ -359,7 +361,9 @@ def _per_market_band_stats(
 	agg_columns = (
 		"substr(m.close_time, 1, 10) AS day, "
 		"COUNT(*) AS n_trades, "
-		"SUM(t.yes_price) / 100.0 AS sum_price"
+		"SUM(t.yes_price) / 100.0 AS sum_price, "
+		# m.result is constant per market, so MAX() just lifts it into the GROUP BY.
+		"MAX(CASE WHEN m.result = 'yes' THEN 1 ELSE 0 END) AS won"
 	)
 	per_band: list[McMarketRows] = [[] for _ in bands_c]
 
@@ -378,10 +382,10 @@ def _per_market_band_stats(
 			"GROUP BY band, t.ticker"
 		)
 		cursor.execute(sql, params)
-		for band, day, n_trades, sum_price in cursor.fetchall():
+		for band, day, n_trades, sum_price, won in cursor.fetchall():
 			if band is None:
 				continue  # trade in a gap between non-contiguous bands
-			per_band[band].append((day, n_trades, float(sum_price)))
+			per_band[band].append((day, n_trades, float(sum_price), int(won)))
 	else:
 		for idx, (lo, hi) in enumerate(bands_c):
 			sql = (
@@ -393,8 +397,8 @@ def _per_market_band_stats(
 			)
 			cursor.execute(sql, params)
 			per_band[idx] = [
-				(day, n_trades, float(sum_price))
-				for day, n_trades, sum_price in cursor.fetchall()
+				(day, n_trades, float(sum_price), int(won))
+				for day, n_trades, sum_price, won in cursor.fetchall()
 			]
 
 	return per_band
@@ -424,7 +428,7 @@ def _attach_per_market_stats(
 	for b, rows in zip(bucket_results, per_band):
 		rows_by_band[(b["bucket_lo"], b["bucket_hi"])] = rows
 		if rows:
-			b["per_market_mean_price"] = sum(sp / n for _, n, sp in rows) / len(rows)
+			b["per_market_mean_price"] = sum(sp / n for _, n, sp, _w in rows) / len(rows)
 	return lambda b: rows_by_band[(b["bucket_lo"], b["bucket_hi"])]
 
 
@@ -769,6 +773,30 @@ def _bonferroni_alpha(z_threshold: float, k: int) -> float:
 	return alpha / k if k > 1 else alpha
 
 
+def _per_market_calibration_z(rows: McMarketRows) -> tuple[float, float, int]:
+	"""Day-clustered z of the ONE-OBS-PER-MARKET calibration (class (f)).
+
+	Each in-band market contributes ONE observation — did it settle YES against
+	its own in-band mean price — clustered by close-date. This is the level a
+	market-level POSITION realizes P&L at: when print count correlates with
+	outcome (a NO-settler lingers in the band while a YES-settler exits early on
+	the resolving event), the per-TRADE edge is inflated by print weighting while
+	this per-market view stays calibrated. Reuses the McMarketRows the MC null
+	already fetched (won = 1 iff settled YES), so it costs no extra scan. Returns
+	(z, p, n_clusters) from clustered_z_from_stats over per-day
+	(n_markets, wins, Σ per-market mean price) — a market's implied is its own
+	in-band mean price (sum_price / n_trades), matching the graded population.
+	"""
+	by_day: dict[Optional[str], list[float]] = {}
+	for day, n_trades, sum_price, won in rows:
+		agg = by_day.setdefault(day, [0.0, 0.0, 0.0])  # n_markets, wins, Σ mean_price
+		agg[0] += 1.0
+		agg[1] += won
+		agg[2] += sum_price / n_trades if n_trades else 0.0
+	clusters = [(int(n), int(w), smp) for n, w, smp in by_day.values()]
+	return clustered_z_from_stats(clusters)
+
+
 def _bucket_bonferroni_verdict(
 	bucket_results: list[dict],
 	z_threshold: float,
@@ -816,19 +844,28 @@ def _bucket_bonferroni_verdict(
 	NO_EDGE. Evaluated lazily (qualifiers only) because each run is
 	MC_NULL_SIMS simulations over the bucket's per-market rows.
 
-	PER-MARKET SENSITIVITY GATE (artifact class (f)): entries with "market_wins"
-	are annotated with "per_market_edge" (one-obs-per-market view) and
-	"per_market_sign_flip". A flip — the market-level calibration going the
-	OTHER way (or exactly zero) against the per-trade edge — is the print-count
-	endogeneity signature: many-print markets dominate the per-trade stat and
-	print counts are outcome-endogenous in play, so the per-trade direction is
-	not what a market-level position realizes. Sign-flipped buckets cannot drive
-	EDGE_EXISTS → EDGE_NOT_TRADEABLE. (Flag-only proved insufficient: a local
-	real-data control re-graded a hand-killed series EDGE_EXISTS through a
-	sign-flipped bucket that passed every other gate.)
+	PER-MARKET CONFIRMATION GATE (artifact class (f)): the per-trade edge is
+	trustworthy only if the one-obs-per-market view — the level a position
+	realizes P&L at — independently confirms it. Two reads, cheap→strict:
+	  1. "per_market_sign_flip" (aggregate, always computed): the market-level
+	     calibration going the OTHER way (or exactly zero) against the per-trade
+	     edge. Refutes even without the batched per-market scan.
+	  2. "per_market_confirms" (day-clustered, when the per-market outcome rows
+	     are supplied): the one-obs-per-market day-clustered calibration z must
+	     match the per-trade sign AND clear the base alpha. A same-sign NEAR-zero
+	     per-market view — invisible to the sign flip — is the print-count
+	     endogeneity signature: a NO-settler that lingers in the band prints far
+	     more than a YES-settler that exits early on the resolving event, so the
+	     trade-weighted edge is fabricated while a market-level position realizes
+	     ~0. (Sign-flip alone proved insufficient twice on real data: a
+	     hand-killed series re-graded EDGE_EXISTS through a sign-flipped bucket,
+	     then KXNBAMENTION re-crossed once its small-k penalty relaxed at k=118 —
+	     per_market_edge -0.004, z=-0.6, but per-trade z=-4.3.)
+	A bucket failing either read cannot drive EDGE_EXISTS → EDGE_NOT_TRADEABLE.
 
 	A bucket *qualifies* iff it is significant AND fee_adj > max(min_fee_adj,
-	0.0) AND its taker and degenerate-outcome gates pass. The floor is clamped
+	0.0) AND its taker, degenerate-outcome, and per-market confirmation gates
+	pass. The floor is clamped
 	at 0 so EDGE_EXISTS always requires a genuinely net-positive fee-adjusted
 	edge even if a config passes a negative `min_fee_adjusted_edge`. Verdict:
 	  - EDGE_EXISTS        if ≥1 bucket qualifies;
@@ -932,11 +969,51 @@ def _bucket_bonferroni_verdict(
 			)
 		survivors = []
 		for b in qualifying:
-			b["mc_p"] = mc_null_pvalue(mc_rows_fn(b), b["z"], mc_sims)
+			rows = mc_rows_fn(b)
+			b["mc_p"] = mc_null_pvalue(rows, b["z"], mc_sims)
 			b["mc_n_sims"] = mc_sims
 			b["mc_gate_ok"] = b["mc_p"] <= alpha_corr
-			if b["mc_gate_ok"]:
+			# Class (f) magnitude collapse: the per-trade edge only counts if the
+			# one-obs-per-market day-clustered calibration INDEPENDENTLY confirms
+			# it — matching sign AND significant at the base alpha. A same-sign
+			# near-zero per-market view (the sign-flip check cannot see it) is
+			# print-count endogeneity: a NO-settler that lingers in the band prints
+			# far more than a YES-settler that exits early, so the trade-weighted
+			# edge is fabricated while a market-level position realizes ~0.
+			pm_confirms = True  # not evaluated unless the per-market outcome rode along
+			# len>=4: real runs always carry `won` (4-tuple); the 3-tuple form is
+			# the direct MC-gate unit tests' hand-built mc_rows_fn — skip cleanly.
+			if rows and len(rows[0]) >= 4:
+				pm_z, _pm_norm_p, pm_k = _per_market_calibration_z(rows)
+				# Grade the confirmation on t(k−1), NOT the normal p that
+				# z_over_excesses returns — every significance decision in this
+				# function uses the t reference (per-trade p_t, taker exploit_p_t)
+				# because the normal overstates small-k significance (artifact
+				# class (e)); a normal p here would make the qualify-direction
+				# gate anti-conservative and leak the very small-k artifacts it
+				# guards against. (A zero-variance ±100 sentinel z still yields
+				# p≈0 and confirms on few clusters; thin/lumpy cells are the
+				# class (c) degenerate and class (d) MC null's job, which run
+				# before this branch is reached.)
+				pm_p = t_pvalue(pm_z, pm_k - 1)
+				b["per_market_z"] = pm_z
+				b["per_market_p"] = pm_p
+				pm_confirms = bool(pm_z * b["edge"] > 0 and pm_p <= alpha_base)
+				b["per_market_confirms"] = pm_confirms
+				# Positive DOWNGRADE flag (a confirmation failure is a sibling of
+				# per_market_sign_flip): the market level cannot confirm the edge,
+				# but the lead is unadjudicated real-vs-artifact — the kill
+				# registry must keep it proposable, never permanent (#90). Only set
+				# when the gate actually ran (per-market outcome supplied).
+				b["per_market_unconfirmed"] = not pm_confirms
+			if not b["mc_gate_ok"]:
+				continue  # rare-event null inflation (class d) — NO_EDGE
+			if pm_confirms:
 				survivors.append(b)
+			else:
+				# Fee-positive and MC-clean, but unconfirmed at the market level:
+				# not tradeable (same routing as a sign flip), not a silent NO_EDGE.
+				significant_not_tradeable.append(b)
 		qualifying = survivors
 
 	if qualifying:
@@ -1232,6 +1309,7 @@ class PriceBucketBiasTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -1407,6 +1485,7 @@ class LifecycleBiasTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -1617,6 +1696,7 @@ class VolumeMispricingTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"volume_basis": "at_trade_cumulative",
 				"tercile_bounds": (t1, t2),
 				"buckets": bucket_results,

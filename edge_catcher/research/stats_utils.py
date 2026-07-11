@@ -129,7 +129,12 @@ def clustered_z_from_stats(
 
 
 def mc_null_pvalue(
-	market_stats: list[tuple[str | None, int, float]],
+	# (day, n_trades, sum_price) per market, optionally with a trailing `won`
+	# (the per-market calibration's field) that the redraw ignores.
+	market_stats: (
+		list[tuple[str | None, int, float]]
+		| list[tuple[str | None, int, float, int]]
+	),
 	z_obs: float,
 	n_sims: int = 10_000,
 	seed: int = 20260703,
@@ -161,19 +166,21 @@ def mc_null_pvalue(
 
 	if not market_stats:
 		return 1.0
-	day_keys = sorted({d if d is not None else "__no_key__" for d, _, _ in market_stats})
+	# Rows may carry extra trailing fields (e.g. per-market `won` for the class
+	# (f) calibration z); the MC null redraws outcomes, so it ignores them.
+	day_keys = sorted({d if d is not None else "__no_key__" for d, _, _, *_ in market_stats})
 	k = len(day_keys)
 	if k < 2:
 		return 1.0
 	day_id = {d: i for i, d in enumerate(day_keys)}
 
-	n_m = np.array([n for _, n, _ in market_stats], dtype=np.float64)
+	n_m = np.array([n for _, n, _, *_ in market_stats], dtype=np.float64)
 	p_m = np.clip(
-		np.array([sp / n for _, n, sp in market_stats], dtype=np.float64), 0.0, 1.0
+		np.array([sp / n for _, n, sp, *_ in market_stats], dtype=np.float64), 0.0, 1.0
 	)
-	sp_m = np.array([sp for _, _, sp in market_stats], dtype=np.float64)
+	sp_m = np.array([sp for _, _, sp, *_ in market_stats], dtype=np.float64)
 	day_idx = np.array(
-		[day_id[d if d is not None else "__no_key__"] for d, _, _ in market_stats]
+		[day_id[d if d is not None else "__no_key__"] for d, _, _, *_ in market_stats]
 	)
 	# Sort markets by day once so per-sim day aggregation is a segment sum
 	# (np.add.reduceat, O(M) per sim) — a dense M×k one-hot matmul is O(M·k)
