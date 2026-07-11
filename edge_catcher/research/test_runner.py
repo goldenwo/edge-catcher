@@ -918,7 +918,18 @@ def _bucket_bonferroni_verdict(
 			# edge is fabricated while a market-level position realizes ~0.
 			pm_confirms = True  # not evaluated unless the per-market outcome rode along
 			if rows and len(rows[0]) >= 4:
-				pm_z, pm_p, _pm_k = _per_market_calibration_z(rows)
+				pm_z, _pm_norm_p, pm_k = _per_market_calibration_z(rows)
+				# Grade the confirmation on t(k−1), NOT the normal p that
+				# z_over_excesses returns — every significance decision in this
+				# function uses the t reference (per-trade p_t, taker exploit_p_t)
+				# because the normal overstates small-k significance (artifact
+				# class (e)); a normal p here would make the qualify-direction
+				# gate anti-conservative and leak the very small-k artifacts it
+				# guards against. (A zero-variance ±100 sentinel z still yields
+				# p≈0 and confirms on few clusters; thin/lumpy cells are the
+				# class (c) degenerate and class (d) MC null's job, which run
+				# before this branch is reached.)
+				pm_p = t_pvalue(pm_z, pm_k - 1)
 				b["per_market_z"] = pm_z
 				b["per_market_p"] = pm_p
 				pm_confirms = bool(pm_z * b["edge"] > 0 and pm_p <= alpha_base)
