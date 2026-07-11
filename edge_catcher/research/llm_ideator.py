@@ -655,8 +655,9 @@ class LLMIdeator:
 				"volume traded so far) are wider mispriced"
 			),
 			"momentum_alignment": (
-				"Tests if contract prices lag spot price movements (per-market VWAP "
-				"method, NOT per-trade calibrated — verdicts need re-verification)"
+				"Tests if contract prices lag spot price movements (per-trade "
+				"day-clustered calibration at each trade's own timestamp; up/down "
+				"regime cells graded under the hardened gate stack)"
 			),
 		}
 		parts.append("\n## Available Test Types\n")
