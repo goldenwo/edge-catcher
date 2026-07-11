@@ -128,3 +128,17 @@ class TestFlaggedDowngradesNeverPermanent:
         assert _downgrade_flags({"driver_bucket": {"z": 2.0}}) == []
         assert _downgrade_flags({}) == []
         assert _downgrade_flags({"driver_bucket": None}) == []
+
+    def test_per_market_unconfirmed_is_a_downgrade_flag(self):
+        """A class (f) per-market CONFIRMATION failure (same-sign near-zero
+        market-level view — the KXNBAMENTION signature) downgrades to
+        EDGE_NOT_TRADEABLE exactly like a sign flip, so it must carry a downgrade
+        flag and never become a permanent kill. Without it the lead is
+        blacklisted from the ideator while the real-vs-artifact question is
+        unadjudicated — the #90 protection has to cover the new gate's PRIMARY
+        path, not only the sibling per_market_sign_flip.
+        """
+        from edge_catcher.research.loop import _downgrade_flags
+
+        d = {"driver_bucket": {"per_market_unconfirmed": True, "z": -4.3}}
+        assert _downgrade_flags(d) == ["per_market_unconfirmed"]

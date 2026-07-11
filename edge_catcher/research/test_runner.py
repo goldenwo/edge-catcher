@@ -934,6 +934,12 @@ def _bucket_bonferroni_verdict(
 				b["per_market_p"] = pm_p
 				pm_confirms = bool(pm_z * b["edge"] > 0 and pm_p <= alpha_base)
 				b["per_market_confirms"] = pm_confirms
+				# Positive DOWNGRADE flag (a confirmation failure is a sibling of
+				# per_market_sign_flip): the market level cannot confirm the edge,
+				# but the lead is unadjudicated real-vs-artifact — the kill
+				# registry must keep it proposable, never permanent (#90). Only set
+				# when the gate actually ran (per-market outcome supplied).
+				b["per_market_unconfirmed"] = not pm_confirms
 			if not b["mc_gate_ok"]:
 				continue  # rare-event null inflation (class d) — NO_EDGE
 			if pm_confirms:

@@ -1162,6 +1162,11 @@ class TestPerMarketSensitivity:
 		# realizable at the market level → must NOT grade EDGE_EXISTS.
 		assert abs(b["per_market_z"]) < 3.0
 		assert result.verdict == EDGE_NOT_TRADEABLE
+		# The downgrade must carry a positive flag so the kill registry keeps the
+		# lead proposable (never a permanent kill) — same #90 protection as a
+		# sign flip, which this failure mode is a sibling of.
+		assert b["per_market_unconfirmed"] is True
+		assert result.detail["driver_bucket"].get("per_market_unconfirmed") is True
 
 	def test_gates_use_per_market_baseline_not_trade_weighted(self):
 		"""The (c)/(f) gates compare MARKET-level outcome counts, so their null

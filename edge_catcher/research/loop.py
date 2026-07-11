@@ -32,6 +32,7 @@ _DOWNGRADE_FLAG_KEYS = (
 	"taker_side_fragile",
 	"taker_side_unavailable",
 	"per_market_sign_flip",
+	"per_market_unconfirmed",
 )
 
 
