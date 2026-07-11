@@ -1696,7 +1696,11 @@ class TestMomentumPerTradeCalibration:
 		assert result.verdict == NO_EDGE
 
 	def test_regime_unknown_until_candle_closes(self, tmp_path):
-		"""REGRESSION (one-candle look-ahead, caught by adversarial verification
+		"""Artifact class (g): candle-close look-ahead (the momentum analogue of
+		class (a)'s final-volume look-ahead — a look-ahead fixed at signal
+		construction rather than a grade-time gate).
+
+		REGRESSION (one-candle look-ahead, caught by adversarial verification
 		2026-07-10): OHLC rows are stamped by bucket START but a candle's close is
 		only observable at bucket END. A trade placed INSIDE a candle's own bucket
 		must classify by the PREVIOUS candle's state, not the in-flight candle's
