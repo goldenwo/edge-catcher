@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import math
 import sqlite3
+import statistics
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, ClassVar, NamedTuple, Optional
 
 from edge_catcher.adapters.kalshi.fees import INDEX_FEE, STANDARD_FEE
 from edge_catcher.fees import ZERO_FEE, FeeModel
 from edge_catcher.research.stats_utils import (
-	clustered_z,
 	clustered_z_from_stats,
 	exact_binom_pvalue,
 	fee_adjusted_edge_curve,
@@ -52,6 +53,19 @@ MC_NULL_SIMS_MAX = 2_000_000
 # (day, n_trades, sum_price) AND the per-market day-clustered calibration z (won =
 # 1 if the market settled YES, class (f)). `won` rides along the same single scan.
 McMarketRows = list[tuple[Optional[str], int, float, int]]
+
+# Momentum regime classification (MomentumAlignmentTest): the |lookback return|
+# must exceed this for a directional regime; below it the regime is "flat" and
+# its trades sit outside the hypothesis. Fixed, not a param — a sweepable
+# threshold here is a garden of forking paths, and 0.1% per lookback window is
+# well above spot microstructure noise at the 1-minute candles we capture.
+FLAT_MOMENTUM_THRESHOLD = 0.001
+
+# A candle's regime stops being current after this many MEDIAN inter-candle
+# gaps without a fresher candle. Trades past that horizon are UNCLASSIFIED and
+# excluded from grading: the pre-port implementation silently classified months
+# of post-capture trades by the final candle's frozen regime label.
+REGIME_STALENESS_GAPS = 10
 
 # Fee model mapping: name → FeeModel. The gate applies each model's real
 # per-contract fee curve via fee_adjusted_edge_curve() (see stats_utils.py), so
@@ -194,10 +208,34 @@ _CAUSAL_CUM_VOLUME_SUBQUERY = (
 )
 
 
+# Per-print momentum regime at TRADE time: each print picks up the regime of
+# the temp._momentum_regime interval containing its epoch second (populated by
+# MomentumAlignmentTest from the OHLC candles BEFORE the scan; intervals are
+# non-overlapping by construction, the ORDER BY/LIMIT is defensive). The trade
+# time is CAST through strftime('%s') to INTEGER — binding a TEXT ISO time
+# against an INTEGER epoch column compares by SQLite TYPE ORDER (every INTEGER
+# < any TEXT), which is exactly the affinity bug that made the pre-port test
+# classify every market by the last candle in the DB. Prints outside every
+# interval (before coverage, past the staleness horizon, or in a candle gap)
+# get regime NULL and match no regime filter. Binds one param: series_ticker.
+_MOMENTUM_REGIME_SUBQUERY = (
+	"SELECT t.ticker, t.trade_id, t.yes_price, t.count, t.created_time, t.taker_side, "
+	"       (SELECT CASE WHEN r.ts_end > CAST(strftime('%s', t.created_time) AS INTEGER) "
+	"                    THEN r.regime END "
+	"        FROM _momentum_regime r "
+	"        WHERE r.ts_start <= CAST(strftime('%s', t.created_time) AS INTEGER) "
+	"        ORDER BY r.ts_start DESC LIMIT 1) AS regime "
+	"FROM trades t JOIN markets m ON t.ticker = m.ticker "
+	"WHERE m.series_ticker = ? AND m.result IN ('yes', 'no') "
+	"AND t.count > 0 AND t.created_time IS NOT NULL"
+)
+
+
 def _band_scan_clauses(
 	series: str,
 	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
 	lifecycle_segment: Optional[tuple[str, int]] = None,
+	momentum_regime: Optional[str] = None,
 ) -> tuple[str, list[str], list[object]]:
 	"""Shared FROM/WHERE construction for in-band trade scans.
 
@@ -221,16 +259,39 @@ def _band_scan_clauses(
 	INTEGER — uncast, SQLite's type affinity compares the TEXT strftime result
 	GREATER than any number, which silently empties the early segment. Trades
 	with NULL created_time and markets with NULL open_time are excluded (they
-	cannot be segmented). Unknown segment names raise. Not combinable with
-	`cum_volume_range`.
+	cannot be segmented). Unknown segment names raise.
+
+	`momentum_regime` = "up"|"down"|"flat" restricts to trades whose at-trade
+	momentum regime matches (_MOMENTUM_REGIME_SUBQUERY; requires
+	temp._momentum_regime to exist on the scanned connection). Unclassified
+	prints (regime NULL) never match.
+
+	The three filters are mutually exclusive — at most one per scan.
 	"""
-	if cum_volume_range is not None and lifecycle_segment is not None:
-		raise ValueError("cum_volume_range and lifecycle_segment cannot be combined")
+	filters_set = sum(
+		f is not None for f in (cum_volume_range, lifecycle_segment, momentum_regime)
+	)
+	if filters_set > 1:
+		raise ValueError(
+			"cum_volume_range, lifecycle_segment and momentum_regime cannot be combined"
+		)
 
 	where_parts = ["m.result IN ('yes', 'no')", "t.count > 0"]
 	params: list[object] = []
 
-	if lifecycle_segment is not None:
+	if momentum_regime is not None:
+		if momentum_regime not in ("up", "down", "flat"):
+			raise ValueError(
+				f"Unknown momentum regime {momentum_regime!r}: use 'up', 'down' or 'flat'"
+			)
+		from_clause = (
+			f"FROM ({_MOMENTUM_REGIME_SUBQUERY}) t "
+			"JOIN markets m ON t.ticker = m.ticker"
+		)
+		params = [series]
+		where_parts.append("t.regime = ?")
+		params.append(momentum_regime)
+	elif lifecycle_segment is not None:
 		segment, window_minutes = lifecycle_segment
 		if segment not in ("early", "late"):
 			raise ValueError(f"Unknown lifecycle segment {segment!r}: use 'early' or 'late'")
@@ -276,6 +337,7 @@ def _per_market_band_stats(
 	bands_c: list[tuple[int, int]],
 	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
 	lifecycle_segment: Optional[tuple[str, int]] = None,
+	momentum_regime: Optional[str] = None,
 ) -> list[McMarketRows]:
 	"""Per-market in-band aggregates, one row list per band (parallel to bands_c).
 
@@ -294,7 +356,7 @@ def _per_market_band_stats(
 	if not bands_c:
 		return []
 	from_clause, where_parts, params = _band_scan_clauses(
-		series, cum_volume_range, lifecycle_segment
+		series, cum_volume_range, lifecycle_segment, momentum_regime
 	)
 	agg_columns = (
 		"substr(m.close_time, 1, 10) AS day, "
@@ -348,6 +410,7 @@ def _attach_per_market_stats(
 	bucket_results: list[dict],
 	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
 	lifecycle_segment: Optional[tuple[str, int]] = None,
+	momentum_regime: Optional[str] = None,
 ) -> Callable[[dict], McMarketRows]:
 	"""One batched per-market scan for every evaluated bucket.
 
@@ -359,7 +422,7 @@ def _attach_per_market_stats(
 	"""
 	per_band = _per_market_band_stats(
 		cursor, series, [_entry_band_c(b) for b in bucket_results],
-		cum_volume_range, lifecycle_segment,
+		cum_volume_range, lifecycle_segment, momentum_regime,
 	)
 	rows_by_band: dict[tuple[float, float], McMarketRows] = {}
 	for b, rows in zip(bucket_results, per_band):
@@ -398,6 +461,7 @@ def _per_trade_band_day_stats(
 	bands_c: list[tuple[int, int]],
 	cum_volume_range: Optional[tuple[Optional[float], Optional[float]]] = None,
 	lifecycle_segment: Optional[tuple[str, int]] = None,
+	momentum_regime: Optional[str] = None,
 ) -> list[list[_BandDayStats]]:
 	"""TRUE per-trade calibration aggregates per price band, per day.
 
@@ -445,9 +509,9 @@ def _per_trade_band_day_stats(
 	one scan per band, because a CASE would assign a trade to only its first
 	matching band and silently under-count the others.
 
-	`cum_volume_range` / `lifecycle_segment` filter semantics live in
-	_band_scan_clauses (shared with the MC null's per-market scan so both
-	populations filter identically). A volume tercile is a range predicate, NOT
+	`cum_volume_range` / `lifecycle_segment` / `momentum_regime` filter
+	semantics live in _band_scan_clauses (shared with the MC null's per-market
+	scan so both populations filter identically). A volume tercile is a range predicate, NOT
 	a ticker IN(...) list — a tercile of a long-history series exceeds SQLite's
 	bound-variable limit and crashes.
 
@@ -457,7 +521,7 @@ def _per_trade_band_day_stats(
 	if not bands_c:
 		return []
 	from_clause, where_parts, scan_params = _band_scan_clauses(
-		series, cum_volume_range, lifecycle_segment
+		series, cum_volume_range, lifecycle_segment, momentum_regime
 	)
 
 	agg_columns = (
@@ -994,26 +1058,125 @@ class StatisticalTest:
 		raise NotImplementedError
 
 
-def _compute_vwap(cursor: sqlite3.Cursor, ticker: str, last_price: Optional[float]) -> Optional[float]:
-	"""Return volume-weighted average price (0-1 scale) for a market.
+def _ohlc_epoch_seconds(value: object) -> Optional[int]:
+	"""Normalize an OHLC timestamp cell to epoch seconds.
 
-	Falls back to last_price when no trades exist.
-	Returns None when no price signal is available.
+	Capture DBs (btc.db / ohlc.db) store INTEGER epoch seconds; legacy fixtures
+	store ISO-8601 TEXT (naive means UTC). Numeric strings are epochs. Returns
+	None for anything unparseable — the candle is dropped, never guessed at.
 	"""
-	cursor.execute(
-		"SELECT SUM(CAST(yes_price AS REAL) * count) / SUM(count) FROM trades WHERE ticker = ?",
-		(ticker,),
-	)
-	row = cursor.fetchone()
-	vwap_cents = row[0] if row else None
-
-	if vwap_cents is not None:
-		return vwap_cents / 100.0
-
-	if last_price is not None and last_price > 0:
-		return last_price / 100.0
-
+	if isinstance(value, bool):
+		return None
+	if isinstance(value, (int, float)):
+		return int(value)
+	if isinstance(value, bytes):
+		try:
+			value = value.decode()
+		except UnicodeDecodeError:
+			return None
+	if isinstance(value, str):
+		try:
+			return int(float(value))
+		except ValueError:
+			pass
+		try:
+			dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+		except ValueError:
+			return None
+		if dt.tzinfo is None:
+			dt = dt.replace(tzinfo=timezone.utc)
+		return int(dt.timestamp())
 	return None
+
+
+def _momentum_regime_intervals(
+	ohlc_cursor: sqlite3.Cursor,
+	ohlc_table: str,
+	lookback: int,
+) -> tuple[list[tuple[int, int, str]], dict]:
+	"""Build the (ts_start, ts_end, regime) lookup intervals from OHLC candles.
+
+	Candle i's regime is the sign of its lookback return (close_i vs
+	close_{i-lookback}, an index offset — the original OFFSET semantics),
+	thresholded at ±FLAT_MOMENTUM_THRESHOLD.
+
+	CAUSALITY — proven artifact class (g), candle-close look-ahead
+	(adversarial-verification catch 2026-07-10): OHLC rows are stamped by
+	bucket START, but a candle's close only exists at bucket END — so candle
+	i's regime becomes CURRENT at ts_i + one median gap (the nominal bucket
+	close), never at ts_i itself. Opening the interval at ts_i handed every
+	trade inside the candle's own bucket up to a full bucket of future spot
+	movement as its regime label, which fabricates momentum alignment on
+	exactly the venues the test targets (the whole 15-minute momentum edge was
+	one leaked candle: on the causal re-sweep KX{BTC,ETH,SOL}15M collapse to
+	NO_EDGE). Like class (a) — final-settled volume terciles — this is a
+	look-ahead fixed at signal construction, not a grade-time gate: the guard
+	IS this causal timing, regression-pinned by
+	test_regime_unknown_until_candle_closes. The interval runs until the NEXT
+	candle's close-known moment, capped at REGIME_STALENESS_GAPS median gaps:
+	past that horizon the label is stale history, not current momentum, and
+	trades there stay unclassified. Timestamps normalize through
+	_ohlc_epoch_seconds (INTEGER-epoch capture DBs and ISO-TEXT fixtures
+	alike); duplicate timestamps keep the last row. The first `lookback`
+	candles have no return and open no interval. Returns the intervals
+	(non-overlapping, ascending) plus the coverage meta dict reported in the
+	test detail.
+	"""
+	ohlc_cursor.execute(f'SELECT timestamp, close FROM "{ohlc_table}"')
+	candles: list[tuple[int, float]] = []
+	for ts_raw, close in ohlc_cursor.fetchall():
+		ts = _ohlc_epoch_seconds(ts_raw)
+		if ts is None or close is None:
+			continue
+		candles.append((ts, float(close)))
+	candles.sort(key=lambda c: c[0])
+	deduped: list[tuple[int, float]] = []
+	for ts, close in candles:
+		if deduped and deduped[-1][0] == ts:
+			deduped[-1] = (ts, close)
+		else:
+			deduped.append((ts, close))
+
+	coverage: dict = {
+		"n_candles": len(deduped),
+		"n_classifiable_candles": 0,
+		"staleness_cap_seconds": None,
+		"coverage_start": None,
+		"coverage_end": None,
+	}
+	if len(deduped) <= lookback:
+		return [], coverage
+
+	gaps = [b[0] - a[0] for a, b in zip(deduped, deduped[1:])]
+	bucket_seconds = int(statistics.median(gaps))
+	stale_cap = REGIME_STALENESS_GAPS * bucket_seconds
+	coverage["staleness_cap_seconds"] = stale_cap
+	coverage["bucket_seconds"] = bucket_seconds
+
+	intervals: list[tuple[int, int, str]] = []
+	for i in range(lookback, len(deduped)):
+		ts_i, close_i = deduped[i]
+		ref_close = deduped[i - lookback][1]
+		if ref_close == 0:
+			continue
+		momentum = (close_i - ref_close) / ref_close
+		if momentum > FLAT_MOMENTUM_THRESHOLD:
+			regime = "up"
+		elif momentum < -FLAT_MOMENTUM_THRESHOLD:
+			regime = "down"
+		else:
+			regime = "flat"
+		known_at = ts_i + bucket_seconds  # close observable at nominal bucket end
+		ts_end = known_at + stale_cap
+		if i + 1 < len(deduped):
+			ts_end = min(ts_end, deduped[i + 1][0] + bucket_seconds)
+		intervals.append((known_at, ts_end, regime))
+
+	coverage["n_classifiable_candles"] = len(intervals)
+	if intervals:
+		coverage["coverage_start"] = intervals[0][0]
+		coverage["coverage_end"] = intervals[-1][1]
+	return intervals, coverage
 
 
 class PriceBucketBiasTest(StatisticalTest):
@@ -1543,22 +1706,27 @@ class VolumeMispricingTest(StatisticalTest):
 
 
 class MomentumAlignmentTest(StatisticalTest):
-	"""Test whether contract prices lag or lead external spot price movements.
+	"""Test whether contract prices lag external spot price movements.
 
-	Uses OHLC data from an external SQLite DB to classify each trade into a
-	momentum regime (up/down/flat), then checks whether contracts in "up"
-	momentum are systematically underpriced (actual win rate > implied) and
-	contracts in "down" momentum are overpriced.
+	Each TRADE is classified into a momentum regime (up/down/flat) from the
+	OHLC candle state at its own timestamp, and every (regime × price band)
+	cell is graded with the same TRUE per-trade day-clustered calibration and
+	hardened gate stack — (b) taker-side composition, (c) degenerate outcomes,
+	(d) MC null, (e) t-reference, (f) per-market sensitivity — as
+	PriceBucketBiasTest, in ONE Bonferroni family across all evaluated cells.
+	"flat" trades are counted in the detail but never graded (no directional
+	hypothesis); the driving cell's regime rides in detail["driver_regime"].
 
-	WARNING — methodology NOT yet ported to per-trade calibration: this test
-	still grades one observation per MARKET, bucketed by lifetime VWAP (with a
-	last_price fallback), pooled without Bonferroni or a min_clusters floor —
-	the same per-market aggregation class that _per_trade_band_day_stats' docstring
-	documents as edge-fabricating, and it has NOT been validated against the
-	known-dead controls the other tests have. Treat its EDGE_EXISTS as a lead
-	to re-verify per-trade, never as a graded edge. The detail carries
-	calibration="per_market_lifetime_vwap" so downstream consumers can tell its
-	verdicts apart from the calibrated tests.
+	Ported 2026-07-10 from the per-market lifetime-VWAP method, which had two
+	proven defects: (1) one observation per MARKET — the edge-fabricating
+	aggregation class _per_trade_band_day_stats documents; and (2) an SQLite
+	type-affinity look-ahead — binding the TEXT ISO trade time against the
+	INTEGER epoch `timestamp` column of the real capture DBs matched every row
+	(an INTEGER sorts before any TEXT), so every market classified by the LAST
+	candle in the DB, and trades entirely outside OHLC coverage inherited that
+	frozen regime label. Post-port, trades outside coverage or past the
+	staleness horizon (REGIME_STALENESS_GAPS) are excluded and reported in
+	detail["regime_trade_counts"]["unclassified"].
 
 	Requires params["ohlc_config"] = {"db_path": str, "table": str, "asset": str}.
 	Falls back to INSUFFICIENT_DATA gracefully if OHLC data is unavailable.
@@ -1573,9 +1741,12 @@ class MomentumAlignmentTest(StatisticalTest):
 		thresholds: dict,
 	) -> TestResult:
 		ohlc_config: Optional[dict] = params.get("ohlc_config")
-		lookback: int = params.get("lookback_candles", 5)
+		# Momentum over zero candles is meaningless; clamp so a degenerate
+		# config cannot define every candle as "flat".
+		lookback: int = max(1, params.get("lookback_candles", 5))
 		buckets: list[list[float]] = params.get("buckets", [[0.30, 0.70]])
 		min_n: int = params.get("min_n_per_bucket", 30)
+		min_clusters: int = thresholds.get("min_clusters", 2)
 		fee_model: FeeModel = _resolve_fee_model(params.get("fee_model", "zero"))
 		z_threshold: float = thresholds.get("clustered_z_stat", 3.0)
 		min_fee_adj: float = thresholds.get("min_fee_adjusted_edge", 0.0)
@@ -1635,6 +1806,7 @@ class MomentumAlignmentTest(StatisticalTest):
 				lookback=lookback,
 				buckets=buckets,
 				min_n=min_n,
+				min_clusters=min_clusters,
 				fee_model=fee_model,
 				z_threshold=z_threshold,
 				min_fee_adj=min_fee_adj,
@@ -1651,200 +1823,178 @@ class MomentumAlignmentTest(StatisticalTest):
 		lookback: int,
 		buckets: list[list[float]],
 		min_n: int,
+		min_clusters: int,
 		fee_model: FeeModel,
 		z_threshold: float,
 		min_fee_adj: float,
 	) -> TestResult:
 		cursor = conn.cursor()
-		ohlc_cursor = ohlc_conn.cursor()
 
-		# 3. Query decided (yes/no) markets for the series with trades. Voided/
-		# scratched settlements are excluded — counting them as NO deflates win
-		# rates and fabricates a short-side residual (same rule as the other tests).
-		cursor.execute(
-			"SELECT ticker, result, last_price, close_time "
-			"FROM markets WHERE series_ticker = ? AND result IN ('yes', 'no')",
-			(series,),
-		)
-		markets = cursor.fetchall()
-
-		if not markets:
+		n_decided_markets = _count_decided_markets(cursor, series)
+		if n_decided_markets == 0:
 			return TestResult(
 				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
 				detail={"reason": "no_settled_markets", "n": 0},
 			)
 
-		bucket_tuples = [(lo, hi) for lo, hi in buckets]
+		bucket_tuples = _normalize_buckets(buckets)
 
-		# Per regime → per bucket → list of (implied, won, close_date)
-		regime_bucket_data: dict[str, dict[tuple[float, float], list[tuple[float, bool, Optional[str]]]]] = {
-			"up":   {(lo, hi): [] for lo, hi in bucket_tuples},
-			"down": {(lo, hi): [] for lo, hi in bucket_tuples},
-			"flat": {(lo, hi): [] for lo, hi in bucket_tuples},
-		}
-
-		# 4-6. For each market, fetch trades, look up OHLC, classify regime
-		for row in markets:
-			ticker, result, last_price, close_time = row[0], row[1], row[2], row[3]
-			won = (result == "yes")
-			close_date = close_time[:10] if close_time else None
-
-			# Fetch trades for this market
-			cursor.execute(
-				"SELECT yes_price, count, created_time FROM trades WHERE ticker = ?",
-				(ticker,),
-			)
-			trade_rows = cursor.fetchall()
-			if not trade_rows:
-				continue
-
-			# Compute VWAP from trades
-			implied = _compute_vwap(cursor, ticker, last_price)
-			if implied is None:
-				continue
-
-			# Use the earliest trade time as the reference point for OHLC lookup
-			# (we want the candle *before* the first trade)
-			trade_times = [t[2] for t in trade_rows if t[2] is not None]
-			if not trade_times:
-				continue
-			ref_time = min(trade_times)
-
-			# 4. Look up the most recent OHLC candle before the trade time
-			ohlc_cursor.execute(
-				f"SELECT timestamp, close FROM \"{ohlc_table}\" "
-				"WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1",
-				(ref_time,),
-			)
-			current_candle = ohlc_cursor.fetchone()
-			if current_candle is None:
-				continue
-			current_close = current_candle[1]
-
-			# Look up candle N steps back from the current candle
-			ohlc_cursor.execute(
-				f"SELECT timestamp, close FROM \"{ohlc_table}\" "
-				"WHERE timestamp < ? ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
-				(ref_time, lookback),
-			)
-			lookback_candle = ohlc_cursor.fetchone()
-			if lookback_candle is None:
-				continue
-			lookback_close = lookback_candle[1]
-
-			# 5. Compute momentum and classify regime
-			if lookback_close == 0:
-				continue
-			momentum = (current_close - lookback_close) / lookback_close
-
-			flat_threshold = 0.001  # 0.1% threshold for "flat"
-			if momentum > flat_threshold:
-				regime = "up"
-			elif momentum < -flat_threshold:
-				regime = "down"
-			else:
-				regime = "flat"
-
-			# 7. Assign to bucket by implied price
-			for lo, hi in bucket_tuples:
-				if lo <= implied < hi:
-					regime_bucket_data[regime][(lo, hi)].append((implied, won, close_date))
-					break
-
-		# 8. Test for underreaction: in "up" momentum, win_rate > implied;
-		#    in "down" momentum, win_rate < implied.
-		# We focus on "up" + "down" regimes combined, signed by hypothesis direction.
-		# Build analysis rows: for "up" regime keep as-is (edge = win_rate - implied > 0 is the signal)
-		# For "down" regime, invert (edge = implied - win_rate > 0 is the signal)
-		# We compute the aggregate signal across both momentum regimes.
-
-		bucket_results: list[dict] = []
-		any_bucket_has_data = False
-		all_signal_rows: list[tuple[float, bool, Optional[str]]] = []
-
-		for lo, hi in bucket_tuples:
-			up_rows = regime_bucket_data["up"][(lo, hi)]
-			down_rows = regime_bucket_data["down"][(lo, hi)]
-			flat_rows = regime_bucket_data["flat"][(lo, hi)]
-
-			# Need enough data in at least one directional regime
-			if len(up_rows) < min_n and len(down_rows) < min_n:
-				continue
-
-			any_bucket_has_data = True
-
-			def _regime_summary(rows: list) -> dict:
-				if not rows:
-					return {"n": 0}
-				wins = sum(1 for _, won, _ in rows if won)
-				n = len(rows)
-				imp = sum(i for i, _, _ in rows) / n
-				z, p, nc = clustered_z(rows)
-				return {
-					"n": n, "n_clusters": nc,
-					"implied_prob": imp,
-					"win_rate": wins / n,
-					"edge": wins / n - imp,
-					"z_stat_clustered": float(z),
-					"p_value_clustered": float(p),
-				}
-
-			bucket_results.append({
-				"bucket_lo": lo, "bucket_hi": hi,
-				"up_regime": _regime_summary(up_rows),
-				"down_regime": _regime_summary(down_rows),
-				"flat_regime": _regime_summary(flat_rows),
-			})
-
-			# Aggregate signal: use "up" rows directly (up momentum → contracts underpriced → win_rate > implied)
-			if len(up_rows) >= min_n:
-				all_signal_rows.extend(up_rows)
-
-		if not any_bucket_has_data:
-			return TestResult(
-				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
-				detail={"reason": "no_bucket_met_min_n", "buckets": []},
-			)
-
-		# 9-10. Aggregate statistics
-		total_n = len(all_signal_rows)
-		if total_n == 0:
-			return TestResult(
-				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
-				detail={"reason": "no_up_regime_rows", "buckets": bucket_results},
-			)
-
-		total_wins = sum(1 for _, won, _ in all_signal_rows if won)
-		total_implied = sum(imp for imp, _, _ in all_signal_rows) / total_n
-		overall_edge = total_wins / total_n - total_implied
-
-		overall_z_clust, overall_p_clust, overall_n_clust = clustered_z(all_signal_rows)
-		overall_fee_adj = fee_adjusted_edge_curve(overall_edge, total_implied, fee_model)
-
-		# Verdict
-		if abs(overall_z_clust) >= z_threshold and overall_fee_adj > min_fee_adj:
-			verdict = EDGE_EXISTS
-		elif abs(overall_z_clust) >= z_threshold and overall_fee_adj <= 0:
-			verdict = EDGE_NOT_TRADEABLE
-		else:
-			verdict = NO_EDGE
-
-		return TestResult(
-			verdict=verdict,
-			z_stat=float(overall_z_clust),
-			fee_adjusted_edge=overall_fee_adj,
-			detail={
-				# NOT per-trade calibrated — see the class docstring warning.
-				"calibration": "per_market_lifetime_vwap",
-				"n": total_n,
-				"n_clusters": overall_n_clust,
-				"overall_implied": total_implied,
-				"overall_win_rate": total_wins / total_n,
-				"overall_edge": overall_edge,
-				"lookback_candles": lookback,
-				"buckets": bucket_results,
-			},
+		intervals, coverage = _momentum_regime_intervals(
+			ohlc_conn.cursor(), ohlc_table, lookback
 		)
+		if not intervals:
+			return TestResult(
+				verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+				detail={
+					"reason": "no_classifiable_candles",
+					"momentum_coverage": coverage,
+					"lookback_candles": lookback,
+				},
+			)
+
+		# The regime lookup table _MOMENTUM_REGIME_SUBQUERY joins against. TEMP
+		# schema: private to this connection, never touches the data file;
+		# dropped in finally so a same-connection rerun starts clean.
+		cursor.execute("DROP TABLE IF EXISTS temp._momentum_regime")
+		cursor.execute(
+			"CREATE TEMP TABLE _momentum_regime ("
+			"ts_start INTEGER NOT NULL, ts_end INTEGER NOT NULL, regime TEXT NOT NULL)"
+		)
+		try:
+			cursor.executemany(
+				"INSERT INTO _momentum_regime VALUES (?, ?, ?)", intervals
+			)
+			cursor.execute(
+				"CREATE INDEX temp.idx_momentum_regime_ts "
+				"ON _momentum_regime (ts_start, ts_end)"
+			)
+
+			# Whole-population regime census (one scan): up/down/flat plus the
+			# prints no interval covers — the honesty stat that exposes a run
+			# whose trades mostly fall outside OHLC coverage.
+			regime_trade_counts = {"up": 0, "down": 0, "flat": 0, "unclassified": 0}
+			cursor.execute(
+				f"SELECT t.regime, COUNT(*) FROM ({_MOMENTUM_REGIME_SUBQUERY}) t "
+				"GROUP BY t.regime",
+				[series],
+			)
+			for regime, n in cursor.fetchall():
+				regime_trade_counts["unclassified" if regime is None else regime] = n
+
+			bands_c = _bands_to_cents(bucket_tuples)
+			bucket_results: list[dict] = []
+			cluster_floor_skipped: list[dict] = []
+			any_bucket_met_min_n = False
+			total_n = 0
+			total_wins = 0
+			total_sum_price = 0.0
+			mc_fns: dict[str, Callable[[dict], McMarketRows]] = {}
+
+			# "flat" is never graded (no directional hypothesis). Both graded
+			# regimes' cells enter ONE Bonferroni family below.
+			for regime in ("up", "down"):
+				per_band = _per_trade_band_day_stats(
+					cursor, series, bands_c, momentum_regime=regime
+				)
+				regime_entries: list[dict] = []
+				for (lo, hi), day_stats in zip(bucket_tuples, per_band):
+					s = _summarize_band(day_stats)
+					if not _meets_min_n(s, min_n):
+						continue
+
+					z_naive, p_naive = proportions_ztest(s.wins, s.n_trades, s.mean_price)
+					# Fee on the edge MAGNITUDE (same rationale as PriceBucketBiasTest
+					# FIX A3: a short-side edge must not be double-charged).
+					fee_adj = fee_adjusted_edge_curve(abs(s.edge), s.mean_price, fee_model)
+					ci_lo, ci_hi = wilson_ci(s.wins, s.n_trades)
+
+					bucket_entry = {
+						"regime": regime,
+						"bucket_lo": lo, "bucket_hi": hi,
+						"n_trades": s.n_trades, "n_markets": s.n_markets,
+						"n_clusters": s.n_clusters,
+						"market_wins": s.market_wins,
+						"mean_price": s.mean_price,
+						"win_rate": s.win_rate,
+						"edge": s.edge,
+						"z": s.z,
+						"z_stat_naive": float(z_naive),
+						"p": s.p,
+						"p_value_naive": float(p_naive),
+						"fee_adj": fee_adj,
+						"ci_lower_naive": ci_lo, "ci_upper_naive": ci_hi,
+						**_taker_side_entry_fields(day_stats, s.edge),
+					}
+
+					# Same min-cluster floor as PriceBucketBiasTest (FIX A1): a
+					# thin-day cell must not score.
+					if s.n_clusters < min_clusters:
+						cluster_floor_skipped.append(bucket_entry)
+						continue
+
+					any_bucket_met_min_n = True
+					regime_entries.append(bucket_entry)
+					total_n += s.n_trades
+					total_wins += s.wins
+					total_sum_price += s.sum_price
+
+				if regime_entries:
+					# One batched per-market scan per regime; the composed fn
+					# below dispatches each entry to its own regime's scan so the
+					# gate/MC population always matches the graded population.
+					mc_fns[regime] = _attach_per_market_stats(
+						cursor, series, regime_entries, momentum_regime=regime
+					)
+				bucket_results.extend(regime_entries)
+
+			verdict, driver, z_stat, fee_adj_result = _bucket_bonferroni_verdict(
+				bucket_results, z_threshold, min_fee_adj, any_bucket_met_min_n,
+				mc_rows_fn=(lambda b: mc_fns[b["regime"]](b)) if mc_fns else None,
+			)
+
+			if verdict == INSUFFICIENT_DATA:
+				return TestResult(
+					verdict=INSUFFICIENT_DATA, z_stat=0.0, fee_adjusted_edge=0.0,
+					detail={
+						"reason": "no_bucket_met_min_n",
+						"regime_trade_counts": regime_trade_counts,
+						"momentum_coverage": coverage,
+						"lookback_candles": lookback,
+						"buckets": bucket_results,
+						"cluster_floor_skipped": cluster_floor_skipped,
+					},
+				)
+
+			# Aggregate descriptors (back-compat detail keys); the VERDICT is
+			# per-cell.
+			total_implied = total_sum_price / total_n
+
+			return TestResult(
+				verdict=verdict,
+				z_stat=z_stat,
+				fee_adjusted_edge=fee_adj_result,
+				detail={
+					"calibration": "per_trade_day_clustered",
+					"n": total_n,
+					"n_decided_markets": n_decided_markets,
+					"overall_implied": total_implied,
+					"overall_win_rate": total_wins / total_n,
+					"overall_edge": total_wins / total_n - total_implied,
+					"lookback_candles": lookback,
+					"regime_trade_counts": regime_trade_counts,
+					"momentum_coverage": coverage,
+					"z_threshold_bonferroni": _bonferroni_z_threshold(z_threshold, len(bucket_results)),
+					"alpha_bonferroni": _bonferroni_alpha(z_threshold, len(bucket_results)),
+					"driver_bucket": driver,
+					"driver_bucket_band": _driver_band(driver),
+					"driver_regime": driver.get("regime") if driver else None,
+					"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+					"buckets": bucket_results,
+					"cluster_floor_skipped": cluster_floor_skipped,
+				},
+			)
+		finally:
+			cursor.execute("DROP TABLE IF EXISTS temp._momentum_regime")
 
 
 class TestRunner:

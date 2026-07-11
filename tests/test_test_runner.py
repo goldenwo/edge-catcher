@@ -9,13 +9,17 @@ from edge_catcher.research.test_runner import (
 )
 
 
-def _make_ohlc_db(tmp_path, candles: list[dict], table: str = "ohlc") -> str:
-	"""Create a simple OHLC SQLite DB with timestamp, open, high, low, close, volume columns."""
+def _make_ohlc_db(tmp_path, candles: list[dict], table: str = "ohlc", ts_type: str = "TEXT") -> str:
+	"""Create a simple OHLC SQLite DB with timestamp, open, high, low, close, volume columns.
+
+	ts_type="INTEGER" matches the REAL capture DBs (btc.db / ohlc.db store epoch
+	seconds with INTEGER affinity); the TEXT default keeps the legacy ISO fixtures.
+	"""
 	db_path = tmp_path / "ohlc.db"
 	conn = sqlite3.connect(str(db_path))
 	conn.execute(f"""
 		CREATE TABLE {table} (
-			timestamp TEXT,
+			timestamp {ts_type},
 			open REAL,
 			high REAL,
 			low REAL,
@@ -1649,6 +1653,354 @@ class TestMomentumAlignmentTest:
 		# Resolved path is the data/-prefixed candidate, not the bare name.
 		import os
 		assert result.detail["db_path"] == os.path.join("data", "no-such.db")
+
+
+def _epoch(day: int, minute: int, month: int = 1) -> int:
+	"""Epoch seconds for 2026-<month>-<day> 00:<minute> UTC (minute may exceed 59)."""
+	from datetime import datetime, timedelta, timezone
+
+	return int(
+		(datetime(2026, month, day, tzinfo=timezone.utc) + timedelta(minutes=minute)).timestamp()
+	)
+
+
+def _iso(day: int, minute: int, month: int = 1) -> str:
+	"""ISO-8601 UTC string for the same instant _epoch() returns."""
+	from datetime import datetime, timezone
+
+	return (
+		datetime.fromtimestamp(_epoch(day, minute, month), tz=timezone.utc)
+		.strftime("%Y-%m-%dT%H:%M:%SZ")
+	)
+
+
+def _minute_candles(day: int, minutes: range, slope: float, base: float = 100.0) -> list[dict]:
+	"""INTEGER-epoch 1-minute candles for one day; close moves `slope` per minute.
+
+	A positive slope yields an unambiguous "up" regime for any small lookback
+	(momentum per 5 candles ≈ 5*slope/base >> the 0.001 flat threshold when
+	slope >= 0.1); negative slope yields "down"; slope 0.0 yields "flat".
+	"""
+	return [
+		{
+			"timestamp": _epoch(day, m),
+			"open": base + slope * m,
+			"high": base + slope * m + 0.5,
+			"low": base + slope * m - 0.5,
+			"close": base + slope * m,
+			"volume": 10.0,
+		}
+		for m in minutes
+	]
+
+
+class TestMomentumPerTradeCalibration:
+	"""Per-trade port of MomentumAlignmentTest: regime at TRADE time (epoch-safe),
+	per-trade day-clustered calibration, and the hardened (b)-(f) gate stack.
+	"""
+
+	def _run(self, conn, series, ohlc_db, table, buckets=None, thresholds=None, lookback=5):
+		from edge_catcher.research.test_runner import TestRunner
+
+		runner = TestRunner()
+		return runner.run(
+			"momentum_alignment", conn, series,
+			params={
+				"ohlc_config": {"db_path": ohlc_db, "table": table, "asset": "X"},
+				"lookback_candles": lookback,
+				"buckets": buckets or [[0.30, 0.70]],
+				"min_n_per_bucket": 10,
+				"fee_model": "zero",
+			},
+			thresholds=thresholds or {"clustered_z_stat": 2.0, "min_fee_adjusted_edge": -1.0},
+		)
+
+	def test_epoch_integer_timestamps_classify_at_trade_time(self, tmp_path):
+		"""REGRESSION (SQLite affinity look-ahead): real OHLC DBs store INTEGER epoch
+		timestamps while trade times are TEXT ISO. `timestamp < ?` with a TEXT bind
+		matches EVERY integer row (INTEGER < TEXT in SQLite's type ordering), so the
+		old code classified every market by the LAST candle in the DB. With epoch
+		candles rising early / falling late each day and all trades placed in the
+		rising window, trade-time classification must grade the edge in the "up"
+		regime; last-candle classification sees only "down" and finds nothing.
+		"""
+		from edge_catcher.research.test_runner import EDGE_EXISTS
+
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			candles.extend(_minute_candles(day, range(0, 60), slope=+0.5))
+			candles.extend(_minute_candles(day, range(60, 121), slope=-0.5, base=160.0))
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="epoch_ohlc", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for day in range(1, n_days + 1):
+			wins = 8 if day % 2 == 0 else 6  # mean 0.7, day-to-day variance > 0
+			for i in range(10):
+				ticker = f"EP-{day}-{i}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_EP",
+					"result": "yes" if i < wins else "no",
+					"last_price": 50, "volume": 10,
+					"close_time": _iso(day, 20 * 60),
+					"open_time": _iso(day, 0),
+				})
+				# Placed mid rising-window (minute 10+i): regime must be "up".
+				trades.append({
+					"trade_id": f"ep-{day}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": _iso(day, 10 + i),
+				})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(conn, "SER_EP", ohlc_db, "epoch_ohlc")
+		conn.close()
+
+		assert result.verdict == EDGE_EXISTS
+		assert result.detail["calibration"] == "per_trade_day_clustered"
+		assert result.detail["driver_bucket"]["regime"] == "up"
+		counts = result.detail["regime_trade_counts"]
+		assert counts["up"] == 280
+		assert counts.get("down", 0) == 0
+
+	def test_per_trade_flat_calibration_stays_no_edge(self, tmp_path):
+		"""Per-trade FLAT calibration must grade NO_EDGE even under extreme
+		per-market print-count asymmetry (winners carry 10 prints each, losers 1) —
+		the market-level view is wildly miscalibrated (win rate ~0.5 at 90c) but no
+		trade-level edge exists. Per-market aggregation would fabricate a signal
+		here; the per-trade port must not.
+		"""
+		from edge_catcher.research.test_runner import NO_EDGE
+
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			candles.extend(_minute_candles(day, range(0, 121), slope=+0.5))
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="flat_cal", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for day in range(1, n_days + 1):
+			n_losers = 8 if day % 2 == 0 else 12  # win fraction jitters ~0.90
+			mkts = [(f"FC-{day}-W{i}", "yes", 10) for i in range(9)]
+			mkts += [(f"FC-{day}-L{i}", "no", 1) for i in range(n_losers)]
+			for ticker, res, n_prints in mkts:
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_FC",
+					"result": res, "last_price": 90, "volume": 10,
+					"close_time": _iso(day, 20 * 60), "open_time": _iso(day, 0),
+				})
+				for p in range(n_prints):
+					trades.append({
+						"trade_id": f"fc-{ticker}-{p}", "ticker": ticker,
+						"yes_price": 90, "no_price": 10, "count": 1,
+						"created_time": _iso(day, 10 + p),
+					})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(
+			conn, "SER_FC", ohlc_db, "flat_cal", buckets=[[0.88, 0.93]],
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+		assert result.verdict == NO_EDGE
+
+	def test_regime_unknown_until_candle_closes(self, tmp_path):
+		"""Artifact class (g): candle-close look-ahead (the momentum analogue of
+		class (a)'s final-volume look-ahead — a look-ahead fixed at signal
+		construction rather than a grade-time gate).
+
+		REGRESSION (one-candle look-ahead, caught by adversarial verification
+		2026-07-10): OHLC rows are stamped by bucket START but a candle's close is
+		only observable at bucket END. A trade placed INSIDE a candle's own bucket
+		must classify by the PREVIOUS candle's state, not the in-flight candle's
+		close — otherwise up to one bucket of future spot information leaks into
+		the regime label, which fabricates momentum alignment wholesale.
+		"""
+		candles = _minute_candles(1, range(0, 60), slope=0.0)  # flat hour
+		# From minute 60 the close jumps and keeps rising: candle 60's close is
+		# only knowable at minute 61.
+		candles += _minute_candles(1, range(60, 121), slope=+0.5, base=150.0)
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="lookahead", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for i in range(40):
+			ticker = f"LA-{i}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_LA",
+				"result": "yes" if i < 28 else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": _iso(1, 20 * 60), "open_time": _iso(1, 0),
+			})
+			# All trades INSIDE candle 60's bucket (minute 60, +1..+50s): the
+			# rising close of candle 60 is in their future.
+			trades.append({
+				"trade_id": f"la-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": _iso(1, 60),
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(conn, "SER_LA", ohlc_db, "lookahead")
+		conn.close()
+
+		counts = result.detail["regime_trade_counts"]
+		assert counts.get("up", 0) == 0, (
+			"trades inside a candle's own bucket must not see that candle's close"
+		)
+		assert counts["flat"] == 40
+
+	def test_trades_beyond_staleness_cap_are_excluded(self, tmp_path):
+		"""Trades far past the last candle carry no current momentum signal — the
+		old code silently classified months of post-capture trades by the final
+		candle's regime. They must be excluded (unclassified), not graded.
+		"""
+		from edge_catcher.research.test_runner import INSUFFICIENT_DATA
+
+		candles = _minute_candles(1, range(0, 121), slope=+0.5)
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="stale", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for day in range(3, 31):  # days after OHLC coverage ended
+			for i in range(10):
+				ticker = f"ST-{day}-{i}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_ST",
+					"result": "yes" if i < 7 else "no",
+					"last_price": 50, "volume": 10,
+					"close_time": _iso(day, 20 * 60), "open_time": _iso(day, 0),
+				})
+				trades.append({
+					"trade_id": f"st-{day}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": _iso(day, 10 + i),
+				})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(conn, "SER_ST", ohlc_db, "stale")
+		conn.close()
+
+		assert result.verdict == INSUFFICIENT_DATA
+		counts = result.detail["regime_trade_counts"]
+		assert counts["unclassified"] == 280
+		assert counts.get("up", 0) == 0
+
+	def test_flat_regime_is_not_graded(self, tmp_path):
+		"""Trades under flat momentum are outside the hypothesis (no directional
+		regime) — counted in the detail, never graded.
+		"""
+		from edge_catcher.research.test_runner import INSUFFICIENT_DATA
+
+		candles = _minute_candles(1, range(0, 121), slope=0.0)
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="flat_mom", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for i in range(40):
+			ticker = f"FL-{i}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_FL",
+				"result": "yes" if i < 28 else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": _iso(1, 20 * 60), "open_time": _iso(1, 0),
+			})
+			trades.append({
+				"trade_id": f"fl-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": _iso(1, 10 + (i % 60)),
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(conn, "SER_FL", ohlc_db, "flat_mom")
+		conn.close()
+
+		assert result.verdict == INSUFFICIENT_DATA
+		counts = result.detail["regime_trade_counts"]
+		assert counts["flat"] == 40
+		assert counts.get("up", 0) == 0 and counts.get("down", 0) == 0
+
+	def test_taker_one_sided_composition_downgrades(self, tmp_path):
+		"""Hardened gate (b) must apply to momentum cells: a pooled up-regime edge
+		whose exploit side (taker='yes' for a positive edge) is itself flat is
+		bid-ask bounce, not capturable → EDGE_NOT_TRADEABLE + taker_side_fragile.
+		"""
+		from edge_catcher.research.test_runner import EDGE_NOT_TRADEABLE
+
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			candles.extend(_minute_candles(day, range(0, 121), slope=+0.5))
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="taker", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for day in range(1, n_days + 1):
+			a_wins = 4 if day % 2 == 0 else 6  # taker-yes prints: calibrated (~50%)
+			b_wins = 8 if day % 2 == 0 else 10  # taker-no prints: win ~90%
+			for i in range(10):
+				for grp, wins, side in (("A", a_wins, "yes"), ("B", b_wins, "no")):
+					ticker = f"TK-{grp}-{day}-{i}"
+					markets.append({
+						"ticker": ticker, "series_ticker": "SER_TK",
+						"result": "yes" if i < wins else "no",
+						"last_price": 50, "volume": 10,
+						"close_time": _iso(day, 20 * 60), "open_time": _iso(day, 0),
+					})
+					trades.append({
+						"trade_id": f"tk-{grp}-{day}-{i}", "ticker": ticker,
+						"yes_price": 50, "no_price": 50, "count": 1,
+						"taker_side": side,
+						"created_time": _iso(day, 10 + i),
+					})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(
+			conn, "SER_TK", ohlc_db, "taker",
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+
+		assert result.verdict == EDGE_NOT_TRADEABLE
+		assert result.detail["driver_bucket"]["taker_side_fragile"] is True
+
+	def test_bonferroni_family_spans_both_regimes(self, tmp_path):
+		"""Up and down cells are graded in ONE multiple-testing family: with both
+		regimes evaluated, the Bonferroni alpha must be the K=2 correction.
+		"""
+		from scipy.stats import norm
+
+		n_days = 28
+		candles = []
+		for day in range(1, n_days + 1):
+			slope = +0.5 if day % 2 == 0 else -0.5
+			candles.extend(_minute_candles(day, range(0, 121), slope=slope))
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="both", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for day in range(1, n_days + 1):
+			wins = 4 if day % 4 in (0, 1) else 6  # ~50% overall, non-degenerate days
+			for i in range(10):
+				ticker = f"BR-{day}-{i}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_BR",
+					"result": "yes" if i < wins else "no",
+					"last_price": 50, "volume": 10,
+					"close_time": _iso(day, 20 * 60), "open_time": _iso(day, 0),
+				})
+				trades.append({
+					"trade_id": f"br-{day}-{i}", "ticker": ticker,
+					"yes_price": 50, "no_price": 50, "count": 1,
+					"created_time": _iso(day, 10 + i),
+				})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(
+			conn, "SER_BR", ohlc_db, "both",
+			thresholds={"clustered_z_stat": 3.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+
+		evaluated = result.detail["buckets"]
+		assert {b["regime"] for b in evaluated} == {"up", "down"}
+		alpha_1 = float(2.0 * (1.0 - norm.cdf(3.0)))
+		assert result.detail["alpha_bonferroni"] == pytest.approx(alpha_1 / 2.0)
 
 
 class TestFeeModelResolution:
