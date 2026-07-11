@@ -917,6 +917,8 @@ def _bucket_bonferroni_verdict(
 			# far more than a YES-settler that exits early, so the trade-weighted
 			# edge is fabricated while a market-level position realizes ~0.
 			pm_confirms = True  # not evaluated unless the per-market outcome rode along
+			# len>=4: real runs always carry `won` (4-tuple); the 3-tuple form is
+			# the direct MC-gate unit tests' hand-built mc_rows_fn — skip cleanly.
 			if rows and len(rows[0]) >= 4:
 				pm_z, _pm_norm_p, pm_k = _per_market_calibration_z(rows)
 				# Grade the confirmation on t(k−1), NOT the normal p that
@@ -1144,6 +1146,7 @@ class PriceBucketBiasTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -1319,6 +1322,7 @@ class LifecycleBiasTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"buckets": bucket_results,
 				"cluster_floor_skipped": cluster_floor_skipped,
 			},
@@ -1529,6 +1533,7 @@ class VolumeMispricingTest(StatisticalTest):
 				"driver_bucket": driver,
 				"driver_bucket_band": _driver_band(driver),
 				"per_market_sign_flip": bool(driver.get("per_market_sign_flip", False)) if driver else False,
+				"per_market_unconfirmed": bool(driver.get("per_market_unconfirmed", False)) if driver else False,
 				"volume_basis": "at_trade_cumulative",
 				"tercile_bounds": (t1, t2),
 				"buckets": bucket_results,
