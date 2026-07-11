@@ -1021,14 +1021,23 @@ def _momentum_regime_intervals(
 
 	Candle i's regime is the sign of its lookback return (close_i vs
 	close_{i-lookback}, an index offset — the original OFFSET semantics),
-	thresholded at ±FLAT_MOMENTUM_THRESHOLD. The regime is current from the
-	candle's timestamp until the next candle's, capped at REGIME_STALENESS_GAPS
-	median inter-candle gaps: past that horizon the label is stale history, not
-	current momentum, and trades there stay unclassified. Timestamps normalize
-	through _ohlc_epoch_seconds (INTEGER-epoch capture DBs and ISO-TEXT fixtures
-	alike); duplicate timestamps keep the last row. The first `lookback` candles
-	have no return and open no interval. Returns the intervals (non-overlapping,
-	ascending) plus the coverage meta dict reported in the test detail.
+	thresholded at ±FLAT_MOMENTUM_THRESHOLD.
+
+	CAUSALITY (adversarial-verification catch 2026-07-10): OHLC rows are
+	stamped by bucket START, but a candle's close only exists at bucket END —
+	so candle i's regime becomes CURRENT at ts_i + one median gap (the nominal
+	bucket close), never at ts_i itself. Opening the interval at ts_i handed
+	every trade inside the candle's own bucket up to a full bucket of future
+	spot movement as its regime label, which fabricates momentum alignment on
+	exactly the venues the test targets. The interval runs until the NEXT
+	candle's close-known moment, capped at REGIME_STALENESS_GAPS median gaps:
+	past that horizon the label is stale history, not current momentum, and
+	trades there stay unclassified. Timestamps normalize through
+	_ohlc_epoch_seconds (INTEGER-epoch capture DBs and ISO-TEXT fixtures
+	alike); duplicate timestamps keep the last row. The first `lookback`
+	candles have no return and open no interval. Returns the intervals
+	(non-overlapping, ascending) plus the coverage meta dict reported in the
+	test detail.
 	"""
 	ohlc_cursor.execute(f'SELECT timestamp, close FROM "{ohlc_table}"')
 	candles: list[tuple[int, float]] = []
@@ -1056,8 +1065,10 @@ def _momentum_regime_intervals(
 		return [], coverage
 
 	gaps = [b[0] - a[0] for a, b in zip(deduped, deduped[1:])]
-	stale_cap = REGIME_STALENESS_GAPS * int(statistics.median(gaps))
+	bucket_seconds = int(statistics.median(gaps))
+	stale_cap = REGIME_STALENESS_GAPS * bucket_seconds
 	coverage["staleness_cap_seconds"] = stale_cap
+	coverage["bucket_seconds"] = bucket_seconds
 
 	intervals: list[tuple[int, int, str]] = []
 	for i in range(lookback, len(deduped)):
@@ -1072,10 +1083,11 @@ def _momentum_regime_intervals(
 			regime = "down"
 		else:
 			regime = "flat"
-		ts_end = ts_i + stale_cap
+		known_at = ts_i + bucket_seconds  # close observable at nominal bucket end
+		ts_end = known_at + stale_cap
 		if i + 1 < len(deduped):
-			ts_end = min(ts_end, deduped[i + 1][0])
-		intervals.append((ts_i, ts_end, regime))
+			ts_end = min(ts_end, deduped[i + 1][0] + bucket_seconds)
+		intervals.append((known_at, ts_end, regime))
 
 	coverage["n_classifiable_candles"] = len(intervals)
 	if intervals:

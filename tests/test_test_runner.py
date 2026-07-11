@@ -1695,6 +1695,47 @@ class TestMomentumPerTradeCalibration:
 		conn.close()
 		assert result.verdict == NO_EDGE
 
+	def test_regime_unknown_until_candle_closes(self, tmp_path):
+		"""REGRESSION (one-candle look-ahead, caught by adversarial verification
+		2026-07-10): OHLC rows are stamped by bucket START but a candle's close is
+		only observable at bucket END. A trade placed INSIDE a candle's own bucket
+		must classify by the PREVIOUS candle's state, not the in-flight candle's
+		close — otherwise up to one bucket of future spot information leaks into
+		the regime label, which fabricates momentum alignment wholesale.
+		"""
+		candles = _minute_candles(1, range(0, 60), slope=0.0)  # flat hour
+		# From minute 60 the close jumps and keeps rising: candle 60's close is
+		# only knowable at minute 61.
+		candles += _minute_candles(1, range(60, 121), slope=+0.5, base=150.0)
+		ohlc_db = _make_ohlc_db(tmp_path, candles, table="lookahead", ts_type="INTEGER")
+
+		markets, trades = [], []
+		for i in range(40):
+			ticker = f"LA-{i}"
+			markets.append({
+				"ticker": ticker, "series_ticker": "SER_LA",
+				"result": "yes" if i < 28 else "no",
+				"last_price": 50, "volume": 10,
+				"close_time": _iso(1, 20 * 60), "open_time": _iso(1, 0),
+			})
+			# All trades INSIDE candle 60's bucket (minute 60, +1..+50s): the
+			# rising close of candle 60 is in their future.
+			trades.append({
+				"trade_id": f"la-{i}", "ticker": ticker,
+				"yes_price": 50, "no_price": 50, "count": 1,
+				"created_time": _iso(1, 60),
+			})
+
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = self._run(conn, "SER_LA", ohlc_db, "lookahead")
+		conn.close()
+
+		counts = result.detail["regime_trade_counts"]
+		assert counts.get("up", 0) == 0, (
+			"trades inside a candle's own bucket must not see that candle's close"
+		)
+		assert counts["flat"] == 40
+
 	def test_trades_beyond_staleness_cap_are_excluded(self, tmp_path):
 		"""Trades far past the last candle carry no current momentum signal — the
 		old code silently classified months of post-capture trades by the final
