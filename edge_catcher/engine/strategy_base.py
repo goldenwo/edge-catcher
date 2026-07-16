@@ -38,6 +38,12 @@ class Signal:
 	exit_kind: ExitKind | None = None
 	stop_loss_distance_cents: int | None = None
 	protective_stop_cents: int | None = None  # strategy's real stop (TP/SL dist); gate input, NOT sizing basis above
+	# Phase 2a maker execution (SPEC §4.1). Defaults keep every existing
+	# taker strategy byte-identical. entry_price_cents doubles as the
+	# resting price for exec_style="maker" entries.
+	exec_style: Literal["taker", "maker"] = "taker"
+	rest_ttl_seconds: int | None = None            # maker: mandatory; cancel unfilled remainder after this age
+	cancel_before_close_seconds: int | None = None # maker: cancel when market close nearer than this
 
 
 class Strategy(ABC):
