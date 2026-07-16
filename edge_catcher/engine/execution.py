@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping, cast, get_args
 
 from edge_catcher.engine.executor import OpenPosition, OrderRequest
+from edge_catcher.engine.market_state import OrderbookSnapshot
 from edge_catcher.engine.strategy_base import ExitKind, Signal
 from edge_catcher.live.venue import sanitize_client_order_id_component
 
@@ -38,7 +39,8 @@ from edge_catcher.live.venue import sanitize_client_order_id_component
 # alongside the builders that consume it. The canonical definition lives in
 # engine/executor.py — see module docstring above.
 __all__ = ["ENTRY_TIF", "EXIT_TIF", "ExecCfg", "OpenPosition", "build_entry_order",
-           "build_exit_order", "entry_spread_too_wide", "validate_exec_cfg"]
+           "build_exit_order", "build_maker_entry_order", "entry_spread_too_wide",
+           "resting_cap", "validate_exec_cfg", "validate_maker_signal", "would_cross"]
 
 # Kalshi time-in-force value used for both entries and exits in Phase 1.
 # IOC = "fill at the limit immediately and cancel any unfilled remainder";
@@ -81,6 +83,117 @@ def _series_of(ticker: str) -> str:
 	any future series whose naming drops the event suffix).
 	"""
 	return ticker.split("-", 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a maker (resting-order) invariants (SPEC §6, §4.4)
+# ---------------------------------------------------------------------------
+# The three helpers below are the SOLE enforcement home for maker safety
+# invariants, run in BOTH paper and live modes. Paper never calls
+# ``build_maker_entry_order`` (it constructs a bare ``OrderRequest`` directly,
+# mirroring the existing taker precedent — see ``build_entry_order``'s
+# docstring for why dispatch, not the builder, is the only site guaranteed to
+# run on every path), so invariants living only inside the builder would
+# silently not exist in paper. Dispatch's maker branch calls these directly
+# BEFORE the executor fork; the live builder calls the same functions again
+# internally as defense in depth. One implementation, two callers, no
+# enforcement hole on either path.
+
+
+def would_cross(book: OrderbookSnapshot, side: str, price_cents: int) -> bool:
+	"""True when a resting bid for *side* at *price_cents* would CROSS the
+	implied ask and immediately take liquidity instead of resting, rather
+	than joining the book (SPEC §6).
+
+	Args:
+		book:        Current orderbook snapshot for the market.
+		side:        ``"yes"`` or ``"no"`` — the side the resting order buys.
+		price_cents: Proposed resting price in cents.
+
+	Returns:
+		``True`` when *price_cents* is at-or-through the best implied ask for
+		*side* — the boundary is INCLUSIVE (a price equal to the touch takes
+		the resting liquidity there rather than joining behind it).
+		``False`` when the implied-ask ladder for *side* is empty: no
+		liquidity to cross, so a lonely-quote placement is allowed (the
+		offline fill model in ``engine/resting.py`` prices that risk
+		honestly; this guard only prevents a silent taker fill).
+	"""
+	levels = book.implied_asks(side)
+	if not levels:
+		return False
+	return price_cents >= levels[0][0]
+
+
+def validate_maker_signal(sig: Signal) -> str | None:
+	"""Dispatch-level maker-invariant validator, run in BOTH modes (SPEC §6).
+
+	Checks the invariants a resting order must satisfy independent of any
+	book snapshot: a cancellable TTL, and a price inside Kalshi's tradeable
+	band. ``would_cross`` is deliberately a separate function — it needs a
+	book snapshot the caller supplies on its own schedule.
+
+	Args:
+		sig: The maker-style entry Signal (``exec_style="maker"``) to check.
+
+	Returns:
+		``None`` when *sig* satisfies both invariants. Otherwise the
+		skip-reason token recorded in the §11 skip-reason report table:
+		  - ``"invalid_maker_signal:no_ttl"``: ``rest_ttl_seconds`` is
+		    missing or <= 0. An uncancellable resting order is not allowed
+		    even in paper.
+		  - ``"invalid_maker_signal:price_band"``: ``entry_price_cents`` is
+		    missing or outside Kalshi's tradeable 1..99 cent band.
+	"""
+	if sig.rest_ttl_seconds is None or sig.rest_ttl_seconds <= 0:
+		return "invalid_maker_signal:no_ttl"
+	if sig.entry_price_cents is None or not (1 <= sig.entry_price_cents <= 99):
+		return "invalid_maker_signal:price_band"
+	return None
+
+
+def resting_cap(config: dict[str, object]) -> int:
+	"""Mode-agnostic read of ``execution.max_resting_per_strategy`` (SPEC
+	§4.4). Called by dispatch in BOTH modes — this is what makes the resting
+	cap enforceable in paper, where ``validate_exec_cfg``/``ExecCfg`` never
+	run (that path is live-boot-only; see ``engine.py``'s boot sequence).
+
+	Args:
+		config: The mode's parsed config dict — paper category config /
+			``config.local`` override, or the dict containing live
+			``live-trader.yaml``'s ``execution:`` section.
+
+	Returns:
+		The configured cap, or ``0`` when ``execution`` or
+		``max_resting_per_strategy`` is absent — maker path DISABLED, the
+		quiet opt-in default. Paper configs today have no ``execution:``
+		section at all, so they read as disabled without any code change.
+
+	Raises:
+		TypeError: ``max_resting_per_strategy`` is present but not an int,
+			or is a ``bool`` (a subclass of ``int`` in Python — True/False
+			would otherwise silently coerce to 1/0).
+		ValueError: ``max_resting_per_strategy`` is present but negative.
+
+	A key PRESENT but invalid RAISES rather than silently disabling — a
+	mistyped enablement must fail loudly at boot in both modes, not vanish
+	into "maker never fires" with no diagnostic (mirrors
+	``validate_exec_cfg``'s posture for the live-only fields).
+	"""
+	section = config.get("execution")
+	if not isinstance(section, dict) or "max_resting_per_strategy" not in section:
+		return 0
+	value = section["max_resting_per_strategy"]
+	if not isinstance(value, int) or isinstance(value, bool):
+		raise TypeError(
+			f"execution.max_resting_per_strategy must be int, "
+			f"got {type(value).__name__}: {value!r}"
+		)
+	if value < 0:
+		raise ValueError(
+			f"execution.max_resting_per_strategy must be >= 0, got {value}"
+		)
+	return value
 
 
 # Charset + length contract for the client_order_id field. This is a
@@ -237,6 +350,77 @@ def build_entry_order(
 		strategy=sig.strategy,
 		client_order_id=_make_client_order_id(sig.strategy, sig.ticker, now),
 		action="buy",
+	)
+
+
+def build_maker_entry_order(
+	sig: Signal,
+	allowed_size: int,
+	book: OrderbookSnapshot,
+	now: datetime,
+) -> OrderRequest:
+	"""Build the engine OrderRequest for a maker (resting) entry.
+
+	Live-path builder (SPEC §6) — paper constructs a bare ``OrderRequest``
+	directly on its own GTC sizing branch (§8.1) and never calls this
+	function. It re-runs the shared invariants (``validate_maker_signal``,
+	``would_cross``) anyway as defense in depth: the live path cannot skip
+	them, and dispatch has already run them once before the executor fork.
+
+	Unlike ``build_entry_order``, the limit price is ``sig.entry_price_cents``
+	UNWALKED — no slippage is added, and an out-of-band or crossing price is
+	REJECTED rather than clamped. A maker rests at its price; walking or
+	silently moving it changes the trade the strategy asked for (the taker
+	builder's clamp exists to absorb slippage-walk overflow, which does not
+	apply here).
+
+	Args:
+		sig:          The maker entry Signal (``exec_style="maker"``).
+			``rest_ttl_seconds`` and ``entry_price_cents`` MUST satisfy
+			``validate_maker_signal``; missing/invalid fields raise
+			``ValueError``.
+		allowed_size: Contract count from C's gate decision. MUST be > 0;
+			0 / negative raises ``ValueError``.
+		book:         Current orderbook snapshot, used for the no-cross guard.
+		now:          Wall-clock for the idempotency key.
+
+	Returns:
+		Engine ``OrderRequest`` with ``action="buy"``, ``time_in_force="gtc"``,
+		the unwalked limit price, and a freshly-generated ``client_order_id``.
+
+	Raises:
+		ValueError: ``allowed_size <= 0``; *sig* fails ``validate_maker_signal``
+			(message carries the ``invalid_maker_signal:*`` reason token); or
+			the rest price would cross the implied ask for ``sig.side``
+			(message carries ``would_cross``).
+	"""
+	if allowed_size <= 0:
+		# Defense in depth — mirrors build_entry_order's guard. C's gate
+		# should never produce Allow(size <= 0), but a sign bug there
+		# reaching here would silently send count=0 or count=-N to Kalshi.
+		raise ValueError(
+			f"build_maker_entry_order: allowed_size must be > 0, got {allowed_size} "
+			f"(strategy={sig.strategy}, ticker={sig.ticker})"
+		)
+	reason = validate_maker_signal(sig)
+	if reason is not None:
+		raise ValueError(f"build_maker_entry_order: {reason} (strategy={sig.strategy})")
+	assert sig.entry_price_cents is not None  # narrowed by validate_maker_signal
+	if would_cross(book, sig.side, sig.entry_price_cents):
+		raise ValueError(
+			f"build_maker_entry_order: would_cross — rest price {sig.entry_price_cents}c "
+			f"crosses the implied {sig.side} ask (strategy={sig.strategy}, ticker={sig.ticker})"
+		)
+	return OrderRequest(
+		ticker=sig.ticker,
+		series=sig.series,
+		side=cast(Literal["yes", "no"], sig.side),
+		size_contracts=allowed_size,
+		limit_price_cents=sig.entry_price_cents,
+		strategy=sig.strategy,
+		client_order_id=_make_client_order_id(sig.strategy, sig.ticker, now),
+		action="buy",
+		time_in_force="gtc",
 	)
 
 
