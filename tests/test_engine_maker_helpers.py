@@ -45,6 +45,27 @@ def test_would_cross_empty_ladder_allows():
 	book = OrderbookSnapshot(yes_levels=[], no_levels=[])
 	assert would_cross(book, "no", 99) is False
 
+def test_would_cross_multi_level_ladder_uses_cheapest_implied_ask():
+	# yes bids 80c and 85c -> implied NO asks 20 and 15; BEST (cheapest) = 15
+	# from the HIGHEST yes bid. would_cross must key off 15, not 20.
+	book = OrderbookSnapshot(yes_levels=[[0.80, 10], [0.85, 5]], no_levels=[])
+	assert would_cross(book, "no", 15) is True
+	assert would_cross(book, "no", 14) is False
+
+def test_would_cross_locked_book_at_own_touch_crosses():
+	# Locked market: best NO bid (20c) == implied NO ask (100-80=20).
+	# Joining our own side's touch at 20 IS at the implied ask -> crosses.
+	book = OrderbookSnapshot(yes_levels=[[0.80, 10]], no_levels=[[0.20, 5]])
+	assert would_cross(book, "no", 20) is True
+	assert would_cross(book, "no", 19) is False
+
+def test_validate_rejects_malformed_side():
+	# implied_asks treats any non-"yes" string as "no" — a malformed side
+	# must be caught HERE, before would_cross, or the no-cross guard is
+	# silently evaluated against the wrong ladder (quality review, Task 2).
+	for bad in ("Yes", "YES", "no ", "", "both"):
+		assert validate_maker_signal(_maker_sig(side=bad)) == "invalid_maker_signal:side"
+
 def test_validate_rejects_missing_ttl():
 	assert validate_maker_signal(_maker_sig(rest_ttl_seconds=None)) == "invalid_maker_signal:no_ttl"
 

@@ -129,22 +129,31 @@ def validate_maker_signal(sig: Signal) -> str | None:
 	"""Dispatch-level maker-invariant validator, run in BOTH modes (SPEC §6).
 
 	Checks the invariants a resting order must satisfy independent of any
-	book snapshot: a cancellable TTL, and a price inside Kalshi's tradeable
-	band. ``would_cross`` is deliberately a separate function — it needs a
-	book snapshot the caller supplies on its own schedule.
+	book snapshot: a recognized side, a cancellable TTL, and a price inside
+	Kalshi's tradeable band. ``would_cross`` is deliberately a separate
+	function — it needs a book snapshot the caller supplies on its own
+	schedule.
 
 	Args:
 		sig: The maker-style entry Signal (``exec_style="maker"``) to check.
 
 	Returns:
-		``None`` when *sig* satisfies both invariants. Otherwise the
+		``None`` when *sig* satisfies all invariants. Otherwise the
 		skip-reason token recorded in the §11 skip-reason report table:
+		  - ``"invalid_maker_signal:side"``: ``side`` is not exactly
+		    ``"yes"`` or ``"no"``. Checked FIRST because ``would_cross``
+		    (and ``implied_asks`` beneath it) treats any non-``"yes"``
+		    string as ``"no"`` — a malformed side would otherwise slip past
+		    the no-cross guard and silently take liquidity, the exact
+		    failure this module exists to make structurally impossible.
 		  - ``"invalid_maker_signal:no_ttl"``: ``rest_ttl_seconds`` is
 		    missing or <= 0. An uncancellable resting order is not allowed
 		    even in paper.
 		  - ``"invalid_maker_signal:price_band"``: ``entry_price_cents`` is
 		    missing or outside Kalshi's tradeable 1..99 cent band.
 	"""
+	if sig.side not in ("yes", "no"):
+		return "invalid_maker_signal:side"
 	if sig.rest_ttl_seconds is None or sig.rest_ttl_seconds <= 0:
 		return "invalid_maker_signal:no_ttl"
 	if sig.entry_price_cents is None or not (1 <= sig.entry_price_cents <= 99):
