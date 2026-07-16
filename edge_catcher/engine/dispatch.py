@@ -1037,11 +1037,13 @@ async def _handle_enter(
 		)
 		metrics.inc("entries_pending")
 	else:
-		# Defensive exhaustiveness arm — the OrderResult.status Literal at
-		# executor.py:65 enumerates {"filled","pending","rejected"} so static
-		# type checking would catch a missing branch, but a new variant added
-		# to the Literal without a matching dispatch branch (PR 5 / PR 6 risk)
+		# Defensive exhaustiveness arm — the OrderResult.status Literal
+		# (executor.py) enumerates {"filled","pending","rejected","resting"}
+		# so static type checking would catch a missing branch, but a new
+		# variant added to the Literal without a matching dispatch branch
 		# would otherwise silently fall through with no audit row + no notify.
+		# "resting" currently lands here by design: its real dispatch branch
+		# arrives with Phase 2a Task 9 (no executor returns it until then).
 		# Loud log + metric surfaces the dispatch-side miss before live money
 		# is affected.
 		log.error(

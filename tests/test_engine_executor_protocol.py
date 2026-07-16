@@ -67,8 +67,11 @@ def test_order_result_rejected_shape_zero_sentinels():
 
 
 def test_order_result_pending_allows_partial_fill():
-	"""Per spec §R9-F1: status='pending' AND filled_size > 0 is valid for
-	Kalshi GTC partial-fill-resting orders."""
+	"""status='pending' AND filled_size > 0 remains valid for the
+	UNKNOWN-state case: a fill count arrived but placement state is
+	unresolved (e.g. the kalshi_missing_fill_cost path in executors/live.py).
+	The reconciler (B's state machine) resolves it. GTC partial-fill-resting
+	orders now map to status='resting' instead (Phase 2a, SPEC §4.3)."""
 	r = OrderResult(
 		status="pending",
 		intended_size=10,

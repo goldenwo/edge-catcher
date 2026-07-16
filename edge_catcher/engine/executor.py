@@ -54,14 +54,14 @@ class OrderResult:
 	              happened). Engine writes a pending row; B's state machine
 	              (the reconciler) resolves it. `filled_size` MAY be > 0 if a
 	              partial fill amount is known despite the ambiguity.
+	- "rejected": order rejected at executor level (orderbook stale, budget too
+	              small, Kalshi 4xx, etc.). No trade row written. `filled_size == 0`.
 	- "resting":  the venue (or paper, for maker sims) ACCEPTED the order and
 	              it now rests on the book unfilled or partially filled.
 	              `order_id` is known. `filled_size` MAY be > 0 — a partial
 	              fill at placement time, live only. `fill_pct` reflects the
 	              partial. `blended_entry_cents` is the partial's blended
 	              price (or 0 sentinel if no fill yet).
-	- "rejected": order rejected at executor level (orderbook stale, budget too
-	              small, Kalshi 4xx, etc.). No trade row written. `filled_size == 0`.
 
 	Two fields the paper path does NOT need (and G therefore omits):
 	  - `order_id`: paper_trades has no order_id column; D adds it when LiveExecutor
