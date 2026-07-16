@@ -38,17 +38,14 @@ from edge_catcher.live.venue import sanitize_client_order_id_component
 # Re-export so callers can ``from edge_catcher.engine.execution import OpenPosition``
 # alongside the builders that consume it. The canonical definition lives in
 # engine/executor.py — see module docstring above.
-__all__ = ["ENTRY_TIF", "EXIT_TIF", "ExecCfg", "OpenPosition", "build_entry_order",
+__all__ = ["ExecCfg", "OpenPosition", "build_entry_order",
            "build_exit_order", "build_maker_entry_order", "entry_spread_too_wide",
            "resting_cap", "validate_exec_cfg", "validate_maker_signal", "would_cross"]
 
-# Kalshi time-in-force value used for both entries and exits in Phase 1.
-# IOC = "fill at the limit immediately and cancel any unfilled remainder";
-# matches the taker-with-cap intent of paper's ``walk_book_with_ceiling``.
-# Kept as a module-level literal so a future GTC option lands as an additive
-# ``ExecCfg.entry_tif`` field without scattering string constants.
-ENTRY_TIF: Literal["ioc"] = "ioc"
-EXIT_TIF: Literal["ioc"] = "ioc"
+# NOTE: the Phase-1 module-level ENTRY_TIF/EXIT_TIF constants were retired in
+# Phase 2a — time-in-force now travels on ``OrderRequest.time_in_force``, set
+# by the builder that knows the order's intent (taker builders default "ioc";
+# ``build_maker_entry_order`` sets "gtc"). See SPEC §4.2.
 
 
 @dataclass(frozen=True, slots=True)

@@ -78,6 +78,7 @@ def _make_request(
 	strategy: str = "strat-a",
 	client_order_id: str = "strat-a-KXSOL15M-1715195456789-abc12345",
 	action: str = "buy",
+	time_in_force: str = "ioc",
 ) -> OrderRequest:
 	"""Construct an engine ``OrderRequest`` with sensible Phase-1 defaults."""
 	return OrderRequest(
@@ -89,6 +90,7 @@ def _make_request(
 		strategy=strategy,
 		client_order_id=client_order_id,
 		action=action,  # type: ignore[arg-type]
+		time_in_force=time_in_force,  # type: ignore[arg-type]
 	)
 
 
@@ -622,11 +624,23 @@ def test_to_kalshi_request_forwards_sell_action():
 	assert kalshi_req.side == "yes"
 
 
-def test_to_kalshi_request_uses_ioc():
-	"""All engine orders are IOC (Phase 1 invariant — no GTC entries)."""
-	req = _make_request()
-	kalshi_req = _to_kalshi_request(req)
-	assert kalshi_req.time_in_force == "ioc"
+def test_to_kalshi_request_passes_time_in_force_through():
+	"""SPEC §4.2: TIF is builder-set and passed through VERBATIM — the
+	action-keyed ENTRY_TIF/EXIT_TIF inference is retired (G1 landmine).
+
+	Strictly stronger than the old "all engine orders are IOC" pin: the
+	default still translates to ioc (taker builders rely on the dataclass
+	default), AND an explicit gtc survives translation regardless of action.
+	"""
+	# Default (taker) request: ioc, unchanged behavior.
+	assert _to_kalshi_request(_make_request()).time_in_force == "ioc"
+	# Maker request: gtc passes through on a buy (the old mapping would
+	# have silently rewritten this to ENTRY_TIF="ioc" — the exact trap).
+	req_gtc = _make_request(action="buy", time_in_force="gtc")
+	assert _to_kalshi_request(req_gtc).time_in_force == "gtc"
+	# Explicit ioc on a sell stays ioc.
+	req_ioc = _make_request(action="sell", time_in_force="ioc")
+	assert _to_kalshi_request(req_ioc).time_in_force == "ioc"
 
 
 def test_to_kalshi_request_passes_size_and_limit():
