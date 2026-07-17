@@ -386,6 +386,51 @@ async def test_maker_booking_against_real_trade_store(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_out_of_band_print_is_still_an_event_tick(monkeypatch) -> None:
+	# Real-data catch (§11 sweep, 2026-04-18 bundle): the final minutes of a
+	# settling market print at 0c. Those prints must STILL step the tracker —
+	# they are event ticks for §7.5 mark-out sampling and must be COUNTED
+	# degenerate by the model (§7.8) — but must never fill, and must not
+	# reach price_history or the strategy fan-out.
+	import edge_catcher.engine.dispatch as dispatch_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	tr = _tracker()
+	cfg = _config(tracker=tr)
+	await _enter(_maker_sig(), cfg)                     # rests at 15c
+	store = _StubStoreOf(cfg)
+	# Full fill via a crossing print, so a mark-out becomes pending.
+	step_resting_orders(cfg, store, "KXTEST-1",
+	                    [Print(_NOW.timestamp() + 10, 90, 50.0, "yes")], _NOW)
+	assert tr.ledger[0].disposition == "filled"
+
+	ms = MarketState()
+	discover = {"recv_seq": 1, "recv_ts": _NOW.isoformat(),
+	            "source": "synthetic.ticker_discovered",
+	            "payload": {"ticker": "KXTEST-1", "yes_levels": [[0.80, 10]],
+	                        "no_levels": [[0.15, 7]], "market_metadata": {}}}
+	await dispatch_mod.dispatch_message(
+		event=discover, config=cfg, market_state=ms, store=store,
+		strategies=[], strat_by_series={}, pending_states={}, dirty=set(),
+		executor=_executor(cfg), now=_NOW)
+	# 0c settlement print 45s later: the +30s mark-out is due — the
+	# out-of-band print must be the event tick that samples it.
+	late = datetime.fromtimestamp(_NOW.timestamp() + 55, tz=timezone.utc)
+	settle = {"recv_seq": 2, "recv_ts": late.isoformat(), "source": "ws",
+	          "payload": {"type": "trade", "msg": {
+	              "market_ticker": "KXTEST-1", "yes_price_dollars": "0.00",
+	              "count_fp": "100.0", "taker_side": "no"}}}
+	await dispatch_mod.dispatch_message(
+		event=settle, config=cfg, market_state=ms, store=store,
+		strategies=[], strat_by_series={}, pending_states={}, dirty=set(),
+		executor=_executor(cfg), now=late)
+	row = tr.ledger[0]
+	assert any(off == 30 for _f, off, _v in row.mark_outs)   # sample fired
+	assert row.fills == [(_NOW.timestamp() + 10, 13)]        # 0c print filled nothing
+	assert not ms.get_price_history("KXTEST-1")              # history unpolluted
+
+
+@pytest.mark.asyncio
 async def test_markout_provider_error_reaches_metrics() -> None:
 	# A raising mid_provider degrades the sample to None in the tracker;
 	# dispatch drains the tally into maker_markout_provider_error so a
