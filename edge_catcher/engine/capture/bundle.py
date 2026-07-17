@@ -44,6 +44,12 @@ UPLOADED_SENTINEL = ".uploaded"
 
 MARKET_STATE_SCHEMA_VERSION = 2
 
+# Bundle-manifest schema version. Bumped 1 → 2 when the resting_orders.json
+# step shipped (Phase 2a, SPEC §8.3): the seeder keys the absence rule on it —
+# schema_version < 2 ⇒ pre-feature bundle, seed empty quietly; >= 2 AND
+# resting_orders.json absent ⇒ assembly bug, surfaced loudly.
+BUNDLE_MANIFEST_SCHEMA_VERSION = 2
+
 
 def assemble_daily_bundle(
 	capture_date: date,
@@ -52,6 +58,7 @@ def assemble_daily_bundle(
 	db_path: Path,
 	market_state: Optional[MarketState] = None,
 	config_path: Optional[Path] = None,
+	resting_orders: Optional[list[dict]] = None,
 ) -> Path:
 	"""Build the bundle directory for ``capture_date``.
 
@@ -123,6 +130,14 @@ def assemble_daily_bundle(
 	#    so next day's replay seeds pending_states from the same scratchpad
 	#    the live engine had at end-of-day. See spec §4.1.
 	_write_strategy_state_snapshot(db_path, bundle_dir / "strategy_state_at_start.json")
+
+	# 6.6. resting_orders.json — in-flight maker orders at rotation (Phase 2a,
+	#    SPEC §8.3). ALWAYS written once this step ships — [] when none — so a
+	#    write failure can never masquerade as a pre-feature bundle: the
+	#    seeder treats manifest schema_version >= 2 with this file ABSENT as
+	#    a loud assembly bug. Discrete step + file + writer/seeder pair, per
+	#    the bundle's per-type architecture.
+	_write_resting_orders(bundle_dir / "resting_orders.json", resting_orders)
 
 	# 7. paper_trades_v2_<date>.sqlite — the full day's slice of the live DB.
 	#    This is the ground truth that the parity test compares replay output
@@ -355,10 +370,19 @@ def _write_strategy_state_snapshot(db_path: Path, dst: Path) -> None:
 	)
 
 
+def _write_resting_orders(dst: Path, snapshot: Optional[list[dict]]) -> None:
+	"""Write the tracker's in-flight resting-order snapshot (SPEC §5.5/§8.3).
+	``None`` (no tracker / catch-up assembly) writes ``[]`` — the file is
+	ALWAYS present in a schema_version>=2 bundle so absence = assembly bug."""
+	dst.write_text(
+		json.dumps(snapshot or [], sort_keys=True, indent=2), encoding="utf-8",
+	)
+
+
 def _write_manifest(bundle_dir: Path, capture_date: date, commit: str, dirty: bool) -> None:
 	files = sorted(p.name for p in bundle_dir.iterdir() if p.name != "manifest.json")
 	manifest = {
-		"schema_version": 1,
+		"schema_version": BUNDLE_MANIFEST_SCHEMA_VERSION,
 		"exchange": "kalshi",
 		"capture_date": capture_date.isoformat(),
 		"engine_commit": commit,

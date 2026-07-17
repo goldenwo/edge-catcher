@@ -1184,6 +1184,7 @@ def _make_rotation_callback(
 	delete_raw_after_bundle: bool = True,
 	local_retention_days: int = 7,
 	config_path: Optional[Path] = None,
+	tracker_source: Optional[Callable[[], Optional[RestingOrderTracker]]] = None,
 ):
 	"""Build the rotation_callback closure that RawFrameWriter fires on
 	midnight UTC rollover.
@@ -1211,6 +1212,14 @@ def _make_rotation_callback(
 	def on_rotation(old_day: date) -> None:
 		# 1. Synchronous snapshot on the engine thread (fast, safe).
 		snapshot = copy.deepcopy(market_state)
+		# Phase 2a (SPEC §8.3 snapshot concurrency): the tracker is serialized
+		# ON the engine thread too — the same reason as the deepcopy above: the
+		# assembly daemon thread must never iterate live-mutating state.
+		# tracker_source is a late-bound callable (the tracker is stashed in
+		# config at boot); None / no tracker ⇒ [] and the bundle still writes
+		# resting_orders.json (absence = assembly bug under schema_version 2).
+		_tracker = tracker_source() if tracker_source is not None else None
+		resting_snapshot = _tracker.to_snapshot() if _tracker is not None else []
 
 		# 2. Background thread for assemble + upload + retention (slow).
 		def _assemble_upload_prune() -> None:
@@ -1223,6 +1232,7 @@ def _make_rotation_callback(
 					db_path=db_path,
 					market_state=snapshot,
 					config_path=config_path,
+					resting_orders=resting_snapshot,
 				)
 				bundle_assembled = True
 
@@ -1592,6 +1602,9 @@ async def run_engine(
 			delete_raw_after_bundle=bool(capture_cfg.get("delete_raw_after_bundle", True)),
 			local_retention_days=int(capture_cfg.get("local_retention_days", 7)),
 			config_path=config_path,
+			# Late-bound: _boot_maker_wiring stashes the tracker in config
+			# AFTER this callback is constructed; resolve at rotation time.
+			tracker_source=lambda: config.get("_tracker"),
 		)
 
 	capture_writer = RawFrameWriter(
