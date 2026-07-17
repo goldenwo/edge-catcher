@@ -9,8 +9,8 @@ import logging
 
 import pytest
 
-from edge_catcher.engine.engine import _boot_maker_wiring, _make_mid_provider
-from edge_catcher.engine.resting import RestingOrderTracker
+from edge_catcher.engine.engine import _boot_maker_wiring
+from edge_catcher.engine.resting import RestingOrderTracker, make_yes_mid_provider
 
 
 class _StubMarketState:
@@ -25,13 +25,14 @@ class _StubMarketState:
 
 
 def test_mid_provider_returns_mid_when_both_sides_quoted():
-	mid = _make_mid_provider(_StubMarketState(bid=14, ask=17))
+	# The ONE shared formula (review R9-M3) — engine and replay both wire it.
+	mid = make_yes_mid_provider(_StubMarketState(bid=14, ask=17))
 	assert mid("KXTEST-1") == 16          # round(15.5) banker's -> 16
 
 
 def test_mid_provider_returns_none_when_one_sided():
-	assert _make_mid_provider(_StubMarketState(bid=14))("KXTEST-1") is None
-	assert _make_mid_provider(_StubMarketState(ask=17))("KXTEST-1") is None
+	assert make_yes_mid_provider(_StubMarketState(bid=14))("KXTEST-1") is None
+	assert make_yes_mid_provider(_StubMarketState(ask=17))("KXTEST-1") is None
 
 
 def test_boot_enabled_logs_cap_and_stashes_tracker(caplog):
