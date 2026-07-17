@@ -268,6 +268,42 @@ async def test_maker_filled_counted_once_for_multi_fill_batch() -> None:
 	assert cfg["_metrics"].snapshot()["maker_filled"] == 1
 
 
+@pytest.mark.asyncio
+async def test_taker_hot_path_skips_print_allocation_when_maker_idle(monkeypatch) -> None:
+	# SPEC §12.7: with maker absent OR idle, the taker hot path must not
+	# even construct a Print. Prove it by making Print explode — dispatching
+	# a trade must complete without raising in both cases.
+	import edge_catcher.engine.dispatch as dispatch_mod
+	from edge_catcher.engine.market_state import MarketState
+
+	class _BoomPrint:
+		def __init__(self, *a: Any, **k: Any) -> None:
+			raise AssertionError("Print constructed on idle maker path")
+
+	monkeypatch.setattr(dispatch_mod, "Print", _BoomPrint)
+	discover = {"recv_seq": 1, "recv_ts": _NOW.isoformat(),
+	            "source": "synthetic.ticker_discovered",
+	            "payload": {"ticker": "KXTEST-1", "yes_levels": [[0.80, 10]],
+	                        "no_levels": [[0.15, 7]], "market_metadata": {}}}
+	trade = {"recv_seq": 2, "recv_ts": _NOW.isoformat(), "source": "ws",
+	         "payload": {"type": "trade", "msg": {
+	             "market_ticker": "KXTEST-1", "yes_price_dollars": "0.50",
+	             "count_fp": "1.0", "taker_side": "yes"}}}
+	reached: list[str] = []
+	for cfg in (_config(tracker=None), _config(tracker=_tracker())):
+		ms = MarketState()
+		for event in (discover, trade):
+			await dispatch_mod.dispatch_message(
+				event=event, config=cfg, market_state=ms,
+				store=_StubStore(), strategies=[], strat_by_series={},
+				pending_states={}, dirty=set(), executor=_executor(cfg), now=_NOW)
+		# Guard against a vacuous pass: the trade must have gotten PAST the
+		# early-return guards to the (gated) Print site.
+		assert ms.get_price_history("KXTEST-1"), "trade never reached hot path"
+		reached.append("ok")
+	assert reached == ["ok", "ok"]
+
+
 def test_market_close_ts_parses_utc_and_naive_identically() -> None:
 	# Kalshi timestamps are UTC; a NAIVE close_time string must not be read
 	# as machine-local time — that would shift deadline_ts by the UTC offset

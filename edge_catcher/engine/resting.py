@@ -235,6 +235,16 @@ class RestingOrderTracker:
 	what lets 2b wrap a durable write between event emission and state
 	commit (SPEC §5.6, frozen contract §15.11).
 
+	SINGLE-REGISTRAR INVARIANT (2a-load-bearing, frozen for 2b): the
+	tracker is lock-free because exactly ONE code path ever registers
+	orders — dispatch's maker-enter branch, awaited sequentially by the
+	WS loop. The cap and duplicate-level checks run BEFORE the
+	``await executor.place()`` and ``register`` runs AFTER it; that
+	check-then-act split is safe only while no second registrar can run
+	during the await. A 2b concurrent order source (live reconciler,
+	gathered fan-out) MUST either serialize registration or re-validate
+	cap+level atomically with register — never silently add a registrar.
+
 	Internals pinned by SPEC §5:
 	  - ticker-keyed index: ``step`` touches only tickers with in-flight
 	    orders — O(orders-at-ticker) per print, never O(all-orders).
@@ -342,6 +352,43 @@ class RestingOrderTracker:
 	def ledger(self) -> list[LedgerRow]:
 		"""All ledger rows, registration-ordered (SPEC §11 instrument)."""
 		return list(self._rows.values())
+
+	@property
+	def active(self) -> bool:
+		"""True when a step could do any work (orders tracked or mark-out
+		samples pending). Dispatch's cheap taker-hot-path gate (SPEC §12.7):
+		with maker disabled/idle this is one attribute check and no Print
+		allocation ever happens."""
+		return bool(self._orders) or bool(self._pending_markouts)
+
+	def compact(self) -> int:
+		"""Drop terminal orders (and their ledger rows) with no pending
+		mark-out samples. Called by the rotation callback right after
+		``to_snapshot()`` — terminal rows are session-local reporting
+		(SPEC §5.5, never carried across days), and without compaction a
+		long-lived maker-enabled paper process grows ``_orders``/``_rows``/
+		``_by_ticker`` without bound while ``find_by_trade_id`` (every
+		exit) and ``in_flight_count`` (every maker enter) degrade to
+		O(all-orders-ever). Terminal orders whose mark-outs are still
+		pending are kept until sampled (a later rotation drops them).
+		Returns the number of orders dropped."""
+		pending_coids = {c for c, _, _, _ in self._pending_markouts}
+		drop = [
+			coid for coid, o in self._orders.items()
+			if o.state in _TERMINAL_STATES and coid not in pending_coids
+		]
+		for coid in drop:
+			order = self._orders.pop(coid)
+			self._rows.pop(coid, None)
+			ticker_index = self._by_ticker.get(order.ticker)
+			if ticker_index is not None:
+				try:
+					ticker_index.remove(coid)
+				except ValueError:
+					pass
+				if not ticker_index:
+					del self._by_ticker[order.ticker]
+		return len(drop)
 
 	def drain_markout_provider_errors(self) -> int:
 		"""Return and reset the count of mark-out samples degraded to ``None``

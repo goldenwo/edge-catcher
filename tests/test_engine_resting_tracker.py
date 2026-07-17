@@ -291,6 +291,33 @@ def test_per_order_error_isolation():
 
 
 # ---------------------------------------------------------------------------
+# Rotation-time compaction + hot-path gate (SPEC §5.5 / §12.7, review R7)
+# ---------------------------------------------------------------------------
+
+def test_compact_drops_terminal_orders_but_keeps_pending_markouts():
+	tr = _tracker()
+	tr.register(_order(coid="done"))
+	tr.register(_order(coid="live2", ticker="KXTEST-2", expires_ts=99999.0))
+	tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})       # "done" fills
+	assert tr.compact() == 0                                  # mark-outs pending: kept
+	tr.step(1900.0, {"KXTEST-3": [_at_level(1900.0, 1.0)]})   # samples all three
+	assert tr.compact() == 1                                  # now droppable
+	assert tr.in_flight_count() == 1                          # live2 untouched
+	assert [r.client_order_id for r in tr.ledger] == ["live2"]
+
+
+def test_active_reflects_orders_and_pending_markouts():
+	tr = _tracker()
+	assert tr.active is False
+	tr.register(_order(expires_ts=99999.0))
+	assert tr.active is True
+	tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})        # filled + pending samples
+	tr.step(1900.0, {"KXTEST-3": [_at_level(1900.0, 1.0)]})   # samples drained
+	assert tr.compact() == 1
+	assert tr.active is False
+
+
+# ---------------------------------------------------------------------------
 # Serialization round-trip (SPEC §5.5) + stream-end censoring (SPEC §11)
 # ---------------------------------------------------------------------------
 

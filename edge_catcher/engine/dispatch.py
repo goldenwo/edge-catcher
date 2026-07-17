@@ -1978,16 +1978,21 @@ async def _handle_trade_msg(
 	# orderbook guard's early-return below: a print can fill a resting order
 	# even while the book is unpopulated. Print.ts = the threaded `now`
 	# (captured recv_ts in replay) so paper and replay agree byte-exactly.
-	step_resting_orders(
-		config, store, ticker,
-		[Print(
-			ts=now.timestamp(),
-			yes_price_cents=trade_price_cents,
-			size=float(trade_count) if trade_count is not None else 0.0,
-			taker_side=taker_side,
-		)],
-		now,
-	)
+	# Gated on tracker.active so the taker hot path pays ONE attribute check
+	# with maker disabled/idle — no Print/list/dict allocation (SPEC §12.7).
+	# Behavior-neutral: an inactive tracker's step() would return [] anyway.
+	_maker_tracker = config.get("_tracker")
+	if isinstance(_maker_tracker, RestingOrderTracker) and _maker_tracker.active:
+		step_resting_orders(
+			config, store, ticker,
+			[Print(
+				ts=now.timestamp(),
+				yes_price_cents=trade_price_cents,
+				size=float(trade_count) if trade_count is not None else 0.0,
+				taker_side=taker_side,
+			)],
+			now,
+		)
 
 	# Bid/ask come from the orderbook, NOT the trade price. A trade can execute
 	# off-book (late limit orders, aggressive fills); treating yes_price as the

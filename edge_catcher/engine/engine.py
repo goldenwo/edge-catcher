@@ -1222,6 +1222,13 @@ def _make_rotation_callback(
 		# resting_orders.json (absence = assembly bug under schema_version 2).
 		_tracker = tracker_source() if tracker_source is not None else None
 		resting_snapshot = _tracker.to_snapshot() if _tracker is not None else []
+		if _tracker is not None:
+			# In-flight state is captured above; terminal rows are
+			# session-local reporting (SPEC §5.5) — drop them so a
+			# long-lived maker-enabled process never grows without bound.
+			_dropped = _tracker.compact()
+			if _dropped:
+				log.info("resting tracker compacted: %d terminal orders dropped", _dropped)
 
 		# 2. Background thread for assemble + upload + retention (slow).
 		def _assemble_upload_prune() -> None:
