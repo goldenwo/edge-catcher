@@ -713,8 +713,10 @@ def test_augment_fill_bumps_size_pct_and_fee(store: TradeStore) -> None:
 	assert after[0] == 7
 	assert after[1] == pytest.approx(0.7)
 	# Fee accrues for the ADDED contracts at the same effective price --
-	# a stale fee would inflate P&L at settlement.
-	assert after[2] > before[2]
+	# a stale fee would inflate P&L at settlement. Exact-cents assertion so
+	# a regression in the ceil/accrual math cannot hide behind "some fee".
+	from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+	assert after[2] == before[2] + int(STANDARD_FEE.calculate(15, 3))
 	assert after[3] == 15          # blended unchanged: same resting price every fill
 
 

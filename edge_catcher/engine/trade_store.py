@@ -58,6 +58,14 @@ class TradeStoreProtocol(Protocol):
 
 	def exit_trade(self, trade_id: int, exit_price: int, *, now: datetime) -> None: ...
 
+	def augment_fill(self, trade_id: int, added_size: int) -> None:
+		"""Phase 2a maker partial-fill accumulation (SPEC §8.2): bump an OPEN
+		trade's ``fill_size`` by ``added_size`` (fee accrues for the added
+		contracts; ``blended_entry`` unchanged — maker fills at one price).
+		Paper ``TradeStore`` implements it fully; replay ``InMemoryTradeStore``
+		mirrors it; the live store's resting rows are Phase 2b scope."""
+		...
+
 	def record_pending(
 		self,
 		*,
@@ -776,6 +784,32 @@ class InMemoryTradeStore:
 			"pnl_cents": None,
 		})
 		return trade_id
+
+	def augment_fill(self, trade_id: int, added_size: int) -> None:
+		"""Mirror of TradeStore.augment_fill (Phase 2a maker accumulation) —
+		same arithmetic so replay produces byte-identical rows: bump
+		fill_size, recompute fill_pct vs intended_size, accrue the added
+		contracts' entry fee at the effective price; blended unchanged.
+		Same loud ValueError contract on bad input / non-open rows."""
+		if added_size <= 0:
+			raise ValueError(
+				f"augment_fill: added_size must be > 0, got {added_size}"
+			)
+		for r in self._rows:
+			if r["id"] != trade_id:
+				continue
+			if r["status"] != "open":
+				raise ValueError(
+					f"augment_fill: trade {trade_id} is {r['status']!r}, not open"
+				)
+			effective_price = r["blended_entry"] if r["blended_entry"] else r["entry_price"]
+			added_fee = int(STANDARD_FEE.calculate(effective_price, added_size))
+			r["fill_size"] = r["fill_size"] + added_size
+			intended = r.get("intended_size")
+			r["fill_pct"] = r["fill_size"] / intended if intended else None
+			r["entry_fee_cents"] = (r["entry_fee_cents"] or 0) + added_fee
+			return
+		raise ValueError(f"augment_fill: no trade with id={trade_id}")
 
 	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None:
 		"""Mirror of SQLiteTradeStore.settle_trade — see trade_store.py:148.

@@ -308,6 +308,16 @@ class RestingOrderTracker:
 				return True
 		return False
 
+	def find_by_trade_id(self, trade_id: int) -> str | None:
+		"""``client_order_id`` of the non-terminal order booked to *trade_id*
+		(dispatch's exit-while-resting lookup, SPEC §8.2), else ``None``.
+		A read-only query in the same family as ``has_level`` — added for
+		2a's exit ordering; 2b adds no further methods."""
+		for coid, order in self._orders.items():
+			if order.trade_id == trade_id and order.state not in _TERMINAL_STATES:
+				return coid
+		return None
+
 	def in_flight_count(self, strategy: str | None = None) -> int:
 		"""Count of non-terminal resting orders (per-strategy cap input)."""
 		return sum(

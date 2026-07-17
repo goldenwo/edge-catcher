@@ -232,6 +232,11 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	# Partial fill at placement on a still-resting GTC (SPEC §4.3/§9): the
 	# crossed portion filled at a usable cost basis, the remainder rests —
 	# status "resting" with the fill fields populated, NOT "filled".
+	# NOTE: nonzero slippage_cents on a "maker" result is NOT a bug — it can
+	# only arise when the placement itself partially crossed (rare: the
+	# builder's no-cross guard makes it a race against a book move), and the
+	# crossed portion executes at-or-better than our limit, so the signed
+	# slippage is ≤ 0 (price improvement) by construction.
 	if req.time_in_force == "gtc" and order.status in ("resting", "pending"):
 		return OrderResult(
 			status="resting",
