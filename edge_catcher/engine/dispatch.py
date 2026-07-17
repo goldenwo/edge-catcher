@@ -1955,8 +1955,6 @@ async def _handle_trade_msg(
 		trade_price_cents = int(round(float(yes_price_raw) * 100))
 	except (TypeError, ValueError, OverflowError):
 		return
-	if not (1 <= trade_price_cents <= 99):
-		return
 
 	taker_side = data.get("taker_side")
 	# 'count_fp' is the v2 fixed-point count string (e.g. "1.39"); 'count' is the
@@ -1967,17 +1965,16 @@ async def _handle_trade_msg(
 	except (TypeError, ValueError, OverflowError):  # inf from "1e999"-style count
 		trade_count = None
 
-	# Record the trade price in history (legitimate event data) before the
-	# orderbook guard — price_history should still accumulate even if the
-	# book isn't populated yet.
-	is_first = market_state.update_price(ticker, trade_price_cents)
-
 	# Phase 2a (SPEC §8.2): step resting orders with this print BEFORE the
 	# strategy fan-out — an order a strategy places on THIS tick must not be
-	# fillable by THIS print (no latency credit, §7.3). Placed before the
-	# orderbook guard's early-return below: a print can fill a resting order
-	# even while the book is unpopulated. Print.ts = the threaded `now`
-	# (captured recv_ts in replay) so paper and replay agree byte-exactly.
+	# fillable by THIS print (no latency credit, §7.3). Placed BEFORE the
+	# price-band guard below: an out-of-band print (0/100¢ settlement
+	# sweeps) is still an EVENT TICK — §7.5 mark-out samples fire on it,
+	# and it must reach the fill model to be COUNTED degenerate rather than
+	# silently dropped (§7.8; the model never fills on it). Also before the
+	# orderbook guard: a print can fill a resting order even while the book
+	# is unpopulated. Print.ts = the threaded `now` (captured recv_ts in
+	# replay) so paper and replay agree byte-exactly.
 	# Gated on tracker.active so the taker hot path pays ONE attribute check
 	# with maker disabled/idle — no Print/list/dict allocation (SPEC §12.7).
 	# Behavior-neutral: an inactive tracker's step() would return [] anyway.
@@ -1993,6 +1990,17 @@ async def _handle_trade_msg(
 			)],
 			now,
 		)
+
+	# Price-band guard for HISTORY + STRATEGIES (the maker step above has
+	# its own honest degenerate handling): 0/100¢ settlement prints must not
+	# pollute price_history or fire strategy fan-out.
+	if not (1 <= trade_price_cents <= 99):
+		return
+
+	# Record the trade price in history (legitimate event data) before the
+	# orderbook guard — price_history should still accumulate even if the
+	# book isn't populated yet.
+	is_first = market_state.update_price(ticker, trade_price_cents)
 
 	# Bid/ask come from the orderbook, NOT the trade price. A trade can execute
 	# off-book (late limit orders, aggressive fills); treating yes_price as the
