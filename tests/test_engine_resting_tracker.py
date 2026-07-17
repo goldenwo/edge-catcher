@@ -174,7 +174,7 @@ def test_has_level_and_in_flight_count():
 # Mark-out scheduling (SPEC §7.5: pending-sample, first tick at-or-after)
 # ---------------------------------------------------------------------------
 
-def test_markouts_sample_at_first_step_at_or_after_offsets():
+def test_markouts_sample_at_first_event_tick_at_or_after_offsets():
 	mids = {"value": 20}
 	tr = RestingOrderTracker(QueueFillModel(), mid_provider=lambda t: mids["value"])
 	tr.register(_order(expires_ts=99999.0))
@@ -182,11 +182,29 @@ def test_markouts_sample_at_first_step_at_or_after_offsets():
 	row = tr.ledger[0]
 	assert row.mark_outs == []                              # nothing sampled yet
 	mids["value"] = 25
-	tr.step(1530.0, {})                                     # 1500+30
+	tr.step(1530.0, {"KXTEST-2": [_at_level(1530.0, 1.0)]})   # event tick at 1500+30
 	assert row.mark_outs == [(1500.0, 30, 25)]
 	mids["value"] = 30
-	tr.step(1900.0, {})                                     # covers +120 and +300
+	tr.step(1900.0, {"KXTEST-2": [_at_level(1900.0, 1.0)]})   # covers +120 and +300
 	assert (1500.0, 120, 30) in row.mark_outs and (1500.0, 300, 30) in row.mark_outs
+
+
+def test_clock_only_step_never_samples_markouts():
+	# SPEC §5.1: the paper engine's periodic timer steps with NO prints. If a
+	# clock-only step sampled, the recorded mid would depend on wall-clock
+	# step cadence and the paper vs (timerless) replay ledgers would diverge.
+	# §7.5's "first subsequent tick at-or-after" means first EVENT tick.
+	mids = {"value": 20}
+	tr = RestingOrderTracker(QueueFillModel(), mid_provider=lambda t: mids["value"])
+	tr.register(_order(expires_ts=99999.0))
+	tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})     # fill at 1500
+	row = tr.ledger[0]
+	mids["value"] = 25
+	tr.step(1540.0, {})                                     # timer tick: due, no sample
+	assert row.mark_outs == []
+	mids["value"] = 30
+	tr.step(1550.0, {"KXTEST-2": [_at_level(1550.0, 1.0)]})   # first event tick samples
+	assert row.mark_outs == [(1500.0, 30, 30)]
 
 
 def test_multi_fill_markouts_recorded_per_fill_never_overwritten():
@@ -196,7 +214,7 @@ def test_multi_fill_markouts_recorded_per_fill_never_overwritten():
 	tr.register(_order(expires_ts=99999.0, size=10))
 	tr.step(1500.0, {"KXTEST-1": [_at_level(1500.0, 4.0)]})   # fill 4 @1500
 	tr.step(1600.0, {"KXTEST-1": [_at_level(1600.0, 3.0)]})   # fill 3 @1600
-	tr.step(2000.0, {})                                        # all 6 samples due
+	tr.step(2000.0, {"KXTEST-2": [_at_level(2000.0, 1.0)]})   # all 6 samples due
 	row = tr.ledger[0]
 	assert sorted(row.mark_outs) == [
 		(1500.0, 30, 42), (1500.0, 120, 42), (1500.0, 300, 42),
@@ -259,6 +277,20 @@ def test_snapshot_round_trip_identical_continuation():
 	# already-terminal orders live in the pre-snapshot session), so compare
 	# the surviving order's outcome:
 	assert direct == resumed
+
+
+def test_snapshot_preserves_queue_ahead_at_place():
+	# register() derives queue_ahead_at_place from order.queue_ahead, which is
+	# live model state (decremented by at-level prints). A resumed tracker
+	# must report the ORIGINAL placement depth in its §11 ledger row, not the
+	# already-consumed queue (cross-day survivors would understate it).
+	tr = _tracker()
+	tr.register(_order(expires_ts=9000.0, queue_ahead=6.0))
+	tr.step(1400.0, {"KXTEST-1": [_at_level(1400.0, 4.0)]})   # queue 6 -> 2, no fill
+	assert tr.ledger[0].queue_ahead_at_place == 6.0
+	fresh = RestingOrderTracker(QueueFillModel(), mid_provider=lambda t: None)
+	fresh.from_snapshot(tr.to_snapshot())
+	assert fresh.ledger[0].queue_ahead_at_place == 6.0
 
 
 def test_snapshot_serializes_plain_data_only():

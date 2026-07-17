@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from edge_catcher.engine.dispatch import dispatch_message
+from edge_catcher.engine.dispatch import dispatch_message, step_resting_orders
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.metrics import Metrics
@@ -116,6 +116,17 @@ def _events() -> list[dict]:
 	events.append(_trade("KXTEST-A", 10, "0.90", "50.0", "yes", next(seq)))
 	# B: at-level print, 11 - 7 queue = 4 fill (partial).
 	events.append(_trade("KXTEST-B", 12, "0.85", "11.0", "yes", next(seq)))
+	# Book move at t0+50 (mid 82 -> 80): AFTER the +30s mark-out due times
+	# (t0+40/42) but BEFORE the next event tick. Both drivers must sample the
+	# mark-outs at the t0+120 EVENT tick — post-move mid — never at a paper
+	# timer tick in between (§5.1 cadence independence).
+	for suffix in ("A", "B"):
+		events.append({
+			"recv_seq": next(seq), "recv_ts": _iso(50),
+			"source": "synthetic.rest_orderbook",
+			"payload": {"ticker": f"KXTEST-{suffix}",
+			            "yes_levels": [[0.70, 10]], "no_levels": [[0.10, 7]]},
+		})
 	# Final tick well past B/C deadlines -> backdated expiry cancels; also
 	# samples the +30s mark-outs for A and B fills.
 	events.append(_trade("KXTEST-A", 120, "0.90", "1.0", "yes", next(seq)))
@@ -164,8 +175,15 @@ def _canonical(ledger) -> str:
 	return json.dumps([asdict(r) for r in ledger], sort_keys=True, indent=1)
 
 
-async def _drive_paper(tmp_path: Path) -> tuple[str, Metrics, InMemoryTradeStore]:
-	"""Driver (a): the paper engine's dispatch loop, fed in-process."""
+async def _drive_paper(
+	tmp_path: Path, *, timer_ticks: bool = False,
+) -> tuple[str, Metrics, InMemoryTradeStore]:
+	"""Driver (a): the paper engine's dispatch loop, fed in-process.
+
+	With ``timer_ticks=True``, clock-only steps are interleaved every 5 s
+	between events — the same call shape as ``engine._resting_timer_loop`` —
+	so the parity assertion also covers the production paper cadence
+	(SPEC §5.1: the timer must never change the ledger)."""
 	config = json.loads(json.dumps(_CONFIG))          # deep copy
 	metrics = Metrics()
 	config["_metrics"] = metrics
@@ -190,6 +208,14 @@ async def _drive_paper(tmp_path: Path) -> tuple[str, Metrics, InMemoryTradeStore
 	last_ts: float | None = None
 	for event in _events():
 		now = datetime.fromisoformat(event["recv_ts"])
+		if timer_ticks and last_ts is not None:
+			t = last_ts + 5.0
+			while t < now.timestamp():
+				step_resting_orders(
+					config, store, "", [],
+					datetime.fromtimestamp(t, tz=timezone.utc),
+				)
+				t += 5.0
 		last_ts = now.timestamp()
 		await dispatch_message(
 			event=event, config=config, market_state=market_state, store=store,
@@ -239,6 +265,25 @@ async def test_two_driver_parity_byte_identical_ledgers(tmp_path, monkeypatch):
 	assert booked["KXTEST-A"]["slippage_cents"] == 0
 	assert booked["KXTEST-B"]["fill_size"] == 4        # partial residual stays open
 	assert "KXTEST-C" not in booked                    # zero-fill expiry books nothing
+
+
+@pytest.mark.asyncio
+async def test_two_driver_parity_with_paper_timer_ticks(tmp_path, monkeypatch):
+	"""SPEC §12.6b + §5.1: the paper engine's 5 s wall-clock timer must never
+	change the ledger. The fixture's t0+50 book move sits between the +30 s
+	mark-out due times (t0+40/42) and the next event tick (t0+120): a timer
+	tick that sampled would record the PRE-move mid while timerless replay
+	records the post-move mid — divergent mark_outs. Clock-only steps must
+	sample nothing (event ticks only)."""
+	monkeypatch.setattr(backtester_mod, "_check_engine_version", lambda b, m: None)
+
+	_mock_uuid(monkeypatch)
+	paper_ledger, _, _ = await _drive_paper(tmp_path / "paper", timer_ticks=True)
+
+	bundle = _write_bundle(tmp_path)
+	_mock_uuid(monkeypatch)                            # reset the counter
+	result = await backtester_mod.replay_capture(bundle)
+	assert paper_ledger == _canonical(result.resting_ledger)   # BYTE-identical
 
 
 @pytest.mark.asyncio

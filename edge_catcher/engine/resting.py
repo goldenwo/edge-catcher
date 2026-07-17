@@ -341,7 +341,9 @@ class RestingOrderTracker:
 		prints_by_ticker: dict[str, list[Print]],
 	) -> list[TrackerEvent]:
 		"""Advance the state machine: consume prints, apply deadline cancels,
-		sample due mark-outs. Returns the events for dispatch to act on.
+		sample due mark-outs (event ticks only — a clock-only step never
+		samples, keeping the ledger cadence-independent per SPEC §5.1).
+		Returns the events for dispatch to act on.
 
 		Phase order is load-bearing (SPEC §5.1): prints are processed FIRST
 		on their OWN timestamps (a print with ``ts < deadline_ts`` fills even
@@ -409,7 +411,12 @@ class RestingOrderTracker:
 				))
 
 		# Phase 3 — due mark-out samples (§7.5 pending-sample scheduling).
-		if self._pending_markouts:
+		# EVENT ticks only: a clock-only step (the paper engine's periodic
+		# timer passes no prints) must never sample — the sampled mid would
+		# depend on wall-clock step cadence, breaking §5.1's "ledger is a
+		# pure function of the event stream" (replay is timerless). §7.5's
+		# "first subsequent tick at-or-after" = first EVENT tick.
+		if prints_by_ticker and self._pending_markouts:
 			due = [m for m in self._pending_markouts if m[3] <= now]
 			if due:
 				self._pending_markouts = [m for m in self._pending_markouts if m[3] > now]
@@ -476,6 +483,7 @@ class RestingOrderTracker:
 			snapshot.append({
 				"order": asdict(order),
 				"fills": [[ts, size] for ts, size in row.fills],
+				"queue_ahead_at_place": row.queue_ahead_at_place,
 				"time_to_first_fill": row.time_to_first_fill,
 				"mark_outs": [[fill_ts, offset, v] for fill_ts, offset, v in row.mark_outs],
 				"pending_markouts": [
@@ -493,6 +501,12 @@ class RestingOrderTracker:
 			order = RestingOrder(**cast("dict[str, object]", entry["order"]))  # type: ignore[arg-type]
 			self.register(order)
 			row = self._rows[order.client_order_id]
+			# register() derives queue_ahead_at_place from order.queue_ahead,
+			# which is live model state (already decremented by at-level
+			# prints) — restore the ORIGINAL placement depth when present.
+			qaap = entry.get("queue_ahead_at_place")
+			if qaap is not None:
+				row.queue_ahead_at_place = float(cast(float, qaap))
 			fills = cast("list[list[float]]", entry.get("fills") or [])
 			row.fills = [(float(ts), int(size)) for ts, size in fills]
 			ttff = cast("float | None", entry.get("time_to_first_fill"))

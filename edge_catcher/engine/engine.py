@@ -1020,8 +1020,10 @@ async def _resting_timer_loop(
 	close-window cancels during print gaps so cap slots free promptly and
 	the operator is notified. Operationally useful, LEDGER-IRRELEVANT —
 	§5.1's validity window + backdated cancels make ledger outcomes a pure
-	function of the event stream, which is why replay (timerless) still
-	produces a byte-identical ledger. One bad tick never kills the loop."""
+	function of the event stream, and clock-only steps never sample
+	mark-outs (tracker Phase 3 is event-tick-only), which is why replay
+	(timerless) still produces a byte-identical ledger. One bad tick never
+	kills the loop."""
 	while True:
 		await asyncio.sleep(interval)
 		try:
