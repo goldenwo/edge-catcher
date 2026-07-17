@@ -299,11 +299,21 @@ class RestingOrderTracker:
 		)
 
 	def has_level(self, strategy: str, ticker: str, side: str, price_cents: int) -> bool:
-		"""Data source for dispatch's ``duplicate_level`` guard (SPEC §8.2)."""
+		"""Data source for dispatch's ``duplicate_level`` guard (SPEC §8.2).
+
+		CROSS-strategy on purpose (SPEC §7.7): the fill model never
+		allocates one print across two own orders at a level, so a second
+		order at ``(ticker, side, price)`` is rejected regardless of which
+		strategy asks — per-strategy scoping would let two strategies'
+		orders each consume the same print, over-booking fills and
+		breaking the §7 conservative-lower-bound claim. ``strategy`` is
+		kept for the frozen §15 signature (and future per-strategy skip
+		attribution); it does not narrow the match."""
+		del strategy  # cross-strategy match — see docstring
 		for coid in self._by_ticker.get(ticker, ()):
 			o = self._orders[coid]
 			if (o.state not in _TERMINAL_STATES
-					and o.strategy == strategy and o.side == side
+					and o.side == side
 					and o.rest_price_cents == price_cents):
 				return True
 		return False
@@ -496,9 +506,40 @@ class RestingOrderTracker:
 	def from_snapshot(self, snapshot: list[dict[str, object]]) -> None:
 		"""Seed from a prior ``to_snapshot`` (or its JSON round-trip — string
 		mark-out keys are coerced back to int). Additive: call on a fresh
-		tracker at boot/replay-seed time (SPEC §5.5)."""
+		tracker at boot/replay-seed time (SPEC §5.5).
+
+		Raises:
+			ValueError: on malformed content. Bundles travel through R2;
+				a present-but-wrong-shaped snapshot must fail as LOUDLY as
+				a missing one (replay/backtester §8.3 absence rule) —
+				never seed fabricated orders or die on an opaque
+				``TypeError`` deep in a dataclass constructor.
+		"""
+		if not isinstance(snapshot, list):
+			raise ValueError(
+				f"RestingOrderTracker.from_snapshot: snapshot must be a list, "
+				f"got {type(snapshot).__name__}"
+			)
 		for entry in snapshot:
-			order = RestingOrder(**cast("dict[str, object]", entry["order"]))  # type: ignore[arg-type]
+			order_data = entry.get("order") if isinstance(entry, dict) else None
+			if not isinstance(order_data, dict):
+				raise ValueError(
+					"RestingOrderTracker.from_snapshot: malformed entry — "
+					f"expected a dict with an 'order' dict, got: {entry!r}"
+				)
+			try:
+				order = RestingOrder(**cast("dict[str, object]", order_data))  # type: ignore[arg-type]
+			except TypeError as exc:
+				raise ValueError(
+					f"RestingOrderTracker.from_snapshot: bad order fields: {exc}"
+				) from exc
+			if order.state in _TERMINAL_STATES or order.state not in (
+					"resting", "partially_filled"):
+				raise ValueError(
+					"RestingOrderTracker.from_snapshot: snapshot carries "
+					f"non-in-flight state {order.state!r} for "
+					f"{order.client_order_id!r} — to_snapshot never emits it"
+				)
 			self.register(order)
 			row = self._rows[order.client_order_id]
 			# register() derives queue_ahead_at_place from order.queue_ahead,

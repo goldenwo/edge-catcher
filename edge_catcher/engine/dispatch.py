@@ -1349,6 +1349,10 @@ def _route_tracker_events(
 	metrics = config.get("_metrics")
 	if metrics is None:
 		metrics = Metrics()
+	# One step() batch can emit several fill events for one order (multi-print
+	# batches); order.state is read AFTER the whole step, so every fill event
+	# of a fully-filled order sees "filled" — count each order at most once.
+	filled_counted: set[str] = set()
 	for event in events:
 		order = event.order
 		try:
@@ -1403,7 +1407,9 @@ def _route_tracker_events(
 						order.strategy, event.size, order.filled_size,
 						order.intended_size, order.ticker,
 					)
-				if order.state == "filled":
+				if (order.state == "filled"
+						and order.client_order_id not in filled_counted):
+					filled_counted.add(order.client_order_id)
 					metrics.inc("maker_filled")
 			elif event.kind == "cancel":
 				if order.filled_size > 0:

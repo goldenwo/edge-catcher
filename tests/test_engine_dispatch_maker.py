@@ -236,6 +236,39 @@ async def test_second_same_level_skips_duplicate_level() -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_level_guard_is_cross_strategy() -> None:
+	# SPEC §7.7: the fill model must never allocate one print across two own
+	# orders at a level — so a SECOND strategy at the same (ticker, side,
+	# price) is also rejected. Per-strategy scoping would let both orders
+	# consume the same print, over-booking fills and breaking the §7
+	# conservative-lower-bound claim.
+	tr = _tracker()
+	cfg = _config(tracker=tr)
+	await _enter(_maker_sig(), cfg)
+	await _enter(_maker_sig(strategy="other"), cfg)     # passes "other"'s cap
+	assert tr.in_flight_count() == 1
+	assert cfg["_metrics"].snapshot()["maker_skip_duplicate_level"] == 1
+
+
+@pytest.mark.asyncio
+async def test_maker_filled_counted_once_for_multi_fill_batch() -> None:
+	# Two fill events completing ONE order in a single step batch: routing
+	# reads order.state after the whole step, so both events see "filled" —
+	# the counter must still increment exactly once per order.
+	tr = _tracker()
+	cfg = _config(tracker=tr)
+	await _enter(_maker_sig(), cfg)                     # intended 13, queue 7
+	store = _StubStoreOf(cfg)
+	step_resting_orders(cfg, store, "KXTEST-1", [
+		Print(_NOW.timestamp() + 10, 85, 9.0, "yes"),    # queue consumed, 2 fill
+		Print(_NOW.timestamp() + 11, 85, 11.0, "yes"),   # 11 fill -> complete
+	], _NOW)
+	assert len(store.trade_calls) == 1
+	assert store.augment_calls == [(101, 11)]
+	assert cfg["_metrics"].snapshot()["maker_filled"] == 1
+
+
+@pytest.mark.asyncio
 async def test_close_window_without_close_ts_skips() -> None:
 	tr = _tracker()
 	cfg = _config(tracker=tr)

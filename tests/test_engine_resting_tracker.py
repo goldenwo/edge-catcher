@@ -161,7 +161,10 @@ def test_has_level_and_in_flight_count():
 	tr.register(_order())
 	assert tr.has_level("s", "KXTEST-1", "no", 15) is True
 	assert tr.has_level("s", "KXTEST-1", "no", 16) is False
-	assert tr.has_level("other", "KXTEST-1", "no", 15) is False
+	# CROSS-strategy on purpose (SPEC §7.7): another strategy at the same
+	# (ticker, side, price) is also blocked — one print must never be
+	# allocated across two own orders' fill models.
+	assert tr.has_level("other", "KXTEST-1", "no", 15) is True
 	assert tr.in_flight_count() == 1
 	assert tr.in_flight_count(strategy="s") == 1
 	assert tr.in_flight_count(strategy="other") == 0
@@ -291,6 +294,30 @@ def test_snapshot_preserves_queue_ahead_at_place():
 	fresh = RestingOrderTracker(QueueFillModel(), mid_provider=lambda t: None)
 	fresh.from_snapshot(tr.to_snapshot())
 	assert fresh.ledger[0].queue_ahead_at_place == 6.0
+
+
+def test_from_snapshot_rejects_malformed_content():
+	# Bundles travel through R2: a present-but-wrong-shaped snapshot must
+	# fail as loudly as a missing one — never seed fabricated orders or die
+	# on an opaque TypeError inside the dataclass constructor.
+	import pytest
+	tr = _tracker()
+	with pytest.raises(ValueError, match="must be a list"):
+		tr.from_snapshot({"order": {}})  # type: ignore[arg-type]
+	with pytest.raises(ValueError, match="malformed entry"):
+		tr.from_snapshot(["garbage"])  # type: ignore[list-item]
+	with pytest.raises(ValueError, match="bad order fields"):
+		tr.from_snapshot([{"order": {"unexpected_field": 1}}])
+
+
+def test_from_snapshot_rejects_non_in_flight_state():
+	import pytest
+	from dataclasses import asdict
+	entry = {"order": asdict(_order())}
+	entry["order"]["state"] = "filled"        # to_snapshot never emits terminal
+	tr = _tracker()
+	with pytest.raises(ValueError, match="non-in-flight state"):
+		tr.from_snapshot([entry])
 
 
 def test_snapshot_serializes_plain_data_only():
