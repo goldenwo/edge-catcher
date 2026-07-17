@@ -268,6 +268,78 @@ async def test_maker_filled_counted_once_for_multi_fill_batch() -> None:
 	assert cfg["_metrics"].snapshot()["maker_filled"] == 1
 
 
+def test_market_close_ts_parses_utc_and_naive_identically() -> None:
+	# Kalshi timestamps are UTC; a NAIVE close_time string must not be read
+	# as machine-local time — that would shift deadline_ts by the UTC offset
+	# and accept fills past close. Same naive-datetime trap fixed in
+	# adapters/kalshi/adapter.py.
+	from edge_catcher.engine.dispatch import _market_close_ts
+	expected = datetime(2026, 7, 17, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+	assert _market_close_ts(
+		_Ctx(_book(), {"close_time": "2026-07-17T15:00:00Z"})) == expected
+	assert _market_close_ts(
+		_Ctx(_book(), {"close_time": "2026-07-17T15:00:00"})) == expected
+	assert _market_close_ts(_Ctx(_book(), {"close_time": expected})) == expected
+	assert _market_close_ts(_Ctx(_book(), {"close_time": "garbage"})) is None
+	assert _market_close_ts(_Ctx(_book(), {})) is None
+
+
+class _BoomOnFirstBookingStore(_StubStore):
+	"""record_trade raises on the FIRST call only (isolation-path probe)."""
+
+	def __init__(self) -> None:
+		super().__init__()
+		self._boomed = False
+
+	def record_trade(self, **kwargs: Any) -> int:
+		if not self._boomed:
+			self._boomed = True
+			raise RuntimeError("booking boom")
+		return super().record_trade(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_route_isolation_one_bad_booking_never_drops_other_events() -> None:
+	# _route_tracker_events' per-event isolation: a store raising on one
+	# booking must not prevent later events in the same batch from routing,
+	# and must be sweep-visible via maker_order_errored.
+	tr = _tracker()
+	cfg = _config(tracker=tr)
+	await _enter(_maker_sig(), cfg)                             # A @15
+	await _enter(_maker_sig(entry_price_cents=16), cfg)         # B @16
+	store = _BoomOnFirstBookingStore()
+	step_resting_orders(cfg, store, "KXTEST-1",
+	                    [Print(_NOW.timestamp() + 10, 90, 50.0, "yes")], _NOW)
+	assert len(store.trade_calls) == 1                          # B still booked
+	snap = cfg["_metrics"].snapshot()
+	assert snap["maker_order_errored"] == 1                     # A's boom visible
+	assert snap["maker_filled"] == 1                            # B only
+
+
+@pytest.mark.asyncio
+async def test_maker_booking_against_real_trade_store(tmp_path) -> None:
+	# The stub store accepts any kwargs; the REAL SQLite TradeStore is the
+	# contract (mocks-must-match-real-shape). Drive record-then-augment
+	# through the actual store.
+	from edge_catcher.engine.trade_store import TradeStore
+	store = TradeStore(tmp_path / "t.db")
+	try:
+		tr = _tracker()
+		cfg = _config(tracker=tr)
+		await _enter(_maker_sig(), cfg)
+		step_resting_orders(cfg, store, "KXTEST-1",
+		                    [Print(_NOW.timestamp() + 10, 85, 9.0, "yes")], _NOW)
+		step_resting_orders(cfg, store, "KXTEST-1",
+		                    [Print(_NOW.timestamp() + 20, 85, 5.0, "yes")], _NOW)
+		rows = store.get_open_trades()
+		assert len(rows) == 1
+		assert rows[0]["fill_size"] == 7                        # 2 booked + 5 augmented
+		assert rows[0]["entry_price"] == 15
+		assert rows[0]["slippage_cents"] == 0
+	finally:
+		store.close()
+
+
 @pytest.mark.asyncio
 async def test_markout_provider_error_reaches_metrics() -> None:
 	# A raising mid_provider degrades the sample to None in the tracker;

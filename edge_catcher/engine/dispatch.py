@@ -1096,9 +1096,16 @@ def _market_close_ts(ctx: TickContext) -> float | None:
 		return float(raw)
 	if isinstance(raw, str):
 		try:
-			return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+			dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
 		except ValueError:
 			return None
+		if dt.tzinfo is None:
+			# Kalshi timestamps are UTC; a naive string parsed with
+			# .timestamp() would be read as LOCAL time, shifting the close
+			# (and thus deadline_ts) by the machine's UTC offset — the same
+			# naive-datetime trap fixed in adapters/kalshi/adapter.py.
+			dt = dt.replace(tzinfo=timezone.utc)
+		return dt.timestamp()
 	return None
 
 
