@@ -277,6 +277,8 @@ class RestingOrderTracker:
 		self._pending_markouts: list[tuple[str, float, int, float]] = []
 		# Raising mid_provider tally (drained by dispatch to a counter).
 		self._markout_provider_errors = 0
+		# Set by censor_open (end-of-stream): further transitions forbidden.
+		self._censored = False
 
 	# ------------------------------------------------------------------
 	# Registration + guard data sources (SPEC §5 API)
@@ -293,6 +295,7 @@ class RestingOrderTracker:
 				seed a FRESH tracker (``from_snapshot`` contract), never
 				re-register into a live one.
 		"""
+		self._assert_not_censored("register")
 		if order.client_order_id in self._orders:
 			raise ValueError(
 				f"RestingOrderTracker.register: duplicate client_order_id "
@@ -419,6 +422,7 @@ class RestingOrderTracker:
 		when ``now`` is already past the deadline — model time, not step
 		time), THEN deadline cancels apply, backdated to ``deadline_ts``.
 		"""
+		self._assert_not_censored("step")
 		if not self._orders:
 			return []
 		has_live = any(o.state not in _TERMINAL_STATES for o in self._orders.values())
@@ -524,11 +528,15 @@ class RestingOrderTracker:
 	# External transitions
 	# ------------------------------------------------------------------
 
-	def cancel(self, client_order_id: str, cause: str, now: float) -> TrackerEvent | None:
+	def cancel(self, client_order_id: str, *, cause: str, now: float) -> TrackerEvent | None:
 		"""Strategy- or operator-initiated cancel (e.g. exit-while-resting,
 		SPEC §8.2). NOT backdated — this is a genuine now-decision, unlike
 		deadline cancels. Idempotent: terminal/unknown orders are a no-op.
-		Fills already booked stay booked (fills-beat-cancels, §5.2)."""
+		Fills already booked stay booked (fills-beat-cancels, §5.2).
+		``cause``/``now`` are keyword-only: two adjacent same-typed
+		positionals would let a transposed call silently no-op via the
+		``.get()`` miss."""
+		self._assert_not_censored("cancel")
 		order = self._orders.get(client_order_id)
 		if order is None or order.state in _TERMINAL_STATES:
 			return None
@@ -540,7 +548,12 @@ class RestingOrderTracker:
 		"""Stream-end censoring (SPEC §11): mark every still-in-flight order's
 		ledger row ``censored_stream_end``. A REPORTING disposition, not a
 		state transition — called only by the replay driver at end-of-stream.
+		ENFORCED, not just documented: after censoring, ``register``/``step``/
+		``cancel`` raise — a later transition would silently overwrite the
+		censored disposition (``_finalize``'s terminal-state guard cannot
+		protect it, since the order's state stays non-terminal by design).
 		Returns the censored count."""
+		self._censored = True
 		censored = 0
 		for coid, order in self._orders.items():
 			if order.state in _TERMINAL_STATES:
@@ -626,6 +639,7 @@ class RestingOrderTracker:
 				and isinstance(order.filled_size, num)
 				and isinstance(order.intended_size, num)
 				and isinstance(order.queue_ahead, num)
+				and isinstance(order.rest_price_cents, num)
 				and (order.market_close_ts is None
 				     or isinstance(order.market_close_ts, num))
 				and (order.cancel_before_close_seconds is None
@@ -635,6 +649,21 @@ class RestingOrderTracker:
 				raise ValueError(
 					"RestingOrderTracker.from_snapshot: non-numeric "
 					f"timestamp/size field(s) for {order.client_order_id!r}"
+				)
+			# Domain checks (same invariants validate_maker_signal enforces
+			# on the live registration path): the fill model treats any
+			# non-"no" side as "yes", so a corrupted side would silently
+			# compute the wrong counter-side instead of failing here.
+			if order.side not in ("yes", "no"):
+				raise ValueError(
+					"RestingOrderTracker.from_snapshot: invalid side "
+					f"{order.side!r} for {order.client_order_id!r}"
+				)
+			if not (1 <= order.rest_price_cents <= 99):
+				raise ValueError(
+					"RestingOrderTracker.from_snapshot: rest_price_cents "
+					f"{order.rest_price_cents!r} out of [1, 99] for "
+					f"{order.client_order_id!r}"
 				)
 			self.register(order)
 			row = self._rows[order.client_order_id]
@@ -662,6 +691,14 @@ class RestingOrderTracker:
 	# ------------------------------------------------------------------
 	# Internal
 	# ------------------------------------------------------------------
+
+	def _assert_not_censored(self, op: str) -> None:
+		if self._censored:
+			raise RuntimeError(
+				f"RestingOrderTracker.{op}: tracker was censored at "
+				"end-of-stream (censor_open); no further transitions allowed "
+				"— they would silently overwrite censored dispositions"
+			)
 
 	def _finalize(
 		self,

@@ -304,6 +304,15 @@ async def test_taker_hot_path_skips_print_allocation_when_maker_idle(monkeypatch
 	assert reached == ["ok", "ok"]
 
 
+def test_signal_exec_style_typo_raises() -> None:
+	# Literal isn't enforced at runtime by dataclasses: a typo like "Maker"
+	# would silently execute as a TAKER order (review R8-F2). Signal
+	# construction must fail loudly instead; the strategy fan-out isolates
+	# and logs the raise per-strategy.
+	with pytest.raises(ValueError, match="exec_style"):
+		_maker_sig(exec_style="Maker")
+
+
 def test_market_close_ts_parses_utc_and_naive_identically() -> None:
 	# Kalshi timestamps are UTC; a NAIVE close_time string must not be read
 	# as machine-local time — that would shift deadline_ts by the UTC offset

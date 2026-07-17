@@ -45,6 +45,18 @@ class Signal:
 	rest_ttl_seconds: int | None = None            # maker: mandatory; cancel unfilled remainder after this age
 	cancel_before_close_seconds: int | None = None # maker: cancel when market close nearer than this
 
+	def __post_init__(self) -> None:
+		# Dataclasses don't enforce Literal at runtime: a typo like "Maker"
+		# would otherwise fall through dispatch's `== "maker"` branch and
+		# silently execute as a TAKER order (materially different price
+		# source and fill semantics, no diagnostic trail). Raise here —
+		# the strategy fan-out isolates and loudly logs per-strategy.
+		if self.exec_style not in ("taker", "maker"):
+			raise ValueError(
+				f"Signal.exec_style must be 'taker' or 'maker', got "
+				f"{self.exec_style!r} ({self.strategy} {self.ticker})"
+			)
+
 
 class Strategy(ABC):
 	"""Base class for engine strategies — runs in both paper and live modes."""

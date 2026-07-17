@@ -374,6 +374,17 @@ def test_from_snapshot_rejects_malformed_content():
 	entry["order"]["expires_ts"] = "2000"     # numeric field corrupted to str
 	with pytest.raises(ValueError, match="non-numeric"):
 		tr.from_snapshot([entry])
+	# Domain corruption: the fill model treats any non-"no" side as "yes",
+	# so a bad side must fail at the seed boundary, never silently flip
+	# the counter-side (review R8-F1, re-flag of R4-F3).
+	entry_side = {"order": asdict(_order())}
+	entry_side["order"]["side"] = "NO"
+	with pytest.raises(ValueError, match="invalid side"):
+		tr.from_snapshot([entry_side])
+	entry_price = {"order": asdict(_order())}
+	entry_price["order"]["rest_price_cents"] = 0
+	with pytest.raises(ValueError, match="out of"):
+		tr.from_snapshot([entry_price])
 
 
 def test_from_snapshot_rejects_non_in_flight_state():
@@ -399,6 +410,24 @@ def test_censor_open_marks_still_resting_orders():
 	tr.register(_order(expires_ts=99999.0))
 	tr.censor_open(ts=5000.0)
 	assert tr.ledger[0].disposition == "censored_stream_end"
+
+
+def test_censored_tracker_rejects_further_transitions():
+	# The "called only at end-of-stream" contract is ENFORCED (review R8-F3):
+	# a step/cancel/register after censoring would silently overwrite the
+	# censored disposition (the order's state stays non-terminal by design,
+	# so _finalize's terminal-state guard cannot protect it).
+	import pytest
+	tr = _tracker()
+	tr.register(_order(expires_ts=99999.0))
+	tr.censor_open(ts=5000.0)
+	with pytest.raises(RuntimeError, match="censored"):
+		tr.step(6000.0, {})
+	with pytest.raises(RuntimeError, match="censored"):
+		tr.cancel("cid-1", cause="cancelled", now=6000.0)
+	with pytest.raises(RuntimeError, match="censored"):
+		tr.register(_order(coid="cid-2"))
+	assert tr.ledger[0].disposition == "censored_stream_end"   # intact
 
 
 # ---------------------------------------------------------------------------
