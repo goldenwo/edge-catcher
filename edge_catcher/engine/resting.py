@@ -203,8 +203,11 @@ class LedgerRow:
 	``filled | partial | expired | cancelled | censored_stream_end |
 	errored`` — fill-completeness wins over cause (SPEC §5.3): a partially
 	filled order that ends for ANY reason is ``partial`` with the cause
-	preserved in ``end_cause``. ``mark_outs`` maps offset-seconds to the
-	sampled reference price (``None`` when the provider had no price).
+	preserved in ``end_cause``. ``mark_outs`` is PER-FILL (SPEC §11:
+	"mark-outs present for every fill"): one ``(fill_ts, offset_s, sample)``
+	record per fill per offset, ``sample=None`` when the provider had no
+	price — a multi-fill order gets a full mark-out set for EACH fill, never
+	an overwrite (quality-review fix, Tasks 4+5).
 	"""
 
 	client_order_id: str
@@ -218,7 +221,7 @@ class LedgerRow:
 	time_to_first_fill: float | None = None
 	disposition: str | None = None
 	end_cause: str | None = None
-	mark_outs: dict[int, int | None] = field(default_factory=dict)
+	mark_outs: list[tuple[float, int, int | None]] = field(default_factory=list)
 
 
 class RestingOrderTracker:
@@ -259,15 +262,30 @@ class RestingOrderTracker:
 		self._orders: dict[str, RestingOrder] = {}          # coid -> order (insertion-ordered)
 		self._by_ticker: dict[str, list[str]] = {}          # ticker -> [coid, ...]
 		self._rows: dict[str, LedgerRow] = {}               # coid -> ledger row
-		# Pending mark-out samples: (coid, offset_s, scheduled_ts), FIFO.
-		self._pending_markouts: list[tuple[str, int, float]] = []
+		# Pending mark-out samples: (coid, fill_ts, offset_s, scheduled_ts),
+		# FIFO. fill_ts anchors each sample to ITS fill (SPEC §11 per-fill).
+		self._pending_markouts: list[tuple[str, float, int, float]] = []
 
 	# ------------------------------------------------------------------
 	# Registration + guard data sources (SPEC §5 API)
 	# ------------------------------------------------------------------
 
 	def register(self, order: RestingOrder) -> None:
-		"""Track a newly placed resting order (dispatch's ``resting`` branch)."""
+		"""Track a newly placed resting order (dispatch's ``resting`` branch).
+
+		Raises:
+			ValueError: on a duplicate ``client_order_id``. A re-registered
+				coid would appear twice in the ticker index and consume the
+				same prints twice — silent fill inflation in funds-adjacent
+				code. Loud failure instead; 2b's venue-derived recovery must
+				seed a FRESH tracker (``from_snapshot`` contract), never
+				re-register into a live one.
+		"""
+		if order.client_order_id in self._orders:
+			raise ValueError(
+				f"RestingOrderTracker.register: duplicate client_order_id "
+				f"{order.client_order_id!r} (ticker={order.ticker})"
+			)
 		self._orders[order.client_order_id] = order
 		self._by_ticker.setdefault(order.ticker, []).append(order.client_order_id)
 		self._rows[order.client_order_id] = LedgerRow(
@@ -350,9 +368,9 @@ class RestingOrderTracker:
 						if first:
 							row.time_to_first_fill = p.ts - order.placed_ts
 						for offset in MARKOUT_OFFSETS_S:
-							self._pending_markouts.append((coid, offset, p.ts + offset))
+							self._pending_markouts.append((coid, p.ts, offset, p.ts + offset))
 						if order.remaining <= 0:
-							self._finalize(order, row, "filled", None)
+							self._finalize(order, row, "filled")
 						else:
 							order.state = "partially_filled"
 						events.append(TrackerEvent(
@@ -364,7 +382,7 @@ class RestingOrderTracker:
 						"RestingOrderTracker: error processing order %s on %s — "
 						"isolating as errored, step continues", coid, ticker,
 					)
-					self._finalize(order, row, "errored", None)
+					self._finalize(order, row, "errored")
 					events.append(TrackerEvent(kind="error", order=order, ts=now))
 
 		# Phase 2 — deadline cancels (clock conditions), backdated (§5.1).
@@ -375,27 +393,27 @@ class RestingOrderTracker:
 			if deadline <= now:
 				row = self._rows[coid]
 				cause = "expired" if deadline == order.expires_ts else "cancelled"
-				self._finalize(order, row, cause, None)
+				self._finalize(order, row, cause)
 				events.append(TrackerEvent(
 					kind="cancel", order=order, ts=deadline, cause=cause,
 				))
 
 		# Phase 3 — due mark-out samples (§7.5 pending-sample scheduling).
 		if self._pending_markouts:
-			due = [m for m in self._pending_markouts if m[2] <= now]
+			due = [m for m in self._pending_markouts if m[3] <= now]
 			if due:
-				self._pending_markouts = [m for m in self._pending_markouts if m[2] > now]
-				for coid, offset, _scheduled in due:
+				self._pending_markouts = [m for m in self._pending_markouts if m[3] > now]
+				for coid, fill_ts, offset, _scheduled in due:
 					mrow = self._rows.get(coid)
 					if mrow is None:
 						continue
 					try:
-						mrow.mark_outs[offset] = self._mid_provider(mrow.ticker)
+						mrow.mark_outs.append((fill_ts, offset, self._mid_provider(mrow.ticker)))
 					except Exception:
 						log.exception(
 							"RestingOrderTracker: mark-out sample failed for %s", coid,
 						)
-						mrow.mark_outs[offset] = None
+						mrow.mark_outs.append((fill_ts, offset, None))
 
 		return events
 
@@ -412,7 +430,7 @@ class RestingOrderTracker:
 		if order is None or order.state in _TERMINAL_STATES:
 			return None
 		row = self._rows[client_order_id]
-		self._finalize(order, row, "cancelled" if cause != "expired" else cause, None)
+		self._finalize(order, row, "cancelled" if cause != "expired" else cause)
 		return TrackerEvent(kind="cancel", order=order, ts=now, cause=cause)
 
 	def censor_open(self, ts: float) -> int:
@@ -449,10 +467,10 @@ class RestingOrderTracker:
 				"order": asdict(order),
 				"fills": [[ts, size] for ts, size in row.fills],
 				"time_to_first_fill": row.time_to_first_fill,
-				"mark_outs": {str(k): v for k, v in row.mark_outs.items()},
+				"mark_outs": [[fill_ts, offset, v] for fill_ts, offset, v in row.mark_outs],
 				"pending_markouts": [
-					[offset, scheduled]
-					for c, offset, scheduled in self._pending_markouts if c == coid
+					[fill_ts, offset, scheduled]
+					for c, fill_ts, offset, scheduled in self._pending_markouts if c == coid
 				],
 			})
 		return snapshot
@@ -469,12 +487,16 @@ class RestingOrderTracker:
 			row.fills = [(float(ts), int(size)) for ts, size in fills]
 			ttff = cast("float | None", entry.get("time_to_first_fill"))
 			row.time_to_first_fill = float(ttff) if ttff is not None else None
-			mark_outs = cast("dict[str, int | None]", entry.get("mark_outs") or {})
-			row.mark_outs = {int(k): v for k, v in mark_outs.items()}
+			mark_outs = cast("list[list[float | None]]", entry.get("mark_outs") or [])
+			row.mark_outs = [
+				(float(cast(float, fill_ts)), int(cast(float, offset)),
+				 int(v) if v is not None else None)
+				for fill_ts, offset, v in mark_outs
+			]
 			pending = cast("list[list[float]]", entry.get("pending_markouts") or [])
-			for offset, scheduled in pending:
+			for fill_ts, offset, scheduled in pending:
 				self._pending_markouts.append(
-					(order.client_order_id, int(offset), float(scheduled)))
+					(order.client_order_id, float(fill_ts), int(offset), float(scheduled)))
 
 	# ------------------------------------------------------------------
 	# Internal
@@ -485,7 +507,6 @@ class RestingOrderTracker:
 		order: RestingOrder,
 		row: LedgerRow,
 		outcome: str,
-		_unused: None,
 	) -> None:
 		"""Apply the terminal transition + §5.3 canonical disposition rule.
 		Idempotent: terminal states absorb duplicates (SPEC §5.4)."""

@@ -180,13 +180,36 @@ def test_markouts_sample_at_first_step_at_or_after_offsets():
 	tr.register(_order(expires_ts=99999.0))
 	tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})     # fill at 1500
 	row = tr.ledger[0]
-	assert row.mark_outs == {}                              # nothing sampled yet
+	assert row.mark_outs == []                              # nothing sampled yet
 	mids["value"] = 25
 	tr.step(1530.0, {})                                     # 1500+30
-	assert row.mark_outs[30] == 25
+	assert row.mark_outs == [(1500.0, 30, 25)]
 	mids["value"] = 30
 	tr.step(1900.0, {})                                     # covers +120 and +300
-	assert row.mark_outs[120] == 30 and row.mark_outs[300] == 30
+	assert (1500.0, 120, 30) in row.mark_outs and (1500.0, 300, 30) in row.mark_outs
+
+
+def test_multi_fill_markouts_recorded_per_fill_never_overwritten():
+	# SPEC §11: "mark-outs present for every fill" — a second fill must ADD
+	# its own records, not overwrite the first's (Tasks 4+5 quality review).
+	tr = RestingOrderTracker(QueueFillModel(), mid_provider=lambda t: 42)
+	tr.register(_order(expires_ts=99999.0, size=10))
+	tr.step(1500.0, {"KXTEST-1": [_at_level(1500.0, 4.0)]})   # fill 4 @1500
+	tr.step(1600.0, {"KXTEST-1": [_at_level(1600.0, 3.0)]})   # fill 3 @1600
+	tr.step(2000.0, {})                                        # all 6 samples due
+	row = tr.ledger[0]
+	assert sorted(row.mark_outs) == [
+		(1500.0, 30, 42), (1500.0, 120, 42), (1500.0, 300, 42),
+		(1600.0, 30, 42), (1600.0, 120, 42), (1600.0, 300, 42),
+	]
+
+
+def test_register_duplicate_client_order_id_raises():
+	import pytest
+	tr = _tracker()
+	tr.register(_order())
+	with pytest.raises(ValueError, match="duplicate client_order_id"):
+		tr.register(_order())
 
 
 # ---------------------------------------------------------------------------
