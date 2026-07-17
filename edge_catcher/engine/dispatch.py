@@ -22,11 +22,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from edge_catcher.engine.execution import _make_client_order_id, build_entry_order, entry_spread_too_wide
+from edge_catcher.engine.execution import (
+	_make_client_order_id,
+	build_entry_order,
+	entry_spread_too_wide,
+	resting_cap,
+	validate_maker_signal,
+	would_cross,
+)
 from edge_catcher.engine.executor import Executor, OrderRequest, OrderResult
+from edge_catcher.engine.resting import (
+	Print,
+	RestingOrder,
+	RestingOrderTracker,
+	TrackerEvent,
+)
 from edge_catcher.engine.market_state import (
 	MarketState,
 	OrderbookSnapshot,
@@ -610,6 +623,19 @@ async def _handle_enter(
 	allowed_size: int | None = None,
 ) -> None:
 	"""Process an entry signal: build OrderRequest, call executor, route by status."""
+	# Phase 2a maker path (SPEC §8.2): routed BEFORE the taker flow — the
+	# taker machinery below (ctx-ask price derivation, spread gate, slippage
+	# walk, shielded filled-branch) does not apply to a resting order, whose
+	# price IS signal.entry_price_cents and whose fills arrive later via the
+	# RestingOrderTracker. Taker signals (the default) fall through to the
+	# byte-identical pre-2a flow.
+	if signal.exec_style == "maker":
+		await _handle_maker_enter(
+			signal, ctx, store, config, executor, bullet,
+			now=now, allowed_size=allowed_size,
+		)
+		return
+
 	# Raw tick price for the side: yes pays yes_ask, no pays no_ask
 	entry_price = ctx.yes_ask if signal.side == "yes" else ctx.no_ask
 
@@ -1037,11 +1063,13 @@ async def _handle_enter(
 		)
 		metrics.inc("entries_pending")
 	else:
-		# Defensive exhaustiveness arm — the OrderResult.status Literal at
-		# executor.py:65 enumerates {"filled","pending","rejected"} so static
-		# type checking would catch a missing branch, but a new variant added
-		# to the Literal without a matching dispatch branch (PR 5 / PR 6 risk)
+		# Defensive exhaustiveness arm — the OrderResult.status Literal
+		# (executor.py) enumerates {"filled","pending","rejected","resting"}
+		# so static type checking would catch a missing branch, but a new
+		# variant added to the Literal without a matching dispatch branch
 		# would otherwise silently fall through with no audit row + no notify.
+		# "resting" currently lands here by design: its real dispatch branch
+		# arrives with Phase 2a Task 9 (no executor returns it until then).
 		# Loud log + metric surfaces the dispatch-side miss before live money
 		# is affected.
 		log.error(
@@ -1051,6 +1079,406 @@ async def _handle_enter(
 			result.status, signal.strategy, signal.ticker,
 		)
 		metrics.inc("entries_unhandled_status")
+
+
+def _market_close_ts(ctx: TickContext) -> float | None:
+	"""Best-effort market close/expiration timestamp from tick metadata.
+
+	``None`` = unknown — a TTL-only resting order is fine with that (its
+	deadline is just ``expires_ts``, SPEC §5 internals), but a close-window
+	signal (``cancel_before_close_seconds`` set) is REJECTED upstream when
+	this returns None (``invalid_maker_signal:no_close_ts``)."""
+	meta = getattr(ctx, "market_metadata", None)
+	if not isinstance(meta, dict):
+		return None
+	raw = meta.get("close_time") or meta.get("expiration_time")
+	if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+		return float(raw)
+	if isinstance(raw, str):
+		try:
+			dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+		except ValueError:
+			return None
+		if dt.tzinfo is None:
+			# Kalshi timestamps are UTC; a naive string parsed with
+			# .timestamp() would be read as LOCAL time, shifting the close
+			# (and thus deadline_ts) by the machine's UTC offset — the same
+			# naive-datetime trap fixed in adapters/kalshi/adapter.py.
+			dt = dt.replace(tzinfo=timezone.utc)
+		return dt.timestamp()
+	return None
+
+
+def _depth_at_level(book: OrderbookSnapshot, side: str, price_cents: int) -> float:
+	"""Visible resting depth at *price_cents* on OUR side — the maker
+	queue-ahead estimate at placement (SPEC §7.1: we join the back).
+
+	``OrderbookSnapshot`` level prices are DOLLAR floats (e.g. ``0.15``);
+	convert to cents for the comparison — the same dollars→cents convention
+	``implied_asks`` applies internally."""
+	levels = book.yes_levels if side == "yes" else book.no_levels
+	total = 0.0
+	for price, qty in levels:
+		if int(round(float(price) * 100)) == price_cents:
+			total += float(qty)
+	return total
+
+
+async def _handle_maker_enter(
+	signal: Signal,
+	ctx: TickContext,
+	store: TradeStoreProtocol,
+	config: dict,
+	executor: Executor,
+	bullet: str = "🔵",
+	*,
+	now: datetime,
+	allowed_size: int | None = None,
+) -> None:
+	"""Process a maker (resting/GTC) entry signal — SPEC §8.2 guard chain,
+	then place + register with the RestingOrderTracker.
+
+	Guards run in the pinned order, ALL before ``executor.place()`` in both
+	modes. The taker counters (``entries_attempted`` etc.) are deliberately
+	untouched: maker accounting is the ``maker_*`` counter set whose closure
+	(attempts = skips + rejections + placed) the SPEC §11 report asserts.
+	"""
+	metrics = config.get("_metrics")
+	if metrics is None:
+		metrics = Metrics()
+
+	# Guard 1 — live-mode structural guard (SPEC §4.4; removed ONLY by 2b in
+	# the same PR that lands live resting persistence + the reconciler
+	# exemption). ``allowed_size is not None`` ⟺ the C-gate ran ⟺ live path;
+	# the executor-config check is belt-and-braces for any future live shape
+	# that bypasses the gate. Without this, a maker strategy tested in paper
+	# would, on live deploy, place a real Kalshi GTC order with NO local
+	# record — the untracked-position failure class.
+	if allowed_size is not None or config.get("executor") == "live":
+		log.error(
+			"maker_not_supported_live: maker signal from %s for %s REJECTED — "
+			"live resting-order persistence/reconciliation is Phase 2b; the "
+			"engine will not place a live GTC order it cannot track.",
+			signal.strategy, signal.ticker,
+		)
+		notify(
+			f"🛑 **[{signal.strategy} | {signal.series}] MAKER BLOCKED (live)** — "
+			f"`{signal.ticker}` maker execution is not supported live until "
+			f"Phase 2b; signal rejected (maker_not_supported_live)"
+		)
+		return
+
+	# Guard 2 — cap / disabled (SPEC §4.4: 0 or missing wiring = disabled).
+	tracker = config.get("_tracker")
+	cap = resting_cap(config)
+	if not isinstance(tracker, RestingOrderTracker) or cap <= 0:
+		metrics.inc("maker_skip_disabled")
+		log.info(
+			"Skip maker signal from %s for %s: maker execution disabled "
+			"(cap=%d, tracker=%s)",
+			signal.strategy, signal.ticker, cap,
+			"wired" if isinstance(tracker, RestingOrderTracker) else "absent",
+		)
+		return
+	if tracker.in_flight_count(strategy=signal.strategy) >= cap:
+		# Cap reached — counted under maker_skip_disabled (the SPEC §8.2
+		# pinned counter set folds cap-full into the cap guard's counter);
+		# the log line carries the distinct cause.
+		metrics.inc("maker_skip_disabled")
+		log.info(
+			"Skip maker signal from %s for %s: maker cap reached (%d in flight >= cap %d)",
+			signal.strategy, signal.ticker,
+			tracker.in_flight_count(strategy=signal.strategy), cap,
+		)
+		return
+
+	# Guard 3 — pure signal validation + the no-cross guard (SPEC §6, shared
+	# helpers; one implementation for both modes).
+	skip_reason = validate_maker_signal(signal)
+	close_ts = _market_close_ts(ctx)
+	if (skip_reason is None and signal.cancel_before_close_seconds is not None
+			and close_ts is None):
+		# A close-window thesis without a known close time is unexecutable
+		# (SPEC §5 internals total rule) — e.g. the tennis early-window shape.
+		skip_reason = "invalid_maker_signal:no_close_ts"
+	if skip_reason is not None:
+		metrics.inc("maker_skip_invalid_signal")
+		log.info(
+			"Skip maker signal from %s for %s: %s",
+			signal.strategy, signal.ticker, skip_reason,
+		)
+		return
+	assert signal.entry_price_cents is not None  # narrowed by validate_maker_signal
+	assert signal.rest_ttl_seconds is not None
+	book = getattr(ctx, "orderbook", None)
+	if not isinstance(book, OrderbookSnapshot):
+		book = OrderbookSnapshot([], [])
+	if would_cross(book, signal.side, signal.entry_price_cents):
+		metrics.inc("maker_skip_would_cross")
+		log.info(
+			"Skip maker signal from %s for %s: rest price %dc would CROSS the "
+			"implied %s ask (the silent-take trap — SPEC §6)",
+			signal.strategy, signal.ticker, signal.entry_price_cents, signal.side,
+		)
+		return
+
+	# Guard 4 — duplicate level (SPEC §8.2: forbid rather than model; the
+	# tracker is the data source, dispatch owns the reject).
+	if tracker.has_level(signal.strategy, signal.ticker, signal.side,
+	                     signal.entry_price_cents):
+		metrics.inc("maker_skip_duplicate_level")
+		log.info(
+			"Skip maker signal from %s for %s: duplicate level (%s @ %dc already resting)",
+			signal.strategy, signal.ticker, signal.side, signal.entry_price_cents,
+		)
+		return
+
+	# Construct the bare GTC request (paper construction site — the taker
+	# precedent: the executor sizes internally; SPEC §6 mode-split. The live
+	# path never reaches here in 2a — guard 1 — so build_maker_entry_order
+	# is dispatch-unused until 2b wires the sized live build.)
+	req = OrderRequest(
+		ticker=signal.ticker,
+		series=signal.series,
+		side=cast(Literal["yes", "no"], signal.side),
+		size_contracts=0,
+		limit_price_cents=signal.entry_price_cents,
+		strategy=signal.strategy,
+		client_order_id=_make_client_order_id(signal.strategy, signal.ticker, now),
+		action="buy",
+		time_in_force="gtc",
+	)
+
+	# Pre-place durability hook — unconditional, mode-agnostic (§3 keystone;
+	# paper/InMemory record_intent is a no-op, and live is guard-blocked in
+	# 2a, so this is the already-in-place hook 2b's durable rows inherit).
+	store.record_intent(
+		ticker=signal.ticker,
+		series=signal.series,
+		strategy=signal.strategy,
+		side=signal.side,
+		intended_size=req.size_contracts,
+		entry_price_cents=signal.entry_price_cents,
+		stop_loss_distance_cents=signal.stop_loss_distance_cents,
+		client_order_id=req.client_order_id,
+		placed_at_utc=now.isoformat(),
+		entry_best_price_cents=None,
+		entry_limit_price_cents=req.limit_price_cents,
+	)
+
+	try:
+		result = await asyncio.wait_for(
+			executor.place(req), timeout=_ENTRY_PLACEMENT_TIMEOUT_SECONDS,
+		)
+	except asyncio.TimeoutError:
+		# Unreachable in paper (synchronous place) — live-only safety net,
+		# same unknown-state semantics as the taker timeout path.
+		log.warning(
+			"maker executor.place exceeded %ds for %s %s (coid=%s) — recording "
+			"pending for reconciliation",
+			_ENTRY_PLACEMENT_TIMEOUT_SECONDS, signal.strategy, signal.ticker,
+			req.client_order_id,
+		)
+		store.record_pending(
+			ticker=signal.ticker, series=signal.series, strategy=signal.strategy,
+			side=signal.side, intended_size=req.size_contracts,
+			entry_price_cents=signal.entry_price_cents,
+			stop_loss_distance_cents=signal.stop_loss_distance_cents,
+			client_order_id=req.client_order_id, kalshi_order_id=None,
+			placed_at_utc=now.isoformat(),
+			rejection_reason=f"engine_timeout:{_ENTRY_PLACEMENT_TIMEOUT_SECONDS}s",
+		)
+		return
+
+	if result.status == "resting":
+		placed_ts = now.timestamp()
+		order = RestingOrder(
+			client_order_id=req.client_order_id,
+			order_id=result.order_id or f"paper-{req.client_order_id}",
+			ticker=signal.ticker,
+			series=signal.series,
+			strategy=signal.strategy,
+			side=signal.side,
+			rest_price_cents=signal.entry_price_cents,
+			intended_size=result.intended_size,
+			filled_size=0,
+			placed_ts=placed_ts,
+			expires_ts=placed_ts + signal.rest_ttl_seconds,
+			market_close_ts=close_ts,
+			cancel_before_close_seconds=signal.cancel_before_close_seconds,
+			trade_id=None,
+			queue_ahead=_depth_at_level(book, signal.side, signal.entry_price_cents),
+			state="resting",
+		)
+		# NOTE (SPEC §8.2 precision): this branch sits OUTSIDE the taker
+		# path's asyncio-shielded region. Paper place() is synchronous so
+		# shielding is inert here; 2b must DECIDE shield placement when it
+		# adds the durable pending+gtc row-write (frozen contract §15.5).
+		tracker.register(order)
+		metrics.inc("maker_placed")
+		log.info(
+			"%s [%s] RESTING %s %s @ %dc x%d (ttl=%ds, queue_ahead=%.1f, coid=%s)",
+			bullet, signal.strategy, signal.side, signal.ticker,
+			signal.entry_price_cents, result.intended_size,
+			signal.rest_ttl_seconds, order.queue_ahead, req.client_order_id,
+		)
+		notify(
+			f"{bullet} **[{signal.strategy} | {signal.series}] MAKER RESTING** — "
+			f"`{signal.ticker}` {signal.side} @ {signal.entry_price_cents}c "
+			f"x{result.intended_size} (ttl {signal.rest_ttl_seconds}s, "
+			f"queue ahead ~{order.queue_ahead:.0f})"
+		)
+	elif result.status == "rejected":
+		if result.rejection_reason == "below_min_fill":
+			metrics.inc("maker_reject_below_min_fill")
+		log.info(
+			"Maker placement rejected for %s %s: %s",
+			signal.strategy, signal.ticker, result.rejection_reason,
+		)
+	else:
+		log.error(
+			"_handle_maker_enter: unexpected OrderResult.status=%r for %s %s — "
+			"a GTC paper placement returns resting|rejected only (SPEC §8.1).",
+			result.status, signal.strategy, signal.ticker,
+		)
+		metrics.inc("entries_unhandled_status")
+
+
+def _route_tracker_events(
+	events: list[TrackerEvent],
+	store: TradeStoreProtocol,
+	config: dict,
+) -> None:
+	"""Apply tracker events' side effects — dispatch owns ALL of them (the
+	tracker's step is side-effect-free, SPEC §5/§15.11): booking, augmenting,
+	notifications, metrics. Per-event isolation mirrors the tracker's
+	per-order isolation — one bad booking never drops the rest."""
+	metrics = config.get("_metrics")
+	if metrics is None:
+		metrics = Metrics()
+	# One step() batch can emit several fill events for one order (multi-print
+	# batches); order.state is read AFTER the whole step, so every fill event
+	# of a fully-filled order sees "filled" — count each order at most once.
+	filled_counted: set[str] = set()
+	for event in events:
+		order = event.order
+		try:
+			if event.kind == "fill":
+				fill_dt = datetime.fromtimestamp(event.ts, tz=timezone.utc)
+				if event.first_fill:
+					trade_id = store.record_trade(
+						ticker=order.ticker,
+						entry_price=order.rest_price_cents,
+						strategy=order.strategy,
+						side=order.side,
+						series_ticker=order.series,
+						intended_size=order.intended_size,
+						fill_size=event.size,
+						# Maker fills at our limit by construction (SPEC §8.2):
+						# blended == rest price, slippage 0, market impact n/a.
+						blended_entry=order.rest_price_cents,
+						fill_pct=(order.filled_size / order.intended_size
+						          if order.intended_size else None),
+						slippage_cents=0,
+						now=fill_dt,
+						client_order_id=order.client_order_id,
+						kalshi_order_id=order.order_id,
+						market_impact_cents=None,
+						limit_slippage_cents=None,
+					)
+					order.trade_id = trade_id
+					ttf = (order.placed_ts and event.ts - order.placed_ts) or 0.0
+					log.info(
+						"🟢 [%s] MAKER FILL %s %s @ %dc x%d/%d (t+%.0fs, trade %s)",
+						order.strategy, order.side, order.ticker,
+						order.rest_price_cents, event.size, order.intended_size,
+						ttf, trade_id,
+					)
+					notify(
+						f"🟢 **[{order.strategy} | {order.series}] MAKER FILL** — "
+						f"`{order.ticker}` {order.side} @ {order.rest_price_cents}c "
+						f"x{event.size}/{order.intended_size} "
+						f"(t+{ttf:.0f}s, trade {trade_id})"
+					)
+				else:
+					if order.trade_id is None:
+						log.error(
+							"_route_tracker_events: augment fill with no trade_id "
+							"for %s — booking desync", order.client_order_id,
+						)
+						metrics.inc("maker_order_errored")
+						continue
+					store.augment_fill(order.trade_id, event.size)
+					log.info(
+						"[%s] maker fill +%d (%d/%d) %s",
+						order.strategy, event.size, order.filled_size,
+						order.intended_size, order.ticker,
+					)
+				if (order.state == "filled"
+						and order.client_order_id not in filled_counted):
+					filled_counted.add(order.client_order_id)
+					metrics.inc("maker_filled")
+			elif event.kind == "cancel":
+				if order.filled_size > 0:
+					metrics.inc("maker_partial")
+				if event.cause == "expired":
+					metrics.inc("maker_expired")
+				else:
+					metrics.inc("maker_cancelled")
+				log.info(
+					"[%s] maker order %s %s: %s (filled %d/%d)",
+					order.strategy, order.client_order_id, order.ticker,
+					event.cause, order.filled_size, order.intended_size,
+				)
+				notify(
+					f"⚪ **[{order.strategy} | {order.series}] MAKER "
+					f"{'PARTIAL-' if order.filled_size else ''}"
+					f"{(event.cause or 'cancelled').upper()}** — `{order.ticker}` "
+					f"filled {order.filled_size}/{order.intended_size} "
+					f"@ {order.rest_price_cents}c"
+				)
+			elif event.kind == "error":
+				metrics.inc("maker_order_errored")
+				notify(
+					f"🚨 **[{order.strategy} | {order.series}] MAKER ORDER ERRORED** — "
+					f"`{order.ticker}` coid `{order.client_order_id}` isolated as "
+					f"errored; investigate (SPEC §5 internals)"
+				)
+		except Exception:
+			log.exception(
+				"_route_tracker_events: failed routing %s event for %s",
+				event.kind, order.client_order_id,
+			)
+			metrics.inc("maker_order_errored")
+
+
+def step_resting_orders(
+	config: dict,
+	store: TradeStoreProtocol,
+	ticker: str,
+	prints: list[Print],
+	now: datetime,
+) -> list[TrackerEvent]:
+	"""Step the resting-order tracker with *prints* for *ticker* and route the
+	emitted events (SPEC §8.2 tick stepping). The ONE seam shared by the
+	trade-msg handler, the engine's periodic timer (clock-only cancels,
+	ledger-irrelevant per §5.1), and tests. No-op without a wired tracker;
+	the tracker's own empty short-circuit keeps the taker hot path at a
+	single emptiness check (§12.7)."""
+	tracker = config.get("_tracker")
+	if not isinstance(tracker, RestingOrderTracker):
+		return []
+	events = tracker.step(now.timestamp(), {ticker: prints} if prints else {})
+	provider_errors = tracker.drain_markout_provider_errors()
+	if provider_errors:
+		metrics = config.get("_metrics")
+		if metrics is None:
+			metrics = Metrics()
+		for _ in range(provider_errors):
+			metrics.inc("maker_markout_provider_error")
+	if events:
+		_route_tracker_events(events, store, config)
+	return events
 
 
 async def _handle_exit(
@@ -1115,6 +1543,29 @@ async def _handle_exit(
 	# store.exit_trade which handles row-not-found / already-closed safely.
 	pos_row = store.get_trade_by_id(signal.trade_id)
 	exit_size = int((pos_row or {}).get("fill_size") or 0)
+
+	# Phase 2a (SPEC §8.2 total ordering): a trade whose maker entry is still
+	# partially RESTING cancels the remainder FIRST, then exits the filled
+	# part. If the exit later fails/rejects, the position stays open under
+	# the existing exit-failure semantics and the remainder is NOT
+	# resurrected (conservative — the strategy may re-emit). 2b inherits
+	# this ordering unchanged (frozen contract §15.10).
+	# Duck-typed None-check, NOT isinstance — this function carries the §1
+	# keystone AST guard (no isinstance/mode branches in _handle_exit); the
+	# "_tracker" config slot is composition-controlled, so presence ⇒ tracker.
+	_maker_tracker = config.get("_tracker")
+	if _maker_tracker is not None:
+		_maker_coid = _maker_tracker.find_by_trade_id(signal.trade_id)
+		if _maker_coid is not None:
+			_cancel_event = _maker_tracker.cancel(
+				_maker_coid, cause="cancelled", now=now.timestamp(),
+			)
+			if _cancel_event is not None:
+				_route_tracker_events([_cancel_event], store, config)
+				log.info(
+					"maker remainder cancelled before exit for trade %s (coid=%s)",
+					signal.trade_id, _maker_coid,
+				)
 
 	# Captured from the exit place() so the close below is booked ONLY on a
 	# venue-confirmed fill. None ⇒ no place attempted (no position) or timeout.
@@ -1520,6 +1971,28 @@ async def _handle_trade_msg(
 	# orderbook guard — price_history should still accumulate even if the
 	# book isn't populated yet.
 	is_first = market_state.update_price(ticker, trade_price_cents)
+
+	# Phase 2a (SPEC §8.2): step resting orders with this print BEFORE the
+	# strategy fan-out — an order a strategy places on THIS tick must not be
+	# fillable by THIS print (no latency credit, §7.3). Placed before the
+	# orderbook guard's early-return below: a print can fill a resting order
+	# even while the book is unpopulated. Print.ts = the threaded `now`
+	# (captured recv_ts in replay) so paper and replay agree byte-exactly.
+	# Gated on tracker.active so the taker hot path pays ONE attribute check
+	# with maker disabled/idle — no Print/list/dict allocation (SPEC §12.7).
+	# Behavior-neutral: an inactive tracker's step() would return [] anyway.
+	_maker_tracker = config.get("_tracker")
+	if isinstance(_maker_tracker, RestingOrderTracker) and _maker_tracker.active:
+		step_resting_orders(
+			config, store, ticker,
+			[Print(
+				ts=now.timestamp(),
+				yes_price_cents=trade_price_cents,
+				size=float(trade_count) if trade_count is not None else 0.0,
+				taker_side=taker_side,
+			)],
+			now,
+		)
 
 	# Bid/ask come from the orderbook, NOT the trade price. A trade can execute
 	# off-book (late limit orders, aggressive fills); treating yes_price as the

@@ -467,6 +467,19 @@ class SQLiteTradeStore:
 			entry_limit_price_cents=entry_limit_price_cents,
 		)
 
+	def augment_fill(self, trade_id: int, added_size: int) -> None:
+		"""Phase 2a maker partial-fill accumulation — LIVE resting rows are
+		Phase 2b scope (SPEC §4.5 / frozen contracts §15). UNREACHABLE in 2a:
+		dispatch's live-mode maker guard (`maker_not_supported_live`) rejects
+		every maker signal before a resting order can exist, so no live fill
+		can ever route here. Loud failure if reached ahead of 2b — silent
+		acceptance would fake a durable fill accumulation that never happened."""
+		raise NotImplementedError(
+			"SQLiteTradeStore.augment_fill: live maker resting-row accumulation "
+			"lands in Phase 2b (trade_id="
+			f"{trade_id}, added_size={added_size})"
+		)
+
 	def record_pending(
 		self,
 		*,

@@ -38,6 +38,24 @@ class Signal:
 	exit_kind: ExitKind | None = None
 	stop_loss_distance_cents: int | None = None
 	protective_stop_cents: int | None = None  # strategy's real stop (TP/SL dist); gate input, NOT sizing basis above
+	# Phase 2a maker execution (SPEC §4.1). Defaults keep every existing
+	# taker strategy byte-identical. entry_price_cents doubles as the
+	# resting price for exec_style="maker" entries.
+	exec_style: Literal["taker", "maker"] = "taker"
+	rest_ttl_seconds: int | None = None            # maker: mandatory; cancel unfilled remainder after this age
+	cancel_before_close_seconds: int | None = None # maker: cancel when market close nearer than this
+
+	def __post_init__(self) -> None:
+		# Dataclasses don't enforce Literal at runtime: a typo like "Maker"
+		# would otherwise fall through dispatch's `== "maker"` branch and
+		# silently execute as a TAKER order (materially different price
+		# source and fill semantics, no diagnostic trail). Raise here —
+		# the strategy fan-out isolates and loudly logs per-strategy.
+		if self.exec_style not in ("taker", "maker"):
+			raise ValueError(
+				f"Signal.exec_style must be 'taker' or 'maker', got "
+				f"{self.exec_style!r} ({self.strategy} {self.ticker})"
+			)
 
 
 class Strategy(ABC):

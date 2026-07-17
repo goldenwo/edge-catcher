@@ -370,6 +370,38 @@ class PaperExecutor:
 		# so dispatch can `await executor.place(...)` uniformly across paper
 		# and live executors. No `await` is needed in this body.
 
+		# --- Phase 2a maker path (SPEC §8.1). A GTC request is a resting
+		# maker ENTRY (exits stay IOC in 2a): NO book walk, NO synchronous
+		# fill — fills arrive on later ticks via the RestingOrderTracker.
+		# Maker safety invariants (would_cross, caps, signal validation) ran
+		# at DISPATCH before place(), same tick against the same book
+		# (SPEC §6/§8.2); the executor deliberately does not re-check them.
+		# Sizing: the C-gate doesn't exist on the paper path, so size here
+		# with the two existing paper primitives — exact, no walk needed,
+		# because a maker fills at its own resting price by construction.
+		if req.time_in_force == "gtc":
+			sizing = self._config["sizing"]
+			size = compute_raw_size(sizing["risk_per_trade_cents"], req.limit_price_cents)
+			if size < sizing["min_fill"]:
+				return OrderResult(
+					status="rejected",
+					intended_size=size,
+					filled_size=0,
+					blended_entry_cents=0,
+					fill_pct=0.0,
+					slippage_cents=0,
+					rejection_reason="below_min_fill",
+				)
+			return OrderResult(
+				status="resting",
+				intended_size=size,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				order_id=f"paper-{req.client_order_id}",
+			)
+
 		# --- SC-D3 sell/exit path (spec §10 / §3 `:534`). dispatch's
 		# `_handle_exit` routes EVERY exit Signal through `executor.place(...)`
 		# UNCONDITIONALLY (the §1 keystone — the executor is the live-vs-paper

@@ -225,7 +225,12 @@ def test_bundle_manifest_schema(
 	trade_db: Path,
 	market_state: MarketState,
 ) -> None:
-	"""manifest.json should have schema_version=1, exchange, capture_date, and a file list."""
+	"""manifest.json should have schema_version=2, exchange, capture_date, and a file list.
+
+	schema_version bumped 1 -> 2 with the Phase 2a resting_orders.json step
+	(SPEC §8.3): v2 pins the always-written resting_orders.json so the replay
+	seeder can treat absence as an assembly bug rather than a pre-feature
+	bundle."""
 	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
 
 	bundle_path = assemble_daily_bundle(
@@ -236,9 +241,10 @@ def test_bundle_manifest_schema(
 		market_state=market_state,
 	)
 	manifest = json.loads((bundle_path / "manifest.json").read_text(encoding="utf-8"))
-	assert manifest["schema_version"] == 1
+	assert manifest["schema_version"] == 2
 	assert manifest["exchange"] == "kalshi"
 	assert manifest["capture_date"] == "2026-04-14"
+	assert "resting_orders.json" in manifest["files"]
 	assert "engine_commit" in manifest
 	assert "engine_dirty" in manifest
 	assert isinstance(manifest["files"], list)

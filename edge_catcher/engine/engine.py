@@ -51,6 +51,13 @@ from edge_catcher.engine.dispatch import (
 	_pnl_label,
 	dispatch_message,
 	drain_inflight_sections,
+	step_resting_orders,
+)
+from edge_catcher.engine.execution import resting_cap
+from edge_catcher.engine.resting import (
+	QueueFillModel,
+	RestingOrderTracker,
+	make_yes_mid_provider,
 )
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
@@ -970,6 +977,52 @@ async def _summary_logger(
 			log.exception("Summary logger error")
 
 
+def _boot_maker_wiring(config: dict, market_state: MarketState) -> int:
+	"""Phase 2a maker boot step (SPEC §4.4 boot visibility + §5 internals).
+
+	Validates the cap key (``resting_cap`` RAISES on a present-but-invalid
+	value in BOTH modes — a mistyped enablement must fail fast, not silently
+	disable), constructs the tracker, stashes it in ``config["_tracker"]``
+	(the ``_metrics``/``_exec_cfg`` side-channel idiom dispatch reads), and
+	emits the one explicit boot line so a config edit's effect is always
+	confirmable without running a sweep. Returns the cap.
+
+	The tracker always starts EMPTY at boot: any in-flight resting orders
+	from a prior mid-day crash are gone with the process memory (SPEC §5.6
+	— accepted for paper; live 2b recovers from durable rows instead).
+	"""
+	cap = resting_cap(config)
+	config["_tracker"] = RestingOrderTracker(
+		QueueFillModel(), mid_provider=make_yes_mid_provider(market_state),
+	)
+	if cap > 0:
+		log.info("maker execution ENABLED (max_resting_per_strategy=%d)", cap)
+	else:
+		log.info("maker execution DISABLED")
+	return cap
+
+
+async def _resting_timer_loop(
+	config: dict,
+	store: "TradeStoreProtocol",
+	interval: int = 5,
+) -> None:
+	"""Periodic clock tick for resting orders (SPEC §8.2): fires TTL /
+	close-window cancels during print gaps so cap slots free promptly and
+	the operator is notified. Operationally useful, LEDGER-IRRELEVANT —
+	§5.1's validity window + backdated cancels make ledger outcomes a pure
+	function of the event stream, and clock-only steps never sample
+	mark-outs (tracker Phase 3 is event-tick-only), which is why replay
+	(timerless) still produces a byte-identical ledger. One bad tick never
+	kills the loop."""
+	while True:
+		await asyncio.sleep(interval)
+		try:
+			step_resting_orders(config, store, "", [], datetime.now(timezone.utc))
+		except Exception:
+			log.exception("resting timer step failed; continuing")
+
+
 async def _state_flusher(
 	store: TradeStoreProtocol,
 	strategies: list[Strategy],
@@ -1124,6 +1177,7 @@ def _make_rotation_callback(
 	delete_raw_after_bundle: bool = True,
 	local_retention_days: int = 7,
 	config_path: Optional[Path] = None,
+	tracker_source: Optional[Callable[[], Optional[RestingOrderTracker]]] = None,
 ):
 	"""Build the rotation_callback closure that RawFrameWriter fires on
 	midnight UTC rollover.
@@ -1151,6 +1205,21 @@ def _make_rotation_callback(
 	def on_rotation(old_day: date) -> None:
 		# 1. Synchronous snapshot on the engine thread (fast, safe).
 		snapshot = copy.deepcopy(market_state)
+		# Phase 2a (SPEC §8.3 snapshot concurrency): the tracker is serialized
+		# ON the engine thread too — the same reason as the deepcopy above: the
+		# assembly daemon thread must never iterate live-mutating state.
+		# tracker_source is a late-bound callable (the tracker is stashed in
+		# config at boot); None / no tracker ⇒ [] and the bundle still writes
+		# resting_orders.json (absence = assembly bug under schema_version 2).
+		_tracker = tracker_source() if tracker_source is not None else None
+		resting_snapshot = _tracker.to_snapshot() if _tracker is not None else []
+		if _tracker is not None:
+			# In-flight state is captured above; terminal rows are
+			# session-local reporting (SPEC §5.5) — drop them so a
+			# long-lived maker-enabled process never grows without bound.
+			_dropped = _tracker.compact()
+			if _dropped:
+				log.info("resting tracker compacted: %d terminal orders dropped", _dropped)
 
 		# 2. Background thread for assemble + upload + retention (slow).
 		def _assemble_upload_prune() -> None:
@@ -1163,6 +1232,7 @@ def _make_rotation_callback(
 					db_path=db_path,
 					market_state=snapshot,
 					config_path=config_path,
+					resting_orders=resting_snapshot,
 				)
 				bundle_assembled = True
 
@@ -1532,6 +1602,9 @@ async def run_engine(
 			delete_raw_after_bundle=bool(capture_cfg.get("delete_raw_after_bundle", True)),
 			local_retention_days=int(capture_cfg.get("local_retention_days", 7)),
 			config_path=config_path,
+			# Late-bound: _boot_maker_wiring stashes the tracker in config
+			# AFTER this callback is constructed; resolve at rotation time.
+			tracker_source=lambda: config.get("_tracker"),
 		)
 
 	capture_writer = RawFrameWriter(
@@ -1677,7 +1750,16 @@ async def run_engine(
 					_provider_for_close.build(None, now)
 				)
 
+		# Phase 2a maker wiring (SPEC §4.4/§5 internals): validate the cap key
+		# (raises at boot on present-but-invalid — both modes), construct the
+		# tracker, stash it for dispatch, log the one boot-visibility line.
+		_boot_maker_wiring(config, market_state)
+
 		tasks = [
+			asyncio.create_task(
+				_resting_timer_loop(config, store),
+				name="resting_timer",
+			),
 			asyncio.create_task(
 				_settlement_poller(
 					store, client, strategies, pending_states,

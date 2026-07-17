@@ -35,6 +35,10 @@ from typing import Any, Optional
 
 import yaml
 
+from edge_catcher.engine.capture.bundle import (
+	BUNDLE_MANIFEST_SCHEMA_VERSION,
+	RESTING_ORDERS_MIN_SCHEMA_VERSION,
+)
 from edge_catcher.engine.discovery import get_enabled_strategies
 from edge_catcher.engine.dispatch import dispatch_message
 from edge_catcher.engine.executor import Executor
@@ -42,6 +46,12 @@ from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState, OrderbookSnapshot, _parse_qty
 from edge_catcher.engine.ohlc_wiring import build_ohlc_provider
 from edge_catcher.engine.replay.loader import read_jsonl_window
+from edge_catcher.engine.resting import (
+	LedgerRow,
+	QueueFillModel,
+	RestingOrderTracker,
+	make_yes_mid_provider,
+)
 from edge_catcher.engine.strategy_base import Strategy
 from edge_catcher.engine.trade_store import InMemoryTradeStore
 
@@ -70,6 +80,11 @@ class ReplayResult:
 	capture_end_ts: Optional[str] = None
 	strategies_loaded: list[str] = field(default_factory=list)
 	store: Optional["InMemoryTradeStore"] = None
+	# Phase 2a (SPEC §8.3/§11): the resting-order ledger — one row per maker
+	# order placed during the replay (dispositions incl. censored_stream_end).
+	# Empty for taker-only replays and pre-feature bundles. Additive default
+	# keeps every existing consumer untouched.
+	resting_ledger: list[LedgerRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +127,13 @@ async def replay_capture(
 
 	# 1. Load manifest
 	manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
-	if manifest.get("schema_version") != 1:
-		raise ValueError(f"unsupported manifest schema_version: {manifest.get('schema_version')}")
+	# v1 = pre-maker bundles (Apr-Jul 2026 archive); v2 adds the mandatory
+	# resting_orders.json step (Phase 2a, SPEC §8.3). Accepted set derives
+	# from the writer's canonical constant so a future bump can't silently
+	# make new bundles unreplayable.
+	_sv = manifest.get("schema_version")
+	if not isinstance(_sv, int) or not (1 <= _sv <= BUNDLE_MANIFEST_SCHEMA_VERSION):
+		raise ValueError(f"unsupported manifest schema_version: {_sv!r}")
 	capture_date_str = manifest["capture_date"]
 
 	# 3. Load config first so strategy filtering can use it
@@ -166,6 +186,17 @@ async def replay_capture(
 	store = InMemoryTradeStore()
 	_seed_open_trades(store, bundle, prior_bundle)
 	_seed_strategy_state(store, bundle, prior_bundle)
+
+	# 6a. Phase 2a: resting-order tracker — the replay side of the engine's
+	# _boot_maker_wiring, on the SAME shared mid formula (byte-parity).
+	# Stashed in config["_tracker"] — the same side-channel dispatch reads
+	# in the live/paper engine — and OVERWRITTEN unconditionally so a
+	# caller-reused config dict can never leak a prior replay's tracker
+	# state into this run.
+	tracker = RestingOrderTracker(
+		QueueFillModel(), mid_provider=make_yes_mid_provider(market_state))
+	config["_tracker"] = tracker
+	_seed_resting_orders(tracker, bundle, prior_bundle)
 
 	# 7. Build strategy-by-series index (same shape as engine.py run_engine)
 	strat_by_series: dict[str, list[Strategy]] = {}
@@ -254,6 +285,16 @@ async def replay_capture(
 		if state is not None:
 			store.save_state(strat.name, state)
 
+	# Phase 2a stream-end censoring (SPEC §11): orders still validly resting
+	# when the captured stream ends are censored observations — a REPORTING
+	# disposition, excluded from fill-rate numerators AND denominators by the
+	# report layer. Uses the LAST captured timestamp (deterministic), never
+	# the wall clock.
+	if last_ts is not None:
+		censored = tracker.censor_open(ts=datetime.fromisoformat(last_ts).timestamp())
+		if censored:
+			log.info("replay_capture: %d resting order(s) censored at stream end", censored)
+
 	return ReplayResult(
 		trades=store.all_trades(),
 		final_market_state=market_state,
@@ -263,6 +304,7 @@ async def replay_capture(
 		capture_end_ts=last_ts,
 		strategies_loaded=strategy_names,
 		store=store,
+		resting_ledger=tracker.ledger,
 	)
 
 
@@ -392,6 +434,40 @@ def _seed_market_state(market_state: MarketState, bundle: Path, prior_bundle: Op
 		# would mask future seeder bugs.
 		market_state._first_seen.update(state.get("orderbooks", {}).keys())  # noqa: SLF001
 		market_state._first_seen.update(state.get("metadata", {}).keys())  # noqa: SLF001
+
+
+def _seed_resting_orders(
+	tracker: RestingOrderTracker,
+	bundle: Path,
+	prior_bundle: Optional[Path | str],
+) -> None:
+	"""Seed in-flight resting orders from the PRIOR day's resting_orders.json
+	(Phase 2a, SPEC §5.5/§8.3 — cross-midnight resting orders survive rotation).
+
+	Absence rule (§8.3): the prior bundle's manifest schema_version decides —
+	< 2 ⇒ pre-feature bundle, seed empty, quiet (the entire Apr–Jul 2026
+	archive); >= 2 AND the file absent ⇒ ASSEMBLY BUG, raise loudly — the
+	writer ALWAYS emits the file (``[]`` when nothing in-flight), so a
+	missing file means the snapshot was silently lost, and quietly seeding
+	empty would fake cross-day continuity.
+	"""
+	snapshot_file = _resolve_prior_file(bundle, prior_bundle, "resting_orders.json")
+	if snapshot_file is not None:
+		tracker.from_snapshot(json.loads(snapshot_file.read_text(encoding="utf-8")))
+		return
+	# File not found — decide quiet-vs-loud from the prior manifest.
+	prior_manifest = _resolve_prior_file(bundle, prior_bundle, "manifest.json")
+	if prior_manifest is None:
+		return  # no prior bundle at all — fresh start, nothing to seed
+	version = json.loads(prior_manifest.read_text(encoding="utf-8")).get("schema_version", 1)
+	if version >= RESTING_ORDERS_MIN_SCHEMA_VERSION:
+		raise ValueError(
+			f"prior bundle {prior_manifest.parent} has manifest schema_version "
+			f"{version} but no resting_orders.json — assembly bug (SPEC §8.3: "
+			f"the writer always emits the file; absence means the resting "
+			f"snapshot was lost, not that none existed)"
+		)
+	log.info("replay_capture: prior bundle is pre-maker (schema_version %s); no resting orders to seed", version)
 
 
 def _seed_open_trades(store: InMemoryTradeStore, bundle: Path, prior_bundle: Optional[Path | str]) -> None:

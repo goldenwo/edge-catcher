@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from edge_catcher.engine.execution import ENTRY_TIF, EXIT_TIF
 from edge_catcher.engine.executor import OrderRequest, OrderResult
 from edge_catcher.live.venue import (
 	LiveVenueClient,
@@ -124,23 +123,17 @@ def _to_kalshi_request(req: OrderRequest) -> KalshiOrderRequest:
 	Sell flipped at signal generation) must NOT be papered over here. The
 	round-1 caught bug silently inverted sells to buys (funds-at-risk).
 
-	``time_in_force`` is sourced from ``execution.ENTRY_TIF`` / ``EXIT_TIF``
-	rather than a hardcoded literal so a future Phase-2 flip to GTC entries
-	lands as a one-line constant change in ``execution.py`` without scattering
-	updates across the executor layer.
-
-	**Phase-1 invariant (load-bearing):** the ``buy → ENTRY_TIF`` /
-	``sell → EXIT_TIF`` mapping assumes entries are always buys and exits
-	always sells (true in Phase 1). It is action-name-keyed, NOT
-	intent-keyed. If Phase 2 ever introduces a sell-entry or buy-exit, OR
-	makes ``ENTRY_TIF != EXIT_TIF`` (the GTC-entries case), this mapping
-	must be revisited — the OrderRequest would need to carry explicit
-	entry/exit intent rather than inferring it from ``action``. Today both
-	constants are ``"ioc"`` so a mis-assignment is harmless, but the
-	structural assumption is the thing that drifts silently. Flagged by
-	the PR #38 pass-3 review (G1).
+	``time_in_force`` is passed through VERBATIM from ``req.time_in_force``
+	(SPEC §4.2). The BUILDER that constructed the OrderRequest — which knows
+	entry-vs-exit and taker-vs-maker — sets TIF: the taker builders rely on
+	the dataclass default ``"ioc"``; ``build_maker_entry_order`` sets
+	``"gtc"`` explicitly. This function no longer infers anything. The old
+	action-name-keyed ``buy → ENTRY_TIF / sell → EXIT_TIF`` mapping (and the
+	``ENTRY_TIF != EXIT_TIF`` landmine its own docstring flagged per the
+	PR #38 pass-3 review, G1) is retired — Phase 2a made TIF intent explicit
+	on the request itself, which was that note's prescribed fix.
 	"""
-	tif = ENTRY_TIF if req.action == "buy" else EXIT_TIF
+	tif = req.time_in_force
 	return KalshiOrderRequest(
 		ticker=req.ticker,
 		action=req.action,
@@ -175,8 +168,24 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			req, reason=f"invalid_intended_size:{req.size_contracts}"
 		)
 
-	# Zero fill — IOC didn't get any liquidity at our limit. Reject.
+	# Zero fill. For an IOC this is terminal — no liquidity at our limit,
+	# reject. For a GTC the venue reports as resting (or pending-accepted),
+	# zero fill is the SUCCESS case: the order is on the book (SPEC §9).
+	# Reachability: the §4.4 live-mode maker guard blocks GTC requests from
+	# live dispatch in 2a — this branch is the frozen contract 2b builds
+	# against, unit-tested offline against documented-shape fixtures whose
+	# diff vs a real captured GTC response is 2b acceptance criterion #1.
 	if order.filled_count == 0:
+		if req.time_in_force == "gtc" and order.status in ("resting", "pending"):
+			return OrderResult(
+				status="resting",
+				intended_size=req.size_contracts,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				order_id=order.order_id or None,
+			)
 		return OrderResult(
 			status="rejected",
 			intended_size=req.size_contracts,
@@ -220,6 +229,24 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	slippage = signed_slippage_cents(
 		blended=blended, limit=req.limit_price_cents, action=req.action
 	)
+	# Partial fill at placement on a still-resting GTC (SPEC §4.3/§9): the
+	# crossed portion filled at a usable cost basis, the remainder rests —
+	# status "resting" with the fill fields populated, NOT "filled".
+	# NOTE: nonzero slippage_cents on a "maker" result is NOT a bug — it can
+	# only arise when the placement itself partially crossed (rare: the
+	# builder's no-cross guard makes it a race against a book move), and the
+	# crossed portion executes at-or-better than our limit, so the signed
+	# slippage is ≤ 0 (price improvement) by construction.
+	if req.time_in_force == "gtc" and order.status in ("resting", "pending"):
+		return OrderResult(
+			status="resting",
+			intended_size=req.size_contracts,
+			filled_size=order.filled_count,
+			blended_entry_cents=blended,
+			fill_pct=fill_pct,
+			slippage_cents=slippage,
+			order_id=order.order_id or None,
+		)
 	return OrderResult(
 		status="filled",
 		intended_size=req.size_contracts,

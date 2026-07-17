@@ -36,6 +36,9 @@ class OrderRequest:
 	# invariant above, "buy" serves as the zero-value default for this
 	# binary-action field.
 	action: Literal["buy", "sell"] = "buy"
+	# Set by the builders (which know entry-vs-exit and taker-vs-maker);
+	# executors pass it through. "ioc" default preserves all current sites.
+	time_in_force: Literal["ioc", "gtc"] = "ioc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,14 +49,19 @@ class OrderResult:
 	- "filled":   trade is booked synchronously (paper); or live IOC filled at
 	              submission. `filled_size == intended_size` (or close to it for
 	              partial-IOC, with `fill_pct` reflecting the partial).
-	- "pending":  order accepted upstream but fill not yet confirmed (live GTC).
-	              Engine writes a pending row; B's state machine resolves it.
-	              `filled_size` MAY be > 0 — Kalshi's "partially filled and resting"
-	              GTC case maps to `status="pending" AND filled_size > 0`. `fill_pct`
-	              reflects the partial. `blended_entry_cents` is the partial's
-	              blended price (or 0 sentinel if no fill yet).
+	- "pending":  fill/placement state is UNKNOWN (network error, 5xx, or a
+	              missing fill cost prevents the engine from confirming what
+	              happened). Engine writes a pending row; B's state machine
+	              (the reconciler) resolves it. `filled_size` MAY be > 0 if a
+	              partial fill amount is known despite the ambiguity.
 	- "rejected": order rejected at executor level (orderbook stale, budget too
 	              small, Kalshi 4xx, etc.). No trade row written. `filled_size == 0`.
+	- "resting":  the venue (or paper, for maker sims) ACCEPTED the order and
+	              it now rests on the book unfilled or partially filled.
+	              `order_id` is known. `filled_size` MAY be > 0 — a partial
+	              fill at placement time, live only. `fill_pct` reflects the
+	              partial. `blended_entry_cents` is the partial's blended
+	              price (or 0 sentinel if no fill yet).
 
 	Two fields the paper path does NOT need (and G therefore omits):
 	  - `order_id`: paper_trades has no order_id column; D adds it when LiveExecutor
@@ -62,7 +70,7 @@ class OrderResult:
 	    (STANDARD_FEE.calculate); D adds it when live REST responses carry an
 	    explicit fee value Kalshi reports.
 	"""
-	status: Literal["filled", "pending", "rejected"]
+	status: Literal["filled", "pending", "rejected", "resting"]
 	intended_size: int
 	filled_size: int
 	blended_entry_cents: int      # 0-sentinel preserved from FillResult.blended_price_cents
