@@ -54,3 +54,21 @@ def test_inc_rejects_gauge_key():
 	m = Metrics()
 	with pytest.raises(KeyError):
 		m.inc("entries_skipped_unsupported")
+
+
+def test_maker_counters_registered():
+	"""SPEC S8.2 pinned counter set: the registry is closed-world (KeyError on
+	unknown keys), so every maker counter must be registered explicitly."""
+	from edge_catcher.engine.metrics import Metrics
+	m = Metrics()
+	for key in (
+		"maker_skip_would_cross", "maker_skip_disabled",
+		"maker_skip_duplicate_level", "maker_skip_invalid_signal",
+		"maker_reject_below_min_fill", "maker_placed", "maker_filled",
+		"maker_partial", "maker_expired", "maker_cancelled",
+		"maker_censored_stream_end", "maker_degenerate_print",
+		"maker_dropped_on_restart", "maker_order_errored",
+	):
+		m.inc(key)
+	snap = m.snapshot()
+	assert snap["maker_placed"] == 1 and snap["maker_order_errored"] == 1

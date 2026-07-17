@@ -689,3 +689,51 @@ def test_migrate_idempotent_on_reopen(tmp_path: Path) -> None:
 			)
 	finally:
 		store2.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a: augment_fill (maker partial-fill accumulation, SPEC S8.2)
+# ---------------------------------------------------------------------------
+
+def test_augment_fill_bumps_size_pct_and_fee(store: TradeStore) -> None:
+	tid = store.record_trade(
+		ticker="KXTEST-1", entry_price=15, strategy="s", side="no",
+		series_ticker="KXTEST", intended_size=10, fill_size=4,
+		blended_entry=15, fill_pct=0.4, now=_now(),
+	)
+	before = store._conn.execute(
+		"SELECT fill_size, fill_pct, entry_fee_cents FROM paper_trades WHERE id=?",
+		(tid,),
+	).fetchone()
+	store.augment_fill(tid, 3)
+	after = store._conn.execute(
+		"SELECT fill_size, fill_pct, entry_fee_cents, blended_entry FROM paper_trades WHERE id=?",
+		(tid,),
+	).fetchone()
+	assert after[0] == 7
+	assert after[1] == pytest.approx(0.7)
+	# Fee accrues for the ADDED contracts at the same effective price --
+	# a stale fee would inflate P&L at settlement.
+	assert after[2] > before[2]
+	assert after[3] == 15          # blended unchanged: same resting price every fill
+
+
+def test_augment_fill_rejects_nonpositive_and_missing(store: TradeStore) -> None:
+	tid = store.record_trade(
+		ticker="KXTEST-1", entry_price=15, strategy="s", side="no",
+		series_ticker="KXTEST", intended_size=10, fill_size=4, now=_now(),
+	)
+	with pytest.raises(ValueError, match="added_size"):
+		store.augment_fill(tid, 0)
+	with pytest.raises(ValueError, match="no trade"):
+		store.augment_fill(999999, 1)
+
+
+def test_augment_fill_rejects_non_open_row(store: TradeStore) -> None:
+	tid = store.record_trade(
+		ticker="KXTEST-1", entry_price=15, strategy="s", side="no",
+		series_ticker="KXTEST", intended_size=10, fill_size=4, now=_now(),
+	)
+	store.settle_trade(tid, "no", now=_now())
+	with pytest.raises(ValueError, match="not open"):
+		store.augment_fill(tid, 1)

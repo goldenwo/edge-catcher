@@ -37,6 +37,24 @@ _COUNTER_KEYS = (
 	"entries_unhandled_status", # defensive: OrderResult.status outside the known Literal set
 	# Lost-CAS fill counter (filled IOC but durable row already left pending).
 	"entries_filled_lost_cas",
+	# Phase 2a maker (resting-order) counters — SPEC §8.2's pinned set.
+	# Pre-placement skips (dispatch guard chain, §8.2 order):
+	"maker_skip_would_cross",
+	"maker_skip_disabled",
+	"maker_skip_duplicate_level",
+	"maker_skip_invalid_signal",
+	# Placement rejection (returned by place() itself, paper §8.1):
+	"maker_reject_below_min_fill",
+	# Lifecycle (tracker events routed by dispatch):
+	"maker_placed",
+	"maker_filled",
+	"maker_partial",
+	"maker_expired",
+	"maker_cancelled",
+	"maker_censored_stream_end",
+	"maker_degenerate_print",
+	"maker_dropped_on_restart",   # §5.6 mid-day paper restart drops in-flight orders
+	"maker_order_errored",        # §5 internals per-order isolation fired
 )
 _GAUGE_KEYS = (
 	"entries_skipped_unsupported",

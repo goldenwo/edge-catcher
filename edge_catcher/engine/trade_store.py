@@ -408,6 +408,49 @@ class TradeStore:
 		self._conn.commit()
 		return cur.lastrowid  # type: ignore[return-value]
 
+	def augment_fill(self, trade_id: int, added_size: int) -> None:
+		"""Increase an OPEN trade's ``fill_size`` by ``added_size`` — maker
+		partial-fill accumulation (SPEC §8.2). ``blended_entry`` is unchanged:
+		every maker fill books at the same resting price, so only
+		``fill_size``, ``fill_pct`` (recomputed against ``intended_size``),
+		and ``entry_fee_cents`` move. The fee for the ADDED contracts accrues
+		at the same effective price — leaving it stale would understate fees
+		and inflate P&L at settlement (zero-error lens; spec addendum).
+
+		Raises:
+			ValueError: ``added_size <= 0``, unknown ``trade_id``, or the row
+				is not ``'open'`` — augmenting a closed/settled row is a
+				dispatch bug and must be loud, mirroring the CAS-style
+				status-precondition idiom of the live state writers.
+		"""
+		if added_size <= 0:
+			raise ValueError(
+				f"augment_fill: added_size must be > 0, got {added_size}"
+			)
+		row = self._conn.execute(
+			"SELECT status, entry_price, blended_entry, fill_size, "
+			"intended_size, entry_fee_cents "
+			"FROM paper_trades WHERE id=?",
+			(trade_id,),
+		).fetchone()
+		if row is None:
+			raise ValueError(f"augment_fill: no trade with id={trade_id}")
+		status, entry_price, blended_entry, fill_size, intended_size, entry_fee_cents = row
+		if status != "open":
+			raise ValueError(
+				f"augment_fill: trade {trade_id} is {status!r}, not open"
+			)
+		effective_price = blended_entry if blended_entry else entry_price
+		added_fee = int(STANDARD_FEE.calculate(effective_price, added_size))
+		new_fill = fill_size + added_size
+		new_pct = new_fill / intended_size if intended_size else None
+		self._conn.execute(
+			"UPDATE paper_trades SET fill_size=?, fill_pct=?, entry_fee_cents=? "
+			"WHERE id=? AND status='open'",
+			(new_fill, new_pct, (entry_fee_cents or 0) + added_fee, trade_id),
+		)
+		self._conn.commit()
+
 	def settle_trade(self, trade_id: int, result: str, *, now: datetime) -> None:
 		"""Settle a trade by market resolution result ('yes' or 'no').
 
