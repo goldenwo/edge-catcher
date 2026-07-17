@@ -237,6 +237,40 @@ def test_register_duplicate_client_order_id_raises():
 # Error isolation (SPEC §5 internals): one bad order never kills the step
 # ---------------------------------------------------------------------------
 
+def test_deadline_check_error_isolation_preserves_other_orders_fills():
+	# SPEC §5 internals: step never throws into the dispatch loop. A
+	# corrupted order that raises in the Phase-2 deadline check must be
+	# isolated as errored WITHOUT discarding fill events already computed
+	# for healthy orders in the same call (silent tracker-vs-store desync).
+	tr = _tracker()
+	bad = _order(coid="bad", ticker="KXTEST-2", expires_ts=2000.0)
+	tr.register(bad)
+	tr.register(_order(coid="good"))
+	bad.expires_ts = None  # type: ignore[assignment]  # corruption: deadline check raises
+	events = tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})
+	kinds = {(e.kind, e.order.client_order_id) for e in events}
+	assert ("fill", "good") in kinds       # healthy fill survived the step
+	assert ("error", "bad") in kinds       # corrupted order isolated
+	by = {r.client_order_id: r for r in tr.ledger}
+	assert by["bad"].disposition == "errored"
+	assert by["good"].disposition == "filled"
+
+
+def test_raising_mid_provider_degrades_sample_and_tallies():
+	# A RAISING provider is a code bug, distinct from a legitimate None mid:
+	# the sample degrades to None AND the tally is drainable so dispatch can
+	# make it sweep-visible (maker_markout_provider_error).
+	def boom(t):
+		raise RuntimeError("provider bug")
+	tr = RestingOrderTracker(QueueFillModel(), mid_provider=boom)
+	tr.register(_order(expires_ts=99999.0))
+	tr.step(1500.0, {"KXTEST-1": [_crossing(1500.0)]})
+	tr.step(1530.0, {"KXTEST-2": [_at_level(1530.0, 1.0)]})
+	assert tr.ledger[0].mark_outs == [(1500.0, 30, None)]
+	assert tr.drain_markout_provider_errors() == 1
+	assert tr.drain_markout_provider_errors() == 0    # reset on drain
+
+
 def test_per_order_error_isolation():
 	class BoomModel(QueueFillModel):
 		def consume(self, order, p):
@@ -308,6 +342,11 @@ def test_from_snapshot_rejects_malformed_content():
 		tr.from_snapshot(["garbage"])  # type: ignore[list-item]
 	with pytest.raises(ValueError, match="bad order fields"):
 		tr.from_snapshot([{"order": {"unexpected_field": 1}}])
+	from dataclasses import asdict
+	entry = {"order": asdict(_order())}
+	entry["order"]["expires_ts"] = "2000"     # numeric field corrupted to str
+	with pytest.raises(ValueError, match="non-numeric"):
+		tr.from_snapshot([entry])
 
 
 def test_from_snapshot_rejects_non_in_flight_state():

@@ -265,6 +265,8 @@ class RestingOrderTracker:
 		# Pending mark-out samples: (coid, fill_ts, offset_s, scheduled_ts),
 		# FIFO. fill_ts anchors each sample to ITS fill (SPEC §11 per-fill).
 		self._pending_markouts: list[tuple[str, float, int, float]] = []
+		# Raising mid_provider tally (drained by dispatch to a counter).
+		self._markout_provider_errors = 0
 
 	# ------------------------------------------------------------------
 	# Registration + guard data sources (SPEC §5 API)
@@ -341,6 +343,16 @@ class RestingOrderTracker:
 		"""All ledger rows, registration-ordered (SPEC §11 instrument)."""
 		return list(self._rows.values())
 
+	def drain_markout_provider_errors(self) -> int:
+		"""Return and reset the count of mark-out samples degraded to ``None``
+		because ``mid_provider`` RAISED (a code bug, distinct from a
+		legitimate ``None`` mid). Called by dispatch after each step so the
+		failure is sweep-visible (``maker_markout_provider_error``) — the
+		tracker itself stays I/O-free."""
+		n = self._markout_provider_errors
+		self._markout_provider_errors = 0
+		return n
+
 	# ------------------------------------------------------------------
 	# The pure step (SPEC §5.1)
 	# ------------------------------------------------------------------
@@ -408,17 +420,29 @@ class RestingOrderTracker:
 					events.append(TrackerEvent(kind="error", order=order, ts=now))
 
 		# Phase 2 — deadline cancels (clock conditions), backdated (§5.1).
+		# Same per-order isolation as Phase 1 (SPEC §5 internals: step never
+		# throws into the dispatch loop): an exception here would otherwise
+		# discard Phase-1 fill events already computed for HEALTHY orders in
+		# this same call — a silent tracker-vs-store desync.
 		for coid, order in self._orders.items():
 			if order.state in _TERMINAL_STATES:
 				continue
-			deadline = order.deadline_ts
-			if deadline <= now:
-				row = self._rows[coid]
-				cause = "expired" if deadline == order.expires_ts else "cancelled"
-				self._finalize(order, row, cause)
-				events.append(TrackerEvent(
-					kind="cancel", order=order, ts=deadline, cause=cause,
-				))
+			row = self._rows[coid]
+			try:
+				deadline = order.deadline_ts
+				if deadline <= now:
+					cause = "expired" if deadline == order.expires_ts else "cancelled"
+					self._finalize(order, row, cause)
+					events.append(TrackerEvent(
+						kind="cancel", order=order, ts=deadline, cause=cause,
+					))
+			except Exception:
+				log.exception(
+					"RestingOrderTracker: error in deadline check for %s on %s — "
+					"isolating as errored, step continues", coid, order.ticker,
+				)
+				self._finalize(order, row, "errored")
+				events.append(TrackerEvent(kind="error", order=order, ts=now))
 
 		# Phase 3 — due mark-out samples (§7.5 pending-sample scheduling).
 		# EVENT ticks only: a clock-only step (the paper engine's periodic
@@ -441,6 +465,11 @@ class RestingOrderTracker:
 							"RestingOrderTracker: mark-out sample failed for %s", coid,
 						)
 						mrow.mark_outs.append((fill_ts, offset, None))
+						# Distinct from a legitimate None mid ("no price yet"):
+						# a RAISING provider is a code bug. Tallied here (the
+						# tracker is I/O-free), drained to a sweep-visible
+						# counter by dispatch (drain_markout_provider_errors).
+						self._markout_provider_errors += 1
 
 		return events
 
@@ -539,6 +568,26 @@ class RestingOrderTracker:
 					"RestingOrderTracker.from_snapshot: snapshot carries "
 					f"non-in-flight state {order.state!r} for "
 					f"{order.client_order_id!r} — to_snapshot never emits it"
+				)
+			# Numeric-field validation: a corrupted timestamp/size would
+			# otherwise only surface later, inside step()'s deadline check
+			# or the fill model — fail HERE, at the seed boundary.
+			num = (int, float)
+			numeric_ok = (
+				isinstance(order.placed_ts, num)
+				and isinstance(order.expires_ts, num)
+				and isinstance(order.filled_size, num)
+				and isinstance(order.intended_size, num)
+				and isinstance(order.queue_ahead, num)
+				and (order.market_close_ts is None
+				     or isinstance(order.market_close_ts, num))
+				and (order.cancel_before_close_seconds is None
+				     or isinstance(order.cancel_before_close_seconds, num))
+			)
+			if not numeric_ok:
+				raise ValueError(
+					"RestingOrderTracker.from_snapshot: non-numeric "
+					f"timestamp/size field(s) for {order.client_order_id!r}"
 				)
 			self.register(order)
 			row = self._rows[order.client_order_id]

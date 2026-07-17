@@ -1462,6 +1462,13 @@ def step_resting_orders(
 	if not isinstance(tracker, RestingOrderTracker):
 		return []
 	events = tracker.step(now.timestamp(), {ticker: prints} if prints else {})
+	provider_errors = tracker.drain_markout_provider_errors()
+	if provider_errors:
+		metrics = config.get("_metrics")
+		if metrics is None:
+			metrics = Metrics()
+		for _ in range(provider_errors):
+			metrics.inc("maker_markout_provider_error")
 	if events:
 		_route_tracker_events(events, store, config)
 	return events

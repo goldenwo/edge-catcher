@@ -55,6 +55,7 @@ _COUNTER_KEYS = (
 	"maker_degenerate_print",
 	"maker_dropped_on_restart",   # §5.6 mid-day paper restart drops in-flight orders
 	"maker_order_errored",        # §5 internals per-order isolation fired
+	"maker_markout_provider_error",  # mid_provider RAISED (bug) — sample degraded to None
 )
 _GAUGE_KEYS = (
 	"entries_skipped_unsupported",

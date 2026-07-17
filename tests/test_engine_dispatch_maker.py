@@ -269,6 +269,25 @@ async def test_maker_filled_counted_once_for_multi_fill_batch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_markout_provider_error_reaches_metrics() -> None:
+	# A raising mid_provider degrades the sample to None in the tracker;
+	# dispatch drains the tally into maker_markout_provider_error so a
+	# systematic provider bug is sweep-visible, not log-only.
+	def boom(t: str) -> int:
+		raise RuntimeError("provider bug")
+	tr = RestingOrderTracker(QueueFillModel(), mid_provider=boom)
+	cfg = _config(tracker=tr)
+	await _enter(_maker_sig(), cfg)
+	store = _StubStoreOf(cfg)
+	step_resting_orders(cfg, store, "KXTEST-1",
+	                    [Print(_NOW.timestamp() + 10, 90, 50.0, "yes")], _NOW)
+	late = datetime.fromtimestamp(_NOW.timestamp() + 45, tz=timezone.utc)
+	step_resting_orders(cfg, store, "KXTEST-1",
+	                    [Print(_NOW.timestamp() + 45, 85, 1.0, "yes")], late)
+	assert cfg["_metrics"].snapshot()["maker_markout_provider_error"] == 1
+
+
+@pytest.mark.asyncio
 async def test_close_window_without_close_ts_skips() -> None:
 	tr = _tracker()
 	cfg = _config(tracker=tr)
