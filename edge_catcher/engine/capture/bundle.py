@@ -50,6 +50,14 @@ MARKET_STATE_SCHEMA_VERSION = 2
 # resting_orders.json absent ⇒ assembly bug, surfaced loudly.
 BUNDLE_MANIFEST_SCHEMA_VERSION = 2
 
+# The manifest version at which resting_orders.json became MANDATORY. A
+# DIFFERENT constant from BUNDLE_MANIFEST_SCHEMA_VERSION even though they
+# are equal today: on a future bump to 3, the replay reader's accepted set
+# grows with BUNDLE_MANIFEST_SCHEMA_VERSION while this threshold stays 2
+# (the absence rule keys on when the file became mandatory, not on the
+# current version).
+RESTING_ORDERS_MIN_SCHEMA_VERSION = 2
+
 
 def assemble_daily_bundle(
 	capture_date: date,

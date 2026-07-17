@@ -387,6 +387,20 @@ def test_from_snapshot_rejects_malformed_content():
 		tr.from_snapshot([entry_price])
 
 
+def test_from_snapshot_ignores_unknown_extra_order_fields():
+	# Forward-compat (review R9-M2): a NEWER writer (2b rolling deploy) may
+	# add order fields — the older reader must ignore them, not drop the
+	# cross-day order. Missing REQUIRED fields still fail loudly.
+	tr = _tracker()
+	tr.register(_order(expires_ts=9000.0))
+	snap = tr.to_snapshot()
+	assert snap[0]["schema"] == 1                     # entries are versioned
+	snap[0]["order"]["future_2b_field"] = "x"  # type: ignore[index]
+	fresh = _tracker()
+	fresh.from_snapshot(snap)                          # must not raise
+	assert fresh.in_flight_count() == 1
+
+
 def test_from_snapshot_rejects_non_in_flight_state():
 	import pytest
 	from dataclasses import asdict

@@ -54,7 +54,11 @@ from edge_catcher.engine.dispatch import (
 	step_resting_orders,
 )
 from edge_catcher.engine.execution import resting_cap
-from edge_catcher.engine.resting import QueueFillModel, RestingOrderTracker
+from edge_catcher.engine.resting import (
+	QueueFillModel,
+	RestingOrderTracker,
+	make_yes_mid_provider,
+)
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.executors.honest_paper import (
@@ -973,19 +977,6 @@ async def _summary_logger(
 			log.exception("Summary logger error")
 
 
-def _make_mid_provider(market_state: MarketState):
-	"""Mark-out reference-price callback for the RestingOrderTracker (SPEC
-	§7.5): the yes-mid when both sides of the book are quoted, else None
-	("no price" — recorded honestly, never fabricated)."""
-	def _mid(ticker: str) -> int | None:
-		bid = market_state.get_yes_bid(ticker)
-		ask = market_state.get_yes_ask(ticker)
-		if bid is None or ask is None:
-			return None
-		return round((bid + ask) / 2)
-	return _mid
-
-
 def _boot_maker_wiring(config: dict, market_state: MarketState) -> int:
 	"""Phase 2a maker boot step (SPEC §4.4 boot visibility + §5 internals).
 
@@ -1002,7 +993,7 @@ def _boot_maker_wiring(config: dict, market_state: MarketState) -> int:
 	"""
 	cap = resting_cap(config)
 	config["_tracker"] = RestingOrderTracker(
-		QueueFillModel(), mid_provider=_make_mid_provider(market_state),
+		QueueFillModel(), mid_provider=make_yes_mid_provider(market_state),
 	)
 	if cap > 0:
 		log.info("maker execution ENABLED (max_resting_per_strategy=%d)", cap)

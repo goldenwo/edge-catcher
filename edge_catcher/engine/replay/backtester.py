@@ -35,6 +35,10 @@ from typing import Any, Optional
 
 import yaml
 
+from edge_catcher.engine.capture.bundle import (
+	BUNDLE_MANIFEST_SCHEMA_VERSION,
+	RESTING_ORDERS_MIN_SCHEMA_VERSION,
+)
 from edge_catcher.engine.discovery import get_enabled_strategies
 from edge_catcher.engine.dispatch import dispatch_message
 from edge_catcher.engine.executor import Executor
@@ -46,6 +50,7 @@ from edge_catcher.engine.resting import (
 	LedgerRow,
 	QueueFillModel,
 	RestingOrderTracker,
+	make_yes_mid_provider,
 )
 from edge_catcher.engine.strategy_base import Strategy
 from edge_catcher.engine.trade_store import InMemoryTradeStore
@@ -123,9 +128,12 @@ async def replay_capture(
 	# 1. Load manifest
 	manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
 	# v1 = pre-maker bundles (Apr-Jul 2026 archive); v2 adds the mandatory
-	# resting_orders.json step (Phase 2a, SPEC §8.3).
-	if manifest.get("schema_version") not in (1, 2):
-		raise ValueError(f"unsupported manifest schema_version: {manifest.get('schema_version')}")
+	# resting_orders.json step (Phase 2a, SPEC §8.3). Accepted set derives
+	# from the writer's canonical constant so a future bump can't silently
+	# make new bundles unreplayable.
+	_sv = manifest.get("schema_version")
+	if not isinstance(_sv, int) or not (1 <= _sv <= BUNDLE_MANIFEST_SCHEMA_VERSION):
+		raise ValueError(f"unsupported manifest schema_version: {_sv!r}")
 	capture_date_str = manifest["capture_date"]
 
 	# 3. Load config first so strategy filtering can use it
@@ -180,19 +188,13 @@ async def replay_capture(
 	_seed_strategy_state(store, bundle, prior_bundle)
 
 	# 6a. Phase 2a: resting-order tracker — the replay side of the engine's
-	# _boot_maker_wiring. Mid provider mirrors engine._make_mid_provider
-	# (2 sites; extract on a third). Stashed in config["_tracker"] — the same
-	# side-channel dispatch reads in the live/paper engine — and OVERWRITTEN
-	# unconditionally so a caller-reused config dict can never leak a prior
-	# replay's tracker state into this run.
-	def _replay_mid(ticker: str) -> int | None:
-		bid = market_state.get_yes_bid(ticker)
-		ask = market_state.get_yes_ask(ticker)
-		if bid is None or ask is None:
-			return None
-		return round((bid + ask) / 2)
-
-	tracker = RestingOrderTracker(QueueFillModel(), mid_provider=_replay_mid)
+	# _boot_maker_wiring, on the SAME shared mid formula (byte-parity).
+	# Stashed in config["_tracker"] — the same side-channel dispatch reads
+	# in the live/paper engine — and OVERWRITTEN unconditionally so a
+	# caller-reused config dict can never leak a prior replay's tracker
+	# state into this run.
+	tracker = RestingOrderTracker(
+		QueueFillModel(), mid_provider=make_yes_mid_provider(market_state))
 	config["_tracker"] = tracker
 	_seed_resting_orders(tracker, bundle, prior_bundle)
 
@@ -458,7 +460,7 @@ def _seed_resting_orders(
 	if prior_manifest is None:
 		return  # no prior bundle at all — fresh start, nothing to seed
 	version = json.loads(prior_manifest.read_text(encoding="utf-8")).get("schema_version", 1)
-	if version >= 2:
+	if version >= RESTING_ORDERS_MIN_SCHEMA_VERSION:
 		raise ValueError(
 			f"prior bundle {prior_manifest.parent} has manifest schema_version "
 			f"{version} but no resting_orders.json — assembly bug (SPEC §8.3: "

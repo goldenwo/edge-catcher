@@ -19,16 +19,16 @@ shared by paper, replay, and — in Phase 2b — live:
     per-order print-consumer; lifecycle/deadline enforcement belongs to the
     tracker (SPEC §5.1 validity window), NOT the model.
 
-``RestingOrderTracker`` (SPEC §5 state machine, ledger, serialization) lands
-in this module next — the model below is deliberately tracker-agnostic so
-the two compose without circular knowledge.
+``RestingOrderTracker`` (SPEC §5 state machine, ledger, serialization) is
+defined below — the model is deliberately tracker-agnostic so the two
+compose without circular knowledge.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
-from typing import Callable, Literal, cast
+from dataclasses import asdict, dataclass, field, fields
+from typing import Callable, Literal, Protocol, cast
 
 log = logging.getLogger(__name__)
 
@@ -195,6 +195,28 @@ class TrackerEvent:
 	cause: str | None = None
 
 
+class _QuoteSource(Protocol):
+	"""What ``make_yes_mid_provider`` needs from a market-state object —
+	satisfied by both the live ``MarketState`` and replay's rebuild."""
+
+	def get_yes_bid(self, ticker: str) -> int | None: ...
+	def get_yes_ask(self, ticker: str) -> int | None: ...
+
+
+def make_yes_mid_provider(state: _QuoteSource) -> Callable[[str], int | None]:
+	"""The ONE mark-out reference-price formula (SPEC §7.5), shared by the
+	paper engine, the replay backtester, and tests: the yes-mid when both
+	sides of the book are quoted, else ``None`` ("no price" — recorded
+	honestly, never fabricated; no last-trade fallback)."""
+	def _mid(ticker: str) -> int | None:
+		bid = state.get_yes_bid(ticker)
+		ask = state.get_yes_ask(ticker)
+		if bid is None or ask is None:
+			return None
+		return round((bid + ask) / 2)
+	return _mid
+
+
 @dataclass
 class LedgerRow:
 	"""Per-order instrumentation record (SPEC §11).
@@ -257,9 +279,11 @@ class RestingOrderTracker:
 	  - per-order error isolation: an exception processing one order moves
 	    THAT order to ``errored`` (loud log + event) and the step continues.
 
-	``mid_provider`` supplies the mark-out reference price for a ticker
-	(mid, or last-trade fallback; ``None`` = no price available). Injected
-	by the driver so the tracker stays I/O-free.
+	``mid_provider`` supplies the mark-out reference price for a ticker:
+	the yes-mid when both sides of the book are quoted, else ``None``
+	("no price" — recorded honestly, never fabricated; there is NO
+	last-trade fallback). Injected by the driver so the tracker stays
+	I/O-free; both drivers use ``make_yes_mid_provider``.
 	"""
 
 	def __init__(
@@ -580,6 +604,10 @@ class RestingOrderTracker:
 			if row.disposition == "censored_stream_end":
 				continue
 			snapshot.append({
+				# Per-entry format version: from_snapshot dispatches/branches
+				# on this when the entry shape evolves (2b), instead of
+				# guessing from key presence.
+				"schema": 1,
 				"order": asdict(order),
 				"fills": [[ts, size] for ts, size in row.fills],
 				"queue_ahead_at_place": row.queue_ahead_at_place,
@@ -609,6 +637,7 @@ class RestingOrderTracker:
 				f"RestingOrderTracker.from_snapshot: snapshot must be a list, "
 				f"got {type(snapshot).__name__}"
 			)
+		known_fields = {f.name for f in fields(RestingOrder)}
 		for entry in snapshot:
 			order_data = entry.get("order") if isinstance(entry, dict) else None
 			if not isinstance(order_data, dict):
@@ -616,8 +645,18 @@ class RestingOrderTracker:
 					"RestingOrderTracker.from_snapshot: malformed entry — "
 					f"expected a dict with an 'order' dict, got: {entry!r}"
 				)
+			# Forward-compat: a NEWER writer may add fields (2b rolling
+			# deploy) — ignore unknowns rather than dropping the cross-day
+			# order. MISSING required fields still fail loudly below.
+			unknown = set(order_data) - known_fields
+			if unknown:
+				log.info(
+					"RestingOrderTracker.from_snapshot: ignoring unknown "
+					"order fields %s (newer-writer snapshot)", sorted(unknown),
+				)
+			kept = {k: v for k, v in order_data.items() if k in known_fields}
 			try:
-				order = RestingOrder(**cast("dict[str, object]", order_data))  # type: ignore[arg-type]
+				order = RestingOrder(**cast("dict[str, object]", kept))  # type: ignore[arg-type]
 			except TypeError as exc:
 				raise ValueError(
 					f"RestingOrderTracker.from_snapshot: bad order fields: {exc}"

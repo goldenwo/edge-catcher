@@ -34,7 +34,9 @@ from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.market_state import MarketState
 from edge_catcher.engine.metrics import Metrics
 from edge_catcher.engine.replay import backtester as backtester_mod
-from edge_catcher.engine.resting import QueueFillModel, RestingOrderTracker
+from edge_catcher.engine.resting import (
+	QueueFillModel, RestingOrderTracker, make_yes_mid_provider,
+)
 from edge_catcher.engine.trade_store import InMemoryTradeStore
 
 _T0 = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -191,14 +193,8 @@ async def _drive_paper(
 	store = InMemoryTradeStore()
 	executor = PaperExecutor(market_state=market_state, config=config)
 
-	def _mid(ticker: str) -> int | None:
-		bid = market_state.get_yes_bid(ticker)
-		ask = market_state.get_yes_ask(ticker)
-		if bid is None or ask is None:
-			return None
-		return round((bid + ask) / 2)
-
-	tracker = RestingOrderTracker(QueueFillModel(), mid_provider=_mid)
+	tracker = RestingOrderTracker(
+		QueueFillModel(), mid_provider=make_yes_mid_provider(market_state))
 	config["_tracker"] = tracker
 	probe = _fresh_probe(tmp_path)
 	strategies = [probe]
