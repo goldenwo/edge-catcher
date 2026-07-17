@@ -51,7 +51,10 @@ from edge_catcher.engine.dispatch import (
 	_pnl_label,
 	dispatch_message,
 	drain_inflight_sections,
+	step_resting_orders,
 )
+from edge_catcher.engine.execution import resting_cap
+from edge_catcher.engine.resting import QueueFillModel, RestingOrderTracker
 from edge_catcher.engine.executor import Executor
 from edge_catcher.engine.executors.paper import PaperExecutor
 from edge_catcher.engine.executors.honest_paper import (
@@ -970,6 +973,63 @@ async def _summary_logger(
 			log.exception("Summary logger error")
 
 
+def _make_mid_provider(market_state: MarketState):
+	"""Mark-out reference-price callback for the RestingOrderTracker (SPEC
+	§7.5): the yes-mid when both sides of the book are quoted, else None
+	("no price" — recorded honestly, never fabricated)."""
+	def _mid(ticker: str) -> int | None:
+		bid = market_state.get_yes_bid(ticker)
+		ask = market_state.get_yes_ask(ticker)
+		if bid is None or ask is None:
+			return None
+		return round((bid + ask) / 2)
+	return _mid
+
+
+def _boot_maker_wiring(config: dict, market_state: MarketState) -> int:
+	"""Phase 2a maker boot step (SPEC §4.4 boot visibility + §5 internals).
+
+	Validates the cap key (``resting_cap`` RAISES on a present-but-invalid
+	value in BOTH modes — a mistyped enablement must fail fast, not silently
+	disable), constructs the tracker, stashes it in ``config["_tracker"]``
+	(the ``_metrics``/``_exec_cfg`` side-channel idiom dispatch reads), and
+	emits the one explicit boot line so a config edit's effect is always
+	confirmable without running a sweep. Returns the cap.
+
+	The tracker always starts EMPTY at boot: any in-flight resting orders
+	from a prior mid-day crash are gone with the process memory (SPEC §5.6
+	— accepted for paper; live 2b recovers from durable rows instead).
+	"""
+	cap = resting_cap(config)
+	config["_tracker"] = RestingOrderTracker(
+		QueueFillModel(), mid_provider=_make_mid_provider(market_state),
+	)
+	if cap > 0:
+		log.info("maker execution ENABLED (max_resting_per_strategy=%d)", cap)
+	else:
+		log.info("maker execution DISABLED")
+	return cap
+
+
+async def _resting_timer_loop(
+	config: dict,
+	store: "TradeStoreProtocol",
+	interval: int = 5,
+) -> None:
+	"""Periodic clock tick for resting orders (SPEC §8.2): fires TTL /
+	close-window cancels during print gaps so cap slots free promptly and
+	the operator is notified. Operationally useful, LEDGER-IRRELEVANT —
+	§5.1's validity window + backdated cancels make ledger outcomes a pure
+	function of the event stream, which is why replay (timerless) still
+	produces a byte-identical ledger. One bad tick never kills the loop."""
+	while True:
+		await asyncio.sleep(interval)
+		try:
+			step_resting_orders(config, store, "", [], datetime.now(timezone.utc))
+		except Exception:
+			log.exception("resting timer step failed; continuing")
+
+
 async def _state_flusher(
 	store: TradeStoreProtocol,
 	strategies: list[Strategy],
@@ -1677,7 +1737,16 @@ async def run_engine(
 					_provider_for_close.build(None, now)
 				)
 
+		# Phase 2a maker wiring (SPEC §4.4/§5 internals): validate the cap key
+		# (raises at boot on present-but-invalid — both modes), construct the
+		# tracker, stash it for dispatch, log the one boot-visibility line.
+		_boot_maker_wiring(config, market_state)
+
 		tasks = [
+			asyncio.create_task(
+				_resting_timer_loop(config, store),
+				name="resting_timer",
+			),
 			asyncio.create_task(
 				_settlement_poller(
 					store, client, strategies, pending_states,
