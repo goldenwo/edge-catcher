@@ -168,8 +168,24 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 			req, reason=f"invalid_intended_size:{req.size_contracts}"
 		)
 
-	# Zero fill — IOC didn't get any liquidity at our limit. Reject.
+	# Zero fill. For an IOC this is terminal — no liquidity at our limit,
+	# reject. For a GTC the venue reports as resting (or pending-accepted),
+	# zero fill is the SUCCESS case: the order is on the book (SPEC §9).
+	# Reachability: the §4.4 live-mode maker guard blocks GTC requests from
+	# live dispatch in 2a — this branch is the frozen contract 2b builds
+	# against, unit-tested offline against documented-shape fixtures whose
+	# diff vs a real captured GTC response is 2b acceptance criterion #1.
 	if order.filled_count == 0:
+		if req.time_in_force == "gtc" and order.status in ("resting", "pending"):
+			return OrderResult(
+				status="resting",
+				intended_size=req.size_contracts,
+				filled_size=0,
+				blended_entry_cents=0,
+				fill_pct=0.0,
+				slippage_cents=0,
+				order_id=order.order_id or None,
+			)
 		return OrderResult(
 			status="rejected",
 			intended_size=req.size_contracts,
@@ -213,6 +229,19 @@ def _translate_order(order: Order, req: OrderRequest) -> OrderResult:
 	slippage = signed_slippage_cents(
 		blended=blended, limit=req.limit_price_cents, action=req.action
 	)
+	# Partial fill at placement on a still-resting GTC (SPEC §4.3/§9): the
+	# crossed portion filled at a usable cost basis, the remainder rests —
+	# status "resting" with the fill fields populated, NOT "filled".
+	if req.time_in_force == "gtc" and order.status in ("resting", "pending"):
+		return OrderResult(
+			status="resting",
+			intended_size=req.size_contracts,
+			filled_size=order.filled_count,
+			blended_entry_cents=blended,
+			fill_pct=fill_pct,
+			slippage_cents=slippage,
+			order_id=order.order_id or None,
+		)
 	return OrderResult(
 		status="filled",
 		intended_size=req.size_contracts,

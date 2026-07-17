@@ -948,3 +948,90 @@ async def test_translate_order_buy_slippage_positive_when_paid_more() -> None:
 	assert result.status == "filled"
 	assert result.blended_entry_cents == 52
 	assert result.slippage_cents == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a — GTC translation matrix (SPEC S9)
+#
+# FIXTURE CAVEAT (binding, SPEC S9 / feedback_mock_real_shape): we have NEVER
+# placed a GTC order live, so no captured real create-order response with
+# status="resting" exists. These fixtures are the documented V2 shape with the
+# status field varied on our real captured-IOC shapes. Phase 2b acceptance
+# criterion #1 places ONE smallest-size live resting order, captures the raw
+# response, and diffs it against these fixtures BEFORE anything trusts this
+# translation on real money.
+#
+# Reachability: the S4.4 live-mode maker guard blocks GTC requests from live
+# dispatch in 2a — this matrix is the frozen contract 2b builds against.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gtc_zero_fill_resting_is_success_not_ioc_zero_fill():
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		order_id="ord-kx-gtc-1", filled_count=0, status="resting",
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=15, time_in_force="gtc")
+
+	result = await executor.place(req)
+
+	assert result.status == "resting"
+	assert result.order_id == "ord-kx-gtc-1"       # known -- unlike pending-unknown
+	assert result.filled_size == 0
+	assert result.blended_entry_cents == 0
+	assert result.rejection_reason is None
+
+
+@pytest.mark.asyncio
+async def test_gtc_partial_fill_still_resting_carries_fill_fields():
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		order_id="ord-kx-gtc-2", filled_count=3, avg_fill_price_cents=15,
+		status="resting", count=10,
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=15, time_in_force="gtc")
+
+	result = await executor.place(req)
+
+	assert result.status == "resting"
+	assert result.filled_size == 3
+	assert result.blended_entry_cents == 15
+	assert result.fill_pct == 0.3
+	assert result.order_id == "ord-kx-gtc-2"
+
+
+@pytest.mark.asyncio
+async def test_gtc_partial_missing_cost_still_routes_to_pending_reconcile():
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		order_id="ord-kx-gtc-3", filled_count=3, avg_fill_price_cents=0,
+		status="resting", count=10,
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=15, time_in_force="gtc")
+
+	result = await executor.place(req)
+
+	assert result.status == "pending"
+	assert result.rejection_reason == "kalshi_missing_fill_cost"
+	assert result.order_id == "ord-kx-gtc-3"
+
+
+@pytest.mark.asyncio
+async def test_gtc_fully_executed_at_placement_is_filled():
+	client = FakeKalshiClient()
+	client.return_value = _make_order(
+		order_id="ord-kx-gtc-4", filled_count=10, avg_fill_price_cents=15,
+		status="executed", count=10,
+	)
+	executor = LiveExecutor(client)  # type: ignore[arg-type]
+	req = _make_request(size=10, limit=15, time_in_force="gtc")
+
+	result = await executor.place(req)
+
+	assert result.status == "filled"
+	assert result.filled_size == 10
+	assert result.blended_entry_cents == 15
