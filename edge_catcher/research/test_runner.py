@@ -844,7 +844,10 @@ def _bucket_bonferroni_verdict(
 	clusters kept — mc_null_pvalue). EDGE_EXISTS requires mc_p <= the Bonferroni
 	alpha; a failing bucket's nominal significance was rare-event inflation →
 	NO_EDGE. Evaluated lazily (qualifiers only) because each run is
-	MC_NULL_SIMS simulations over the bucket's per-market rows.
+	MC_NULL_SIMS simulations over the bucket's per-market rows. `mc_pvalue_fn`,
+	when supplied, replaces the MC null call entirely (called as (rows,
+	z_obs, n_sims, seed)); `mc_seed`, when supplied alone, threads into
+	mc_null_pvalue's own `seed` parameter.
 
 	PER-MARKET CONFIRMATION GATE (artifact class (f)): the per-trade edge is
 	trustworthy only if the one-obs-per-market view — the level a position

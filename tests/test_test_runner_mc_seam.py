@@ -85,8 +85,13 @@ class TestMcSeam:
 	def test_mc_seed_forwards_to_mc_null_pvalue_and_changes_nothing_else(self, monkeypatch):
 		captured: list = []
 
-		def fake_mc_null_pvalue(rows, z_obs, n_sims, seed=None):
-			captured.append(seed)
+		def fake_mc_null_pvalue(rows, z_obs, n_sims, *args, **kwargs):
+			# Presence-capture, not a defaulted `seed` param: a defaulted param
+			# can't tell "no seed kwarg passed" apart from "seed=None passed
+			# explicitly", so it would miss a regression that always forwards
+			# `seed=s` (making every default-path verdict irreproducible —
+			# the real default is 20260703, not None).
+			captured.append(kwargs.get("seed", args[0] if args else "<absent>"))
 			return 0.0001  # small + deterministic: clears every alpha here
 
 		monkeypatch.setattr(test_runner, "mc_null_pvalue", fake_mc_null_pvalue)
@@ -101,7 +106,7 @@ class TestMcSeam:
 			mc_seed=123,
 		)
 
-		assert captured == [None, 123]
+		assert captured == ["<absent>", 123]
 		assert res_default[0] == res_seeded[0] == EDGE_EXISTS
 		assert res_default[2:] == res_seeded[2:]  # z_stat, fee_adjusted_edge unchanged
 		assert b_default["mc_p"] == b_seeded["mc_p"] == 0.0001
