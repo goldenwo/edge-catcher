@@ -1,25 +1,35 @@
-"""Polymarket REST adapter — Gamma (markets metadata) + CLOB (trade history).
+"""Polymarket REST adapter — Gamma (markets metadata) + data-api (trades).
 
 Both APIs are public and unauthenticated for read paths. We hit:
   GET https://gamma-api.polymarket.com/markets    — markets list with filters
   GET https://gamma-api.polymarket.com/markets/{id}  — single market detail
-  GET https://clob.polymarket.com/markets/{conditionId}/trades — trade history
+  GET https://data-api.polymarket.com/trades?market={conditionId} — trade
+      history (rows NEWEST-first, `limit`/`offset` paging)
 
-The adapter joins the two — Gamma supplies the listing layer (paginated +
-filterable by status / category), CLOB supplies per-market trade events
-keyed by `condition_id`.
+The old CLOB trade endpoint (GET clob.polymarket.com/markets/{id}/trades)
+is GONE — it 404s for every market as of 2026-07 (verified live
+2026-07-27). The adapter joins the two live APIs — Gamma supplies the
+listing layer (paginated + filterable by status / category / endDate
+window), data-api supplies per-market trade events keyed by `condition_id`.
 
 Mapping notes:
   - Polymarket markets are typically binary (Yes/No) with a `condition_id`
     as primary key and per-outcome `tokens` (ERC1155 token IDs).
   - We use the condition_id as our `ticker` field for storage parity with
-    Kalshi's market-ticker convention. The Yes/No outcome split is
-    encoded in the trade's `side` (BUY of YES → "yes", BUY of NO → "no").
+    Kalshi's market-ticker convention. Trade rows carry `outcomeIndex`
+    (0 = yes-leg token, 1 = no-leg token) + `side` (BUY/SELL); taker_side
+    is derived from that pair — the `outcome` label is display-only (team
+    names on sports markets, "Yes"/"No" on binaries).
+  - Gamma list-ish fields (`outcomes`, `outcomePrices`, `clobTokenIds`)
+    arrive as JSON-in-STRING; prices (`bestBid`/`bestAsk`/`lastTradePrice`)
+    are 0–1 USD floats and are stored as integer cents for parity with
+    Trade and the Kalshi adapter.
   - `series_ticker` defaults to a category slug (politics/sports/crypto)
     derived from market metadata when present, falling back to "default".
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -46,18 +56,27 @@ SCHEMAS: dict[str, Any] = {
 	"gamma_market_detail": {
 		"required": ["id", "conditionId"],
 	},
+	# data-api /trades rows (verified live 2026-07-27): no `id` field exists;
+	# `timestamp` is an epoch int (unix seconds); `outcome` is a display
+	# label only (team names on sports) so it is NOT required here.
 	"clob_trades_list": {
 		"required": [],  # top-level list[dict]
-		"item_required": ["id", "side", "size", "price", "outcome", "timestamp"],
+		"item_required": [
+			"side", "size", "price", "timestamp",
+			"conditionId", "outcomeIndex", "transactionHash",
+		],
 	},
 }
 
 
 class PolymarketAdapter(PredictionMarketAdapter):
-	"""Polymarket REST adapter (Gamma + CLOB public APIs, no auth)."""
+	"""Polymarket REST adapter (Gamma + data-api public APIs, no auth)."""
 
 	GAMMA_BASE = "https://gamma-api.polymarket.com"
+	# Legacy CLOB base — its /markets/{id}/trades endpoint is dead (404s);
+	# retained for config compatibility only.
 	CLOB_BASE = "https://clob.polymarket.com"
+	DATA_BASE = "https://data-api.polymarket.com"
 	SCHEMAS = SCHEMAS
 
 	def __init__(
@@ -75,20 +94,39 @@ class PolymarketAdapter(PredictionMarketAdapter):
 		poly_cfg = config["adapters"]["polymarket"]
 		self.gamma_base: str = poly_cfg.get("gamma_base", self.GAMMA_BASE).rstrip("/")
 		self.clob_base: str = poly_cfg.get("clob_base", self.CLOB_BASE).rstrip("/")
+		self.data_base: str = poly_cfg.get("data_base", self.DATA_BASE).rstrip("/")
 		self.rate_limit_seconds: float = float(poly_cfg.get("rate_limit_seconds", 0.5))
 		# `series` here is a list of category-slug strings (e.g. ["politics",
 		# "sports"]); empty list means "all categories".
 		self.series: List[str] = poly_cfg.get("series", [])
-		self.pagination_limit: int = int(
-			poly_cfg.get("pagination", {}).get("default_limit", 100)
-		)
+		pagination_cfg = poly_cfg.get("pagination") or {}
+		self.pagination_limit: int = int(pagination_cfg.get("default_limit", 100))
+		# Defensive per-market page cap on /trades paging — a runaway market
+		# (or an offset param the API stops honoring) must not loop forever.
+		self.max_trade_pages: int = int(pagination_cfg.get("max_trade_pages", 200))
 		# Status filter — defaults to ["closed"] (settled markets) for
 		# backtest-friendly historical data.
 		self.statuses: List[str] = poly_cfg.get("statuses", ["closed"])
+		# Optional Gamma /markets server-side sort + endDate window params
+		# (all verified binding live 2026-07-27). None/absent → omitted.
+		self.order: Optional[str] = poly_cfg.get("order")
+		self.ascending: Optional[bool] = poly_cfg.get("ascending")
+		self.end_date_min: Optional[str] = poly_cfg.get("end_date_min")
+		self.end_date_max: Optional[str] = poly_cfg.get("end_date_max")
 		self.dry_run: bool = dry_run
 		self.min_available_ram_pct: float = float(
 			poly_cfg.get("min_available_ram_pct", 10)
 		)
+
+		# Trade-path diagnostics — a silent 404→[] here hid a dead trades
+		# endpoint for 12 weeks (0 trades stored, no signal). Counted and
+		# logged so sweeps surface endpoint drift instead of swallowing it.
+		self.trade_404_count: int = 0
+		self.trade_empty_count: int = 0
+		self.non_binary_skipped_count: int = 0
+		# conditionIds flagged non-binary during collect_markets (negRisk or
+		# >2 outcomes) — collect_trades skips these outright.
+		self._non_binary_tickers: set[str] = set()
 
 		self.session = requests.Session()
 		self.session.headers.update({"Accept": "application/json"})
@@ -214,6 +252,16 @@ class PolymarketAdapter(PredictionMarketAdapter):
 				params["closed"] = "true"
 			if "open" in self.statuses or "active" in self.statuses:
 				params["active"] = "true"
+			# Server-side sort + endDate window (all bind; verified live
+			# 2026-07-27). `ascending` must serialize as lowercase.
+			if self.order:
+				params["order"] = self.order
+			if self.ascending is not None:
+				params["ascending"] = "true" if self.ascending else "false"
+			if self.end_date_min:
+				params["end_date_min"] = self.end_date_min
+			if self.end_date_max:
+				params["end_date_max"] = self.end_date_max
 			# Category filter — Polymarket Gamma uses tag_id internally; the
 			# user-facing `series` list maps to slugs. For now pass through
 			# the slug as a `tag_slug` query — adapter consumers can
@@ -254,7 +302,13 @@ class PolymarketAdapter(PredictionMarketAdapter):
 					if mkt_category not in [s.lower() for s in series_filter] \
 						and not any(s.lower() in evt_slugs for s in series_filter):
 						continue
-				out.append(self._raw_market_to_market(raw, series_filter))
+				market = self._raw_market_to_market(raw, series_filter)
+				# Non-binary markets (negRisk or >2 outcomes) keep their
+				# metadata row but are flagged so collect_trades skips them —
+				# their fills can't be stored as yes/no taker sides.
+				if _is_non_binary_market(raw):
+					self._non_binary_tickers.add(market.ticker)
+				out.append(market)
 			# Stop when we get a partial page (last page).
 			if len(batch) < self.pagination_limit:
 				break
@@ -262,6 +316,12 @@ class PolymarketAdapter(PredictionMarketAdapter):
 			if self.dry_run:
 				break
 			offset += len(batch)
+		if self._non_binary_tickers:
+			logger.info(
+				"polymarket collect_markets: %d non-binary markets flagged — "
+				"trades collection will be skipped for them",
+				len(self._non_binary_tickers),
+			)
 		return out
 
 	def _raw_market_to_market(self, raw: dict, series_filter: List[str]) -> Market:
@@ -305,9 +365,12 @@ class PolymarketAdapter(PredictionMarketAdapter):
 			title=title,
 			status=status,
 			result=result,
-			yes_bid=_safe_float(raw.get("bestBid")),
-			yes_ask=_safe_float(raw.get("bestAsk")),
-			last_price=_safe_float(raw.get("lastTradePrice")),
+			# bestBid/bestAsk/lastTradePrice arrive as 0–1 USD floats — store
+			# integer cents for unit parity with Trade and the Kalshi adapter
+			# (raw_data keeps the original full-precision values).
+			yes_bid=_usd_to_cents(raw.get("bestBid")),
+			yes_ask=_usd_to_cents(raw.get("bestAsk")),
+			last_price=_usd_to_cents(raw.get("lastTradePrice")),
 			open_interest=_safe_int(raw.get("openInterest")),
 			volume=_safe_int(raw.get("volumeNum") or raw.get("volume")),
 			expiration_time=_parse_iso(raw.get("endDateIso") or raw.get("end_date_iso") or raw.get("endDate")),
@@ -326,102 +389,144 @@ class PolymarketAdapter(PredictionMarketAdapter):
 	# ------------------------------------------------------------------
 
 	def collect_trades(self, ticker: str, since: Optional[str] = None) -> List[Trade]:
-		"""Fetch trade history for a market via CLOB API.
+		"""Fetch trade history for a market via the public data-api.
 
 		`ticker` is the condition_id (Polymarket's market primary key).
-		`since` is an ISO datetime string; trades older than `since` are
-		filtered out client-side (CLOB doesn't expose a since-filter on
-		this endpoint as of the docs we have).
+		`since` is an ISO datetime string. Rows come back NEWEST-first, so
+		the bound is applied as an EARLY-STOP during pagination — once a
+		page crosses it, no further (older) pages are requested.
+
+		Failure visibility: 404s and zero-trade markets are counted on the
+		adapter (`trade_404_count` / `trade_empty_count`) and logged at
+		WARNING with the market id. The previous silent 404→[] here hid a
+		dead trades endpoint for 12 weeks.
 		"""
-		try:
-			raw_trades = self._get(f"{self.clob_base}/markets/{ticker}/trades")
-		except requests.exceptions.HTTPError as exc:
-			# Closed/settled markets routinely have no live CLOB trade endpoint —
-			# CLOB returns 404. Treat as empty rather than failing the whole sweep.
-			if exc.response is not None and exc.response.status_code == 404:
-				logger.debug("clob /markets/%s/trades returned 404 — treating as no trades", ticker)
-				return []
-			raise
-		if not isinstance(raw_trades, list):
-			raise ValueError(
-				f"clob /markets/{ticker}/trades returned non-list "
-				f"(got {type(raw_trades).__name__})"
+		if ticker in self._non_binary_tickers:
+			self.non_binary_skipped_count += 1
+			logger.info(
+				"polymarket collect_trades: skipping non-binary market %s "
+				"(non_binary_skipped=%d)",
+				ticker, self.non_binary_skipped_count,
 			)
-		self._validate_list(raw_trades, "clob_trades_list")
-		since_dt: Optional[datetime] = None
-		if since:
-			try:
-				since_dt = datetime.fromisoformat(since)
-				if since_dt.tzinfo is None:
-					since_dt = since_dt.replace(tzinfo=timezone.utc)
-			except ValueError:
-				logger.warning("polymarket collect_trades: bad since=%r; ignoring", since)
-				since_dt = None
+			return []
+
+		since_dt = _parse_since(since)
 		out: List[Trade] = []
-		for raw in raw_trades:
-			t = self._raw_trade_to_trade(raw, ticker)
-			if since_dt is not None and t.created_time < since_dt:
-				continue
-			out.append(t)
+		offset = 0
+		pages = 0
+		dropped_rows = 0
+		stop = False
+		while not stop:
+			if pages >= self.max_trade_pages:
+				logger.warning(
+					"polymarket /trades market=%s: hit defensive page cap "
+					"(%d pages × %d rows) — truncating",
+					ticker, self.max_trade_pages, self.pagination_limit,
+				)
+				break
+			params: dict[str, Any] = {
+				"market": ticker,
+				"limit": self.pagination_limit,
+				"offset": offset,
+			}
+			try:
+				batch = self._get(f"{self.data_base}/trades", params=params)
+			except requests.exceptions.HTTPError as exc:
+				if exc.response is not None and exc.response.status_code == 404:
+					self.trade_404_count += 1
+					logger.warning(
+						"polymarket /trades returned 404 for market %s at offset=%d "
+						"(404_count=%d) — possible endpoint drift; keeping %d trades "
+						"fetched so far",
+						ticker, offset, self.trade_404_count, len(out),
+					)
+					return out
+				raise
+			pages += 1
+			if not isinstance(batch, list):
+				raise ValueError(
+					f"polymarket /trades for {ticker} returned non-list "
+					f"(got {type(batch).__name__})"
+				)
+			if not batch:
+				if offset == 0:
+					# Zero trades for a market we expected data on — this is
+					# the exact silence that masked the CLOB breakage, so it
+					# is counted and logged, not swallowed.
+					self.trade_empty_count += 1
+					logger.warning(
+						"polymarket /trades returned 0 rows for market %s (empty_count=%d)",
+						ticker, self.trade_empty_count,
+					)
+				# offset > 0: total % limit == 0 — natural end of pagination.
+				break
+			self._validate_list(batch, "clob_trades_list")
+			for raw in batch:
+				if raw.get("outcomeIndex") not in (0, 1):
+					# Non-binary leg (belt-and-braces for markets never seen
+					# by collect_markets, e.g. --skip-market-scan restarts).
+					# Never store taker_side 'unknown' rows.
+					dropped_rows += 1
+					continue
+				t = self._raw_trade_to_trade(raw, ticker)
+				if since_dt is not None and t.created_time < since_dt:
+					# Newest-first ordering: everything after this row —
+					# including all further pages — is older. Stop.
+					stop = True
+					break
+				out.append(t)
+			if len(batch) < self.pagination_limit:
+				break
+			offset += len(batch)
+		if dropped_rows:
+			logger.warning(
+				"polymarket /trades market=%s: dropped %d rows with outcomeIndex "
+				"outside 0/1 — non-binary legs are not storable as yes/no",
+				ticker, dropped_rows,
+			)
 		return out
 
 	def _raw_trade_to_trade(self, raw: dict, ticker: str) -> Trade:
-		"""Map a CLOB trade event to our Trade dataclass.
+		"""Map a data-api trade row to our Trade dataclass.
 
-		Polymarket trades carry side (BUY/SELL) and outcome (Yes/No). We
-		project to our schema's `taker_side` of yes/no (the side the taker
-		ended up holding) and yes_price/no_price (cents).
+		Rows carry `side` (BUY/SELL of the traded outcome token) and
+		`outcomeIndex` (0 = yes-leg token, 1 = no-leg token). The `outcome`
+		field is a display label ("Yes"/"No" on binaries, team names on
+		sports markets) and is NOT used for side mapping. taker_side is the
+		side the taker ends up holding: BUY of leg 0 → "yes", SELL of leg 0
+		→ "no", mirrored for leg 1. `price` is the traded leg's own 0–1 USD
+		price; converted to integer cents. `timestamp` is an epoch int in
+		unix seconds. Rows have no server id — trade_id is synthesized
+		deterministically (see _synth_trade_id).
+
+		Caller guarantees outcomeIndex ∈ {0, 1} (collect_trades drops the rest).
 		"""
-		# Outcome: Polymarket returns "Yes" / "No" — normalize to lowercase.
-		outcome = (raw.get("outcome") or "").strip().lower()
-		# Side: BUY of Yes ⇒ taker now holds Yes; SELL of Yes ⇒ taker now
-		# holds No (sold Yes back). Same logic mirrored for No.
 		side = (raw.get("side") or "").strip().upper()
-		if outcome == "yes":
+		outcome_index = raw.get("outcomeIndex")
+		if outcome_index == 0:
 			taker_side = "yes" if side == "BUY" else "no"
-		elif outcome == "no":
+		else:  # outcome_index == 1
 			taker_side = "no" if side == "BUY" else "yes"
-		else:
-			# Unknown outcome (multi-outcome market?) — store as-is for the
-			# downstream replay layer to surface.
-			taker_side = outcome or "unknown"
-		# Price: Polymarket trades are in USD-per-share (0.0–1.0). Convert
-		# to cents (0–100) to match our schema.
 		price_usd = _safe_float(raw.get("price"))
 		yes_cents: int
 		no_cents: int
 		if price_usd is None:
 			yes_cents = 0
 			no_cents = 0
-		else:
-			# `price` is the YES-leg price when outcome=Yes; for outcome=No
-			# the price is the NO-leg price (1 − yes_price).
-			if outcome == "yes":
-				yes_cents = int(round(price_usd * 100))
-			elif outcome == "no":
-				no_cents = int(round(price_usd * 100))
-				yes_cents = 100 - no_cents
-				return Trade(
-					trade_id=str(raw.get("id", "")),
-					ticker=ticker,
-					yes_price=yes_cents,
-					no_price=no_cents,
-					count=int(round(_safe_float(raw.get("size")) or 0)),
-					taker_side=taker_side,
-					created_time=_parse_iso_strict(raw.get("timestamp")),
-					raw_data=json.dumps(raw, default=str)[:65535],
-				)
-			else:
-				yes_cents = int(round(price_usd * 100))
+		elif outcome_index == 0:
+			yes_cents = int(round(price_usd * 100))
 			no_cents = 100 - yes_cents
+		else:
+			no_cents = int(round(price_usd * 100))
+			yes_cents = 100 - no_cents
 		return Trade(
-			trade_id=str(raw.get("id", "")),
+			trade_id=_synth_trade_id(raw),
 			ticker=ticker,
 			yes_price=yes_cents,
 			no_price=no_cents,
 			count=int(round(_safe_float(raw.get("size")) or 0)),
 			taker_side=taker_side,
-			created_time=_parse_iso_strict(raw.get("timestamp")),
+			created_time=_parse_epoch(raw.get("timestamp")),
 			raw_data=json.dumps(raw, default=str)[:65535],
 		)
 
@@ -473,3 +578,71 @@ def _parse_iso_strict(v: Any) -> datetime:
 	if dt is None:
 		raise ValueError(f"polymarket trade missing/invalid timestamp: {v!r}")
 	return dt
+
+
+def _parse_epoch(v: Any) -> datetime:
+	"""Parse a unix-seconds epoch (data-api `timestamp` is an epoch int) to a
+	tz-aware UTC datetime. Raises ValueError on missing/invalid input —
+	Trade rows require a timestamp. NOT for ISO strings (see _parse_iso)."""
+	if v is None or isinstance(v, bool) or v == "":
+		raise ValueError(f"polymarket trade missing/invalid epoch timestamp: {v!r}")
+	try:
+		ts = float(v)
+	except (TypeError, ValueError):
+		raise ValueError(
+			f"polymarket trade missing/invalid epoch timestamp: {v!r}"
+		) from None
+	return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def _parse_since(since: Optional[str]) -> Optional[datetime]:
+	"""Parse a `since` ISO bound to tz-aware UTC; warn + ignore on garbage."""
+	if not since:
+		return None
+	dt = _parse_iso(since)
+	if dt is None:
+		logger.warning("polymarket collect_trades: bad since=%r; ignoring", since)
+	return dt
+
+
+def _usd_to_cents(v: Any) -> Optional[int]:
+	"""Convert a 0–1 USD price to integer cents (0–100) — unit parity with
+	Trade prices and the Kalshi adapter's cents convention."""
+	f = _safe_float(v)
+	if f is None:
+		return None
+	return int(round(f * 100))
+
+
+def _synth_trade_id(raw: dict) -> str:
+	"""Deterministic trade id for data-api rows, which carry no server id.
+
+	transactionHash alone is NOT unique — one transaction can settle several
+	fills — so the id hashes the fill-identifying tuple (tx, asset,
+	timestamp, size, price, side). sha256 (not Python's salted hash()) so
+	ids are stable across runs, making trades-table upserts idempotent.
+	"""
+	key = "|".join((
+		str(raw.get("transactionHash", "")),
+		str(raw.get("asset", "")),
+		str(raw.get("timestamp", "")),
+		str(raw.get("size", "")),
+		str(raw.get("price", "")),
+		str(raw.get("side", "")),
+	))
+	return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
+def _is_non_binary_market(raw: dict) -> bool:
+	"""True when a Gamma market is not a plain two-outcome binary — negRisk
+	event legs or >2 outcomes. Gamma serializes `outcomes` as JSON-in-STRING
+	(e.g. '["Yes", "No"]'); parsed defensively."""
+	if raw.get("negRisk") or raw.get("neg_risk"):
+		return True
+	outcomes = raw.get("outcomes")
+	if isinstance(outcomes, str):
+		try:
+			outcomes = json.loads(outcomes)
+		except json.JSONDecodeError:
+			return False
+	return isinstance(outcomes, list) and len(outcomes) > 2

@@ -244,8 +244,12 @@ def _run_polymarket_download(args, markets_file: Path, db_path: Path) -> None:
 		total_trades = 0
 		logger.info(f"Downloading trades for {total_tickers} polymarket markets")
 
+		# `since` bounds the per-market trade history (ISO datetime). The
+		# API-service path (api/download_service.run_polymarket_download)
+		# already forwards its start_date — the CLI must match.
+		since = getattr(args, "since", None)
 		for i, market in enumerate(all_markets_with_vol, 1):
-			trades = adapter.collect_trades(market.ticker)
+			trades = adapter.collect_trades(market.ticker, since=since)
 			if trades:
 				upsert_trades_batch(conn, trades)
 				conn.commit()
@@ -340,6 +344,13 @@ def register(subparsers) -> None:
 		default=None,
 		metavar="N",
 		help="Cap trades download to top N markets by volume (default: all volume>0 markets)",
+	)
+	dl.add_argument(
+		"--since",
+		default=None,
+		metavar="ISO_DATETIME",
+		help="Only fetch trades at/after this ISO datetime "
+		     "(currently honored by the Polymarket path; e.g. 2026-07-01T00:00:00)",
 	)
 	dl.set_defaults(func=_run_download)
 
