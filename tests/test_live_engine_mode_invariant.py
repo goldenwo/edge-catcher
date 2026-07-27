@@ -81,6 +81,10 @@ def test_live_trade_help_exits_zero() -> None:
 		[sys.executable, "-m", "edge_catcher", "live-trade", "--help"],
 		capture_output=True,
 		text=True,
+		# stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+		# STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+		# raising OSError [WinError 6] at spawn.
+		stdin=subprocess.DEVNULL,
 		timeout=30,
 	)
 	assert proc.returncode == 0, proc.stderr
@@ -98,6 +102,7 @@ def test_paper_trade_help_still_exits_zero() -> None:
 		[sys.executable, "-m", "edge_catcher", "paper-trade", "--help"],
 		capture_output=True,
 		text=True,
+		stdin=subprocess.DEVNULL,
 		timeout=30,
 	)
 	assert proc.returncode == 0, proc.stderr

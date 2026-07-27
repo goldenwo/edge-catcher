@@ -363,7 +363,10 @@ def test_subprocess_entry_point_smoke():
 	"""
 	r = subprocess.run(
 		[sys.executable, "-m", "edge_catcher.reporting", "--db", str(FIXTURE_DB)],
-		capture_output=True, text=True,
+		# stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+		# STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+		# raising OSError [WinError 6] at spawn.
+		capture_output=True, text=True, stdin=subprocess.DEVNULL,
 	)
 	assert r.returncode == 0
 	data = json.loads(r.stdout)

@@ -132,6 +132,10 @@ class ResearchAgent:
                 cmd,
                 capture_output=True,
                 text=True,
+                # stdin redirected: Windows Popen otherwise duplicates the parent's
+                # STD_INPUT_HANDLE — stale on headless hosts and under pytest's
+                # fd-capture — intermittently raising OSError [WinError 6] at spawn.
+                stdin=subprocess.DEVNULL,
                 timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
@@ -257,6 +261,7 @@ class ResearchAgent:
                 cmd,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,  # stale-handle guard — same rationale as the spawn above
                 timeout=self.SUBPROCESS_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
@@ -467,6 +472,7 @@ class ResearchAgent:
                 [sys.executable, "-m", "edge_catcher", "list-dbs"],
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,  # stale-handle guard — same rationale as the spawns above
                 timeout=30,
             )
             data = json.loads(proc.stdout.strip())
