@@ -311,7 +311,10 @@ def test_research_loop_help(capsys):
     """Verify the loop subcommand is registered."""
     proc = subprocess.run(
         [sys.executable, "-m", "edge_catcher", "research", "loop", "--help"],
-        capture_output=True, text=True, timeout=10,
+        # stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+        # STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+        # raising OSError [WinError 6] at spawn.
+        capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
     )
     assert proc.returncode == 0
     assert "--max-runs" in proc.stdout

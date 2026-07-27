@@ -384,11 +384,16 @@ def _check_engine_version(bundle: Path, manifest: dict) -> None:
 		dev_commit = subprocess.check_output(
 			["git", "rev-parse", "HEAD"],
 			text=True,
+			# stdin redirected: Windows Popen otherwise duplicates the parent's
+			# STD_INPUT_HANDLE, which can be stale (headless hosts, pytest
+			# fd-capture) and intermittently raises OSError [WinError 6].
+			stdin=subprocess.DEVNULL,
 			stderr=subprocess.DEVNULL,
 			cwd=str(Path(__file__).resolve().parent.parent.parent.parent),
 			timeout=10,  # never block replay startup on a hung git
 		).strip()
-	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+	except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+		# OSError covers spawn-environment failures incl. FileNotFoundError.
 		log.warning("replay_capture: could not determine dev engine commit")
 		return
 	bundle_commit = manifest.get("engine_commit", "unknown")

@@ -745,3 +745,21 @@ async def test_replay_capture_default_executor_is_paperexecutor_unchanged(tmp_pa
 		f"fixtures: {result_a.trades!r} != {result_b.trades!r}"
 	)
 	assert result_a.events_processed == result_b.events_processed
+
+
+def test_check_engine_version_spawn_oserror_warns_not_raises(tmp_path, caplog, monkeypatch):
+	"""_check_engine_version is non-blocking by contract: a spawn-level OSError
+	(stale stdin handle on Windows, [WinError 6] from Popen.__init__) must log
+	the could-not-determine warning and return, never raise into replay startup."""
+	import logging
+	import subprocess
+
+	from edge_catcher.engine.replay.backtester import _check_engine_version
+
+	def _spawn_fails(*args, **kwargs):
+		raise OSError("[WinError 6] The handle is invalid")
+
+	monkeypatch.setattr(subprocess, "check_output", _spawn_fails)
+	with caplog.at_level(logging.WARNING):
+		_check_engine_version(tmp_path, {"engine_commit": "abc123"})
+	assert "could not determine dev engine commit" in caplog.text

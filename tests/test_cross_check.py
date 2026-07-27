@@ -45,7 +45,13 @@ def test_core_imports_no_order_client():
 		"bad = [m for m in sys.modules if m.startswith('edge_catcher.live')]\n"
 		"assert not bad, f'live package leaked: {bad}'\n"
 	)
-	r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+	# stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+	# STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+	# raising OSError [WinError 6] at spawn.
+	r = subprocess.run(
+		[sys.executable, "-c", code],
+		capture_output=True, text=True, stdin=subprocess.DEVNULL,
+	)
 	assert r.returncode == 0, r.stderr
 
 

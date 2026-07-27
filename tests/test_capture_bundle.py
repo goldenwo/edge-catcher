@@ -399,6 +399,56 @@ def test_bundle_market_state_none_skips_snapshot(
 	assert (bundle_path / "kalshi_engine_2026-04-14.jsonl.zst").exists()
 
 
+def test_git_state_spawn_oserror_degrades_to_unknown(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	"""A spawn-level OSError must degrade to ("unknown", False), never raise.
+
+	On Windows, Popen duplicates the parent's stdin handle when stdin is not
+	redirected; a stale STD_INPUT_HANDLE (pytest's fd-capture closes the
+	original, headless hosts may never have one) raises OSError [WinError 6]
+	from Popen.__init__ before git even runs. _git_state is best-effort by
+	contract — no spawn-environment failure may escape into rotation.
+	"""
+	import subprocess
+
+	from edge_catcher.engine.capture.bundle import _git_state
+
+	def _spawn_fails(*args: object, **kwargs: object) -> str:
+		raise OSError("[WinError 6] The handle is invalid")
+
+	monkeypatch.setattr(subprocess, "check_output", _spawn_fails)
+	assert _git_state(tmp_path) == ("unknown", False)
+
+
+def test_bundle_assembles_when_git_spawn_fails(
+	capture_dir: Path,
+	repo_root: Path,
+	trade_db: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	"""Bundle assembly must complete when the git subprocess cannot spawn at
+	all, recording commit "unknown" — rotation must never die on git."""
+	import subprocess
+
+	from edge_catcher.engine.capture.bundle import assemble_daily_bundle
+
+	def _spawn_fails(*args: object, **kwargs: object) -> str:
+		raise OSError("[WinError 6] The handle is invalid")
+
+	monkeypatch.setattr(subprocess, "check_output", _spawn_fails)
+	bundle_path = assemble_daily_bundle(
+		capture_date=date(2026, 4, 14),
+		capture_dir=capture_dir,
+		repo_root=repo_root,
+		db_path=trade_db,
+		market_state=None,
+	)
+	version = (bundle_path / "engine_version.txt").read_text(encoding="utf-8")
+	assert "commit: unknown" in version
+	assert (bundle_path / "manifest.json").exists()
+
+
 def test_strategy_state_snapshot_happy_path(tmp_path):
 	"""Snapshot writes a JSON envelope with all rows from the fixture DB,
 	json.loads'd into native Python objects and grouped by strategy."""

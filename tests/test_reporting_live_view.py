@@ -1177,6 +1177,10 @@ def test_reporting_cli_against_live_db(tmp_path) -> None:
 		 "--db", str(db), "--date", _H4_DATE],
 		capture_output=True,
 		text=True,
+		# stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+		# STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+		# raising OSError [WinError 6] at spawn.
+		stdin=subprocess.DEVNULL,
 		timeout=60,
 		cwd=str(repo_root),
 	)
