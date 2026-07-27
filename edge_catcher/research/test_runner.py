@@ -803,6 +803,8 @@ def _bucket_bonferroni_verdict(
 	min_fee_adj: float,
 	any_bucket_met_min_n: bool,
 	mc_rows_fn: Optional[Callable[[dict], McMarketRows]] = None,
+	mc_pvalue_fn: Optional[Callable[[McMarketRows, float, int, Optional[int]], float]] = None,
+	mc_seed: Optional[int] = None,
 ) -> tuple[str, Optional[dict], float, float]:
 	"""Un-pooled per-bucket verdict with Bonferroni multiple-testing correction.
 
@@ -970,7 +972,11 @@ def _bucket_bonferroni_verdict(
 		survivors = []
 		for b in qualifying:
 			rows = mc_rows_fn(b)
-			b["mc_p"] = mc_null_pvalue(rows, b["z"], mc_sims)
+			fn: Callable[[McMarketRows, float, int, Optional[int]], float] = (
+				mc_pvalue_fn
+				or (lambda r, z, n, s: mc_null_pvalue(r, z, n) if s is None else mc_null_pvalue(r, z, n, seed=s))
+			)
+			b["mc_p"] = fn(rows, b["z"], mc_sims, mc_seed)
 			b["mc_n_sims"] = mc_sims
 			b["mc_gate_ok"] = b["mc_p"] <= alpha_corr
 			# Class (f) magnitude collapse: the per-trade edge only counts if the
