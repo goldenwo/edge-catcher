@@ -735,6 +735,10 @@ def test_28_cross_process_wal_concurrent_reader_is_safe(
 	root = str(Path(__file__).resolve().parents[1])
 	writer = subprocess.Popen(
 		[sys.executable, "-c", _WRITER_SRC, str(live_db_path)],
+		# stdin=DEVNULL (both processes): Windows Popen otherwise duplicates the
+		# parent's STD_INPUT_HANDLE — stale under pytest's fd-capture —
+		# intermittently raising OSError [WinError 6] at spawn.
+		stdin=subprocess.DEVNULL,
 		stdout=subprocess.PIPE,
 		stderr=subprocess.PIPE,
 		text=True,
@@ -742,6 +746,7 @@ def test_28_cross_process_wal_concurrent_reader_is_safe(
 	)
 	reader = subprocess.Popen(
 		[sys.executable, "-c", _READER_SRC, str(live_db_path)],
+		stdin=subprocess.DEVNULL,
 		stdout=subprocess.PIPE,
 		stderr=subprocess.PIPE,
 		text=True,

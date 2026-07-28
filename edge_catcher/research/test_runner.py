@@ -803,6 +803,8 @@ def _bucket_bonferroni_verdict(
 	min_fee_adj: float,
 	any_bucket_met_min_n: bool,
 	mc_rows_fn: Optional[Callable[[dict], McMarketRows]] = None,
+	mc_pvalue_fn: Optional[Callable[[McMarketRows, float, int, Optional[int]], float]] = None,
+	mc_seed: Optional[int] = None,
 ) -> tuple[str, Optional[dict], float, float]:
 	"""Un-pooled per-bucket verdict with Bonferroni multiple-testing correction.
 
@@ -842,7 +844,10 @@ def _bucket_bonferroni_verdict(
 	clusters kept — mc_null_pvalue). EDGE_EXISTS requires mc_p <= the Bonferroni
 	alpha; a failing bucket's nominal significance was rare-event inflation →
 	NO_EDGE. Evaluated lazily (qualifiers only) because each run is
-	MC_NULL_SIMS simulations over the bucket's per-market rows.
+	MC_NULL_SIMS simulations over the bucket's per-market rows. `mc_pvalue_fn`,
+	when supplied, replaces the MC null call entirely (called as (rows,
+	z_obs, n_sims, seed)); `mc_seed`, when supplied alone, threads into
+	mc_null_pvalue's own `seed` parameter.
 
 	PER-MARKET CONFIRMATION GATE (artifact class (f)): the per-trade edge is
 	trustworthy only if the one-obs-per-market view — the level a position
@@ -970,7 +975,11 @@ def _bucket_bonferroni_verdict(
 		survivors = []
 		for b in qualifying:
 			rows = mc_rows_fn(b)
-			b["mc_p"] = mc_null_pvalue(rows, b["z"], mc_sims)
+			fn: Callable[[McMarketRows, float, int, Optional[int]], float] = (
+				mc_pvalue_fn
+				or (lambda r, z, n, s: mc_null_pvalue(r, z, n) if s is None else mc_null_pvalue(r, z, n, seed=s))
+			)
+			b["mc_p"] = fn(rows, b["z"], mc_sims, mc_seed)
 			b["mc_n_sims"] = mc_sims
 			b["mc_gate_ok"] = b["mc_p"] <= alpha_corr
 			# Class (f) magnitude collapse: the per-trade edge only counts if the

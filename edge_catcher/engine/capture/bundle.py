@@ -187,12 +187,20 @@ def _git_state(repo_root: Path) -> tuple[str, bool]:
 	A 10-second timeout guards against hung git invocations (e.g. lock
 	contention from a parallel ``git gc``); rotation must be best-effort
 	and never block the engine thread on git.
+
+	stdin is explicitly redirected: on Windows, Popen otherwise duplicates
+	the parent's STD_INPUT_HANDLE, which can be stale in headless hosts
+	(and under pytest's fd-capture) and intermittently raises
+	``OSError [WinError 6]`` before git even runs. OSError in the except
+	tuple covers such spawn-environment failures (FileNotFoundError is a
+	subclass) — best-effort means none of them may escape into rotation.
 	"""
 	try:
 		commit = subprocess.check_output(
 			["git", "rev-parse", "HEAD"],
 			cwd=str(repo_root),
 			text=True,
+			stdin=subprocess.DEVNULL,
 			stderr=subprocess.DEVNULL,
 			timeout=10,
 		).strip()
@@ -200,12 +208,13 @@ def _git_state(repo_root: Path) -> tuple[str, bool]:
 			["git", "status", "--porcelain"],
 			cwd=str(repo_root),
 			text=True,
+			stdin=subprocess.DEVNULL,
 			stderr=subprocess.DEVNULL,
 			timeout=10,
 		).strip()
 		dirty = porcelain != ""
 		return commit, dirty
-	except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+	except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
 		return "unknown", False
 
 

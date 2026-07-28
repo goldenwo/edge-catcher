@@ -141,6 +141,10 @@ def test_cli_prints_json_for_fixture():
 		],
 		capture_output=True,
 		text=True,
+		# stdin=DEVNULL: Windows Popen otherwise duplicates the parent's
+		# STD_INPUT_HANDLE — stale under pytest's fd-capture — intermittently
+		# raising OSError [WinError 6] at spawn. The CLI never reads stdin.
+		stdin=subprocess.DEVNULL,
 		check=True,
 	)
 	data = json.loads(result.stdout)
@@ -159,6 +163,7 @@ def test_cli_returns_nonzero_on_missing_db():
 		],
 		capture_output=True,
 		text=True,
+		stdin=subprocess.DEVNULL,
 	)
 	assert result.returncode != 0
 	data = json.loads(result.stdout)
@@ -178,6 +183,7 @@ def test_cli_accepts_date_argument():
 		],
 		capture_output=True,
 		text=True,
+		stdin=subprocess.DEVNULL,
 		check=True,
 	)
 	data = json.loads(result.stdout)
