@@ -1,4 +1,4 @@
-# Polymarket adapter — public Gamma + CLOB endpoints, no auth.
+# Polymarket adapter — public Gamma + data-api endpoints, no auth.
 #
 # `series` is a list of category slugs (e.g. politics, sports, crypto). An
 # empty list pulls markets from all categories. The adapter matches the
@@ -9,11 +9,20 @@
 #   - "closed":  markets that have resolved (best for backtests)
 #   - "open"   /  "active":  live markets (for live data collection)
 #   Default is ["closed"] for backtest-friendly historical data.
+#
+# Endpoints (verified live 2026-07-27):
+#   - gamma_base: markets metadata (filters, sort, endDate window all bind
+#     server-side)
+#   - data_base:  trade history — GET {data_base}/trades?market={conditionId}
+#     with limit/offset paging, rows newest-first
+#   - clob_base:  LEGACY — its /markets/{id}/trades endpoint is dead (404s
+#     for every market); kept only for config compatibility
 adapters:
   polymarket:
     enabled: true
     gamma_base: "https://gamma-api.polymarket.com"
     clob_base: "https://clob.polymarket.com"
+    data_base: "https://data-api.polymarket.com"
     rate_limit_seconds: 0.5
     series:
       - politics
@@ -21,7 +30,15 @@ adapters:
       - crypto
     statuses:
       - closed
+    # --- Optional Gamma /markets server-side sort + endDate window ---
+    # All bind server-side (verified 2026-07-27). Uncomment to use.
+    # order: volumeNum          # sort field (e.g. volumeNum, endDate)
+    # ascending: false          # sort direction for `order`
+    # Sub-1-day capture example — only markets ending on 2026-07-27 UTC:
+    # end_date_min: "2026-07-27T00:00:00Z"
+    # end_date_max: "2026-07-27T23:59:59Z"
     min_available_ram_pct: 10
     pagination:
       default_limit: 100
       max_limit: 500
+      max_trade_pages: 200   # defensive per-market cap on /trades paging
