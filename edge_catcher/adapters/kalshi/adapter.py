@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Each entry defines the required top-level keys and optional per-item field lists.
 # NOTE: Kalshi returns numeric fields with _dollars (string) or _fp (string) suffixes.
 # yes_bid/yes_ask are absent from settled market responses — removed from schema.
+# NOTE: settled markets quote fields are POST-SETTLEMENT snapshots (bid~0/ask~100) — never use as in-play spreads.
 SCHEMAS: Dict[str, Any] = {
     "markets_list": {
         "required": ["markets"],
