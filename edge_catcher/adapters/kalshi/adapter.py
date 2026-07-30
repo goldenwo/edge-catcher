@@ -388,11 +388,20 @@ class KalshiAdapter(PredictionMarketAdapter):
                 return None
 
         def _fp_to_int(val) -> Optional[int]:
-            """Convert fixed-point string like '49.00' to int 49."""
+            """Convert fixed-point string like '49.00' to int 49.
+
+            Uses round(), not int() truncation: int(float("0.72")) truncates
+            toward zero, silently turning any sub-1.0 fixed-point value into a
+            zero-size row (defect D1 — same bug class as PR #81's fractional-qty
+            fix on the orderbook side). round() is Python's round-half-to-even,
+            which is fine here — ties are rare on real Kalshi count_fp/volume_fp
+            data and the failure mode we're fixing (0.72 -> 0) is truncation, not
+            tie-breaking.
+            """
             if val is None:
                 return None
             try:
-                return int(float(val))
+                return int(round(float(val)))
             except (ValueError, TypeError):
                 return None
 
@@ -460,10 +469,17 @@ class KalshiAdapter(PredictionMarketAdapter):
                 return 0
 
         def _fp_to_int(val) -> int:
+            """Convert fixed-point string like '49.00' to int 49.
+
+            Uses round(), not int() truncation — see the sibling _fp_to_int in
+            _parse_market for the full rationale (defect D1). A 0.72-contract
+            fill must become 1, not 0; round-half-to-even is acceptable since
+            the bug being fixed is truncation-toward-zero, not tie-breaking.
+            """
             if val is None:
                 return 0
             try:
-                return int(float(val))
+                return int(round(float(val)))
             except (ValueError, TypeError):
                 return 0
 

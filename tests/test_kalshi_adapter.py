@@ -163,6 +163,98 @@ def test_parse_trade_bad_datetime(adapter):
 
 
 # ---------------------------------------------------------------------------
+# _parse_trade / _parse_market — fractional count_fp / volume_fp / open_interest_fp
+# (defect D1: int(float(...)) truncates toward zero, so any fixed-point value
+# below 1.0 silently becomes a zero-size row. Kalshi's own captured trades show
+# real fractional count_fp values like "0.72" — measured blast radius: 7,110 of
+# 193,104 weather trade rows on disk with count=0. Same bug class as PR #81's
+# fractional-qty fix on the orderbook side.)
+# ---------------------------------------------------------------------------
+
+def test_parse_trade_fractional_count_rounds_up_not_truncated(adapter):
+    """A 0.72-contract fill must become 1, not 0 — int(float("0.72")) == 0 is the bug."""
+    raw = {
+        "trade_id": "t1",
+        "ticker": "KXRAINSEAM-26MAY-1",
+        "yes_price_dollars": "0.2000",
+        "no_price_dollars": "0.8000",
+        "count_fp": "0.72",
+        "taker_side": "yes",
+        "created_time": "2026-05-26T00:00:00Z",
+    }
+    trade = adapter._parse_trade(raw)
+    assert trade is not None
+    assert trade.count == 1
+
+
+def test_parse_trade_fractional_count_rounds_down_below_half(adapter):
+    """0.28 rounds to the nearer integer, 0 — this is correct rounding, not the truncation bug."""
+    raw = {
+        "trade_id": "t2",
+        "ticker": "KXRAINSEAM-26MAY-1",
+        "yes_price_dollars": "0.2000",
+        "no_price_dollars": "0.8000",
+        "count_fp": "0.28",
+        "taker_side": "yes",
+        "created_time": "2026-05-26T00:00:00Z",
+    }
+    trade = adapter._parse_trade(raw)
+    assert trade is not None
+    assert trade.count == 0
+
+
+def test_parse_trade_count_fp_half_even(adapter):
+    """Document the round-half-even choice: exact .5 ties round to the nearest even int."""
+    raw_half = {
+        "trade_id": "t3",
+        "ticker": "KXBTC-001",
+        "yes_price_dollars": "0.5000",
+        "no_price_dollars": "0.5000",
+        "count_fp": "0.50",
+        "taker_side": "yes",
+        "created_time": "2026-05-26T00:00:00Z",
+    }
+    raw_one_half = {**raw_half, "trade_id": "t4", "count_fp": "1.50"}
+    assert adapter._parse_trade(raw_half).count == 0  # nearest even: 0
+    assert adapter._parse_trade(raw_one_half).count == 2  # nearest even: 2
+
+
+def test_parse_trade_count_fp_none_defaults_zero(adapter):
+    """Always-int variant: a missing count_fp still defaults to 0 (no None passthrough)."""
+    raw = {
+        "trade_id": "t5",
+        "ticker": "KXBTC-001",
+        "yes_price_dollars": "0.5500",
+        "no_price_dollars": "0.4500",
+        "taker_side": "yes",
+        "created_time": "2026-05-26T00:00:00Z",
+    }
+    trade = adapter._parse_trade(raw)
+    assert trade is not None
+    assert trade.count == 0
+
+
+def test_parse_market_fractional_volume_rounds_up_not_truncated(adapter):
+    """Same defect class in _parse_market's _fp_to_int (open_interest_fp / volume_fp)."""
+    raw = {
+        "ticker": "KXBTC-001",
+        "volume_fp": "0.72",
+        "open_interest_fp": "0.72",
+    }
+    market = adapter._parse_market(raw)
+    assert market.volume == 1
+    assert market.open_interest == 1
+
+
+def test_parse_market_fp_fields_none_passthrough(adapter):
+    """None-passthrough variant: an absent volume_fp/open_interest_fp stays None, not 0."""
+    raw = {"ticker": "KXBTC-001"}
+    market = adapter._parse_market(raw)
+    assert market.volume is None
+    assert market.open_interest is None
+
+
+# ---------------------------------------------------------------------------
 # _check_memory
 # ---------------------------------------------------------------------------
 
