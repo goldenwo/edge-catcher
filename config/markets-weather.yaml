@@ -4,7 +4,7 @@ adapters:
   kalshi:
     enabled: true
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
-    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    rate_limit_seconds: 0.2
     series:
       # Temperature
       - KXTEMPNYCH    # NYC high temperature (13 events — highest weather volume)
@@ -13,6 +13,35 @@ adapters:
       - KXRAINSEAM    # Seattle rain
       - KXRAINMIAM    # Miami rain
       - KXRAINLAXM    # LA rain
+      # Daily-high family — NWS-CLI resolved, highest-liquidity weather series.
+      # Kalshi's public API keeps only a ~68-day rolling window of settled
+      # markets, so capture continuity matters more here than elsewhere.
+      # Deliberately excluded: KXHIGHNYD (hourly TWC-resolved directional
+      # instrument, not a daily high).
+      - KXHIGHNY      # NYC
+      - KXHIGHCHI     # Chicago
+      - KXHIGHMIA     # Miami
+      - KXHIGHAUS     # Austin
+      - KXHIGHDEN     # Denver
+      - KXHIGHLAX     # Los Angeles
+      - KXHIGHPHIL    # Philadelphia
+      - KXHIGHHOU     # Houston
+      - KXHIGHOU      # Houston (older variant, separate ladder)
+      - KXHIGHTHOU    # Houston (third variant)
+      - KXHIGHTATL    # Atlanta
+      - KXHIGHTBOS    # Boston
+      - KXHIGHTDAL    # Dallas
+      - KXHIGHTDC     # Washington DC
+      - KXHIGHTLV     # Las Vegas
+      - KXHIGHTMIN    # Minneapolis
+      - KXHIGHTNOLA   # New Orleans
+      - KXHIGHTOKC    # Oklahoma City
+      - KXHIGHTPHX    # Phoenix
+      - KXHIGHTSATX   # San Antonio
+      - KXHIGHTSEA    # Seattle
+      - KXHIGHTSFO    # San Francisco
+      - KXHIGHTEMPDEN # Denver (custom-frequency variant)
+      - KXHIGHUS      # Highest temperature in the United States
     statuses:
       - settled
     min_available_ram_pct: 10
