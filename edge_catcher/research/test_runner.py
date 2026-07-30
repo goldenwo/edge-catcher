@@ -38,6 +38,21 @@ EDGE_NOT_TRADEABLE = "EDGE_NOT_TRADEABLE"
 # cross-check on the market-level outcome count counts as evidence.
 MIN_EXPECTED_MARKET_OUTCOMES = 5.0
 
+# Artifact class (b) floor: the taker gate's corroboration is a check on the
+# exploit side's OWN prints, and below this many prints it is an underpowered
+# lottery, not evidence — a thin subsample clears the base alpha by print-level
+# luck (measured on the 2026-07-26 expansion artifacts: 32 of 521 evaluated
+# bands carry a sub-30 exploit subsample — the audit's §5.1 count of 15 was
+# over its sign-matching subset — and a sibling family's one leaked false
+# positive passed on a 17-print corroboration). Below the floor the gate
+# REFUSES the bucket. GATE-level demote-only: the floor is a new conjunct, so
+# it can never pass a bucket the pre-floor gate refused; at VERDICT level the
+# one reachable lateral move is a thin bucket that would have gone on to fail
+# the MC null (NO_EDGE) now stopping at EDGE_NOT_TRADEABLE instead — it can
+# never mint an EDGE_EXISTS, and the flagged downgrade keeps the lead
+# non-permanent in the kill registry (the conservative direction).
+EXPLOIT_MIN_N_TRADES = 30
+
 # Artifact class (d): simulations for the Monte-Carlo null gate on each
 # EDGE_EXISTS candidate bucket. The achievable p floor is 1/(n_sims+1), so a
 # FIXED count silently makes the gate unpassable once the Bonferroni alpha
@@ -668,7 +683,22 @@ def _taker_side_entry_fields(day_stats: list[_BandDayStats], pooled_edge: float)
 	the taker='yes' prints show what that realizes; a negative edge (overpriced)
 	is captured by buying NO — the taker='no' prints. _bucket_bonferroni_verdict
 	requires the exploit side to independently clear the BASE alpha with a
-	matching sign before a bucket can drive EDGE_EXISTS.
+	matching sign, on at least EXPLOIT_MIN_N_TRADES prints, before a bucket can
+	drive EDGE_EXISTS.
+
+	BOUNCE DIAGNOSTICS (per cell, Roll-free — no spread estimator, so they
+	exist for every series, not just the third with a half-spread estimate):
+	under bid-ask bounce the yes-taker prints at the ask and the no-taker at
+	the bid, so the side-conditional mean prices straddle the mid and
+	  s_implied = (mean_yes − mean_no) / 2
+	estimates the effective half-spread INSIDE the band (band truncation clips
+	the in-band price distribution, so it is a within-band estimate, not the
+	venue spread). edge_yes/edge_no grade each side against the price IT paid
+	(flat mirrors of the nested side blocks; None where a side has no prints —
+	0.0 would fake a measured zero), and w_yes is the yes share of SIDED
+	prints. A cell whose |s_implied| rivals its pooled |edge| at an extreme
+	w_yes mix is the bounce signature: the pooled edge is the displaced
+	reference, not mispricing.
 	"""
 	yes_s = _summarize_side(day_stats, "yes")
 	no_s = _summarize_side(day_stats, "no")
@@ -698,6 +728,13 @@ def _taker_side_entry_fields(day_stats: list[_BandDayStats], pooled_edge: float)
 		"taker_yes": _block(yes_s),
 		"taker_no": _block(no_s),
 		"taker_side_coverage": sided_n / total_n if total_n else 0.0,
+		"w_yes": yes_s.n_trades / sided_n if sided_n else None,
+		"s_implied": (
+			(yes_s.mean_price - no_s.mean_price) / 2.0
+			if yes_s.n_trades and no_s.n_trades else None
+		),
+		"edge_yes": yes_s.edge if yes_s.n_trades else None,
+		"edge_no": no_s.edge if no_s.n_trades else None,
 		"exploit_side": exploit_side,
 		"exploit_n_trades": exploit.n_trades if exploit else 0,
 		"exploit_edge": exploit.edge if exploit else 0.0,
@@ -909,10 +946,12 @@ def _bucket_bonferroni_verdict(
 	(from _taker_side_entry_fields) must show the taker-replicable side clearing
 	the BASE alpha (uncorrected — a corroboration check on a lower-powered
 	subset, not the primary inference) with an edge whose sign matches the pooled
-	edge. A significant bucket failing the gate is bid-ask bounce / adverse
-	selection, not capturable mispricing: it is flagged "taker_side_fragile" and
-	downgraded to EDGE_NOT_TRADEABLE. Entries without the fields (direct unit
-	tests) skip the gate.
+	edge, on at least EXPLOIT_MIN_N_TRADES prints — below the floor the
+	corroboration is an underpowered lottery and the gate refuses it (flagged
+	"exploit_below_min_n"). A significant bucket failing the gate is bid-ask
+	bounce / adverse selection, not capturable mispricing: it is flagged
+	"taker_side_fragile" and downgraded to EDGE_NOT_TRADEABLE. Entries without
+	the fields (direct unit tests) skip the gate.
 
 	DEGENERATE-OUTCOME GATE (artifact class (c)): entries carrying "market_wins"
 	(with "n_markets"/"mean_price") must have market-level expected wins AND
@@ -980,6 +1019,8 @@ def _bucket_bonferroni_verdict(
 			return True  # side data not supplied — gate not evaluated
 		if b["exploit_side"] is None or b["exploit_n_trades"] == 0:
 			return False  # the signal lives entirely on the non-replicable side
+		if b["exploit_n_trades"] < EXPLOIT_MIN_N_TRADES:
+			return False  # corroboration rests on too thin a subsample to trust
 		if b["exploit_edge"] * b["edge"] <= 0:
 			return False  # the replicable side realizes the OPPOSITE of the claim
 		return b["exploit_p_t"] <= alpha_base
@@ -1020,6 +1061,15 @@ def _bucket_bonferroni_verdict(
 			b["taker_side_unavailable"] = bool(no_side_data)
 			b["taker_side_fragile"] = bool(
 				b["significant"] and not b["taker_gate_ok"] and not no_side_data
+			)
+			# "The exploit subsample is in the floor range" (0 < n <
+			# EXPLOIT_MIN_N_TRADES — the floor necessarily refuses here, though
+			# sign/p_t may independently fail too), distinct from the
+			# pre-existing zero-print diagnosis (the signal lives entirely on
+			# the non-replicable side), where the flag stays False.
+			b["exploit_below_min_n"] = bool(
+				b["exploit_side"] is not None
+				and 0 < b["exploit_n_trades"] < EXPLOIT_MIN_N_TRADES
 			)
 		b["degenerate_gate_ok"] = _degenerate_gate_ok(b)
 		if "market_wins" in b:

@@ -4001,3 +4001,369 @@ class TestMcNullGate:
 		assert b["degenerate_gate_ok"] is True
 		assert b["mc_gate_ok"] is False
 		assert b["mc_p"] > 0.0455
+
+
+class TestExploitMinNFloor:
+	"""Class (b) corroboration must rest on a MINIMUM exploit subsample.
+
+	The taker gate corroborates on the exploit side's prints only, and a thin
+	subsample can clear the base alpha by print-level luck: measured on the
+	2026-07-26 expansion artifacts, 15 evaluated bands rest the class-(b)
+	decision on fewer than 30 prints, and the one false positive that leaked
+	through a sibling family's tier passed on a 17-print corroboration. The
+	floor (EXPLOIT_MIN_N_TRADES) refuses the corroboration below that size —
+	an underpowered check is not evidence of replicability.
+
+	DEMOTE-ONLY, structurally: the floor is a new conjunct on _taker_gate_ok,
+	so it can only flip a pass into a refusal, never the reverse.
+	"""
+
+	def _thin_exploit_day_stats(self, yes_print_days: int, yes_n_per_day: int = 1):
+		"""A band whose pooled edge is positive and strongly significant, carried
+		almost entirely by no-taker prints at the 22¢ bid, plus a SMALL number of
+		yes-taker prints (the exploit side) that all win at ~30¢ — sign-matching
+		and nominally significant, but resting on yes_print_days × yes_n_per_day
+		prints. Prices alternate 29/31¢ so the exploit side's day excesses carry
+		real between-day variance (no degenerate zero-variance z).
+		"""
+		from edge_catcher.research.test_runner import _BandDayStats
+
+		day_stats = []
+		for d in range(1, 29):
+			no_wins = 15 if d % 2 else 16  # 15.5/50 → no-side win rate 0.31 at 22¢
+			yes_n = yes_n_per_day if d <= yes_print_days else 0
+			yes_price = 0.29 if d % 2 else 0.31
+			day_stats.append(_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=50 + yes_n, n_markets=50 + yes_n,
+				wins=no_wins + yes_n,
+				sum_price=50 * 0.22 + yes_n * yes_price,
+				market_wins=no_wins + yes_n,
+				yes_n=yes_n, yes_wins=yes_n, yes_sum_price=yes_n * yes_price,
+				no_n=50, no_wins=no_wins, no_sum_price=50 * 0.22,
+			))
+		return day_stats
+
+	def _bucket(self, day_stats) -> dict:
+		from edge_catcher.research.test_runner import (
+			_summarize_band, _taker_side_entry_fields,
+		)
+
+		s = _summarize_band(day_stats)
+		return {
+			"z": s.z, "n_clusters": s.n_clusters, "edge": s.edge,
+			"mean_price": s.mean_price, "fee_adj": 0.05,
+			**_taker_side_entry_fields(day_stats, s.edge),
+		}
+
+	def test_thin_exploit_corroboration_cannot_qualify(self):
+		"""The load-bearing guard: 17 exploit prints (the exact leak size) with a
+		matching sign and a nominally tiny p_t must NOT count as corroboration —
+		the bucket is refused and the verdict is EDGE_NOT_TRADEABLE, not
+		EDGE_EXISTS.
+		"""
+		from edge_catcher.research.test_runner import (
+			EXPLOIT_MIN_N_TRADES, _bonferroni_alpha, _bucket_bonferroni_verdict,
+		)
+
+		b = self._bucket(self._thin_exploit_day_stats(yes_print_days=17))
+		assert b["exploit_side"] == "yes"
+		assert b["exploit_n_trades"] == 17 < EXPLOIT_MIN_N_TRADES
+		# The thin side would have passed the pre-floor gate on its own terms.
+		assert b["exploit_edge"] * b["edge"] > 0
+		assert b["exploit_p_t"] <= _bonferroni_alpha(2.0, 1)
+
+		verdict, driver, _z, _fee = _bucket_bonferroni_verdict(
+			[b], z_threshold=2.0, min_fee_adj=0.0, any_bucket_met_min_n=True,
+		)
+		assert b["significant"] is True
+		assert b["taker_gate_ok"] is False
+		assert b["exploit_below_min_n"] is True
+		assert verdict == EDGE_NOT_TRADEABLE
+
+	def test_floor_boundary_exactly_at_min_n_passes(self):
+		"""Exactly EXPLOIT_MIN_N_TRADES prints clear the floor — the floor is
+		`< 30`, not `<= 30` — so a future "fix" cannot silently widen it.
+		"""
+		from edge_catcher.research.test_runner import (
+			EXPLOIT_MIN_N_TRADES, _bucket_bonferroni_verdict,
+		)
+
+		b = self._bucket(self._thin_exploit_day_stats(
+			yes_print_days=15, yes_n_per_day=2,
+		))
+		assert b["exploit_n_trades"] == EXPLOIT_MIN_N_TRADES
+
+		verdict, _driver, _z, _fee = _bucket_bonferroni_verdict(
+			[b], z_threshold=2.0, min_fee_adj=0.0, any_bucket_met_min_n=True,
+		)
+		assert b["taker_gate_ok"] is True
+		assert b["exploit_below_min_n"] is False
+		assert verdict == EDGE_EXISTS
+
+	def test_zero_exploit_prints_keeps_existing_diagnosis(self):
+		"""No exploit prints at all is the PRE-EXISTING refusal (the signal lives
+		entirely on the non-replicable side), not the floor's — the flag must not
+		fire so the two diagnoses stay distinguishable in the detail.
+		"""
+		from edge_catcher.research.test_runner import _bucket_bonferroni_verdict
+
+		b = self._bucket(self._thin_exploit_day_stats(yes_print_days=0))
+		assert b["exploit_side"] == "yes"
+		assert b["exploit_n_trades"] == 0
+
+		_verdict, _driver, _z, _fee = _bucket_bonferroni_verdict(
+			[b], z_threshold=2.0, min_fee_adj=0.0, any_bucket_met_min_n=True,
+		)
+		assert b["taker_gate_ok"] is False
+		assert b["exploit_below_min_n"] is False
+
+	def test_demote_only_property_over_a_grid(self):
+		"""The HARD safety property, asserted structurally over a shape grid: the
+		post-floor gate equals (pre-floor gate AND n >= EXPLOIT_MIN_N_TRADES), so
+		it can never pass a bucket the pre-floor gate refused. The grid must also
+		REACH the floor-only-blocked case (pre-floor pass, thin sample) — the
+		property would be vacuous on a grid the floor never bites.
+		"""
+		from edge_catcher.research.test_runner import (
+			EXPLOIT_MIN_N_TRADES, _bonferroni_alpha, _bucket_bonferroni_verdict,
+		)
+
+		alpha_base = _bonferroni_alpha(2.0, 1)
+		floor_only_blocked = 0
+		checked = 0
+		for yes_print_days in (0, 3, 17, 28):
+			for yes_n_per_day in (1, 2, 5):
+				b = self._bucket(self._thin_exploit_day_stats(
+					yes_print_days=yes_print_days, yes_n_per_day=yes_n_per_day,
+				))
+				_bucket_bonferroni_verdict(
+					[b], z_threshold=2.0, min_fee_adj=0.0,
+					any_bucket_met_min_n=True,
+				)
+				pre_floor_gate = (
+					b["exploit_side"] is not None
+					and b["exploit_n_trades"] > 0
+					and b["exploit_edge"] * b["edge"] > 0
+					and b["exploit_p_t"] <= alpha_base
+				)
+				expected = pre_floor_gate and (
+					b["exploit_n_trades"] >= EXPLOIT_MIN_N_TRADES
+				)
+				assert b["taker_gate_ok"] == expected, (
+					f"days={yes_print_days} per_day={yes_n_per_day}: "
+					f"gate={b['taker_gate_ok']} expected={expected}"
+				)
+				checked += 1
+				if pre_floor_gate and not expected:
+					floor_only_blocked += 1
+		assert checked == 12
+		assert floor_only_blocked > 0
+
+	def test_thin_exploit_band_downgraded_end_to_end(self, tmp_path):
+		"""The 17-print lottery through the real SQL path: every other gate passes
+		(significant, fee-positive on both wall components, non-degenerate,
+		per-market-confirmed) and the exploit side is sign-matching and nominally
+		significant — ONLY the floor stands between the band and EDGE_EXISTS.
+		"""
+		markets = []
+		trades = []
+		for d in range(1, 29):
+			date = f"2026-01-{d:02d}"
+			wins_today = 15 if d % 2 else 16
+			for k in range(50):
+				won = k < wins_today
+				ticker = f"TH-{d:02d}-{k}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_TH",
+					"result": "yes" if won else "no",
+					"last_price": 22, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"th-n-{ticker}", "ticker": ticker,
+					"yes_price": 22, "no_price": 78, "count": 1,
+					"taker_side": "no", "created_time": f"{date}T06:00:00Z",
+				})
+				# 17 days get ONE winning yes-taker print at 29/31¢ — the whole
+				# exploit subsample (17 prints, all winners, sign-matching).
+				if d <= 17 and k == 0:
+					trades.append({
+						"trade_id": f"th-y-{ticker}", "ticker": ticker,
+						"yes_price": 29 if d % 2 else 31, "no_price": 71 if d % 2 else 69,
+						"count": 1,
+						"taker_side": "yes", "created_time": f"{date}T07:00:00Z",
+					})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_TH",
+			params={"buckets": [[0.20, 0.35]], "min_n_per_bucket": 10,
+			        "fee_model": "kalshi"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+
+		driver = result.detail["driver_bucket"]
+		assert driver["significant"] is True
+		assert driver["degenerate_gate_ok"] is True
+		assert driver["per_market_sign_flip"] is False
+		assert driver["exploit_side"] == "yes"
+		assert driver["exploit_n_trades"] == 17
+		assert driver["exploit_edge"] * driver["edge"] > 0
+		assert driver["fee_adj"] > 0.0
+		# The floor is the ONLY refusal.
+		assert driver["taker_gate_ok"] is False
+		assert driver["exploit_below_min_n"] is True
+		assert result.verdict == EDGE_NOT_TRADEABLE
+
+
+class TestBounceDiagnostics:
+	"""Per-cell bounce diagnostics: s_implied / w_yes / edge_yes / edge_no.
+
+	Roll-free and computed for every cell (24 of 40 expansion series have no
+	half-spread estimate, so a diagnostic that needs one covers barely a third
+	of the fleet). Under bid-ask bounce the yes-taker prints at the ask and the
+	no-taker at the bid, so the side-conditional mean prices straddle the mid:
+	(mean_yes − mean_no) / 2 estimates the effective half-spread INSIDE the
+	band with no spread estimator, and a cell whose |s_implied| rivals its
+	pooled |edge| at an extreme w_yes mix is the bounce signature.
+	"""
+
+	def _two_sided_day_stats(self):
+		"""R1's bounce shape: each market prints once per side (yes-taker at the
+		30¢ ask, no-taker at the 22¢ bid), shared outcomes, 0.31 win rate."""
+		from edge_catcher.research.test_runner import _BandDayStats
+
+		return [
+			_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=200, n_markets=100, wins=2 * (30 if d % 2 else 32),
+				sum_price=100 * 0.30 + 100 * 0.22,
+				market_wins=(30 if d % 2 else 32),
+				yes_n=100, yes_wins=(30 if d % 2 else 32), yes_sum_price=100 * 0.30,
+				no_n=100, no_wins=(30 if d % 2 else 32), no_sum_price=100 * 0.22,
+			)
+			for d in range(1, 29)
+		]
+
+	def test_diagnostics_published_per_cell(self):
+		from edge_catcher.research.test_runner import (
+			_summarize_band, _taker_side_entry_fields,
+		)
+
+		day_stats = self._two_sided_day_stats()
+		s = _summarize_band(day_stats)
+		fields = _taker_side_entry_fields(day_stats, s.edge)
+		assert fields["w_yes"] == pytest.approx(0.5, abs=1e-9)
+		# (30¢ ask − 22¢ bid) / 2 = 4¢ implied half-spread inside the band.
+		assert fields["s_implied"] == pytest.approx(0.04, abs=1e-9)
+		# Each side graded against the price IT paid — the bounce in the open.
+		assert fields["edge_yes"] == pytest.approx(0.31 - 0.30, abs=1e-9)
+		assert fields["edge_no"] == pytest.approx(0.31 - 0.22, abs=1e-9)
+		# The flat keys mirror the nested side blocks exactly.
+		assert fields["edge_yes"] == fields["taker_yes"]["edge"]
+		assert fields["edge_no"] == fields["taker_no"]["edge"]
+
+	def test_one_sided_cell_reports_none_not_zero(self):
+		"""A side with no prints has no measured mean price or edge — s_implied
+		and the missing side's edge must be None, not a fake measured 0.0.
+		"""
+		from edge_catcher.research.test_runner import (
+			_BandDayStats, _summarize_band, _taker_side_entry_fields,
+		)
+
+		one_sided = [
+			_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=100, n_markets=100, wins=(30 if d % 2 else 32),
+				sum_price=100 * 0.22, market_wins=(30 if d % 2 else 32),
+				no_n=100, no_wins=(30 if d % 2 else 32), no_sum_price=100 * 0.22,
+			)
+			for d in range(1, 29)
+		]
+		s = _summarize_band(one_sided)
+		fields = _taker_side_entry_fields(one_sided, s.edge)
+		assert fields["w_yes"] == pytest.approx(0.0, abs=1e-9)
+		assert fields["s_implied"] is None
+		assert fields["edge_yes"] is None
+		assert fields["edge_no"] == pytest.approx(0.31 - 0.22, abs=1e-9)
+
+	def test_unsided_cell_reports_none_across_the_board(self):
+		"""No side metadata at all (taker_side neither 'yes' nor 'no'): every
+		diagnostic is None — w_yes has no denominator, not a measured 0.
+		"""
+		from edge_catcher.research.test_runner import (
+			_BandDayStats, _summarize_band, _taker_side_entry_fields,
+		)
+
+		blind = [
+			_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=100, n_markets=100, wins=(30 if d % 2 else 32),
+				sum_price=100 * 0.26, market_wins=(30 if d % 2 else 32),
+			)
+			for d in range(1, 29)
+		]
+		s = _summarize_band(blind)
+		fields = _taker_side_entry_fields(blind, s.edge)
+		assert fields["w_yes"] is None
+		assert fields["s_implied"] is None
+		assert fields["edge_yes"] is None
+		assert fields["edge_no"] is None
+
+	def test_diagnostics_json_serializable(self):
+		"""The new keys ride bucket entries into the persisted detail — they must
+		be plain floats/None (never numpy scalars)."""
+		import json
+
+		from edge_catcher.research.test_runner import (
+			_summarize_band, _taker_side_entry_fields,
+		)
+
+		day_stats = self._two_sided_day_stats()
+		s = _summarize_band(day_stats)
+		fields = _taker_side_entry_fields(day_stats, s.edge)
+		json.dumps({k: fields[k] for k in ("w_yes", "s_implied", "edge_yes", "edge_no")})
+
+	def test_diagnostics_flow_through_the_runner(self, tmp_path):
+		"""End-to-end: the four keys land on the persisted bucket entries."""
+		markets = []
+		trades = []
+		for d in range(1, 29):
+			date = f"2026-01-{d:02d}"
+			wins_today = 15 if d % 2 else 16
+			for k in range(50):
+				won = k < wins_today
+				ticker = f"BD-{d:02d}-{k}"
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_BD",
+					"result": "yes" if won else "no",
+					"last_price": 26, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"bd-y-{ticker}", "ticker": ticker,
+					"yes_price": 30, "no_price": 70, "count": 1,
+					"taker_side": "yes", "created_time": f"{date}T06:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"bd-n-{ticker}", "ticker": ticker,
+					"yes_price": 22, "no_price": 78, "count": 1,
+					"taker_side": "no", "created_time": f"{date}T07:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_BD",
+			params={"buckets": [[0.20, 0.35]], "min_n_per_bucket": 10,
+			        "fee_model": "kalshi"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+
+		b = result.detail["buckets"][0]
+		assert b["w_yes"] == pytest.approx(0.5, abs=1e-9)
+		assert b["s_implied"] == pytest.approx(0.04, abs=1e-9)
+		assert b["edge_yes"] == pytest.approx(0.01, abs=1e-9)
+		assert b["edge_no"] == pytest.approx(0.09, abs=1e-9)
