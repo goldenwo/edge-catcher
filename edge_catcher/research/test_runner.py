@@ -701,9 +701,88 @@ def _taker_side_entry_fields(day_stats: list[_BandDayStats], pooled_edge: float)
 		"exploit_side": exploit_side,
 		"exploit_n_trades": exploit.n_trades if exploit else 0,
 		"exploit_edge": exploit.edge if exploit else 0.0,
+		# The price the exploit side ACTUALLY PAID (its own Σprice/n, not the
+		# pooled band mean): the fee curve is priced per contract at the entry
+		# price, so the fee wall has to charge it where that side entered.
+		"exploit_mean_price": exploit.mean_price if exploit else 0.0,
 		"exploit_z": exploit.z if exploit else 0.0,
 		"exploit_p_t": exploit.p_t if exploit else 1.0,
 		"exploit_n_clusters": exploit.n_clusters if exploit else 0,
+	}
+
+
+def _fee_wall_fields(
+	pooled_edge: float,
+	pooled_mean_price: float,
+	side_fields: dict,
+	fee_model: FeeModel,
+) -> dict:
+	"""Fee-wall entry fields, graded on the EXPLOIT side rather than the pooled edge.
+
+	The pooled edge averages the two taker sides, and those sides are graded
+	against DIFFERENT displayed references — a yes-taker lifted the ask, a
+	no-taker hit the bid — so the bid-ask bounce enters the pooled number and can
+	fabricate the whole of it. Class (b) (_taker_gate_ok) already corroborates on
+	the exploit side, the side of the book a taker must hit, but only on that
+	side's SIGN and significance; the ECONOMICS stayed pooled. A band could
+	therefore clear the fee wall and report a fee-adjusted edge no taker can
+	realize (measured against the 2026-07-26 expansion artifacts: 15 of 178
+	sign-matching bands, worst case a reported +1.49¢ against a true taker
+	−1.98¢). Grading the wall on the exploit side is the reference-price repair
+	applied where it is FREE: the exploit-side edge is graded against the price
+	that side itself paid, so the bounce cancels WITHIN the side — no spread
+	estimator, no extra scan.
+
+	FIX A3 carries over to the exploit side: the fee is charged on the edge
+	MAGNITUDE, because a negative edge is a short-side edge whose tradeable size
+	is |edge| − fee. The class-(b) sign check is what keeps the magnitude honest
+	(the exploit side must agree in sign with the pooled edge to qualify at all);
+	the SIGNED edges stay in the detail for direction.
+
+	Returns three keys:
+	  * "fee_adj"         — the GRADED value (contract preserved for consumers:
+	                        _bucket_bonferroni_verdict's wall, TestResult
+	                        .fee_adjusted_edge, the discovery JSONL, the UI);
+	  * "fee_adj_pooled"  — exactly what "fee_adj" carried before this change;
+	  * "fee_adj_exploit" — the realizable taker number ONLY when the exploit
+	                        side's edge sign matches the pooled edge; on a
+	                        sign-mismatched band it is an upper bound on a
+	                        losing trade (the |edge| is of an opposite-direction
+	                        edge). None where the exploit side does not exist.
+
+	DEMOTE-ONLY, and structurally so: the graded value is min(pooled, exploit).
+	The exploit value alone is the *correct* quantity but is NOT demote-only —
+	when the two sides carry opposite signs they partly cancel, so the exploit
+	side's |edge| can EXCEED the pooled |edge| and lift a band back over a wall
+	it currently fails (test_demote_only_property_over_a_grid measures that this
+	case is reachable, not hypothetical). Since this change lands against a
+	pre-registered null declared over an already-searched slice, a fix that can
+	promote would silently re-open that search space; the min buys the guarantee
+	for the price of being conservative on bands whose two sides disagree — and a
+	band whose two sides disagree is exactly the one class (b) is suspicious of.
+	Both components are reported, so a reader can always see the unwalled pair.
+
+	Fallbacks mirror _taker_gate_ok's exactly — no exploit side (zero pooled
+	edge), an empty exploit split, or an entry carrying no side fields at all
+	(direct unit tests) all keep today's pooled behaviour.
+	"""
+	fee_adj_pooled = fee_adjusted_edge_curve(abs(pooled_edge), pooled_mean_price, fee_model)
+	if (
+		side_fields.get("exploit_side") is None
+		or side_fields.get("exploit_n_trades", 0) == 0
+	):
+		return {
+			"fee_adj": fee_adj_pooled,
+			"fee_adj_pooled": fee_adj_pooled,
+			"fee_adj_exploit": None,
+		}
+	fee_adj_exploit = fee_adjusted_edge_curve(
+		abs(side_fields["exploit_edge"]), side_fields["exploit_mean_price"], fee_model,
+	)
+	return {
+		"fee_adj": min(fee_adj_pooled, fee_adj_exploit),
+		"fee_adj_pooled": fee_adj_pooled,
+		"fee_adj_exploit": fee_adj_exploit,
 	}
 
 
@@ -810,7 +889,13 @@ def _bucket_bonferroni_verdict(
 
 	Each entry in `bucket_results` must carry "z" (day-clustered z), "n_clusters"
 	(independent days behind it) and "fee_adj" (fee_adjusted_edge_curve). K =
-	number of evaluated buckets (those that met min_n).
+	number of evaluated buckets (those that met min_n). The four StatisticalTest
+	implementations in this module build "fee_adj" through _fee_wall_fields, so
+	the wall this function applies is the EXPLOIT side's economics, not the pooled
+	edge's — the taker-side gate below corroborates the SIGN on that side, and the
+	wall now corroborates the MAGNITUDE on it too. Callers that build entries by
+	hand (direct unit tests, other families with their own one-sided estimand)
+	supply "fee_adj" themselves and are unaffected.
 
 	Significance is graded on the STUDENT-T reference (artifact class (e)): the
 	clustered statistic is a mean/SE over k day excesses, t-distributed with k−1
@@ -1246,8 +1331,11 @@ class PriceBucketBiasTest(StatisticalTest):
 			# is overpriced (a short-side edge); the tradeable edge is |edge| - fee,
 			# so a fee applied to the signed (negative) edge would wrongly push a real
 			# short-side edge further negative and never grade EDGE_EXISTS. Keep the
-			# SIGNED edge in the detail for direction.
-			fee_adj = fee_adjusted_edge_curve(abs(s.edge), s.mean_price, fee_model)
+			# SIGNED edge in the detail for direction. The wall itself is graded on
+			# the EXPLOIT side, not the bounce-contaminated pooled edge — see
+			# _fee_wall_fields.
+			side_fields = _taker_side_entry_fields(day_stats, s.edge)
+			fee_fields = _fee_wall_fields(s.edge, s.mean_price, side_fields, fee_model)
 			# _naive suffix: the CI (like z_stat_naive) treats every trade as
 			# independent; with millions of correlated prints it is far narrower than
 			# the day-clustered uncertainty the verdict actually uses.
@@ -1264,9 +1352,9 @@ class PriceBucketBiasTest(StatisticalTest):
 				"z_stat_naive": float(z_naive),
 				"p": s.p,
 				"p_value_naive": float(p_naive),
-				"fee_adj": fee_adj,
+				**fee_fields,
 				"ci_lower_naive": ci_lo, "ci_upper_naive": ci_hi,
-				**_taker_side_entry_fields(day_stats, s.edge),
+				**side_fields,
 			}
 
 			# FIX A1 min-cluster floor: a bucket is eligible for the verdict only if
@@ -1414,14 +1502,16 @@ class LifecycleBiasTest(StatisticalTest):
 				diffs.append(early_excess - late_excess)
 			d_z, d_p, d_k = z_over_excesses(diffs)
 
-			# FIX A3 parity with PriceBucketBias: fee on the early edge MAGNITUDE.
-			fee_adj = fee_adjusted_edge_curve(abs(e.edge), e.mean_price, fee_model)
+			# FIX A3 parity with PriceBucketBias: fee on the early edge MAGNITUDE,
+			# walled on the EXPLOIT side of the early segment (_fee_wall_fields).
+			side_fields = _taker_side_entry_fields(early_stats, e.edge)
+			fee_fields = _fee_wall_fields(e.edge, e.mean_price, side_fields, fee_model)
 
 			bucket_entry = {
 				"bucket_lo": lo, "bucket_hi": hi,
 				# Verdict keys (consumed by _bucket_bonferroni_verdict):
 				"z": e.z,
-				"fee_adj": fee_adj,
+				**fee_fields,
 				"n_clusters": e.n_clusters,
 				"edge": e.edge,
 				"n_markets": e.n_markets,
@@ -1443,7 +1533,7 @@ class LifecycleBiasTest(StatisticalTest):
 				"differential_z": float(d_z), "differential_p": float(d_p),
 				"differential_n_clusters": d_k,
 				# Taker-side gate on the verdict-driving (early) segment.
-				**_taker_side_entry_fields(early_stats, e.edge),
+				**side_fields,
 			}
 
 			# Min-cluster floor on the verdict-driving (early) segment.
@@ -1613,14 +1703,18 @@ class VolumeMispricingTest(StatisticalTest):
 			# _naive suffix: independence-assuming CI over correlated prints (see
 			# PriceBucketBiasTest).
 			lv_ci_lo, lv_ci_hi = wilson_ci(lv.wins, lv.n_trades)
-			# FIX A3: charge the fee on the edge MAGNITUDE (see PriceBucketBiasTest).
-			lv_fee_adj = fee_adjusted_edge_curve(abs(lv.edge), lv.mean_price, fee_model)
+			# FIX A3: charge the fee on the edge MAGNITUDE (see PriceBucketBiasTest),
+			# walled on the low tercile's EXPLOIT side (see _fee_wall_fields).
+			lv_side_fields = _taker_side_entry_fields(low_bands[i], lv.edge)
+			lv_fee_fields = _fee_wall_fields(
+				lv.edge, lv.mean_price, lv_side_fields, fee_model,
+			)
 
 			bucket_entry = {
 				"bucket_lo": lo, "bucket_hi": hi,
 				# Verdict keys (consumed by _bucket_bonferroni_verdict):
 				"z": lv.z,
-				"fee_adj": lv_fee_adj,
+				**lv_fee_fields,
 				"n_trades": lv.n_trades,
 				"n_markets": lv.n_markets,
 				"n_clusters": lv.n_clusters,
@@ -1642,7 +1736,9 @@ class VolumeMispricingTest(StatisticalTest):
 					"z_stat_clustered": lv.z,
 					"p_value_naive": float(lv_p_naive),
 					"p_value_clustered": lv.p,
-					"fee_adjusted_edge": lv_fee_adj,
+					# Mirrors the GRADED "fee_adj" (the entry carries the
+					# pooled/exploit decomposition next to it).
+					"fee_adjusted_edge": lv_fee_fields["fee_adj"],
 					"ci_lower_naive": lv_ci_lo,
 					"ci_upper_naive": lv_ci_hi,
 				},
@@ -1652,7 +1748,7 @@ class VolumeMispricingTest(StatisticalTest):
 					lv.edge - hi_summary.edge if hi_summary.n_trades else None
 				),
 				# Taker-side gate on the verdict-driving (low) tercile.
-				**_taker_side_entry_fields(low_bands[i], lv.edge),
+				**lv_side_fields,
 			}
 
 			# FIX A1 min-cluster floor: only buckets clearing min_clusters independent
@@ -1913,8 +2009,12 @@ class MomentumAlignmentTest(StatisticalTest):
 
 					z_naive, p_naive = proportions_ztest(s.wins, s.n_trades, s.mean_price)
 					# Fee on the edge MAGNITUDE (same rationale as PriceBucketBiasTest
-					# FIX A3: a short-side edge must not be double-charged).
-					fee_adj = fee_adjusted_edge_curve(abs(s.edge), s.mean_price, fee_model)
+					# FIX A3: a short-side edge must not be double-charged), walled on
+					# the regime cell's EXPLOIT side (see _fee_wall_fields).
+					side_fields = _taker_side_entry_fields(day_stats, s.edge)
+					fee_fields = _fee_wall_fields(
+						s.edge, s.mean_price, side_fields, fee_model,
+					)
 					ci_lo, ci_hi = wilson_ci(s.wins, s.n_trades)
 
 					bucket_entry = {
@@ -1930,9 +2030,9 @@ class MomentumAlignmentTest(StatisticalTest):
 						"z_stat_naive": float(z_naive),
 						"p": s.p,
 						"p_value_naive": float(p_naive),
-						"fee_adj": fee_adj,
+						**fee_fields,
 						"ci_lower_naive": ci_lo, "ci_upper_naive": ci_hi,
-						**_taker_side_entry_fields(day_stats, s.edge),
+						**side_fields,
 					}
 
 					# Same min-cluster floor as PriceBucketBiasTest (FIX A1): a
