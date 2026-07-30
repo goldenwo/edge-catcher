@@ -3438,6 +3438,272 @@ class TestTakerSideCompositionGate:
 		assert empty["taker_side_fragile"] is True
 
 
+class TestExploitSideFeeWall:
+	"""The fee wall is graded on the EXPLOIT side, not the pooled edge.
+
+	The pooled edge mixes both taker sides, which are graded against DIFFERENT
+	displayed references (a yes-taker lifted the ask, a no-taker hit the bid), so
+	the bid-ask bounce enters the pooled number and inflates it. Class (b) already
+	corroborates on the exploit side — the side a taker must actually hit — but it
+	checks only that side's SIGN and significance, never its magnitude against the
+	fee. A band could therefore report a positive fee-adjusted edge that no taker
+	can realize (measured on the 2026-07-26 expansion artifacts: 15 of 178
+	sign-matching bands, worst case a pooled +1.49¢ against a true taker −1.98¢).
+
+	The graded `fee_adj` is now min(pooled, exploit) — see _fee_wall_fields for why
+	the min rather than the exploit value outright.
+	"""
+
+	def _bounce_band_day_stats(self):
+		"""Real-shape _BandDayStats for a band whose pooled edge clears the fee wall
+		while the exploit side's own fee-adjusted edge is NEGATIVE.
+
+		Each market prints once on each side at DIFFERENT prices (yes-taker at the
+		30¢ ask, no-taker at the 22¢ bid) and both prints share the market's single
+		outcome — the exact bid-ask-bounce shape §5.3 of the reference-price audit
+		measured on KXMLBF5TOTAL. Day win counts alternate 30/32 per 100 markets so
+		the clustered z has real (non-degenerate) between-day variance.
+		"""
+		from edge_catcher.research.test_runner import _BandDayStats
+
+		day_stats = []
+		for d in range(1, 29):
+			wins = 30 if d % 2 else 32  # mean 31/100 → win rate 0.31
+			day_stats.append(_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=200, n_markets=100, wins=2 * wins,
+				sum_price=100 * 0.30 + 100 * 0.22,
+				market_wins=wins,
+				yes_n=100, yes_wins=wins, yes_sum_price=100 * 0.30,
+				no_n=100, no_wins=wins, no_sum_price=100 * 0.22,
+			))
+		return day_stats
+
+	def test_exploit_side_fee_negative_band_reports_non_positive_fee_adj(self):
+		"""The load-bearing guard. Pooled: 31% wins at a 26¢ mean → +5¢ edge, −2¢
+		Kalshi fee → +3¢ and clears the wall. The YES taker who must lift the 30¢
+		ask realizes +1¢ gross, −1¢ net. The graded `fee_adj` must NOT be positive.
+		"""
+		from edge_catcher.research.test_runner import (
+			_fee_wall_fields, _summarize_band, _taker_side_entry_fields,
+		)
+		from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+
+		day_stats = self._bounce_band_day_stats()
+		s = _summarize_band(day_stats)
+		side_fields = _taker_side_entry_fields(day_stats, s.edge)
+		assert side_fields["exploit_side"] == "yes"
+		assert side_fields["exploit_edge"] == pytest.approx(0.01, abs=1e-9)
+		# The exploit side's OWN mean price must ride along — the fee is charged
+		# at the price that side paid (30¢), not the pooled 26¢.
+		assert side_fields["exploit_mean_price"] == pytest.approx(0.30, abs=1e-9)
+
+		fields = _fee_wall_fields(s.edge, s.mean_price, side_fields, STANDARD_FEE)
+		# Pre-fix behaviour, kept for the diagnosis: the pooled number is positive.
+		assert fields["fee_adj_pooled"] == pytest.approx(0.03, abs=1e-9)
+		# The realizable one is negative...
+		assert fields["fee_adj_exploit"] == pytest.approx(-0.01, abs=1e-9)
+		# ...and it is what the verdict now grades.
+		assert fields["fee_adj"] <= 0.0
+
+	def test_bounce_band_downgraded_end_to_end(self, tmp_path):
+		"""Same shape through the real SQL path: significant, class-(b)-corroborated
+		(the exploit side is the right sign and independently significant), degenerate
+		and per-market gates pass — the ONLY thing standing between it and
+		EDGE_EXISTS is the fee wall, and pre-fix the pooled wall let it through.
+		"""
+		markets = []
+		trades = []
+		mkt = 0
+		for d in range(1, 29):
+			date = f"2026-01-{d:02d}"
+			wins_today = 15 if d % 2 else 16  # mean 15.5/50 → 0.31
+			for k in range(50):
+				won = k < wins_today
+				ticker = f"BB-{mkt}"
+				mkt += 1
+				markets.append({
+					"ticker": ticker, "series_ticker": "SER_BB",
+					"result": "yes" if won else "no",
+					"last_price": 26, "volume": 10,
+					"close_time": f"{date}T12:00:00Z",
+					"open_time": f"{date}T00:00:00Z",
+				})
+				# The aggressor lifting the ask prints at 30¢; the aggressor hitting
+				# the bid prints at 22¢. Same market, same outcome, two references.
+				trades.append({
+					"trade_id": f"bb-y-{ticker}", "ticker": ticker,
+					"yes_price": 30, "no_price": 70, "count": 1,
+					"taker_side": "yes", "created_time": f"{date}T06:00:00Z",
+				})
+				trades.append({
+					"trade_id": f"bb-n-{ticker}", "ticker": ticker,
+					"yes_price": 22, "no_price": 78, "count": 1,
+					"taker_side": "no", "created_time": f"{date}T07:00:00Z",
+				})
+		conn = _make_test_db(tmp_path, markets, trades)
+		result = TestRunner().run(
+			"price_bucket_bias", conn, "SER_BB",
+			params={"buckets": [[0.20, 0.35]], "min_n_per_bucket": 10,
+			        "fee_model": "kalshi"},
+			thresholds={"clustered_z_stat": 2.0, "min_fee_adjusted_edge": 0.0},
+		)
+		conn.close()
+
+		driver = result.detail["driver_bucket"]
+		# Everything except the fee wall says "tradeable".
+		assert driver["significant"] is True
+		assert driver["taker_gate_ok"] is True
+		assert driver["degenerate_gate_ok"] is True
+		assert driver["per_market_sign_flip"] is False
+		# The pooled read is the pre-fix one and is positive; the graded one is not.
+		assert driver["fee_adj_pooled"] == pytest.approx(0.03, abs=1e-9)
+		assert driver["fee_adj_exploit"] == pytest.approx(-0.01, abs=1e-9)
+		assert driver["fee_adj"] <= 0.0
+		assert result.verdict == EDGE_NOT_TRADEABLE
+
+	def test_signed_edge_preserved_on_the_exploit_side(self):
+		"""FIX A3 on the exploit side: a SHORT-side edge (pooled and exploit both
+		negative) must be fee-charged on the MAGNITUDE, not pushed further negative.
+		Mirror image of the long case — the no-taker hitting the 70¢-yes bid.
+		"""
+		from edge_catcher.research.test_runner import (
+			_BandDayStats, _fee_wall_fields, _summarize_band,
+			_taker_side_entry_fields,
+		)
+		from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+
+		day_stats = [
+			_BandDayStats(
+				day=f"2026-01-{d:02d}",
+				n_trades=200, n_markets=100, wins=2 * (55 if d % 2 else 57),
+				sum_price=100 * 0.78 + 100 * 0.70,
+				market_wins=(55 if d % 2 else 57),
+				yes_n=100, yes_wins=(55 if d % 2 else 57), yes_sum_price=100 * 0.78,
+				no_n=100, no_wins=(55 if d % 2 else 57), no_sum_price=100 * 0.70,
+			)
+			for d in range(1, 29)
+		]
+		s = _summarize_band(day_stats)
+		side_fields = _taker_side_entry_fields(day_stats, s.edge)
+		# Pooled edge 0.56 − 0.74 = −0.18 → the exploit side is the NO taker.
+		assert s.edge == pytest.approx(-0.18, abs=1e-9)
+		assert side_fields["exploit_side"] == "no"
+		assert side_fields["exploit_edge"] == pytest.approx(-0.14, abs=1e-9)
+
+		fields = _fee_wall_fields(s.edge, s.mean_price, side_fields, STANDARD_FEE)
+		# |−0.14| − 2¢ = +0.12: a real short-side edge survives, it is not
+		# double-charged into negative territory by the sign.
+		assert fields["fee_adj_exploit"] == pytest.approx(0.12, abs=1e-9)
+		assert fields["fee_adj"] == pytest.approx(0.12, abs=1e-9)
+
+	def test_falls_back_to_pooled_when_exploit_side_unavailable(self):
+		"""Demote-only requires a fallback with EXACTLY today's behaviour wherever
+		the exploit side does not exist: zero pooled edge (no exploit side), an
+		empty exploit split, and an entry carrying no side fields at all — the same
+		three fallbacks _taker_gate_ok itself has.
+		"""
+		from edge_catcher.research.test_runner import (
+			_BandDayStats, _fee_wall_fields, _summarize_band,
+			_taker_side_entry_fields,
+		)
+		from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+
+		# (1) No side metadata captured at all (taker_side neither 'yes' nor 'no').
+		blind = [
+			_BandDayStats(day=f"2026-01-{d:02d}", n_trades=100, n_markets=100,
+			              wins=(31 if d % 2 else 33), sum_price=100 * 0.26,
+			              market_wins=(31 if d % 2 else 33))
+			for d in range(1, 29)
+		]
+		s = _summarize_band(blind)
+		fields = _fee_wall_fields(
+			s.edge, s.mean_price, _taker_side_entry_fields(blind, s.edge), STANDARD_FEE,
+		)
+		assert fields["fee_adj_exploit"] is None
+		assert fields["fee_adj"] == fields["fee_adj_pooled"]
+
+		# (2) Entry with no side fields at all (direct unit-test callers).
+		fields_bare = _fee_wall_fields(0.05, 0.26, {}, STANDARD_FEE)
+		assert fields_bare["fee_adj"] == fields_bare["fee_adj_pooled"]
+		assert fields_bare["fee_adj_exploit"] is None
+
+		# (3) Exactly-zero pooled edge → no exploit side is defined.
+		flat = [
+			_BandDayStats(day=f"2026-01-{d:02d}", n_trades=100, n_markets=100,
+			              wins=26, sum_price=100 * 0.26, market_wins=26,
+			              yes_n=50, yes_wins=13, yes_sum_price=50 * 0.30,
+			              no_n=50, no_wins=13, no_sum_price=50 * 0.22)
+			for d in range(1, 29)
+		]
+		s_flat = _summarize_band(flat)
+		side_flat = _taker_side_entry_fields(flat, s_flat.edge)
+		assert side_flat["exploit_side"] is None
+		fields_flat = _fee_wall_fields(
+			s_flat.edge, s_flat.mean_price, side_flat, STANDARD_FEE,
+		)
+		assert fields_flat["fee_adj"] == fields_flat["fee_adj_pooled"]
+
+	def test_demote_only_property_over_a_grid(self):
+		"""The HARD safety property: for every reachable band shape the graded
+		`fee_adj` is <= the pooled value the loop used before this change. A fix
+		that can PROMOTE a band would re-open the search space the 2026-07-26 null
+		was declared over, so this is asserted structurally, not spot-checked.
+
+		The grid deliberately includes the case the exploit value alone would
+		promote: opposite-sign taker splits, where |exploit edge| EXCEEDS the
+		pooled |edge| because the two sides partly cancel.
+		"""
+		from edge_catcher.research.test_runner import (
+			_BandDayStats, _fee_wall_fields, _summarize_band,
+			_taker_side_entry_fields,
+		)
+		from edge_catcher.adapters.kalshi.fees import STANDARD_FEE
+		from edge_catcher.fees import ZERO_FEE
+
+		promotions_under_exploit_alone = 0
+		checked = 0
+		for yes_price in (0.02, 0.15, 0.30, 0.50, 0.72, 0.95):
+			for no_price in (0.02, 0.15, 0.30, 0.50, 0.72, 0.95):
+				for yes_wr in (0.0, 0.1, 0.35, 0.6, 0.9, 1.0):
+					for no_wr in (0.0, 0.1, 0.35, 0.6, 0.9, 1.0):
+						for w_yes in (10, 50, 90):
+							day_stats = [
+								_BandDayStats(
+									day=f"2026-01-{d:02d}",
+									n_trades=100, n_markets=100,
+									wins=round(w_yes * yes_wr) + round((100 - w_yes) * no_wr),
+									sum_price=w_yes * yes_price + (100 - w_yes) * no_price,
+									market_wins=round(100 * yes_wr),
+									yes_n=w_yes, yes_wins=round(w_yes * yes_wr),
+									yes_sum_price=w_yes * yes_price,
+									no_n=100 - w_yes,
+									no_wins=round((100 - w_yes) * no_wr),
+									no_sum_price=(100 - w_yes) * no_price,
+								)
+								for d in range(1, 6)
+							]
+							s = _summarize_band(day_stats)
+							side_fields = _taker_side_entry_fields(day_stats, s.edge)
+							for fee_model in (STANDARD_FEE, ZERO_FEE):
+								fields = _fee_wall_fields(
+									s.edge, s.mean_price, side_fields, fee_model,
+								)
+								checked += 1
+								assert fields["fee_adj"] <= fields["fee_adj_pooled"] + 1e-12, (
+									f"PROMOTION: yes={yes_price}/{yes_wr} "
+									f"no={no_price}/{no_wr} w_yes={w_yes} → "
+									f"{fields['fee_adj']} > {fields['fee_adj_pooled']}"
+								)
+								if (fields["fee_adj_exploit"] is not None
+										and fields["fee_adj_exploit"] > fields["fee_adj_pooled"] + 1e-12):
+									promotions_under_exploit_alone += 1
+		assert checked > 1000
+		# Documents WHY the min is taken: the exploit value on its own is not
+		# demote-only. Opposite-sign splits make |exploit edge| > |pooled edge|.
+		assert promotions_under_exploit_alone > 0
+
+
 class TestDegenerateOutcomeGate:
 	"""Artifact class (c): degenerate zero-win z.
 
