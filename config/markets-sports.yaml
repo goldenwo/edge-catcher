@@ -3,7 +3,7 @@ adapters:
   kalshi:
     enabled: true
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
-    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    rate_limit_seconds: 0.2  # restored 2026-08-25 (refill); backfill asserts >= 0.2
     series:
       - KXNBASPREAD  # NBA point spreads (~8,876 settled markets, ~200 trades each, est ~600MB)
       - KXMLBSPREAD  # MLB run spreads (~489 settled markets, ~150 trades each, est ~25MB)
