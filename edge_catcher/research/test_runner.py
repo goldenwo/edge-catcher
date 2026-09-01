@@ -1478,6 +1478,31 @@ class LifecycleBiasTest(StatisticalTest):
 	segment, day-clustered) — see _per_trade_band_day_stats. A segment with no trades
 	contributes no observations (no last_price fallback — never a synthetic one).
 	min_n_per_bucket floors n_trades AND n_markets in BOTH segments.
+
+	⚠ END-TO-END POWER IS UNDEMONSTRATED FOR THIS TEST (measured 2026-08-31).
+	A NULL FROM THIS TEST IS NOT EVIDENCE OF ABSENCE until that is fixed.
+
+	The cross-market outcome-shuffle positive control — which fires this pipeline
+	to EDGE_EXISTS on 47/48 draws for PriceBucketBiasTest and 48/48 for
+	VolumeMispricingTest — produced 0/48 here. Decomposed, that is three separate
+	effects, only one of which is a defect in this class:
+	  1. 24 of 48 draws never ran: the BOTH-segments min_n floor above is strict,
+	     and on thin series it is unmeetable. k_evaluated lands at 2-3 bands when
+	     it does run, versus 12 for the whole-lifetime tests.
+	  2. The statistic itself is NOT blind: of the 24 that ran, 11 produced a
+	     significant bucket, at p as low as 2.2e-07.
+	  3. All 11 were then demoted to EDGE_NOT_TRADEABLE — correctly. A shuffle
+	     permutes outcomes ACROSS markets, which randomises the taker-side split,
+	     so class (b) finds no coherent exploit side and the fee wall bites.
+
+	So the shuffle is structurally incapable of driving this test to EDGE_EXISTS:
+	it manufactures precisely the artifact the gates exist to reject. It is an
+	inappropriate end-to-end control here, NOT proof the test cannot detect.
+
+	A VALID control needs a PLANTED early-window edge carrying a coherent
+	exploitable side (so class (b) can corroborate and the fee wall can be
+	cleared), rather than permuted outcomes. Build that before treating any
+	lifecycle_bias verdict — especially a null on a thin series — as evidence.
 	"""
 	name: ClassVar[str] = "lifecycle_bias"
 
