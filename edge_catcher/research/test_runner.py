@@ -1479,30 +1479,48 @@ class LifecycleBiasTest(StatisticalTest):
 	contributes no observations (no last_price fallback — never a synthetic one).
 	min_n_per_bucket floors n_trades AND n_markets in BOTH segments.
 
-	⚠ END-TO-END POWER IS UNDEMONSTRATED FOR THIS TEST (measured 2026-08-31).
-	A NULL FROM THIS TEST IS NOT EVIDENCE OF ABSENCE until that is fixed.
+	⚠ END-TO-END POWER IS UNDEMONSTRATED FOR THIS TEST (measured 2026-08-31;
+	mechanism reproduced draw-by-draw 2026-09-01). A NULL FROM THIS TEST IS NOT
+	EVIDENCE OF ABSENCE until that is fixed.
 
-	The cross-market outcome-shuffle positive control — which fires this pipeline
+	The cross-market outcome-shuffle positive control — which drives this pipeline
 	to EDGE_EXISTS on 47/48 draws for PriceBucketBiasTest and 48/48 for
-	VolumeMispricingTest — produced 0/48 here. Decomposed, that is three separate
-	effects, only one of which is a defect in this class:
+	VolumeMispricingTest — produced 0/48 here. Decomposed:
 	  1. 24 of 48 draws never ran: the BOTH-segments min_n floor above is strict,
-	     and on thin series it is unmeetable. k_evaluated lands at 2-3 bands when
+	     and on thin series it is unmeetable. k_evaluated lands at 2-4 bands when
 	     it does run, versus 12 for the whole-lifetime tests.
-	  2. The statistic itself is NOT blind: of the 24 that ran, 11 produced a
-	     significant bucket, at p as low as 2.2e-07.
-	  3. All 11 were then demoted to EDGE_NOT_TRADEABLE — correctly. A shuffle
-	     permutes outcomes ACROSS markets, which randomises the taker-side split,
-	     so class (b) finds no coherent exploit side and the fee wall bites.
+	  2. The statistic is NOT blind: of the 24 that ran, 11 produced a significant
+	     bucket, at p as low as 2.2e-07 — on planted edges of 0.3-0.5, enormous.
+	  3. Every detection was then gate-demoted, and the reproduced mechanism is
+	     SAMPLE STARVATION under the early-window restriction — NOT taker-side
+	     incoherence. On every reproduced bucket the exploit side's sign MATCHES
+	     the pooled edge and the fee wall is nowhere near (fee_adj +25-50c). The
+	     starvation shows up in three forms (KXLOLGAME + KXMLBTEAMTOTAL draws):
+	       - R2's EXPLOIT_MIN_N_TRADES=30 floor. The early window of a high-price
+	         band is 91-98% yes-takers (w_yes 0.91-0.98), so the NO-side exploit
+	         subsample is 4-16 prints and _taker_gate_ok refuses it
+	         (exploit_below_min_n=True). Most demotions.
+	       - The exploit side's OWN significance. With 138 exploit prints over
+	         ~33 day-clusters, a -25c exploit_edge still lands at exploit_p_t
+	         0.098 against alpha_base 0.0027 — coherent, large, and not
+	         independently significant on that little sample.
+	       - Class-(d) MC-null resolution. A bucket that clears both of the above
+	         and passes per-market confirmation then fails mc_p (~5e-3 vs
+	         alpha_corr ~7e-4) on only ~50 in-band markets.
+	     PriceBucketBiasTest clears the identical gates on the identical shuffle
+	     because its whole-lifetime population gives it 30k-80k exploit prints
+	     and 1,200+ markets per band.
 
-	So the shuffle is structurally incapable of driving this test to EDGE_EXISTS:
-	it manufactures precisely the artifact the gates exist to reject. It is an
-	inappropriate end-to-end control here, NOT proof the test cannot detect.
+	So this test's OWN DESIGN — grading only the first lifecycle_window_minutes —
+	starves the corroboration gates that PriceBucketBiasTest clears trivially.
+	The shuffle is an inappropriate end-to-end control, but the deeper point is
+	that even a coherent planted edge of +0.4 does not reach EDGE_EXISTS here.
 
-	A VALID control needs a PLANTED early-window edge carrying a coherent
-	exploitable side (so class (b) can corroborate and the fee wall can be
-	cleared), rather than permuted outcomes. Build that before treating any
-	lifecycle_bias verdict — especially a null on a thin series — as evidence.
+	A VALID control must plant an early-window edge with enough EXPLOIT-SIDE
+	prints (>= EXPLOIT_MIN_N_TRADES per band) and enough in-band markets for the
+	MC null to resolve. If no real series supports that, the test cannot be
+	validated on real series and should be RETIRED rather than trusted. Until
+	then, do not read any lifecycle_bias verdict — especially a null — as evidence.
 	"""
 	name: ClassVar[str] = "lifecycle_bias"
 
