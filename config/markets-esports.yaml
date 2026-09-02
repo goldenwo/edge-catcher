@@ -4,7 +4,7 @@ adapters:
   kalshi:
     enabled: true
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
-    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    rate_limit_seconds: 0.2  # restored 2026-08-25 (refill); backfill asserts >= 0.2
     series:
       - KXCS2MAP         # CS2 map winner (74 events — highest)
       - KXCS2GAME        # CS2 game winner (32 events)

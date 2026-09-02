@@ -13,6 +13,21 @@ edge-catcher is a Python framework for building and validating systematic strate
 
 ---
 
+## Status and results
+
+This framework was built to find tradeable inefficiencies. In the authors' own use — roughly five months of systematic, pre-registered search on Kalshi — it functioned primarily as a **falsifier**. The large majority of candidate edges did not survive honest grading, and the few that did were not capturable from the seat being tested.
+
+That is stated here deliberately. A validation harness whose authors only ever report wins is not a validation harness. Every gate in this repo exists because it killed a finding that had looked convincing: look-ahead guards, bid-ask-bounce and taker-side composition checks, degenerate-outcome and rare-event nulls, per-market confirmation, day-clustered standard errors, fee-adjusted walls.
+
+Two caveats worth carrying into your own use:
+
+- **Paper fills are not live fills.** Measured in live operation, the paper executor filled at close to 100% where the venue filled at roughly 9% — and those live fills were adversely selected. Any backtest result should be read against that gap; the repo ships an honest-fill executor and a fill-realism gate for exactly this reason.
+- **A null is only as strong as the test's demonstrated power.** See the caveat in `LifecycleBiasTest` for a worked example: a test whose statistic responds to planted signal but whose *end-to-end* power was never demonstrated, and what that does to the interpretation of its nulls. Check your positive controls actually fire before believing a negative result.
+
+None of this claims that edges don't exist on event markets. It says that this search, on this venue, from this seat, didn't find one that survived — and the tooling is offered on that basis.
+
+---
+
 ## Highlights
 
 - 🔬 **Anti-p-hacking by default** — Pre-registered hypotheses, Bonferroni + Harvey-Liu-Zhu (t > 3.0), clustered SEs, mandatory out-of-sample validation

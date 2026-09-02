@@ -3,7 +3,7 @@ adapters:
   kalshi:
     enabled: true
     base_url: "https://api.elections.kalshi.com/trade-api/v2"
-    rate_limit_seconds: 0  # TEMP: was 0.2 — restore after bulk download
+    rate_limit_seconds: 0.2  # restored 2026-08-31; bulk download ended 2026-04
     series:
       # Spotify charts (recurring)
       - KXSPOTIFYD        # Spotify daily
