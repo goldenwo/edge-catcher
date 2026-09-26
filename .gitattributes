@@ -1,0 +1,32 @@
+# Enforce LF line endings on text files regardless of working-OS default.
+# Reason: Windows + git-bash sessions intermittently introduce CRLF (notably
+# on files created via Claude Code's Write tool from earlier sessions). Mixed
+# CRLF/LF defeats grep `^---$` and similar line-anchored regexes (real bug
+# surfaced 2026-04-26 when 2 lens files were CRLF and 9 were LF).
+#
+# `text=auto` lets Git autodetect text vs binary; `eol=lf` forces LF in the
+# repo (working-tree may still be CRLF on Windows, but storage is LF).
+
+* text=auto eol=lf
+
+# Explicit per-extension rules so future binary additions don't accidentally
+# get text-treated.
+*.md         text eol=lf
+*.sh         text eol=lf
+*.yaml       text eol=lf
+*.yml        text eol=lf
+*.json       text eol=lf
+*.py         text eol=lf
+*.txt        text eol=lf
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+
+# Binary file types — never text-process these.
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.pdf        binary
+*.tar        binary
+*.gz         binary
+*.zip        binary
